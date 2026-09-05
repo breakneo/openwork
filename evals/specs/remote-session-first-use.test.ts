@@ -109,9 +109,19 @@ test("first cloud task provisions once over MCP, recovers its workspace, and pre
 
   async function runtimeRecord(workerId: string) {
     const rows = await queryDenDatabase(databaseUrl,
-      "SELECT id, sandbox_id, workspace_volume_id, data_volume_id, signed_preview_url, signed_preview_url_expires_at FROM daytona_sandbox WHERE worker_id = ?", [workerId]);
+      "SELECT id, provider_id, endpoint_kind, JSON_UNQUOTE(JSON_EXTRACT(provider_ref, '$.sandboxId')) AS sandbox_id, workspace_volume_id, data_volume_id, endpoint_url AS signed_preview_url, endpoint_expires_at AS signed_preview_url_expires_at FROM cloud_runtime_instance WHERE worker_id = ?", [workerId]);
     expect(rows).toHaveLength(1);
-    return record(rows[0]);
+    const current = record(rows[0]);
+    expect(current).toMatchObject({ provider_id: "daytona", endpoint_kind: "signed-expiring" });
+    expect(current.id).toMatch(/^cri_/);
+    const legacyRows = await queryDenDatabase(databaseUrl,
+      "SELECT id, sandbox_id, workspace_volume_id, data_volume_id, signed_preview_url, signed_preview_url_expires_at FROM daytona_sandbox WHERE worker_id = ?", [workerId]);
+    expect(legacyRows).toHaveLength(1);
+    const { id: legacyId, ...legacy } = record(legacyRows[0]);
+    const { id, provider_id, endpoint_kind, ...neutral } = current;
+    expect(legacyId).toMatch(/^dts_/);
+    expect(neutral).toEqual(legacy);
+    return current;
   }
 
   async function bothHealthy() {
@@ -269,7 +279,7 @@ test("first cloud task provisions once over MCP, recovers its workspace, and pre
   witness.expireEndpoint(original.id);
   const expired = await fetch(`${beforeRefresh.signed_preview_url}/health`, { signal: AbortSignal.timeout(5_000) });
   expect(expired.status).toBe(410);
-  await queryDenDatabase(databaseUrl, "UPDATE daytona_sandbox SET signed_preview_url_expires_at = '2000-01-01 00:00:00' WHERE worker_id = ?", [original.workerId]);
+  await queryDenDatabase(databaseUrl, "UPDATE cloud_runtime_instance SET endpoint_expires_at = '2000-01-01 00:00:00' WHERE worker_id = ?", [original.workerId]);
   const refreshed = await instance();
   const afterRefresh = await runtimeRecord(original.workerId);
   expect(refreshed).toMatchObject({ status: "ready", instanceName: original.id });
@@ -346,6 +356,7 @@ test("first cloud task provisions once over MCP, recovers its workspace, and pre
   const privateBootstraps = assertPrivateBootstrapTransport();
   evidence.recordAssertionEvidence("Bootstrap transport keeps credentials out of command requests",
     `${privateBootstraps} bootstraps used path-only asynchronous commands after private-directory, upload and permission requests. Credential values remained in raw-script uploads, never command requests; the witness observed the self-unlink prelude. This checks SDK HTTP transport, not Linux execution or actual filesystem permissions.`, true);
+  evidence.recordAssertionEvidence("Neutral instance reads keep Daytona rollback data current", "After provision, wake, endpoint refresh, rejected restore and successful recycle, both members retained one neutral instance row with provider and endpoint semantics. Its sandbox, volumes, URL and expiry matched the legacy Daytona row after every operation. Expiring only the neutral row triggered refresh, proving the new table owns reads.", true);
 
   await queryDenDatabase(databaseUrl, "UPDATE org_subscriptions SET status = 'canceled' WHERE organization_id = ?", [orgId]);
   expect((await call(writeToken, "create", task)).payload.error).toBe("openwork_web_access_required");
