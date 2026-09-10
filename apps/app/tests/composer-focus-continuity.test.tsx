@@ -12,6 +12,7 @@ import type { OpenworkSessionSnapshot } from "../src/app/lib/openwork-server";
 import type { NativeContextMenuRequest } from "../src/app/lib/desktop-types";
 import type { ComposerAttachment, ComposerDraft, PendingPermission, PendingQuestion } from "../src/app/types";
 import type { CloudMcpSubmissionResult } from "../src/react-app/domains/connections/cloud-mcp-submit-readiness";
+import type { ArchiveSessionOutcome } from "../src/react-app/domains/session/sidebar/use-session-archive";
 import type {
   NewTaskComposerContext,
   NewTaskComposerHandoff,
@@ -256,7 +257,7 @@ test.each([
     return nativeMenuRequests.at(-1)?.items;
   };
   const routeWorkspaceId = `rem_${workspaceId}`;
-  let restoreShared = async () => false;
+  let restoreShared = async (): Promise<ArchiveSessionOutcome> => ({ kind: "cancelled" });
   let updateRouteArchived = (_archived: boolean) => {};
   function ArchiveOwner({ children }: { children: (archived: boolean) => ReactNode }) {
     const [archived, setArchived] = useState(false);
@@ -328,9 +329,12 @@ test.each([
                 modelVariantLabel="Default"
                 modelVariant={null}
                 onModelVariantChange={() => {}}
-                agentLabel="OpenWork"
-                selectedAgent={null}
-                listAgents={async () => []}
+                agentLabel="Build"
+                selectedAgent="build"
+                listAgents={async () => [
+                  { name: "build", mode: "primary", permission: [], options: {} },
+                  { name: "plan", mode: "primary", permission: [], options: {} },
+                ]}
                 onSelectAgent={() => {}}
                 listCommands={async () => []}
                 recentFiles={[]}
@@ -421,6 +425,25 @@ test.each([
         URL.revokeObjectURL(previewUrl);
       }
       return;
+    }
+
+    // A selection changes future submissions, not the busy turn or its draft.
+    for (const next of ["Plan", "Build"]) {
+      const picker = container.querySelector<HTMLButtonElement>('[data-composer-settings] button[title="Agent"]');
+      expect(picker?.disabled).toBe(false);
+      await act(async () => picker?.click());
+      const option = () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === next && button !== picker);
+      await waitFor(() => option() !== undefined, `the ${next} option`);
+      await act(async () => {
+        option()?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      });
+      expect(picker?.textContent).toBe(next);
+      expect(picker?.getAttribute("aria-expanded")).toBe("false");
+      expect(container.querySelector('button[aria-label="Stop"]')).not.toBeNull();
+      expect(editor.textContent).toBe(draft);
+      expect(sentDrafts).toHaveLength(0);
+      expect(interrupt).not.toHaveBeenCalled();
     }
 
     // Hold both async boundaries: idle alone must not release Stop's feedback.
