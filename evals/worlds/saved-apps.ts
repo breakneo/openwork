@@ -208,11 +208,14 @@ export async function cloudDraftRouting(seed: Seed) {
   });
   if (!configured.ok) throw new Error(`Draft model setup failed: ${configured.status}`);
   const workspacePath = seed.tmpPath("cloud-draft-routing");
-  const app = await seed.appWeb({ name: "cloud-draft-routing", workspacePath, headless: true });
+  const denOrigin = new URL(den.ref.apiUrl);
+  const app = await seed.appWeb({ name: "preactivated-synthetic-cloud-draft-routing", workspacePath, headless: true,
+    ...(denOrigin.protocol === "https:" ? { syntheticPreactivatedDenOrigin: denOrigin.origin } : {}) });
   const workspace = await seed.workspace(app, workspacePath);
   await configureProvider(seed, app, workspace.workspaceId, "draft-model", "draft-model", {
     provider: { "draft-model": { npm: "@ai-sdk/openai-compatible", name: "Draft model fixture", options: { baseURL: `${den.mocks.slack.url}/v1`, apiKey: "sk-draft-fixture" }, models: { "draft-model": { name: "Draft model fixture" } } } },
   });
+  const session = await seed.session(app, { title: "Slack draft review" });
   const hostSetup = {
     name: app.handle.name, openworkUrl: app.openworkUrl, workspaceRoot: app.workspaceRoot,
     workspaceId: workspace.workspaceId, cloudUrl: `${den.ref.apiUrl}/mcp/agent`,
@@ -223,8 +226,7 @@ export async function cloudDraftRouting(seed: Seed) {
       `node /workspace/evals/fixtures/cloud-draft-host.ts ${Buffer.from(JSON.stringify(hostSetup)).toString("base64url")}`,
       { context: "Reconcile the owned draft host", timeoutMs: 150_000 })).stdout.trim()))
     : await reconcileDraftHost(hostSetup);
-  if (record(reconciled).status !== 200 || record(reconciled).phase !== "ready") throw new Error(`Cloud reconcile failed: ${JSON.stringify(reconciled)}`);
-  const session = await seed.session(app, { title: "Slack draft review" });
+  if (record(reconciled).status !== 200 || record(reconciled).phase !== "ready" || record(reconciled).diagnostic !== "ready") throw new Error(`Cloud reconcile failed: ${JSON.stringify(reconciled)}`);
   return { app, session, den, connectionId: connection.id, reconciled,
     resolveRecipient: () => inAppDocuments(app, "details"),
     reports: async () => (await inAppDocuments(app, "isolation")).map(value => record(JSON.parse(value))),

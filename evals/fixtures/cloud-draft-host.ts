@@ -38,29 +38,34 @@ export async function reconcileDraftHost(value: unknown) {
   const ownerToken = text(issued.token);
   const ownerId = text(issued.id);
   try {
-  const response = await fetch(`${runtime.openworkUrl}/workspace/${encodeURIComponent(text(input.workspaceId))}/mcp/openwork-cloud/reconcile`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      config: { type: "remote", url: text(input.cloudUrl), enabled: true, headers: { Authorization: `Bearer ${token}` }, oauth: false },
-      appHostAuthorization: `Bearer ${appHostToken}`, trigger: "draft-routing-world",
-    }),
-    signal: AbortSignal.timeout(120_000),
-  });
-  const raw = await response.text();
-  let body: Record<string, unknown> = {};
-  try { body = record(JSON.parse(raw)); } catch {}
-  const sanitize = (value: unknown) => typeof value === "string"
-    ? [runtime.hostToken, runtime.token, ownerToken, token, appHostToken].filter(Boolean).reduce((result, secret) => result.replaceAll(secret, "[redacted]"), value)
-      .replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 400)
-    : null;
-  const details = body.details && typeof body.details === "object" && !Array.isArray(body.details) ? record(body.details) : {};
-  return {
-    status: response.status, phase: sanitize(body.phase), diagnostic: sanitize(body.connectCatalogDiagnostic),
-    error: sanitize(body.error), code: sanitize(body.code), message: sanitize(body.message),
-    required: sanitize(details.required), scope: sanitize(details.scope),
-    jsonBody: Object.keys(body).length > 0,
-  };
+    const response = await fetch(`${runtime.openworkUrl}/workspace/${encodeURIComponent(text(input.workspaceId))}/mcp/openwork-cloud/reconcile`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        config: { type: "remote", url: text(input.cloudUrl), enabled: true, headers: { Authorization: `Bearer ${token}` }, oauth: false },
+        appHostAuthorization: `Bearer ${appHostToken}`, trigger: "draft-routing-world",
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const raw = await response.text();
+    let body: Record<string, unknown> = {};
+    try { body = record(JSON.parse(raw)); } catch {}
+    const sanitize = (value: unknown) => typeof value === "string"
+      ? [runtime.hostToken, runtime.token, ownerToken, token, appHostToken].filter(Boolean).reduce((result, secret) => result.replaceAll(secret, "[redacted]"), value)
+        .replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 400)
+      : null;
+    const details = isRecord(body.details) ? body.details : {};
+    const firstFailure = isRecord(body.firstFailure) ? body.firstFailure : null;
+    return {
+      status: response.status, phase: sanitize(body.phase), diagnostic: sanitize(body.connectCatalogDiagnostic),
+      error: sanitize(body.error), code: sanitize(body.code), message: sanitize(body.message),
+      required: sanitize(details.required), scope: sanitize(details.scope),
+      firstFailure: firstFailure ? {
+        code: sanitize(firstFailure.code), stage: sanitize(firstFailure.stage), message: sanitize(firstFailure.message),
+        recommendedAction: sanitize(firstFailure.recommendedAction), retryable: firstFailure.retryable === true,
+      } : null,
+      jsonBody: Object.keys(body).length > 0,
+    };
   } finally {
     const revoked = await fetch(`${runtime.openworkUrl}/tokens/${encodeURIComponent(ownerId)}`, {
       method: "DELETE", headers: hostHeaders, signal: AbortSignal.timeout(15_000),
