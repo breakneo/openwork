@@ -641,7 +641,7 @@ function GroupChatView({
     <div className="glass-main flex h-full min-w-0 flex-1" data-testid="group-chat" data-group-id={group.id} data-live={live ? "true" : "false"}>
       <div className="flex min-w-0 flex-1 flex-col" data-testid="group-conversation">
       <header className="glass-header window-drag flex min-h-[78px] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-4 py-3" data-testid="conversation-header">
-        <GroupAvatars members={members} size={30} activeSlugs={activeSlugs} gatherKey={active ? group.id : undefined} />
+        <GroupAvatars members={members} size={30} motion="navigation" activeSlugs={activeSlugs} gatherKey={active ? group.id : undefined} />
         <div className="min-w-0 flex-[1_1_10rem]">
           {renaming ? (
             <input
@@ -689,7 +689,7 @@ function GroupChatView({
           {observed.groupId !== group.id && !activityError ? <p role="status" className="text-xs text-mist">Loading conversation…</p> : null}
           {loaded && observed.groupId === group.id && rows.length === 0 && !introduction ? (
             <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center py-10 text-center" data-testid="group-chat-empty">
-              <GroupAvatars members={members} size={40} animated={false} />
+              <GroupAvatars members={members} size={40} motion="navigation" />
               <p className="mt-3 text-sm font-semibold text-snow">{group.name}</p>
               <p className="mt-0.5 text-xs text-mist">{members.map((member) => member.name).join(", ")}</p>
               <p className="mt-4 text-sm text-mist">What should we work through together? Name a coworker with @ to choose who answers.</p>

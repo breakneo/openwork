@@ -128,6 +128,8 @@ export function useAvatarMotion({
   prominent = false,
   intensity = 1,
   gather,
+  regardX = 0,
+  regardY = 0,
 }: {
   identity: string;
   motion?: AvatarMotion;
@@ -136,12 +138,23 @@ export function useAvatarMotion({
   prominent?: boolean;
   intensity?: number;
   gather?: AvatarGather;
+  /** Resting look direction in -1..1, e.g. toward a neighbour who is replying; idle glances return to it. */
+  regardX?: number;
+  regardY?: number;
 }) {
   const ref = useRef<SVGSVGElement>(null);
   const seenCue = useRef<{ identity: string; at: number } | null>(null);
+  const regard = useRef({ x: regardX, y: regardY });
+  const retarget = useRef<() => void>(() => {});
   const groupKey = gather?.key;
   const groupOwner = gather?.owner;
   const groupIndex = gather?.index ?? 0;
+
+  // A new regard retargets the resting pose in place; it never restarts timers, float phase or wake.
+  useEffect(() => {
+    regard.current = { x: regardX, y: regardY };
+    retarget.current();
+  }, [regardX, regardY]);
 
   useEffect(() => {
     const element = ref.current;
@@ -185,19 +198,24 @@ export function useAvatarMotion({
       idleTimer = undefined;
     }
 
+    /** Rest: straight ahead, or toward the current regard while paused copies always rest straight. */
     function neutral() {
-      avatar.style.setProperty("--avatar-look-x", "0px");
-      avatar.style.setProperty("--avatar-look-y", "0px");
-      avatar.style.setProperty("--avatar-feature-look-x", "0px");
-      avatar.style.setProperty("--avatar-feature-look-y", "0px");
-      avatar.style.setProperty("--avatar-turn", "0deg");
-      avatar.style.setProperty("--avatar-lean", "0deg");
-      avatar.dataset.gaze = "neutral";
+      const { x, y } = regard.current;
+      if (!paused && (x || y)) look(x, y, "neutral");
+      else {
+        avatar.style.setProperty("--avatar-look-x", "0px");
+        avatar.style.setProperty("--avatar-look-y", "0px");
+        avatar.style.setProperty("--avatar-feature-look-x", "0px");
+        avatar.style.setProperty("--avatar-feature-look-y", "0px");
+        avatar.style.setProperty("--avatar-turn", "0deg");
+        avatar.style.setProperty("--avatar-lean", "0deg");
+        avatar.dataset.gaze = "neutral";
+      }
       avatar.dataset.blinking = "false";
     }
 
     /** Eyes lead, features follow a little, and the whole body leans a touch toward the same side. */
-    function look(x: number, y: number, source: "pointer" | "idle", lean = x * 1.5) {
+    function look(x: number, y: number, source: "pointer" | "idle" | "neutral", lean = x * 1.5) {
       const strength = Math.max(0, Math.min(1, intensity));
       avatar.style.setProperty("--avatar-look-x", `${(x * 2.4 * strength).toFixed(3)}px`);
       avatar.style.setProperty("--avatar-look-y", `${(y * 2.1 * strength).toFixed(3)}px`);
@@ -266,6 +284,7 @@ export function useAvatarMotion({
         later(() => {
           reacting = false;
           avatar.dataset.reaction = "none";
+          neutral();
           scheduleIdle();
         }, CUE_DURATION[cue]);
       };
@@ -343,6 +362,7 @@ export function useAvatarMotion({
           avatar.dataset.reaction = "none";
           neutral();
         } else {
+          neutral();
           receive(identity);
           if (!reacting && (!started || Date.now() - awaySince >= WAKE_COOLDOWN)) wake(started);
           if (prominent && motion !== "quiet") memory(identity).appeared = true;
@@ -364,6 +384,11 @@ export function useAvatarMotion({
       inView = !!entry?.isIntersecting && entry.intersectionRatio >= 0.15;
       sync();
     }, { threshold: [0, 0.15] });
+    retarget.current = () => {
+      // Mid-glance or mid-reaction poses settle into the new regard on their own.
+      if (paused || interacting || reacting || avatar.dataset.gaze === "idle") return;
+      neutral();
+    };
     neutral();
     avatar.dataset.reaction = "none";
     listeners.add(receive);
@@ -377,6 +402,7 @@ export function useAvatarMotion({
 
     return () => {
       const leftAt = paused ? awaySince : Date.now();
+      retarget.current = () => {};
       paused = true;
       clearTimers();
       removePointer?.();
