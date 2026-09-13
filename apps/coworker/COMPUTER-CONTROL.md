@@ -59,15 +59,24 @@ not verified results or the person's live cursor. Minimizing the view, hiding
 Coworker or switching discussions stops preview capture, not work or access.
 Native menu-bar Take over, Continue and Stop remain available.
 
-The guide's settings buttons run `ComputerUse permissions accessibility` or
-`ComputerUse permissions screenRecording` as a direct child, keeping the same
-responsible-app context as the probe and MCP session. Only this explicit action
-requests the corresponding macOS permission and opens its System Settings pane.
-It starts no control session. System Settings opening is not proof of permission;
-Coworker waits for a new probe. The native generic `setup` command remains for
-other clients. Native permissions, window-scope checks and human-only continuation
-remain required. Enabling Computer does not authorize purchases, sending messages,
-deleting files or other sensitive actions.
+The guide's settings buttons start one `ComputerUse permissions-coworker
+accessibility|screenRecording` companion as a direct child, keeping the same
+responsible-app context as the probe and MCP session. The companion is a small
+floating native coach: it requests the chosen macOS permission, opens its System
+Settings pane, shows which step is left and which app name macOS may list, and
+offers **Check again**, help and **Back to Coworker** once both permissions are
+granted. The adapter drives it over line-delimited JSON on stdin/stdout: it
+forwards each probe result as status, re-probes on the coach's refresh request
+and once per second while the coach is visible, and closes the coach on dismissal,
+on **Back to Coworker** (which brings the Coworker window forward), when a control
+session connects, or after five minutes. Its `setup()` returns a `setupId`; a
+later request for the other permission re-targets the same coach instead of
+opening a second one. It starts no control session. System Settings opening is
+not proof of permission; Coworker waits for a new probe. The native generic
+`setup` and `permissions` commands remain for other clients. Native permissions,
+window-scope checks and human-only continuation remain required. Enabling
+Computer does not authorize purchases, sending messages, deleting files or other
+sensitive actions.
 
 The guide names the shared **OpenWork Computer Use** helper, the possible
 responsible **Open Coworker** entry, version-dependent macOS pane naming and
@@ -165,7 +174,8 @@ type ComputerAdapter = {
     detail: string;
     permissions?: { accessibility: boolean; screenRecording: boolean };
   }>;
-  setup(permission: "accessibility" | "screenRecording"): Promise<void>;
+  setup(permission: "accessibility" | "screenRecording"): Promise<{ setupId: string }>;
+  dismissSetup(setupId?: string): Promise<void>; // Confirmed coach exit; scoped to one ticket when given.
   connect(): Promise<{
     callTool(name: string, args: Record<string, unknown>, options?: {
       signal?: AbortSignal;

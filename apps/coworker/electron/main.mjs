@@ -948,7 +948,15 @@ const collaboration = createCollaboration({
 });
 const activityInbox = createActivityInbox({ collaboration, coworkers: () => listCoworkers(coworkersDir), groups: () => listGroups(coworkersDir) });
 const computerControl = createComputerControl({
-  adapters: [createLocalComputerAdapter()],
+  adapters: [createLocalComputerAdapter({
+    // "Back to Coworker" in the native permission coach: the coach is an accessory
+    // process, so the person is usually still in System Settings when they click it.
+    onSetupReturn: () => {
+      void app.whenReady().then(() => focusMainWindow()).then((window) => {
+        if (window) app.focus({ steal: true });
+      });
+    },
+  })],
   discussionFor: computerDiscussion,
   resolveContext: (slug, context, expected) => resolveControlContext(slug, context, expected, "computer"),
   onRevoke: (scope) => { void workerControls.revokeOrigin(scope); },
