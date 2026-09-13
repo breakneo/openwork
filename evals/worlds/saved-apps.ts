@@ -240,6 +240,32 @@ export async function cloudDraftRouting(seed: Seed) {
     : await reconcileDraftHost(hostSetup);
   if (record(reconciled).status !== 200 || record(reconciled).phase !== "ready" || record(reconciled).diagnostic !== "ready") throw new Error(`Cloud reconcile failed: ${JSON.stringify(reconciled)}`);
   return { app, session, den, connectionId: connection.id, reconciled,
+    async launchDiagnostics(sinceIso: string) {
+      const sanitize = (value: string) => [field(credentials, "token"), field(credentials, "appHostToken")]
+        .reduce((text, secret) => text.replaceAll(secret, "[redacted]"), value)
+        .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+        .replace(/https?:\/\/[^\s<>"']+/g, "[url omitted]")
+        .replace(/\b(?:owt_|sk-)[a-zA-Z0-9_-]+/g, "[redacted]").slice(0, 6000);
+      const visible = await seed.evalIn(app, () => document.body.innerText);
+      const targets = (await listTargets(app.handle.cdpUrl)).filter(target => target.type === "iframe").map(target => {
+        if (target.url === "about:srcdoc" || target.url === "about:blank") return { type: target.type, url: target.url };
+        try {
+          const url = new URL(target.url);
+          return { type: target.type, url: ["/mcp-apps/sandbox.html", "/mcp-apps/proxy.html"].includes(url.pathname) && !url.username && !url.password && !url.search && !url.hash
+            ? url.pathname : "[url omitted]" };
+        } catch { return { type: target.type, url: "[url omitted]" }; }
+      });
+      const countNames = (calls: { name: string }[]) => calls.reduce<Record<string, number>>((counts, call) => {
+        counts[call.name] = (counts[call.name] ?? 0) + 1;
+        return counts;
+      }, {});
+      const requests = await den.mocks.slack.agentRequests({ promptMarker: draftRoutingPrompt });
+      return { visible: sanitize(typeof visible === "string" ? visible : ""), targets,
+        providerCalls: countNames(await den.mocks.slack.toolCalls({ sinceIso, atLeast: 0 })),
+        otherProviderCalls: countNames(await den.mocks.other.toolCalls({ sinceIso, atLeast: 0 })),
+        modelResults: requests.map(request => ({ kind: request.kind, toolName: request.toolName, toolResultCodes: request.toolResultCodes })),
+      };
+    },
     resolveRecipient: () => inAppDocuments(app, "details"),
     reports: async () => (await inAppDocuments(app, "isolation")).map(value => record(JSON.parse(value))),
   };

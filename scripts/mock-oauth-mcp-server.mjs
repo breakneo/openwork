@@ -555,7 +555,16 @@ async function handleAgentCompletion(req, res, entry) {
   const scopedMessages = workload?.latestUserTurn ? messages.slice(latestUserIndex + 1) : messages;
   const completedTools = scopedMessages.filter((message) => message && typeof message === "object" && message.role === "tool").length;
   const advertisedToolNames = (Array.isArray(body.tools) ? body.tools : []).map((tool) => tool?.function?.name).filter((name) => typeof name === "string");
-  const baseRequest = { model, reasoningEffort: body.reasoning_effort ?? null, matchedMarkers, completedTools, advertisedToolNames };
+  const toolResultCodes = scopedMessages.filter((message) => message?.role === "tool").map((message) => {
+    const value = typeof message.content === "string" ? message.content : JSON.stringify(message.content) ?? "";
+    return {
+      codes: [...value.matchAll(/"(?:error|code)"\s*:\s*"([a-z_]{2,80})"/g)].map(match => match[1]),
+      isError: /"isError"\s*:\s*true/.test(value),
+      hasAppMetadata: value.includes("openwork/mcpApp"),
+      hasDraftResult: value.includes("Draft ready for Test recipient"),
+    };
+  });
+  const baseRequest = { model, reasoningEffort: body.reasoning_effort ?? null, matchedMarkers, completedTools, advertisedToolNames, toolResultCodes };
 
   if (!Array.isArray(body.tools) || body.tools.length === 0) {
     entry.agentCompletion = { ...baseRequest, kind: "utility", promptMarker: matchedMarkers[0] ?? null, toolName: null, arguments: {} };
