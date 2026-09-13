@@ -39,6 +39,15 @@ function firstName(name: string | null): string {
   return name.trim().split(/\s+/)[0] ?? "someone";
 }
 
+/**
+ * Why the signed-in member can use this item. Every edge comes from the
+ * authenticated `/v1/me/library` route, which only returns grants made to the
+ * caller, the caller's teams, or the caller's organization. `sharedBy` is a
+ * fellow member of that same organization and `orgName` is the member's own
+ * organization; My Library is never rendered to anonymous or
+ * cross-organization viewers, so these labels describe the member's own
+ * access rather than an outside party.
+ */
 function getSource(item: LibraryItem, orgName: string): { label: string; isPerson: boolean } | null {
   for (const edge of item.edges) {
     if (edge.kind === "person") {
@@ -97,6 +106,7 @@ export function LibraryRow({ item, isFocused, orgName, orgSlug, layout }: {
   const nextAction = state === "needs_signin" ? "Sign in"
     : state === "needs_admin_setup" ? "Needs admin setup"
       : state === "needs_setup" ? "Ready to set up" : "View details";
+  // Access provenance within the member's own organization (see getSource).
   const meta = (
     <span data-library-source>
       {item.type === "connection" ? <span>{item.transport === "native" ? "Native" : "Cloud"} · </span> : null}
