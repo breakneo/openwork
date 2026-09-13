@@ -15,7 +15,7 @@ import { PersonalityPicker } from "@/ui/personality-picker";
 import { ActivityIcon, AppsIcon, Button, ErrorNote, IconButton, MemoryIcon, SlidersIcon } from "@/ui/kit";
 import { useResizablePanel } from "@/ui/use-resizable-panel";
 import { PanelContent, PanelHeader, PanelLevel, usePanelNavigation } from "@/ui/panel-nav";
-import { pushCrumb, routeDepth, type PanelCrumb } from "@/lib/panel-route";
+import { isBackShortcut, pushCrumb, routeDepth, type PanelCrumb } from "@/lib/panel-route";
 import {
   ABILITIES_CRUMB,
   ACTIVITY_CRUMBS,
@@ -34,7 +34,7 @@ import {
 import { panelViewTooltip } from "@/lib/tooltip";
 import type { PanelBounds } from "@/lib/panel-layout";
 import { MemoryPanel } from "@/ui/memory";
-import { DocumentBesidePane, DocumentsPanel, lastDocumentsOpened, useDocuments } from "@/ui/documents";
+import { DocumentBesidePane, DocumentsPanel, lastDocumentsOpened, useDocuments, useDocumentNavigationGuard, type DocumentNavigationGuard } from "@/ui/documents";
 import { ThreadsPanel, type DocumentHooks } from "@/ui/threads";
 import type { TeamHooks } from "@/ui/team-cards";
 import { WorkersPanel } from "@/ui/workers";
@@ -149,9 +149,13 @@ export function CoworkerHome({
   railWidth,
   request = null,
   onCoworkerAdded,
+  canHandOff,
   onHandOff,
   onVisitCoworker,
+  onExitActivity,
+  navigationGuard,
 }: {
+  navigationGuard?: DocumentNavigationGuard;
   active: boolean;
   runtime: RuntimeInfo;
   session: DenSession | null;
@@ -163,8 +167,9 @@ export function CoworkerHome({
   onCoworkerRemoved: (slug: string) => void;
   /** A teammate this coworker proposed was added from the conversation; the rail gains it without leaving. */
   onCoworkerAdded: (coworker: CoworkerSummary) => void;
+  canHandOff: () => boolean;
   /** Pass a request to another coworker: switch to them and send it in their open discussion. */
-  onHandOff: (slug: string, prompt: string) => void;
+  onHandOff: (slug: string, prompt: string) => boolean;
   /** Open another coworker's conversation (Say hi to a newcomer). */
   onVisitCoworker: (slug: string) => void;
   onRefreshRuntime: () => Promise<void>;
@@ -182,6 +187,7 @@ export function CoworkerHome({
   railWidth: number;
   /** Something another view asked this one to show on arrival: a settings section, or one thread. */
   request?: CoworkerHomeRequest | null;
+  onExitActivity?: () => void;
 }) {
   const [settingsFocus, setSettingsFocus] = useState<{ id: number; section: "model" } | null>(null);
   const [assignmentDraft, setAssignmentDraft] = useState<{ id: number; text: string } | null>(null);
@@ -199,6 +205,22 @@ export function CoworkerHome({
   const [openDocumentRequest, setOpenDocumentRequest] = useState<{ id: number; documentId: string } | null>(null);
   /** The document open in the reading pane beside the conversation, when the window has room. */
   const [besideDocumentId, setBesideDocumentId] = useState("");
+  const documentNavigation: DocumentNavigationGuard = useRef(null);
+  const besideNavigation: DocumentNavigationGuard = useRef(null);
+  const [documentNotice, setDocumentNotice] = useState("");
+  const allowDocumentNavigation = useCallback(() => {
+    const message = documentNavigation.current?.() || besideNavigation.current?.() || "";
+    setDocumentNotice(message);
+    return !message;
+  }, []);
+  useEffect(() => {
+    if (!active) return;
+    const protectDraft = (event: KeyboardEvent) => {
+      if ((event.key === "Escape" || isBackShortcut(event)) && !allowDocumentNavigation()) event.preventDefault();
+    };
+    window.addEventListener("keydown", protectDraft, true);
+    return () => window.removeEventListener("keydown", protectDraft, true);
+  }, [active, allowDocumentNavigation]);
   const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
   const { documents, refresh: refreshDocuments, error: documentsError } = useDocuments(coworker.slug);
   const holdings = useCoworkerHoldings(coworker.slug);
@@ -215,6 +237,9 @@ export function CoworkerHome({
     available: contextPanelRoom,
     startCollapsed: true,
   });
+  const closeContextPanel = useCallback(() => {
+    if (allowDocumentNavigation()) contextPanel.collapse();
+  }, [allowDocumentNavigation, contextPanel.collapse]);
   /**
    * Where the panel is: one of three views and a short path inside it, remembered per view
    * for the session. Escape goes back a level, or closes the panel at a root; a deep link
@@ -224,7 +249,7 @@ export function CoworkerHome({
     initialView: "overview",
     isView: isPanelView,
     open: active && !contextPanel.collapsed,
-    onEscapeAtRoot: contextPanel.collapse,
+    onEscapeAtRoot: closeContextPanel,
     onRequestOpen: contextPanel.expand,
   });
   const contextView = nav.route.view;
@@ -237,6 +262,7 @@ export function CoworkerHome({
    * opens where it was last.
    */
   function showContext(view: PanelView): void {
+    if (!allowDocumentNavigation()) return;
     if (!contextPanel.collapsed && view === contextView) {
       contextPanel.collapse();
       return;
@@ -249,15 +275,17 @@ export function CoworkerHome({
   const expandContextPanel = contextPanel.expand;
   /** Open one level of Activity — Documents, Workers, or Assignments — unfolding the panel. */
   const openActivityLevel = useCallback((level: ActivityLevel) => {
+    if (!allowDocumentNavigation()) return;
     navigateTo(activityRoute(level));
     expandContextPanel();
-  }, [expandContextPanel, navigateTo]);
+  }, [allowDocumentNavigation, expandContextPanel, navigateTo]);
   /** Coworker settings at its own rows, brought to one section; never deeper in Apps & tools. */
   const openSettingsSection = useCallback((section: "model", id: number) => {
+    if (!allowDocumentNavigation()) return;
     navigateTo({ view: "settings", path: [] });
     expandContextPanel();
     setSettingsFocus({ id, section });
-  }, [expandContextPanel, navigateTo]);
+  }, [allowDocumentNavigation, expandContextPanel, navigateTo]);
   /** A request passed from a teammate, to send in the open discussion; the id makes repeats distinct. */
   const [turnRequest, setTurnRequest] = useState<{ id: number; prompt: string } | null>(null);
   const handledRequestRef = useRef(0);
@@ -274,6 +302,7 @@ export function CoworkerHome({
     if (!request) { setOpenThreadRequest(null); return; }
     if (handledRequestRef.current === request.id) return;
     handledRequestRef.current = request.id;
+    if (!allowDocumentNavigation()) return;
     if (request.kind === "thread" || request.kind === "discussion" || request.kind === "activity") {
       setOpenThreadRequest(request);
       return;
@@ -292,7 +321,7 @@ export function CoworkerHome({
       return;
     }
     openSettingsSection(request.section, request.id);
-  }, [openActivityLevel, openSettingsSection, request]);
+  }, [allowDocumentNavigation, openActivityLevel, openSettingsSection, request]);
   useEffect(() => {
     const onResize = () => setWindowWidth(window.innerWidth);
     window.addEventListener("resize", onResize);
@@ -300,20 +329,18 @@ export function CoworkerHome({
   }, []);
   const panelWidth = contextPanel.collapsed ? CONTEXT_PANEL_BOUNDS.collapsedWidth : contextPanel.width;
   const canOpenBeside = windowWidth - railWidth - panelWidth - BESIDE_PANE_WIDTH >= MAIN_WORKSPACE_MIN_WIDTH;
-  useEffect(() => {
-    if (!canOpenBeside) setBesideDocumentId("");
-  }, [canOpenBeside]);
+
   /** An App or skill detail open in a column beside the conversation, while the window is wide enough; its path is the levels below Apps & tools. */
   const [besidePath, setBesidePath] = useState<PanelCrumb[] | null>(null);
   const besideAppsAvailable = windowWidth >= BESIDE_APPS_MIN_WINDOW
     && windowWidth - railWidth - panelWidth - BESIDE_APPS_MIN_WIDTH >= MAIN_WORKSPACE_MIN_WIDTH;
   useEffect(() => {
-    if (besideAppsAvailable || !besidePath) return;
+    if (besideAppsAvailable || !besidePath || !allowDocumentNavigation()) return;
     // The window shrank: the detail folds back into the panel at the same route.
     navigateTo(appsToolsRoute(besidePath));
     expandContextPanel();
     setBesidePath(null);
-  }, [besideAppsAvailable, besidePath, expandContextPanel, navigateTo]);
+  }, [allowDocumentNavigation, besideAppsAvailable, besidePath, expandContextPanel, navigateTo]);
   /** Closing the column hands focus back to the row the detail was opened from. */
   function closeBeside(): void {
     const rowId = besidePath?.[besidePath.length - 1]?.id ?? "";
@@ -324,12 +351,17 @@ export function CoworkerHome({
     });
   }
   const overlayPanel = windowWidth < NARROW_WINDOW && !contextPanel.collapsed;
+  useDocumentNavigationGuard(navigationGuard, () => documentNavigation.current?.() || besideNavigation.current?.()
+    || (!contextPanel.collapsed && contextView === "settings" ? "Close coworker settings before opening another source. Your settings have been kept." : null)
+    || (overlayPanel ? "Close the current sidebar before opening another source. Its contents have been kept." : null));
   const documentHooks: DocumentHooks = {
     onOpenDocument: (documentId) => {
+      if (!allowDocumentNavigation()) return;
       openActivityLevel("documents");
       setOpenDocumentRequest({ id: Date.now(), documentId });
     },
     onOpenDocumentBeside: (documentId) => {
+      if (!allowDocumentNavigation()) return;
       if (canOpenBeside) {
         setBesidePath(null);
         setBesideDocumentId(documentId);
@@ -380,9 +412,14 @@ export function CoworkerHome({
       await refreshTeamStates();
     },
     ask: async (card, recent) => {
-      await coworkerBridge.team.referralResolved(coworker.slug, card.id, "asked");
-      await refreshTeamStates();
-      onHandOff(card.to.slug, referralPrompt({ from: { name: coworker.name, role: coworker.role }, message: card.message, why: card.why, recent }));
+      if (!canHandOff()) return;
+      const asked = await coworkerBridge.team.referralResolved(coworker.slug, card.id, "asked");
+      try {
+        const accepted = onHandOff(card.to.slug, referralPrompt({ from: { name: coworker.name, role: coworker.role }, message: card.message, why: card.why, recent }));
+        if (accepted === false) await coworkerBridge.team.referralResolved(coworker.slug, card.id, "offered", asked.at);
+      } finally {
+        await refreshTeamStates();
+      }
     },
     continueWith: async (card) => {
       await coworkerBridge.team.referralResolved(coworker.slug, card.id, "continued");
@@ -458,9 +495,11 @@ export function CoworkerHome({
             <h1 className="whitespace-normal text-sm font-semibold text-snow [overflow-wrap:anywhere]">{coworker.name}</h1>
             <div ref={setHeaderTitleSlot} className="window-no-drag flex min-h-[18px] min-w-0 items-center gap-2 text-xs text-mist" data-testid="conversation-header-title" />
           </div>
+          {onExitActivity ? <Button variant="ghost" className="window-no-drag shrink-0 text-xs" onClick={onExitActivity}>Go to coworker</Button> : null}
           <div ref={setHeaderActionsSlot} className="window-no-drag flex shrink-0 items-center gap-1" data-testid="conversation-header-actions" />
           <HeaderStatusWord activity={activity} engineManaged={runtime.engineManaged} />
         </header>
+        {documentNotice || (besideDocumentId && !canOpenBeside) ? <p role="status" className="border-b border-line px-6 py-2 text-xs text-mist">{documentNotice || "Your reading pane is kept while space is limited. Close Activity or make room to return to it."}</p> : null}
         {!runtime.engineManaged ? (
           <AiUnavailableNote coworkerName={coworker.name} technical={runtime.engineError} onRestart={onRestartRuntime} />
         ) : null}
@@ -491,15 +530,18 @@ export function CoworkerHome({
         </main>
       </div>
 
-      {besideDocumentId && canOpenBeside ? (
-        <DocumentBesidePane
-          coworker={coworker}
-          documentId={besideDocumentId}
-          onClose={() => setBesideDocumentId("")}
-          onChanged={refreshDocuments}
-          onAskToUpdate={askToUpdate}
-          onOpenDocument={setBesideDocumentId}
-        />
+      {besideDocumentId ? (
+        <div className={canOpenBeside ? "contents" : "hidden"}>
+          <DocumentBesidePane
+            coworker={coworker}
+            documentId={besideDocumentId}
+            onClose={() => { if (allowDocumentNavigation()) setBesideDocumentId(""); }}
+            onChanged={refreshDocuments}
+            onAskToUpdate={askToUpdate}
+            onOpenDocument={setBesideDocumentId}
+            navigationGuard={besideNavigation}
+          />
+        </div>
       ) : null}
 
       {besidePath && besideAppsAvailable ? (
@@ -540,7 +582,7 @@ export function CoworkerHome({
         </section>
       ) : null}
       {overlayPanel ? (
-        <div className="absolute inset-0 z-30 bg-black/40" data-testid="context-panel-scrim" onClick={contextPanel.collapse} aria-hidden="true" />
+        <div className="absolute inset-0 z-30 bg-black/40" data-testid="context-panel-scrim" onClick={closeContextPanel} aria-hidden="true" />
       ) : null}
       <aside
         className={`glass-context flex h-full shrink-0 flex-col border-l border-line ${overlayPanel ? "absolute inset-y-0 right-0 z-40 shadow-[-24px_0_48px_rgba(0,0,0,0.45)]" : "relative"} ${contextPanel.resizing ? "" : "transition-[width] duration-[180ms] ease-out motion-reduce:transition-none"}`}
@@ -550,12 +592,16 @@ export function CoworkerHome({
         data-view={contextView}
         data-depth={routeDepth(nav.route)}
         data-overlay={overlayPanel ? "true" : "false"}
+        onWheelCapture={(event) => { if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && !allowDocumentNavigation()) event.stopPropagation(); }}
         ref={(element) => {
           nav.panelRef.current = element;
         }}
       >
         <div
           {...contextPanel.separatorProps}
+          onPointerDown={(event) => { if (allowDocumentNavigation()) contextPanel.separatorProps.onPointerDown(event); }}
+          onClick={() => { if (allowDocumentNavigation()) contextPanel.separatorProps.onClick(); }}
+          onKeyDown={(event) => { if (allowDocumentNavigation()) contextPanel.separatorProps.onKeyDown(event); else event.preventDefault(); }}
           aria-label="Resize context panel"
           className="window-no-drag group absolute inset-y-0 -left-[5px] z-30 w-[10px] cursor-col-resize outline-none"
           title={contextPanel.collapsed ? "Click to show the panel · Drag to resize" : "Drag to resize · Click or drag closed to fold"}
@@ -603,20 +649,21 @@ export function CoworkerHome({
           route={nav.route}
           rootTitle={PANEL_VIEW_TITLES[contextView]}
           width={contextPanel.width}
-          onBack={nav.back}
-          onToDepth={nav.toDepth}
+          onBack={() => { if (allowDocumentNavigation()) nav.back(); }}
+          onToDepth={(depth) => { if (allowDocumentNavigation()) nav.toDepth(depth); }}
           actions={(
-            <IconButton label="Close sidebar" className="window-no-drag" data-testid="context-panel-close" onClick={contextPanel.collapse}>
+            <IconButton label="Close sidebar" className="window-no-drag" data-testid="context-panel-close" onClick={closeContextPanel}>
               <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" className="size-4" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
             </IconButton>
           )}
           leading={contextView !== "overview" ? (
-            <IconButton label="Back to activity" className="window-no-drag" onClick={() => nav.toRoot("overview")}>
+            <IconButton label="Back to activity" className="window-no-drag" onClick={() => { if (allowDocumentNavigation()) nav.toRoot("overview"); }}>
               <span aria-hidden="true">←</span>
             </IconButton>
           ) : undefined}
         />
         <PanelContent route={nav.route} containerRef={setPanelContentElement}>
+          {documentNotice && overlayPanel ? <p role="alert" className="text-xs text-mist">{documentNotice}</p> : null}
           {contextView === "overview" && activityLevel.kind === "root" ? (
             <PanelLevel key="activity" direction={nav.direction}>
               <CoworkerOverview
@@ -638,6 +685,7 @@ export function CoworkerHome({
                 error={documentsError}
                 onRefresh={refreshDocuments}
                 openRequest={openDocumentRequest}
+                navigationGuard={documentNavigation}
                 onAskToUpdate={askToUpdate}
                 canOpenBeside={canOpenBeside}
                 onOpenBeside={(documentId) => {

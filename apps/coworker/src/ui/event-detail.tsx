@@ -57,6 +57,7 @@ const toneDot: Record<Tone, string> = {
 
 /** One short, truthful word for a session. */
 function describeRun(run: EventRun): RunStatus {
+  if (run.stopping) return { label: "Stopping · awaiting confirmation", tone: "mint", live: true };
   switch (run.status) {
     case "queued":
       return { label: "Starting", tone: "spark", live: true };
@@ -485,13 +486,15 @@ export function EventDetails({
           tone: "mint",
           live: true,
           text:
-            liveRun.status === "queued"
-              ? "A session is starting"
-              : liveRun.status === "waiting" || liveRun.phase === "waiting"
-                ? "In session · waiting for delegated work"
-                : liveRun.phase === "conclusion"
-                  ? `In session · ${name(current.leadSlug)} is wrapping up`
-                  : `In session now · ${liveRun.contributorSlugs.length} of ${liveRun.event.participantSlugs.length} contributed`,
+            liveRun.stopping
+              ? "Stopping this session · awaiting confirmation"
+              : liveRun.status === "queued"
+                ? "A session is starting"
+                : liveRun.status === "waiting" || liveRun.phase === "waiting"
+                  ? "In session · waiting for delegated work"
+                  : liveRun.phase === "conclusion"
+                    ? `In session · ${name(current.leadSlug)} is wrapping up`
+                    : `In session now · ${liveRun.contributorSlugs.length} of ${liveRun.event.participantSlugs.length} contributed`,
         }
       : current.state === "archived"
         ? { tone: "mist", live: false, text: "Archived · history is kept" }

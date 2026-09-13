@@ -28,22 +28,26 @@ v2 skill path remain unchanged. Shared native additions are host-selected.
 
 See [native contracts](electron/NATIVE-PLUGINS.md) and
 [release validation](RELEASE-SIZE.md). The Coworker feature branch now combines
-native v2 with Events, Activity, Abilities and current Computer Use. Its local
-unsigned build excludes the legacy SDK/browser/ORM runtime dependencies. Source
-and package checks do not certify the still-unrun packaged user journeys or signed
-distribution. Legacy history import is optional separate work; existing profiles
-are not reset or imported.
+native v2 with Events, Activity, Abilities and current Computer Use. The package
+excludes the legacy SDK/browser/ORM runtime dependencies. Source and package
+checks do not certify packaged user journeys; signing and runtime evidence belong
+to the exact delivered build. Legacy history import is optional separate work;
+existing profiles are not reset or imported.
 
 ## Activity and mentions
 
-The **Activity bell** at the top-right of the team sidebar opens a shared inbox
-for completed private, group and Event replies. It sits above Chat / Calendar
-without shifting those tabs or search. In the folded rail, the bell shares the
-utility row below the tabs to stay clear of native window controls.
-Filter **All**, **Mentions**, or **Unread**; each row identifies
-the coworker, conversation, time, and a short visible-reply preview. The rail
-shows the real unread count. **Happening now** separately projects current work
-and requests for the person, not notification history or inferred progress.
+The **Activity bell** opens a retained sidebar beside the current conversation
+or Calendar. A folded team rail expands temporarily for the feed without saving
+a different Chat/Calendar width. The bell's existing size and styling stay the
+same; the feed replaces the normal team lists while Activity is open.
+
+Search or filter Events, Chats and Documents, with Unread as an independent
+filter. Rows identify their source and show compact previews; document rows
+browse saved metadata rather than inventing unread state. Live Events and a
+collapsed Up next section show current sessions and upcoming occurrences.
+The existing Event tick records a reminder ten minutes before an eligible
+occurrence, without another scheduler or inference request. Reminder read status
+changes only through its explicit action, not merely by opening Calendar.
 
 Coworkers can write **@you** sparingly when they need a question answered, a
 decision, or help with a blocker. Only standalone mentions in delivered prose
@@ -51,9 +55,12 @@ count; code, quotations, email addresses and source URLs do not. A mention is
 attention, never permission to act or an answer to a pending native request.
 
 Opening Activity keeps the current chat mounted and does not mark anything read.
-Opening a notification returns to its private discussion or group. Read status
-changes only after the private transcript loads or the exact group reply is
-revealed. Older group targets show an explicit history-limit notice and stay
+Opening a reply returns to its exact private discussion, group, Event or session.
+Read status changes only after the private transcript loads or the exact group
+reply is revealed. Document drafts and busy readers block source navigation with
+a message rather than losing their state; a Calendar draft keeps its requested
+destination until the person explicitly opens it after Save/Cancel. A blocked
+teammate handoff retains retryable choices instead of claiming it was passed. Older group targets show an explicit history-limit notice and stay
 unread instead of claiming an exact jump. Individual read/unread controls and **Mark all read** persist
 across restarts; the latter acknowledges only the IDs already loaded in the inbox,
 not notifications arriving during the action. Read state is local to this profile.

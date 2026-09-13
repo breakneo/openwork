@@ -1,6 +1,8 @@
 import { marked } from "marked";
+import { assertEventIdentity } from "./event-execution.mjs";
 
 export const MAX_ACTIVITY_ITEMS = 300;
+export const EVENT_REMINDER_LEAD_MS = 10 * 60_000;
 
 /** Inspect prose, not Markdown source URLs, quoted people, or code examples. */
 export function mentionsYou(value) {
@@ -42,6 +44,11 @@ function captureActivity(state, entry, { event, text, at }) {
   } else if (["group", "consultation"].includes(owner.kind)) {
     if (!event || !event.id || event.kind !== "coworker" || event.status === "passed" || event.slug !== owner.slug || event.threadId !== owner.threadId || event.executionId !== entry.id || !owner.groupId || owner.conversationId !== owner.groupId) return;
     target = { kind: "group", groupId: owner.groupId, eventId: event.id };
+    const run = owner.eventRunId && state.workplaceEvents?.runs[owner.eventRunId];
+    const identity = run?.identities?.[owner.slug];
+    if (run?.event.groupId === owner.groupId && run.event.participantSlugs.includes(owner.slug) && identity?.createdAt === entry.coworkerCreatedAt && (!identity.workspaceId || identity.workspaceId === entry.workspaceId)) {
+      Object.assign(target, { workplaceEventId: run.eventId, runId: run.id, scheduledFor: run.scheduledFor });
+    }
     text = event.text;
     at = event.at;
   } else return;
@@ -53,6 +60,62 @@ function captureActivity(state, entry, { event, text, at }) {
   entry.activityRecorded = true;
 }
 
+function reminderDue(state, event, at) {
+  const due = event?.nextDueAt;
+  return event?.state === "active" && !event.manualOnly && Number.isSafeInteger(due) && due > at && due - EVENT_REMINDER_LEAD_MS <= at
+    && due >= event.startsAt && (event.repeatUntil == null || due <= event.repeatUntil)
+    && !Object.values(state.workplaceEvents.runs).some((run) => run.eventId === event.id && run.trigger !== "manual" && run.scheduledFor === due);
+}
+
+function currentReminder(state, item, at) {
+  const event = state.workplaceEvents?.definitions[item.target.eventId];
+  return event?.activityReminder?.id === item.id && event.activityReminder.scheduledFor === item.target.scheduledFor
+    && event.groupId === item.target.groupId && event.nextDueAt === item.target.scheduledFor && reminderDue(state, event, at);
+}
+
+function reminderCopy(event) {
+  const title = event.title.trim().replace(/\s+/g, " ").slice(0, 160);
+  return { title, preview: `${title} starts soon. Open the Event in Calendar.` };
+}
+
+export function eventRemindersNeeded(state, at) {
+  try {
+    return state.activity.some((item) => item.kind === "event-reminder" && !currentReminder(state, item, at))
+      || Object.values(state.workplaceEvents?.definitions ?? {}).some((event) => event.activityReminder?.scheduledFor !== event.nextDueAt && reminderDue(state, event, at));
+  } catch { return false; }
+}
+
+export function reconcileEventReminders(state, at) {
+  try {
+    const items = state.activity.filter((item) => item.kind !== "event-reminder" || currentReminder(state, item, at));
+    const receipts = [];
+    for (const event of Object.values(state.workplaceEvents?.definitions ?? {})) {
+      if (event.activityReminder?.scheduledFor === event.nextDueAt || !reminderDue(state, event, at)) continue;
+      const generation = event.activityReminder?.generation ?? 0;
+      const id = `activity_reminder_${event.id}_${generation}_${event.nextDueAt}`;
+      const identities = Object.fromEntries(event.participantSlugs.map((slug) => [slug, structuredClone(event.identities[slug])]));
+      items.push({ id, kind: "event-reminder", at, readAt: null, ...reminderCopy(event),
+        target: { kind: "event", eventId: event.id, groupId: event.groupId, scheduledFor: event.nextDueAt }, identities });
+      receipts.push([event, { generation, id, scheduledFor: event.nextDueAt }]);
+    }
+    const bounded = items.sort((a, b) => b.at - a.at || a.id.localeCompare(b.id)).slice(0, MAX_ACTIVITY_ITEMS);
+    state.activity = bounded;
+    for (const [event, receipt] of receipts) event.activityReminder = receipt;
+  } catch {}
+}
+
+export function updateEventReminder(state, previous, event, at, reset) {
+  try {
+    const items = state.activity.flatMap((item) => {
+      if (item.kind !== "event-reminder" || item.target.eventId !== event.id) return [item];
+      return !reset && currentReminder(state, item, at) ? [{ ...item, ...reminderCopy(event) }] : [];
+    });
+    const receipt = reset ? { generation: (previous.activityReminder?.generation ?? 0) + 1, id: null, scheduledFor: null } : event.activityReminder;
+    state.activity = items;
+    if (receipt) event.activityReminder = receipt;
+  } catch {}
+}
+
 export function activityReadIds(ids, read) {
   if (!Array.isArray(ids) || ids.length > MAX_ACTIVITY_ITEMS || ids.some((id) => typeof id !== "string" || !id.trim() || id.length > 240) || typeof read !== "boolean") throw new Error("Choose up to 300 Activity IDs and a read or unread state.");
   return new Set(ids);
@@ -60,11 +123,29 @@ export function activityReadIds(ids, read) {
 
 /** Main-process projection. A recycled slug is not the original actor. Reads
  * never prepare a workspace, inspect native history, or expose coworker tools. */
-export function createActivityInbox({ collaboration, coworkers, groups }) {
+export function createActivityInbox({ collaboration, coworkers, groups, now = Date.now }) {
   async function list() {
-    const [items, actors, memberships] = await Promise.all([collaboration.listActivity(), coworkers(), groups()]);
-    return items.filter((item) => typeof item.coworkerCreatedAt === "string" && item.coworkerCreatedAt.trim() && actors.some((actor) => actor.slug === item.slug && actor.workspaceId && actor.workspaceId === item.workspaceId && actor.createdAt === item.coworkerCreatedAt)
-      && (item.target.kind === "private" || memberships.some((group) => group.id === item.target.groupId && group.archivedAt === null && group.participantSlugs.includes(item.slug))));
+    const [actors, memberships] = await Promise.all([coworkers(), groups()]);
+    return collaboration.read((state) => {
+      const at = now();
+      return state.activity.flatMap((item) => {
+        if (item.kind === "event-reminder") {
+          try {
+            if (!currentReminder(state, item, at)) return [];
+            const group = memberships.find((group) => group.id === item.target.groupId && group.archivedAt === null);
+            const identities = Object.entries(item.identities);
+            if (!group?.eventId || !identities.length || group.participantSlugs.length !== identities.length) return [];
+            for (const [slug, identity] of identities) {
+              if (!group.participantSlugs.includes(slug)) return [];
+              assertEventIdentity(identity, actors.find((actor) => actor.slug === slug));
+            }
+            return [{ id: item.id, kind: item.kind, at: item.at, readAt: item.readAt, title: item.title, preview: item.preview, target: item.target }];
+          } catch { return []; }
+        }
+        return typeof item.coworkerCreatedAt === "string" && item.coworkerCreatedAt.trim() && actors.some((actor) => actor.slug === item.slug && actor.workspaceId && actor.workspaceId === item.workspaceId && actor.createdAt === item.coworkerCreatedAt)
+          && (item.target.kind === "private" || memberships.some((group) => group.id === item.target.groupId && group.archivedAt === null && group.participantSlugs.includes(item.slug))) ? [item] : [];
+      });
+    });
   }
   return {
     list,

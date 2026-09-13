@@ -9,11 +9,12 @@ import { ALL_HANDS_BRIEF, assertEventIdentity, coworkerIdentity, eventRunFor, ev
 import { createGroup, getGroup, updateGroup, groupReplyEvent, EVENT_GROUP_AUTHORITY } from "./groups.mjs";
 import { readAllHands, markAllHandsMigrated } from "./all-hands.mjs";
 import { isDocumentId, findSecretLike } from "./documents.mjs";
+import { eventRemindersNeeded, reconcileEventReminders, updateEventReminder } from "./activity-inbox.mjs";
 
 const terminal = (state) => ["succeeded", "failed", "cancelled"].includes(state);
 const store = (state) => state.workplaceEvents ??= { version: 1, definitions: {}, runs: {}, allHandsMigration: null };
-const eventView = ({ identities, manualOnly, ...event }) => event;
-const runView = ({ identities, activityEligible, requests, usage, deadlineAt, cancelRequested, cleanupPending, stopOutcome, artifactReceipts, artifactErrors, outcomeReceipt, ...run }) => run;
+const eventView = ({ identities, manualOnly, activityReminder, ...event }) => event;
+const runView = ({ identities, activityEligible, requests, usage, deadlineAt, cancelRequested, cleanupPending, stopOutcome, artifactReceipts, artifactErrors, outcomeReceipt, ...run }) => ({ ...run, stopping: cleanupPending === true });
 const artifactKey = (artifact) => JSON.stringify([artifact.owner, artifact.documentId, artifact.revision, artifact.relation]);
 const inputKeys = new Set(["title", "description", "objective", "template", "leadSlug", "participantSlugs", "startsAt", "schedule", "repeatUntil", "durationMinutes", "maxReplies", "state", "artifacts"]);
 const clip = (value, limit) => typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, limit) : "";
@@ -403,6 +404,7 @@ export function createEvents({ directory, collaboration, groups, coworkerFor, co
   async function tick() {
     if (!ready || closed) return;
     return serial(async () => {
+      await collaboration.change((state) => reconcileEventReminders(state, now()), (state) => eventRemindersNeeded(state, now())).catch(() => undefined);
       const stops = await collaboration.read((state) => Object.values(store(state).runs).filter((run) => run.cleanupPending));
       for (const run of stops) await stopRun(run.id, run.status, run.error);
       const at = now();
@@ -543,6 +545,7 @@ export function createEvents({ directory, collaboration, groups, coworkerFor, co
         if (resuming && next.nextDueAt === null) throw new Error(next.schedule.kind === "once" ? "This one-time event has no future occurrence. Change its start or use Run now." : "This repeating event has ended. Extend its end date or use Run now.");
         if (next.state !== "active") next.nextDueAt = null;
         data.definitions[id] = next;
+        updateEventReminder(state, current, next, now(), reschedule || rosterChanged);
         recordOperation(state, operation, next);
         return next;
       });

@@ -28,7 +28,7 @@ export type MessageReaction = {
 export type MessageReactionSnapshot = { revision: number; reactions: MessageReaction[] };
 
 export type GroupInteraction = { executionId: string; slug: string; threadId: string; workspaceId: string; deadline: number; pending: PendingInteractions };
-export type CoworkerActivityItem = {
+export type CoworkerReplyActivityItem = {
   id: string;
   kind: "reply" | "mention";
   at: number;
@@ -37,8 +37,18 @@ export type CoworkerActivityItem = {
   coworkerCreatedAt: string;
   preview: string;
   readAt: number | null;
-  target: { kind: "private"; threadId: string } | { kind: "group"; groupId: string; eventId: string };
+  target: { kind: "private"; threadId: string } | { kind: "group"; groupId: string; eventId: string; workplaceEventId?: string; runId?: string; scheduledFor?: number };
 };
+export type EventReminderActivityItem = {
+  id: string;
+  kind: "event-reminder";
+  at: number;
+  readAt: number | null;
+  title: string;
+  preview: string;
+  target: { kind: "event"; eventId: string; groupId: string; scheduledFor: number };
+};
+export type CoworkerActivityItem = CoworkerReplyActivityItem | EventReminderActivityItem;
 export type GroupInteractionReply = { groupId: string; executionId: string; slug: string; threadId: string; workspaceId: string; requestId: string } & ({ kind: "permission"; reply: PermissionReply } | { kind: "question"; answers: string[][]; reply?: never } | { kind: "question"; reply: "reject"; answers?: never });
 
 export type CollaborationReceipt = {
@@ -644,8 +654,10 @@ export const coworkerBridge = {
     /** Add the proposed coworker; it inherits the proposer's model and remembers who proposed it. */
     accept: (slug: string, suggestionId: string, name?: string) => invoke<CoworkerSummary>("team.accept", { slug, suggestionId, name }),
     decline: (slug: string, suggestionId: string) => invoke<{ id: string; state: TeamSuggestionState; at: number }>("team.decline", { slug, suggestionId }),
-    referralResolved: (slug: string, referralId: string, outcome: "asked" | "continued") =>
-      invoke<{ id: string; state: TeamReferralState; at: number }>("team.referralResolved", { slug, referralId, outcome }),
+    referralResolved: (slug: string, referralId: string, ...resolution: [outcome: "asked" | "continued"] | [outcome: "offered", expectedAt: number]) => {
+      const [outcome, expectedAt] = resolution;
+      return invoke<{ id: string; state: TeamReferralState; at: number }>("team.referralResolved", { slug, referralId, outcome, expectedAt });
+    },
   },
   files: {
     list: (slug: string) => invoke<CoworkerMemoryFile[]>("coworkers.files.list", { slug }),

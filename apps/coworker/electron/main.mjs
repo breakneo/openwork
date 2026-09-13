@@ -2514,10 +2514,27 @@ const commands = {
     await refreshTeamRosters(coworkersDir, await listCoworkers(coworkersDir));
     return { id: declined.id, state: declined.state, at: declined.stateAt };
   },
-  "team.referralResolved": async ({ slug, referralId, outcome }) => {
-    const resolved = await setReferralState(coworkersDir, slug, referralId, outcome);
-    return { id: resolved.id, state: resolved.state, at: resolved.stateAt };
-  },
+  "team.referralResolved": (() => {
+    const pending = new Map();
+    return async ({ slug, referralId, outcome, expectedAt }) => {
+      if (typeof slug !== "string" || !slug || typeof referralId !== "string" || !referralId) throw new Error("Choose the coworker and referral to resolve.");
+      if (!["asked", "continued", "offered"].includes(outcome)) throw new Error("Unknown referral outcome.");
+      if (outcome === "offered" ? !Number.isSafeInteger(expectedAt) || expectedAt < 0 : expectedAt !== undefined) throw new Error("Restoring an offer requires its exact asked receipt.");
+      const key = JSON.stringify([slug, referralId]);
+      const operation = (pending.get(key) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+        const current = (await teamStates(coworkersDir, slug)).referrals.find((entry) => entry.id === referralId);
+        if (!current) throw new Error("That hand-over is not on record.");
+        if (outcome === "offered" && (current.state !== "asked" || current.at !== expectedAt)) throw new Error("REFERRAL_CONFLICT: This referral has a newer answer. Its current state was kept.");
+        if (!Number.isSafeInteger(current.at) || current.at < 0 || current.at === Number.MAX_SAFE_INTEGER) throw new Error("This referral's state receipt is unreadable. Its current state was kept.");
+        const now = Math.max(Date.now(), current.at + 1);
+        const resolved = await setReferralState(coworkersDir, slug, referralId, outcome, { now });
+        return { id: resolved.id, state: resolved.state, at: resolved.stateAt };
+      });
+      pending.set(key, operation);
+      try { return await operation; }
+      finally { if (pending.get(key) === operation) pending.delete(key); }
+    };
+  })(),
   "coworkers.ensureWorkspace": async ({ slug }) => {
     await ensurePlatformServer();
     const coworker = await getCoworker(coworkersDir, slug);

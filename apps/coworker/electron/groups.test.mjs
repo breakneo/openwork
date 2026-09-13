@@ -3,11 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { marked } from "marked";
 import { z } from "zod";
 import { createCollaboration, nativeMessageId, withAbort } from "./collaboration.mjs";
 import { nativeTurnAgent } from "./native-turns.mjs";
-import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS } from "./activity-inbox.mjs";
+import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS, EVENT_REMINDER_LEAD_MS } from "./activity-inbox.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
 import { normalizeSettings } from "./settings.mjs";
@@ -16,7 +17,7 @@ import { createEvents, assertEventToolContext, assertEventHumanOrigin, eventTool
 import { EVENT_PLUGIN } from "./event-plugin.mjs";
 import { createCoworkerToolsServer } from "./coworker-tools.mjs";
 import { coworkerIdentity, EVENT_CONTEXT_LIMIT, EVENT_DYNAMIC_LIMIT } from "./event-execution.mjs";
-import { eventInputSchema } from "../src/lib/events.ts";
+import { eventForTarget, eventInputSchema, groupEventTarget } from "../src/lib/events.ts";
 import { updateAllHands, prepareAllHands, claimAllHands, readAllHands } from "./all-hands.mjs";
 import { createWorker, getWorker, nextWorkerState, parseWorkerReport, prepareWorkerTurn, queueWorkerSteer, updateWorker } from "./workers.mjs";
 import { connectedModelCatalog, createCoworkerThreads } from "../src/lib/threads.ts";
@@ -319,6 +320,128 @@ async function publishFixture(home, source) {
   const event = await appendGroupEvent(home, source.owner.groupId, { id: `evt_${executionId}`, executionId, kind: source.state === "succeeded" ? "coworker" : "status", slug: source.owner.slug, threadId: source.owner.threadId, text: source.result || source.error });
   return { eventId: event.id, event };
 }
+
+test("Activity Event navigation keeps shared groups and accepted run snapshots distinct", () => {
+  const group = { id: "grp_shared", eventId: "event_morning" };
+  const morning = { ...eventInput(), id: group.eventId, groupId: group.id, title: "Morning review" };
+  const afternoon = { ...morning, id: "event_afternoon", title: "Updated afternoon review" };
+  const accepted = { ...afternoon, title: "Accepted afternoon review" };
+  const events = [morning, afternoon];
+  const runs = [{ id: "run_afternoon", eventId: afternoon.id, event: accepted }];
+  const source = { groupId: group.id, eventId: afternoon.id, runId: runs[0].id, at: 1234 };
+  const target = groupEventTarget(group, events, source);
+  assert.deepEqual(target, { eventId: afternoon.id, runId: runs[0].id, at: 1234 });
+  assert.equal(eventForTarget(events, runs, target), accepted);
+  assert.equal(eventForTarget(events, runs, { eventId: morning.id, runId: runs[0].id }), undefined);
+  assert.equal(eventForTarget(events, runs, { ...target, runId: "run_missing" }), undefined);
+  assert.equal(eventForTarget(events, runs, { eventId: afternoon.id }), afternoon);
+  assert.deepEqual(groupEventTarget(group, events, { ...source, groupId: "grp_other" }), { eventId: morning.id });
+  assert.equal(groupEventTarget({ id: group.id }, events), undefined);
+  assert.deepEqual(groupEventTarget({ id: group.id }, [afternoon]), { eventId: afternoon.id });
+});
+
+test("Activity referral preflight and confirmed-veto recovery preserve offers without replay", async () => {
+  const [source, main] = await Promise.all([
+    readFile(new URL("../src/ui/coworker-home.tsx", import.meta.url), "utf8"),
+    readFile(new URL("./main.mjs", import.meta.url), "utf8"),
+  ]);
+  const start = source.indexOf("    ask: async (card, recent) => {");
+  const end = source.indexOf("    continueWith:", start);
+  const nativeStart = main.indexOf('  "team.referralResolved":');
+  const nativeEnd = main.indexOf('  "coworkers.ensureWorkspace":', nativeStart);
+  assert.ok(start >= 0 && end > start && nativeStart >= 0 && nativeEnd > nativeStart);
+  let allowed = false, blockAfterAsked = false, failWrite = "", dispatchMode = "accepted", newerOutcome = "", newerWrite;
+  const states = new Map();
+  const calls = [], writes = [], dispatched = [], shown = [];
+  const card = { id: "ref_guarded", to: { slug: "editor" }, message: "Review this request", why: "Use the teammate's expertise" };
+  const reset = () => {
+    states.set(card.id, { id: card.id, state: "offered", at: 0 });
+    calls.length = writes.length = dispatched.length = shown.length = 0;
+    allowed = true; blockAfterAsked = false; failWrite = ""; dispatchMode = "accepted"; newerOutcome = ""; newerWrite = undefined;
+  };
+  const resolve = runInNewContext(`({${main.slice(nativeStart, nativeEnd)}})["team.referralResolved"]`, {
+    coworkersDir: "fixture",
+    Date: { now: () => 1000 },
+    teamStates: async (directory, slug) => {
+      assert.equal(directory, "fixture"); assert.equal(slug, "scout");
+      return { referrals: [...states.values()].map((entry) => ({ ...entry })) };
+    },
+    setReferralState: async (directory, slug, id, state, { now }) => {
+      assert.equal(directory, "fixture"); assert.equal(slug, "scout");
+      if (failWrite === state) throw new Error("Referral write unavailable");
+      states.set(id, { id, state, at: now });
+      writes.push(state);
+      if (state === "asked" && blockAfterAsked) allowed = false;
+      return { id, state, stateAt: now };
+    },
+  });
+  const ask = runInNewContext(`({${source.slice(start, end)}}).ask`, {
+    coworker: { slug: "scout", name: "Scout", role: "Research" },
+    canHandOff: () => { calls.push("preflight"); return allowed; },
+    coworkerBridge: { team: { referralResolved: (slug, referralId, outcome, expectedAt) => {
+      calls.push(outcome);
+      return resolve({ slug, referralId, outcome, expectedAt });
+    } } },
+    refreshTeamStates: async () => { calls.push("refresh"); shown.push(states.get(card.id).state); },
+    referralPrompt: ({ message }) => message,
+    onHandOff: (slug, prompt) => {
+      assert.equal(states.get(card.id).state, "asked");
+      calls.push("handoff");
+      if (newerOutcome) newerWrite = resolve({ slug: "scout", referralId: card.id, outcome: newerOutcome });
+      if (!allowed) return false;
+      dispatched.push({ slug, prompt });
+      if (dispatchMode === "throw") throw new Error("Handoff confirmation unavailable");
+      return dispatchMode === "unknown" ? undefined : true;
+    },
+  });
+  reset(); allowed = false;
+  await ask(card, []); await ask(card, []);
+  assert.deepEqual(calls, ["preflight", "preflight"]);
+  assert.equal(states.get(card.id).state, "offered");
+  assert.deepEqual(writes, []); assert.deepEqual(dispatched, []);
+  reset(); failWrite = "asked";
+  await assert.rejects(ask(card, []), /Referral write unavailable/);
+  assert.deepEqual(calls, ["preflight", "asked"]);
+  assert.equal(states.get(card.id).state, "offered");
+  assert.deepEqual(dispatched, []);
+  reset(); blockAfterAsked = true;
+  await ask(card, []);
+  assert.deepEqual(calls, ["preflight", "asked", "handoff", "offered", "refresh"]);
+  assert.deepEqual(writes, ["asked", "offered"]);
+  assert.deepEqual(shown, ["offered"]);
+  assert.equal(states.get(card.id).state, "offered");
+  await Promise.resolve(); assert.deepEqual(dispatched, []);
+  allowed = true; blockAfterAsked = false; calls.length = 0;
+  await Promise.resolve(); assert.deepEqual(dispatched, []);
+  await ask(card, []);
+  assert.deepEqual(calls, ["preflight", "asked", "handoff", "refresh"]);
+  assert.equal(states.get(card.id).state, "asked");
+  assert.deepEqual(dispatched, [{ slug: "editor", prompt: card.message }]);
+  for (const mode of ["throw", "unknown"]) {
+    reset(); dispatchMode = mode;
+    if (mode === "throw") await assert.rejects(ask(card, []), /Handoff confirmation unavailable/);
+    else await ask(card, []);
+    assert.deepEqual(writes, ["asked"]);
+    assert.deepEqual(shown, ["asked"]);
+    await Promise.resolve(); assert.equal(dispatched.length, 1);
+  }
+  reset(); blockAfterAsked = true; failWrite = "offered";
+  await assert.rejects(ask(card, []), /Referral write unavailable/);
+  assert.deepEqual(writes, ["asked"]);
+  assert.deepEqual(shown, ["asked"]);
+  assert.deepEqual(dispatched, []);
+  for (const outcome of ["continued", "asked"]) {
+    reset(); blockAfterAsked = true; newerOutcome = outcome;
+    await assert.rejects(ask(card, []), /REFERRAL_CONFLICT/);
+    await newerWrite;
+    assert.deepEqual(writes, ["asked", outcome]);
+    assert.equal(states.get(card.id).state, outcome);
+    assert.equal(states.get(card.id).at, 1001);
+    assert.deepEqual(shown, [outcome]);
+    assert.deepEqual(dispatched, []);
+  }
+  await assert.rejects(resolve({ slug: "scout", referralId: card.id, outcome: "offered" }), /exact asked receipt/);
+});
 
 test("Activity mentions require standalone @you in visible prose", () => {
   for (const value of ["@you", "A decision, @YOU?", "**@You**, choose one.", "(@you)", "Question:@you!", "Hello,@you", "- @you: which option?", "[ask @you](https://example.test)", "```js\n@you\n```\n\nOutside: @you."]) assert.equal(mentionsYou(value), true, value);
@@ -733,7 +856,7 @@ test("idle collaboration does not copy settled history and still accepts new wor
       await Promise.all([events.tick(), events.tick()]);
       await eventually(() => reads >= 10);
       assert.equal(historyCopies, 0, "idle collaboration and Event ticks must not clone the store or completed task payloads");
-      const startsAt = clock + 60_000;
+      const startsAt = clock + EVENT_REMINDER_LEAD_MS + 60_000;
       const input = { ...eventInput(["scout"]), startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" } };
       const future = await events.create(input);
       const paused = await events.create({ ...input, state: "paused" });
@@ -2205,6 +2328,230 @@ async function eventCall(source, name, args, callID = `${name}_${source.reply.id
   } finally { part.toolStatus = "completed"; }
 }
 
+test("Event reminders use saved once daily weekly slots without native work and survive read restart and pruning", async (t) => {
+  await withHome(async (home) => {
+    const startsAt = Date.UTC(2026, 8, 14, 9);
+    let clock = startsAt - EVENT_REMINDER_LEAD_MS - 1;
+    let service = await eventFixture(home, { startGroups: false, now: () => clock });
+    const inbox = () => createActivityInbox({ collaboration: service.collaboration, coworkers: async () => Object.values(service.members), groups: () => listGroups(home), now: () => clock });
+    try {
+      const definitions = [];
+      for (const schedule of [
+        { kind: "once", at: startsAt, timezone: "Etc/UTC" },
+        { kind: "daily", hour: 9, minute: 0, timezone: "Etc/UTC" },
+        { kind: "weekly", daysOfWeek: [1], hour: 9, minute: 0, timezone: "Etc/UTC" },
+      ]) definitions.push(await service.events.create({ ...eventInput(["scout"]), startsAt, schedule }));
+      await service.events.tick();
+      assert.deepEqual(await inbox().list(), []);
+      clock++;
+      await Promise.all([service.events.tick(), service.events.tick()]);
+      const reminders = await inbox().list();
+      assert.equal(reminders.length, 3);
+      assert.ok(reminders.every((item) => item.kind === "event-reminder" && item.readAt === null && item.target.scheduledFor === startsAt && item.at === clock));
+      assert.ok(reminders.every((item) => Object.keys(item).sort().join() === "at,id,kind,preview,readAt,target,title"));
+      assert.ok((await service.events.list()).every((event) => !Object.hasOwn(event, "activityReminder")));
+      for (const event of definitions) assert.equal((await service.events.get(event.id)).runs.length, 0);
+      const raw = await service.collaboration.listActivity();
+      assert.equal(raw[0].identities.scout.path, service.members.scout.path);
+      assert.equal(service.native.requests.length, 0);
+      const read = await inbox().markRead(reminders.map((item) => item.id));
+      assert.ok(read.every((item) => typeof item.readAt === "number"));
+      const clone = globalThis.structuredClone;
+      let storeCopies = 0;
+      const spy = t.mock.method(globalThis, "structuredClone", (value) => { if (value?.tasks) storeCopies++; return clone(value); });
+      try { await service.events.tick(); assert.equal(storeCopies, 0, "an already recorded future reminder leaves idle history untouched"); }
+      finally { spy.mock.restore(); }
+      const { native, members, services } = service;
+      await service.stop();
+      clock += 60_000;
+      service = await eventFixture(home, { native, members, services, startGroups: false, now: () => clock });
+      await service.events.tick();
+      assert.deepEqual(await inbox().list(), read);
+      const unread = await inbox().markRead([read[0].id], false);
+      assert.equal(unread.find((item) => item.id === read[0].id).readAt, null);
+      assert.deepEqual(await inbox().list(), unread, "observing Upcoming or Activity does not acknowledge a notification");
+      await service.collaboration.change((state) => {
+        for (let index = 0; index < MAX_ACTIVITY_ITEMS; index++) {
+          const id = `reminder_prune_${index}`;
+          const owner = { slug: "scout", kind: "private", threadId: "private", conversationId: "private" };
+          state.tasks[id] = { id, owner, state: "succeeded", executionId: id, activityEligible: true };
+          const entry = state.executions[id] = { ...fixtureIdentity, id, taskId: id, owner, state: "succeeded", workspaceId: "workspace_scout" };
+          recordActivity(state, entry, { text: "Visible result", at: clock + index });
+        }
+      });
+      const bounded = await service.collaboration.listActivity();
+      assert.equal(bounded.length, MAX_ACTIVITY_ITEMS);
+      assert.ok(bounded.every((item) => item.kind === "reply"));
+      await service.stop();
+      service = await eventFixture(home, { native, members, services, startGroups: false, now: () => clock });
+      await Promise.all([service.events.tick(), service.events.tick()]);
+      assert.deepEqual(await service.collaboration.listActivity(), bounded, "pruned reminders retain their native receipt across restart");
+      assert.equal(native.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event reminders update same-slot copy and invalidate reschedules state and roster without consuming manual runs", async () => {
+  await withHome(async (home) => {
+    let clock = Date.UTC(2026, 8, 14, 8, 55);
+    const service = await eventFixture(home, { startGroups: false, now: () => clock });
+    const inbox = createActivityInbox({ collaboration: service.collaboration, coworkers: async () => Object.values(service.members), groups: () => listGroups(home), now: () => clock });
+    const startsAt = clock + 5 * 60_000;
+    let event = await service.events.create({ ...eventInput(["scout"]), startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" } });
+    const update = async (patch) => { event = await service.events.update(event.id, { ...eventInputSchema.parse(event), ...patch }, event.revision); };
+    try {
+      await service.events.tick();
+      const [original] = await inbox.list();
+      const [read] = await inbox.markRead([original.id]);
+      clock += 1000;
+      await update({ title: "Renamed review" });
+      const [renamed] = await inbox.list();
+      assert.deepEqual({ ...renamed, title: read.title, preview: read.preview }, read);
+      assert.equal(renamed.title, "Renamed review");
+      assert.match(renamed.preview, /Renamed review/);
+      const later = startsAt + 60_000;
+      await update({ startsAt: later, schedule: { ...event.schedule, at: later } });
+      assert.deepEqual(await service.collaboration.listActivity(), [], "the old reminder disappears in the schedule transaction");
+      await service.events.tick();
+      const [rescheduled] = await inbox.list();
+      assert.notEqual(rescheduled.id, original.id);
+      assert.equal(rescheduled.readAt, null);
+      await inbox.markRead([original.id]);
+      assert.equal((await inbox.list())[0].readAt, null, "a delayed old acknowledgement cannot mark the replacement");
+      await update({ startsAt, schedule: { ...event.schedule, at: startsAt } });
+      await service.events.tick();
+      assert.notEqual((await inbox.list())[0].id, original.id, "returning to the old time uses a new generation");
+      await update({ state: "paused" });
+      assert.deepEqual(await service.collaboration.listActivity(), []);
+      await service.events.tick();
+      assert.deepEqual(await inbox.list(), []);
+      await update({ state: "active" });
+      await service.events.tick();
+      await update({ participantSlugs: ["scout", "editor"], maxReplies: 3 });
+      assert.deepEqual(await service.collaboration.listActivity(), []);
+      await service.events.tick();
+      const [roster] = await inbox.list();
+      assert.deepEqual(Object.keys((await service.collaboration.listActivity())[0].identities).sort(), ["editor", "scout"]);
+      const manual = await service.events.runNow(event.id, "manual-before-schedule");
+      const cancelled = await service.events.cancel(event.id, manual.id);
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(cancelled.stopping, false);
+      assert.equal(Object.hasOwn(cancelled.event, "activityReminder"), false);
+      await service.events.tick();
+      assert.deepEqual(await inbox.list(), [roster], "manual cancellation leaves the future scheduled reminder alone");
+      const beforeRead = await service.collaboration.listActivity();
+      clock = startsAt;
+      assert.deepEqual(await inbox.list(), [], "an expired reminder is hidden even before the next tick");
+      assert.deepEqual(await service.collaboration.listActivity(), beforeRead, "list remains side-effect free");
+      await service.events.tick();
+      assert.deepEqual(await service.collaboration.listActivity(), []);
+      const scheduled = (await service.events.get(event.id)).runs.find((run) => run.trigger !== "manual");
+      assert.equal(scheduled.scheduledFor, startsAt);
+      await service.events.cancel(event.id, scheduled.id);
+      assert.equal(service.native.requests.length, 0);
+      const future = clock + 60_000;
+      await update({ startsAt: future, schedule: { ...event.schedule, at: future } });
+      await service.events.tick();
+      await update({ state: "archived" });
+      assert.deepEqual(await service.collaboration.listActivity(), []);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event reminders keep identity pins private and reject recycled missing archived or mismatched participants", async () => {
+  await withHome(async (home) => {
+    const clock = Date.UTC(2026, 8, 14, 8, 55);
+    const service = await eventFixture(home, { startGroups: false, now: () => clock });
+    let memberships;
+    const inbox = createActivityInbox({ collaboration: service.collaboration, coworkers: async () => Object.values(service.members), groups: async () => memberships, now: () => clock });
+    try {
+      const startsAt = clock + 60_000;
+      await service.events.create({ ...eventInput(), startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" } });
+      memberships = await listGroups(home);
+      await service.events.tick();
+      const [item] = await inbox.list();
+      const original = service.members.editor;
+      for (const patch of [{ createdAt: "replacement" }, { workspaceId: "replacement" }, { path: path.join(home, "replacement") }]) {
+        service.members.editor = { ...original, ...patch };
+        assert.deepEqual(await inbox.list(), []);
+        assert.deepEqual(await inbox.markRead([item.id]), []);
+        assert.equal((await service.collaboration.listActivity())[0].readAt, null);
+      }
+      delete service.members.editor;
+      assert.deepEqual(await inbox.list(), []);
+      service.members.editor = original;
+      const groups = memberships;
+      for (const patch of [{ archivedAt: clock }, { participantSlugs: ["scout"] }, { eventId: undefined }]) {
+        memberships = groups.map((group) => ({ ...group, ...patch }));
+        assert.deepEqual(await inbox.list(), []);
+      }
+      memberships = [];
+      assert.deepEqual(await inbox.list(), []);
+      memberships = groups.map((group) => ({ ...group, eventId: "another-shared-rhythm" }));
+      assert.deepEqual(await inbox.list(), [item], "shared All Hands groups need not point to this specific definition");
+      await service.collaboration.change((state) => { state.activity[0].identities.editor.unresolved = true; });
+      assert.deepEqual(await inbox.list(), []);
+      assert.equal(service.native.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event reminders skip already claimed manual-only and expired plans and admit late future reminders", async () => {
+  await withHome(async (home) => {
+    let clock = Date.UTC(2026, 8, 14, 8, 55);
+    let service = await eventFixture(home, { startGroups: false, now: () => clock });
+    try {
+      const startsAt = clock + 60_000;
+      const input = { ...eventInput(["scout"]), startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" } };
+      const claimed = await service.events.create(input);
+      const run = await service.events.runNow(claimed.id, "accepted-slot");
+      await service.events.cancel(claimed.id, run.id);
+      const manual = await service.events.create(input);
+      const past = await service.events.create({ ...input, startsAt: clock - 1, schedule: { ...input.schedule, at: clock - 1 } });
+      const late = await service.events.create(input);
+      await service.collaboration.change((state) => {
+        Object.assign(state.workplaceEvents.runs[run.id], { trigger: "recovery", scheduledFor: startsAt });
+        state.workplaceEvents.definitions[manual.id].manualOnly = true;
+      });
+      const { native, members, services } = service;
+      await service.stop();
+      clock += 30_000;
+      service = await eventFixture(home, { native, members, services, startGroups: false, now: () => clock });
+      await service.events.tick();
+      const items = await service.collaboration.listActivity();
+      assert.deepEqual(items.map((item) => item.target.eventId), [late.id]);
+      assert.equal((await service.events.get(past.id)).runs.length, 1, "the existing due path still claims past work, without a retrospective reminder");
+      assert.equal(service.native.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event reminders cannot block due source work when the optional projection write fails", async (t) => {
+  await withHome(async (home) => {
+    const clock = Date.UTC(2026, 8, 14, 8, 55);
+    const service = await eventFixture(home, { startGroups: false, now: () => clock });
+    try {
+      const create = (startsAt) => service.events.create({ ...eventInput(["scout"]), startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" } });
+      const upcoming = await create(clock + 60_000);
+      const due = await create(clock - 1);
+      const change = service.collaboration.change;
+      let failed = false;
+      const spy = t.mock.method(service.collaboration, "change", (fn, needed) => {
+        if (!failed && needed) { failed = true; return Promise.reject(new Error("Optional reminder write unavailable")); }
+        return change(fn, needed);
+      });
+      try { await service.events.tick(); }
+      finally { spy.mock.restore(); }
+      assert.equal(failed, true);
+      assert.equal((await service.events.get(due.id)).runs.length, 1);
+      assert.deepEqual(await service.collaboration.listActivity(), []);
+      await service.events.tick();
+      assert.equal((await service.collaboration.listActivity())[0].target.eventId, upcoming.id);
+      assert.equal(service.native.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+});
+
 test("event occurrences claim once, persist exact participants and accept only the lead's native conclusion", async () => {
   await withHome(async (home) => {
     let rejected = 0;
@@ -2237,6 +2584,7 @@ test("event occurrences claim once, persist exact participants and accept only t
       assert.equal(items.length, 3, "scheduled contributions and the conclusion enter Activity through publication");
       assert.ok(records.every((entry) => entry.coworkerCreatedAt === service.members[entry.owner.slug].createdAt));
       assert.ok(items.every((item) => item.target.kind === "group" && item.target.groupId === event.groupId));
+      assert.ok(items.every((item) => item.target.workplaceEventId === event.id && item.target.runId === run.id && item.target.scheduledFor === run.scheduledFor));
       await inbox.markRead(items.map((item) => item.id));
       const read = await inbox.list();
       const timeline = await readGroupTimeline(home, event.groupId);
@@ -2342,6 +2690,7 @@ test("event dependencies release the group queue before final continuation and l
       const items = await service.collaboration.listActivity();
       assert.equal(items.length, 5, "scheduled replies, the human group reply and Worker handback are published once");
       assert.ok(items.every((item) => item.coworkerCreatedAt === service.members[item.slug].createdAt));
+      assert.equal(items.find((item) => item.id === `activity_${ordinary.id}`).target.workplaceEventId, undefined, "ordinary Event-group replies do not inherit a scheduled run");
     } finally { await service.stop(); }
   });
 });
@@ -2555,6 +2904,8 @@ test("event Stop retains exact native failures across restart and cannot release
       await assert.rejects(service.events.cancel(event.id, first.id), /fixture native abort transport refused/);
       const waiting = (await service.events.get(event.id)).runs.find((run) => run.id === first.id);
       assert.equal(waiting.status, "waiting"); assert.equal(waiting.finishedAt, null);
+      assert.equal(waiting.stopping, true);
+      assert.equal(Object.hasOwn(waiting, "cleanupPending"), false);
       assert.match(waiting.error, /Stop not confirmed.*fixture native abort transport refused/);
       assert.ok(await service.collaboration.read((state) => state.workplaceEvents.runs[first.id].cleanupPending));
       assert.ok(await service.collaboration.read((state) => Object.values(state.executions).some((entry) => entry.cleanupPending && entry.cleanupError.includes("transport refused"))));
@@ -2569,7 +2920,10 @@ test("event Stop retains exact native failures across restart and cannot release
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(native.requests.length, 1, "restart must not revive the cancelled speaker or admit the queued successor");
       mode = "ack";
+      const reminderStart = Date.now() + 60_000;
+      const upcoming = await service.events.create({ ...eventInput(["scout"]), startsAt: reminderStart, schedule: { kind: "once", at: reminderStart, timezone: "Etc/UTC" } });
       await assert.rejects(service.events.tick(), /Native stop .* was not confirmed/);
+      assert.ok((await service.collaboration.listActivity()).some((item) => item.kind === "event-reminder" && item.target.eventId === upcoming.id), "pending native cleanup does not block unrelated reminders");
       assert.ok(observations.some((options) => options.observationOnly === true && options.model?.modelId === pin.modelId), "recovered native cleanup observes its saved model without resolving today's default");
       assert.equal(native.requests.length, 1, "an abort acknowledgement does not release admission");
       let settled = false;
@@ -2583,6 +2937,7 @@ test("event Stop retains exact native failures across restart and cannot release
       native.held.clear();
       const stopped = await stopping;
       assert.equal(stopped.status, "cancelled"); assert.equal(typeof stopped.finishedAt, "number");
+      assert.equal(stopped.stopping, false);
       assert.equal(stopped.outcome, null);
       assert.deepEqual(stopped.artifacts.map(({ documentId, revision, relation }) => ({ documentId, revision, relation })), [{ documentId: recoveredDocument.id, revision: 1, relation: "created" }]);
       assert.deepEqual(await service.events.documentRead(event.id, first.id, stopped.artifacts[0]), recoveredDocument);

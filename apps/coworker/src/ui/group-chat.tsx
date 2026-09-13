@@ -5,7 +5,7 @@ import { assignmentPrompt, assignmentTitle, timeLabelBetween, type DiscussionMes
 import { combineSummaryLines, describeCoworkerSummary, type CoworkerSummaryLine } from "@/lib/coworker-summary";
 import { classifyThreads, discussionIds, loadDiscussionRegistry } from "@/lib/discussions";
 import { humanizeDocumentId } from "@/lib/documents";
-import { DocumentCard, lastDocumentsOpened } from "@/ui/documents";
+import { DocumentCard, lastDocumentsOpened, useDocumentNavigationGuard, type DocumentNavigationGuard } from "@/ui/documents";
 import { GroupDocuments, type GroupDocumentsApi } from "@/ui/group-documents";
 import {
   publishGroupRun,
@@ -192,7 +192,11 @@ function GroupChatView({
   documentRequest,
   documentsApi,
   activityRequest,
+  onExitActivity,
+  navigationGuard,
 }: {
+  navigationGuard?: DocumentNavigationGuard;
+  onExitActivity?: () => void;
   activityRequest?: { id: number; eventId: string; onOpened?: () => Promise<void> } | null;
   documentsApi?: GroupDocumentsApi;
   active?: boolean;
@@ -215,9 +219,22 @@ function GroupChatView({
   onOpenAssignment?: (slug: string, threadId: string) => void;
 }) {
   const eventId = event?.id ?? group.eventId;
-  const [sharedDocument, setSharedDocument] = useState<{ groupId: string; id: string } | null>(null);
+  const [sharedDocument, setSharedDocument] = useState<{ groupId: string; id: string; requestId: number } | null>(null);
+  const [sharedDocumentSuspended, setSharedDocumentSuspended] = useState(false);
+  const [documentNotice, setDocumentNotice] = useState("");
+  const documentNavigation: DocumentNavigationGuard = useRef(null);
+  const documentSequence = useRef(0);
+  useDocumentNavigationGuard(navigationGuard, () => documentNavigation.current?.() ?? null);
+  const sharedDocumentVisible = Boolean(sharedDocument) && !sharedDocumentSuspended;
+  function openSharedDocument(id: string) {
+    setSharedDocumentSuspended(false);
+    const message = documentNavigation.current?.() ?? "";
+    setDocumentNotice(message);
+    if (message) return;
+    setSharedDocument({ groupId: group.id, id, requestId: ++documentSequence.current });
+  }
   useEffect(() => {
-    if (documentRequest) setSharedDocument({ groupId: group.id, id: documentRequest.documentId });
+    if (documentRequest) openSharedDocument(documentRequest.documentId);
   }, [documentRequest, group.id]);
   const [observed, setObserved] = useState(() => groupObservations.get(group.id) ?? { groupId: "", timeline: [], executions: [] });
   const [activityReadStartedAt, setActivityReadStartedAt] = useState(0);
@@ -264,10 +281,20 @@ function GroupChatView({
   eventsRef.current = events;
   const { scrollRef, contentRef, away, jumpToLatest, reveal } = useConversationScroll(`group:${group.id}`, active && !pendingAssignment, observed.groupId === group.id);
   const revealedActivity = useRef(0);
+  const preparedActivity = useRef(0);
   const [activityNotice, setActivityNotice] = useState("");
   const [highlightedEvent, setHighlightedEvent] = useState("");
   useEffect(() => {
-    if (!active || sharedDocument || pendingAssignment || !activityRequest || revealedActivity.current === activityRequest.id || observed.groupId !== group.id) return;
+    if (!active || !activityRequest || preparedActivity.current === activityRequest.id) return;
+    const message = documentNavigation.current?.();
+    if (message) { setDocumentNotice(message); return; }
+    preparedActivity.current = activityRequest.id;
+    setSharedDocumentSuspended(true);
+    setHighlightedEvent("");
+    setActivityNotice("");
+  }, [active, activityRequest]);
+  useEffect(() => {
+    if (!active || sharedDocumentVisible || pendingAssignment || !activityRequest || revealedActivity.current === activityRequest.id || observed.groupId !== group.id) return;
     const event = events.find((entry) => entry.id === activityRequest.eventId);
     // A cached timeline can predate the notification. Only a read started after
     // this navigation can establish that its target is outside recent history.
@@ -279,7 +306,7 @@ function GroupChatView({
     if (event) void activityRequest.onOpened?.().catch((cause) => {
       if (mounted.current && revealedActivity.current === activityRequest.id) setActivityNotice(cause instanceof Error ? cause.message : "The reply opened, but read status could not be saved.");
     });
-  }, [active, activityRequest, activityReadStartedAt, events, group.id, observed.groupId, pendingAssignment, reveal, sharedDocument]);
+  }, [active, activityRequest, activityReadStartedAt, events, group.id, observed.groupId, pendingAssignment, reveal, sharedDocumentVisible]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const changedRef = useRef(onGroupChanged);
   changedRef.current = onGroupChanged;
@@ -600,7 +627,7 @@ function GroupChatView({
   const voiceTurn = !live && !activityError && latestTurn && (!voiceBaseline || latestTurn.clientMessageId !== voiceBaseline.clientMessageId || latestTurn.updatedAt > voiceBaseline.updatedAt) ? latestTurn : null;
   const spokenReply = useMemo(() => groupVoiceReply(voiceTurn, events, nameFor, voiceBaseline?.eventIds), [voiceTurn, events, nameFor, voiceBaseline?.eventIds]);
   const voice = useVoice({
-    active: active && !assignmentMode && !sharedDocument && !group.archivedAt,
+    active: active && !assignmentMode && !sharedDocumentVisible && !group.archivedAt,
     scope: `group:${group.id}`,
     onTranscript: (text) => { setMessage((draft) => appendVoiceDraft(draft, text)); setMention(null); },
     reply: spokenReply,
@@ -646,8 +673,9 @@ function GroupChatView({
           <p className="whitespace-normal text-xs text-mist [overflow-wrap:anywhere]" data-testid="conversation-header-title">{members.map((member) => member.name).join(", ")}</p>
         </div>
         <div className="window-no-drag flex shrink-0 items-center gap-1" data-testid="conversation-header-actions">
+          {onExitActivity ? <Button variant="ghost" onClick={onExitActivity}>Go to chat</Button> : null}
           {eventId && onOpenEvent ? <Button variant="ghost" onClick={() => onOpenEvent(eventId)} data-testid="event-conversation-backlink">View event</Button> : null}
-          {documentsApi ? <Button variant="ghost" onClick={() => setSharedDocument({ groupId: group.id, id: "" })} data-testid="group-shared-documents">Shared documents</Button> : null}
+          {documentsApi ? <Button variant="ghost" onClick={() => sharedDocumentSuspended && sharedDocument ? setSharedDocumentSuspended(false) : openSharedDocument("")} data-testid="group-shared-documents">Shared documents</Button> : null}
           {live ? <Button variant="ghost" disabled={busyActions.includes("stop")} onClick={stopGroup}>{busyActions.includes("stop") ? "Stopping…" : actionAttempts.current.get("stop")?.state === "retryable" ? "Retry stop" : "Stop all"}</Button> : null}
           {!event && !group.eventId ? <ActionMenu
             label="Group chat options"
@@ -664,6 +692,7 @@ function GroupChatView({
         </span>
       </header>
       {event || group.eventId ? <p className="border-b border-line/60 px-5 py-2 text-[11px] text-mist">Event conversation. Change participants and future sessions in the event editor. {group.archivedAt ? "This conversation is archived; its history is kept." : ""}</p> : null}
+      {documentNotice ? <p role="alert" className="border-b border-line px-5 py-2 text-xs text-mist">{documentNotice}<button type="button" className="ml-2 underline" onClick={() => setDocumentNotice("")}>Dismiss</button></p> : null}
       {activityNotice ? <p role="status" className="border-b border-line px-5 py-2 text-xs text-mist">{activityNotice}<button type="button" className="ml-2 underline" onClick={() => setActivityNotice("")}>Dismiss</button></p> : null}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} style={{ overflowAnchor: "none" }} className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -702,7 +731,7 @@ function GroupChatView({
                   <div key={key} className="min-w-0 max-w-[320px] space-y-1" data-testid="group-status" data-status={event.status} data-speaker={event.slug} data-event-id={event.id}>
                     <DocumentCard
                       card={{ id: documentId, title: event.title?.trim() || humanizeDocumentId(documentId), summary: event.documentSummary ?? event.text, highlights: [], action: "updated", section: "", revision: event.revision ?? null }}
-                      onOpen={() => setSharedDocument({ groupId: group.id, id: documentId })}
+                      onOpen={() => openSharedDocument(documentId)}
                     />
                     <p className="text-[10px] text-mist" title={new Date(event.at).toLocaleString()}>{timeLabel(event.at)}</p>
                   </div>
@@ -713,7 +742,7 @@ function GroupChatView({
               const failure = speaker ? describeSpeakerFailure(speaker.error, nameFor(speaker.slug)) : null;
               return (
                 <p key={key} className="flex flex-wrap items-center justify-center gap-x-3 px-12 text-center text-[11px] text-mist" data-testid="group-status" data-status={event.status} data-speaker={event.slug} data-error={speaker?.error}>
-                  {documentsApi && "documentId" in event && typeof event.documentId === "string" ? <button type="button" className="text-spark hover:underline" onClick={() => setSharedDocument({ groupId: group.id, id: String(event.documentId) })}>{event.text}</button> : <span title={speaker?.error && speaker.error !== event.text ? speaker.error : undefined}>{event.text}</span>}
+                  {documentsApi && "documentId" in event && typeof event.documentId === "string" ? <button type="button" className="text-spark hover:underline" onClick={() => openSharedDocument(String(event.documentId))}>{event.text}</button> : <span title={speaker?.error && speaker.error !== event.text ? speaker.error : undefined}>{event.text}</span>}
                   {speaker && recoverable ? eventPhaseRecovery ? viewEvent : (
                     <span className="flex items-center gap-x-3">
                       <button type="button" disabled={recoveryBusy} className="font-medium text-snow/80 underline-offset-2 hover:underline disabled:opacity-50" data-testid="group-speaker-retry" data-speaker={speaker.slug} onClick={() => resume(recoverable, speaker.slug)}>Continue</button>
@@ -959,7 +988,7 @@ function GroupChatView({
         </div>
       </div>
       </div>
-      {documentsApi && sharedDocument?.groupId === group.id ? <GroupDocuments api={documentsApi} groupId={group.id} openId={sharedDocument.id} onClose={() => setSharedDocument(null)} /> : null}
+      {documentsApi && sharedDocument?.groupId === group.id ? <div className={sharedDocumentSuspended ? "hidden" : "contents"}><GroupDocuments api={documentsApi} groupId={group.id} openId={sharedDocument.id} openRequestId={sharedDocument.requestId} navigationGuard={documentNavigation} onClose={() => { setSharedDocument(null); setDocumentNotice(""); }} /></div> : null}
     </div>
   );
 }

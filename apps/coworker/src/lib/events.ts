@@ -77,6 +77,8 @@ export type EventRun = {
   finishedAt: number | null;
   status: "queued" | "running" | "waiting" | "succeeded" | "partial" | "failed" | "cancelled";
   phase: "contributions" | "waiting" | "conclusion" | "finished";
+  /** Native cleanup is still pending; terminal status is not yet confirmed. */
+  stopping?: boolean;
   outcome: EventOutcome | null;
   outcomeStatus?: "provisional" | "delivered" | null;
   continuity?: EventContinuity | null;
@@ -88,4 +90,19 @@ export type EventDetail = { event: WorkplaceEvent; runs: EventRun[]; continuity?
 
 export function eventRunIsLive(run: EventRun): boolean {
   return run.status === "queued" || run.status === "running" || run.status === "waiting";
+}
+
+export type EventTarget = { eventId: string; runId?: string; at?: number };
+
+export function eventForTarget(events: readonly WorkplaceEvent[], runs: readonly EventRun[], target: EventTarget): WorkplaceEvent | undefined {
+  return target.runId
+    ? runs.find((run) => run.id === target.runId && run.eventId === target.eventId && run.event.id === target.eventId)?.event
+    : events.find((event) => event.id === target.eventId);
+}
+
+export function groupEventTarget(group: { id: string; eventId?: string }, events: readonly WorkplaceEvent[], source?: EventTarget & { groupId: string }): EventTarget | undefined {
+  if (source?.groupId === group.id) return { eventId: source.eventId, runId: source.runId, at: source.at };
+  if (group.eventId) return { eventId: group.eventId };
+  const matches = events.filter((event) => event.groupId === group.id);
+  return matches.length === 1 && matches[0] ? { eventId: matches[0].id } : undefined;
 }
