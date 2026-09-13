@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { devOpenworkProxy } from "./dev-openwork-proxy";
 
 const portValue = Number.parseInt(process.env.PORT ?? "", 10);
 const devPort = Number.isFinite(portValue) && portValue > 0 ? portValue : 5173;
@@ -107,59 +108,65 @@ const isElectronPackagedBuild = process.env.OPENWORK_ELECTRON_BUILD === "1";
 // that runtime implies a provisioned cloud instance, which local dev lacks.
 const headlessDenTarget = (process.env.OPENWORK_DEV_HEADLESS_DEN_TARGET ?? "").trim();
 
-export default defineConfig({
-  base: isElectronPackagedBuild ? "./" : "/",
-  define: {
-    ...Object.fromEntries(
-      Object.entries(migrationReleaseEnv).map(([k, v]) => [
-        `import.meta.env.${k}`,
-        JSON.stringify(v),
-      ]),
-    ),
-    "import.meta.env.VITE_OPENWORK_APP_VERSION": JSON.stringify(buildAppVersion),
-    "import.meta.env.VITE_OPENWORK_BUILD_SHA": JSON.stringify(shortBuildSha),
-  },
-  plugins: [
-    {
-      name: "openwork-dev-server-id",
-      configureServer(server) {
-        server.middlewares.use("/__openwork_dev_server_id", (_req, res) => {
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ appRoot }));
-        });
+export default defineConfig(({ command, isPreview }) => {
+  const openworkProxy = devOpenworkProxy(command === "serve" && !isPreview ? process.env : {});
+  const headlessBrowserOrigin = Object.keys(openworkProxy).length > 0
+    ? new URL(process.env.OPENWORK_DEV_BROWSER_ORIGIN ?? "")
+    : null;
+  return {
+    base: isElectronPackagedBuild ? "./" : "/",
+    define: {
+      ...Object.fromEntries(
+        Object.entries(migrationReleaseEnv).map(([k, v]) => [
+          `import.meta.env.${k}`,
+          JSON.stringify(v),
+        ]),
+      ),
+      "import.meta.env.VITE_OPENWORK_APP_VERSION": JSON.stringify(buildAppVersion),
+      "import.meta.env.VITE_OPENWORK_BUILD_SHA": JSON.stringify(shortBuildSha),
+    },
+    plugins: [
+      {
+        name: "openwork-dev-server-id",
+        configureServer(server) {
+          server.middlewares.use("/__openwork_dev_server_id", (_req, res) => {
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ appRoot }));
+          });
+        },
+      },
+      tailwindcss(),
+      react({
+        babel: {
+          plugins: [["babel-plugin-react-compiler", { compilationMode: "annotation" }]],
+        },
+      }),
+    ],
+    server: {
+      port: devPort,
+      strictPort: true,
+      ...(allowedHosts.size > 0 || headlessBrowserOrigin
+        ? { allowedHosts: [...allowedHosts, ...(headlessBrowserOrigin ? [headlessBrowserOrigin.hostname] : [])] }
+        : {}),
+      ...(headlessBrowserOrigin ? { hmr: { host: headlessBrowserOrigin.hostname, protocol: "wss", clientPort: 443 } } : {}),
+      proxy: {
+        ...(headlessDenTarget ? { "/api/den": { target: headlessDenTarget, changeOrigin: true } } : {}),
+        ...openworkProxy,
       },
     },
-    tailwindcss(),
-    react({
-      babel: {
-        plugins: [["babel-plugin-react-compiler", { compilationMode: "annotation" }]],
-      },
-    }),
-  ],
-  server: {
-    port: devPort,
-    strictPort: true,
-    ...(allowedHosts.size > 0 ? { allowedHosts: Array.from(allowedHosts) } : {}),
-    ...(headlessDenTarget
-      ? {
-          proxy: {
-            "/api/den": { target: headlessDenTarget, changeOrigin: true },
-          },
-        }
-      : {}),
-  },
-  build: {
-    target: "esnext",
-    rollupOptions: {
-      input: {
-        app: resolve(appRoot, "index.html"),
-        overlay: resolve(appRoot, "overlay.html"),
+    build: {
+      target: "esnext",
+      rollupOptions: {
+        input: {
+          app: resolve(appRoot, "index.html"),
+          overlay: resolve(appRoot, "overlay.html"),
+        },
       },
     },
-  },
-  resolve: {
-    alias: {
-      "@": resolve(appRoot, "src"),
+    resolve: {
+      alias: {
+        "@": resolve(appRoot, "src"),
+      },
     },
-  },
+  };
 });
