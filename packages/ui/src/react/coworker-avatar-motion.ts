@@ -4,10 +4,25 @@ import { useEffect, useRef } from "react";
 
 export type AvatarMotion = "quiet" | "navigation" | "attentive" | "playful" | "presentation";
 export type AvatarReaction = "engage" | "wake";
+/** Body cues share one attribute: intentional reactions plus the rare idle gestures the avatar picks itself. */
+type BodyCue = AvatarReaction | "shake" | "perk";
+type IdleGesture = "glance" | "blink" | "double-blink" | "tilt" | BodyCue;
 
 const ENGAGE_COOLDOWN = 2_000;
 const WAKE_COOLDOWN = 60_000;
 const CUE_RETENTION = 1_500;
+const CUE_DURATION: Record<BodyCue, number> = { engage: 640, wake: 1_000, shake: 720, perk: 820 };
+/* Weighted like a real idle: mostly glances and blinks, an occasional curious tilt, and a rare shiver or perk-up. */
+const IDLE_GESTURES: readonly IdleGesture[] = [
+  "glance", "glance", "glance", "glance", "glance", "glance", "glance",
+  "blink", "blink", "blink",
+  "double-blink", "double-blink",
+  "tilt", "tilt",
+  "shake", "perk",
+];
+const RARE_GESTURE_REST = 4_000;
+/* The face drifts on a longer, non-integer multiple of the float so the two layers never realign for long. */
+const DRIFT_RATIO = 1.37;
 const identities = new Map<string, {
   engageAt?: number;
   wakeAt?: number;
@@ -138,6 +153,7 @@ export function useAvatarMotion({
     const timers = new Set<number>();
     let idleTimer: number | undefined;
     let gesture = 0;
+    let lastGesture: IdleGesture | undefined;
     let inView = typeof IntersectionObserver === "undefined";
     let focused = document.hasFocus();
     let paused = true;
@@ -149,7 +165,9 @@ export function useAvatarMotion({
 
     avatar.dataset.avatarMotion = "true";
     avatar.dataset.motion = motion;
-    avatar.style.setProperty("--avatar-float-duration", `${7.6 + (seed % 2400) / 1000}s`);
+    const floatDuration = 7.6 + (seed % 2400) / 1000;
+    avatar.style.setProperty("--avatar-float-duration", `${floatDuration}s`);
+    avatar.style.setProperty("--avatar-drift-duration", `${(floatDuration * DRIFT_RATIO).toFixed(3)}s`);
     avatar.style.setProperty("--avatar-float-delay", `${-(seed % 7000) / 1000}s`);
 
     function later(work: () => void, delay: number) {
@@ -173,49 +191,83 @@ export function useAvatarMotion({
       avatar.style.setProperty("--avatar-feature-look-x", "0px");
       avatar.style.setProperty("--avatar-feature-look-y", "0px");
       avatar.style.setProperty("--avatar-turn", "0deg");
+      avatar.style.setProperty("--avatar-lean", "0deg");
       avatar.dataset.gaze = "neutral";
       avatar.dataset.blinking = "false";
     }
 
-    function look(x: number, y: number, source: "pointer" | "idle") {
+    /** Eyes lead, features follow a little, and the whole body leans a touch toward the same side. */
+    function look(x: number, y: number, source: "pointer" | "idle", lean = x * 1.5) {
       const strength = Math.max(0, Math.min(1, intensity));
       avatar.style.setProperty("--avatar-look-x", `${(x * 2.4 * strength).toFixed(3)}px`);
       avatar.style.setProperty("--avatar-look-y", `${(y * 2.1 * strength).toFixed(3)}px`);
       avatar.style.setProperty("--avatar-feature-look-x", `${(x * 0.35 * strength).toFixed(3)}px`);
       avatar.style.setProperty("--avatar-feature-look-y", `${(y * 0.2 * strength).toFixed(3)}px`);
       avatar.style.setProperty("--avatar-turn", `${(x * 0.65 * strength).toFixed(3)}deg`);
+      avatar.style.setProperty("--avatar-lean", `${(lean * strength).toFixed(3)}deg`);
       avatar.dataset.gaze = source;
+    }
+
+    function blink(at: number) {
+      later(() => { avatar.dataset.blinking = "true"; }, at);
+      later(() => { avatar.dataset.blinking = "false"; }, at + 240);
     }
 
     function scheduleIdle() {
       if (paused || motion === "quiet" || reacting || interacting || idleTimer !== undefined) return;
+      const rest = lastGesture === "shake" || lastGesture === "perk" ? RARE_GESTURE_REST : 0;
       idleTimer = later(() => {
         idleTimer = undefined;
         if (paused || interacting || reacting) return;
         const phase = seedFor(`${identity}:${gesture++}`);
-        if (phase % 3 !== 0) look(phase % 2 ? 0.72 : -0.72, 0.18, "idle");
-        later(() => { avatar.dataset.blinking = "true"; }, 260);
-        later(() => { avatar.dataset.blinking = "false"; }, 460);
-        later(() => {
+        let kind = IDLE_GESTURES[phase % IDLE_GESTURES.length] ?? "glance";
+        // A shiver or perk-up never plays twice in a row; the seeded sequence stays deterministic per identity.
+        if ((kind === "shake" || kind === "perk") && kind === lastGesture) kind = "glance";
+        lastGesture = kind;
+        const side = (phase >> 4) % 2 ? 1 : -1;
+        const settle = (after: number) => later(() => {
           neutral();
           scheduleIdle();
-        }, 1050);
-      }, 6_400 + ((seed + gesture * 2357) % 6_800));
+        }, after);
+        switch (kind) {
+          case "glance":
+            look(side * 0.72, 0.18, "idle");
+            blink(260);
+            settle(1_100);
+            break;
+          case "blink":
+            blink(0);
+            settle(360);
+            break;
+          case "double-blink":
+            blink(0);
+            blink(360);
+            settle(760);
+            break;
+          case "tilt":
+            look(side * 0.22, -0.3, "idle", side * 2.4);
+            blink(520);
+            settle(1_500);
+            break;
+          default:
+            react(kind);
+        }
+      }, 5_600 + rest + ((seed + gesture * 2357) % 6_400));
     }
 
-    function react(reaction: AvatarReaction, delay = 0) {
+    function react(cue: BodyCue, delay = 0) {
       if (paused) return;
       clearTimers();
       neutral();
       reacting = true;
       avatar.dataset.reaction = "none";
       const play = () => {
-        avatar.dataset.reaction = reaction;
+        avatar.dataset.reaction = cue;
         later(() => {
           reacting = false;
           avatar.dataset.reaction = "none";
           scheduleIdle();
-        }, reaction === "wake" ? 1000 : 640);
+        }, CUE_DURATION[cue]);
       };
       if (delay) later(play, delay);
       else play();

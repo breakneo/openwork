@@ -32,6 +32,13 @@ case "permissions":
     // Opening settings is not evidence that the person granted permission.
     printJSON(["opened": opened])
     if !opened { exit(1) }
+case "permissions-coworker":
+    guard CommandLine.arguments.count == 3,
+          let permission = CoworkerPermission(rawValue: CommandLine.arguments[2]) else { exit(1) }
+    NSApplication.shared.setActivationPolicy(.accessory)
+    let coach = PermissionCoach(permission: permission)
+    NSApplication.shared.delegate = coach
+    withExtendedLifetime(coach) { NSApplication.shared.run() }
 case "--list-apps":
     let apps = NSWorkspace.shared.runningApplications
         .filter { $0.activationPolicy == .regular && AppIdentity.isAllowed($0) }
@@ -94,7 +101,7 @@ case "setup":
     reopen.resume()
     withExtendedLifetime((delegate, reopen)) { NSApplication.shared.run() }
 default:
-    fputs("Usage: ComputerUse [mcp|mcp-hosted|mcp-coworker|mcp-coworker-hosted|--check|--list-apps|setup|permissions accessibility|permissions screenRecording]\n", stderr)
+    fputs("Usage: ComputerUse [mcp|mcp-hosted|mcp-coworker|mcp-coworker-hosted|--check|--list-apps|setup|permissions accessibility|permissions screenRecording|permissions-coworker accessibility|permissions-coworker screenRecording]\n", stderr)
     exit(1)
 }
 }

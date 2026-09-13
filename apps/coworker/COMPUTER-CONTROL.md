@@ -59,15 +59,24 @@ not verified results or the person's live cursor. Minimizing the view, hiding
 Coworker or switching discussions stops preview capture, not work or access.
 Native menu-bar Take over, Continue and Stop remain available.
 
-The guide's settings buttons run `ComputerUse permissions accessibility` or
-`ComputerUse permissions screenRecording` as a direct child, keeping the same
-responsible-app context as the probe and MCP session. Only this explicit action
-requests the corresponding macOS permission and opens its System Settings pane.
-It starts no control session. System Settings opening is not proof of permission;
-Coworker waits for a new probe. The native generic `setup` command remains for
-other clients. Native permissions, window-scope checks and human-only continuation
-remain required. Enabling Computer does not authorize purchases, sending messages,
-deleting files or other sensitive actions.
+The guide's settings buttons start one `ComputerUse permissions-coworker
+accessibility|screenRecording` companion as a direct child, keeping the same
+responsible-app context as the probe and MCP session. The companion is a small
+floating native coach: it requests the chosen macOS permission, opens its System
+Settings pane, shows which step is left and which app name macOS may list, and
+offers **Check again**, help and **Back to Coworker** once both permissions are
+granted. The adapter drives it over line-delimited JSON on stdin/stdout: it
+forwards each probe result as status, re-probes on the coach's refresh request
+and once per second while the coach is visible, and closes the coach on dismissal,
+on **Back to Coworker** (which brings the Coworker window forward), when a control
+session connects, or after five minutes. Its `setup()` returns a `setupId`; a
+later request for the other permission re-targets the same coach instead of
+opening a second one. It starts no control session. System Settings opening is
+not proof of permission; Coworker waits for a new probe. The native generic
+`setup` and `permissions` commands remain for other clients. Native permissions,
+window-scope checks and human-only continuation remain required. Enabling
+Computer does not authorize purchases, sending messages, deleting files or other
+sensitive actions.
 
 The guide names the shared **OpenWork Computer Use** helper, the possible
 responsible **Open Coworker** entry, version-dependent macOS pane naming and
@@ -119,6 +128,36 @@ unforgeable boundary against arbitrary code running as the same OS user, and
 approval to use an app does not authorize every consequential action inside it.
 Dedicated integrations/browser controls remain preferable when sufficient.
 
+## Working at coworker speed
+
+A coworker at the keyboard does not stop to look after every keystroke. The
+loop is tuned so that one model round trip does one meaningful unit of work,
+following the patterns current computer-use references converge on (batched
+actions that stop at the first failure with one screenshot at the end, modifier
+shortcuts, settle-based waits, compact interactive element lists, identity-based
+rather than pixel-based freshness):
+
+- `coworker_computer_act` accepts `action` or `actions` (up to 8). The native
+  runtime validates each step live and stops at the first failure; a partial
+  receipt is `ok: true, status: "partial"` and, like a full dispatch, the broker
+  appends the settled fresh observation so the model never needs a separate
+  observe call between acts.
+- `key` takes `modifiers`; quit, close, hide, minimize, app-switch, Spotlight,
+  screenshot and full-screen chords are refused natively, and `command+v` works
+  only after this session itself copied or cut. Clicks take modifiers too, and
+  `triple_click` and `wait` exist. Refused chords, keys and modifiers are listed
+  by `coworker_computer_discover`.
+- Observations default to interactive elements in compact form; `elements: "all"`
+  is for reading static text, `"none"` for image-only steps. An observation is
+  valid for 60 seconds so a reasoning model does not lose its turn to the clock.
+- The broker's argument allowlist admits only `observation_id`, `action`,
+  `actions` and `elements`; session, receipt and request identities still belong
+  to the broker. Batch steps count individually toward the native action limit.
+
+None of this widens authority: discussion opt-in, native window approval, mode
+scope, human-only Continue, protected fields, hit tests and exact element
+identity all still apply to every step.
+
 ## Adapter strategy
 
 `createComputerControl({ adapters, discussionFor, resolveContext })` accepts
@@ -135,7 +174,8 @@ type ComputerAdapter = {
     detail: string;
     permissions?: { accessibility: boolean; screenRecording: boolean };
   }>;
-  setup(permission: "accessibility" | "screenRecording"): Promise<void>;
+  setup(permission: "accessibility" | "screenRecording"): Promise<{ setupId: string }>;
+  dismissSetup(setupId?: string): Promise<void>; // Confirmed coach exit; scoped to one ticket when given.
   connect(): Promise<{
     callTool(name: string, args: Record<string, unknown>, options?: {
       signal?: AbortSignal;

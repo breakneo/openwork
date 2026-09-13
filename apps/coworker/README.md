@@ -5,6 +5,40 @@ platform. Open Coworker is a second product client, not a second platform: it
 assembles existing OpenWork primitives into a coworker-centric experience and
 adds no new database concepts.
 
+## Activity and mentions
+
+The **Activity bell** at the top-right of the team sidebar opens a shared inbox
+for completed private, group and Event replies. It sits above Chat / Calendar
+without shifting those tabs or search. In the folded rail, the bell shares the
+utility row below the tabs to stay clear of native window controls.
+Filter **All**, **Mentions**, or **Unread**; each row identifies
+the coworker, conversation, time, and a short visible-reply preview. The rail
+shows the real unread count. **Happening now** separately projects current work
+and requests for the person, not notification history or inferred progress.
+
+Coworkers can write **@you** sparingly when they need a question answered, a
+decision, or help with a blocker. Only standalone mentions in delivered prose
+count; code, quotations, email addresses and source URLs do not. A mention is
+attention, never permission to act or an answer to a pending native request.
+
+Opening Activity keeps the current chat mounted and does not mark anything read.
+Opening a notification returns to its private discussion or group. Read status
+changes only after the private transcript loads or the exact group reply is
+revealed. Older group targets show an explicit history-limit notice and stay
+unread instead of claiming an exact jump. Individual read/unread controls and **Mark all read** persist
+across restarts; the latter acknowledges only the IDs already loaded in the inbox,
+not notifications arriving during the action. Read state is local to this profile.
+
+The native collaboration store owns a bounded newest-300 index. Private capture
+waits for final task success, including reviewed Worker handbacks. Group capture
+follows durable timeline publication. Source receipts prevent duplicate rows or
+reset read state during replay; historical work is not backfilled on upgrade.
+Actor creation identity is pinned alongside slug and workspace ID, so a retired
+coworker's replacement cannot inherit the old inbox. Archived groups and removed
+members are filtered out. Classifier failures fall back to an ordinary reply
+without failing the work itself. No OS push notifications, raw tool-event feed,
+cloud inbox sync, or standalone responsibility-completion notifications are added.
+
 ## Fresh start from Settings
 
 **Settings → Fresh start** has three separate actions:
@@ -377,7 +411,7 @@ read more.
   the reply, an assignment, and a Worker — see *Automatic choices* below — with
   five before/after examples: a research question, a plan request, a quick
   question that needs no document, work on a clock, and a goal for a Worker).
-  It is versioned (8) and regenerated on launch for existing coworkers without
+  It is versioned (13) and regenerated on launch for existing coworkers without
   touching `soul.md` or anything under `memory/`; the repair also adds
   `documents/index.md` to `opencode.json`'s instructions and creates the index
   when it is missing.
@@ -420,7 +454,7 @@ sentence or current revision passed.
 | Roles suggested on the Add screen | `new-coworker-suggested` | The team | Up to three catalog roles nobody covers | — | The form stays editable | The card's pitch | Verify suggestions and the editable form directly |
 | Offering to pass a request to a teammate | Contract `## My team`; `team_refer` in `electron/team-tools.mjs` | The request, `team/roster.md` | When the request is clearly a teammate's job and more than a quick answer, before doing the work; never in a group chat. The handler refuses a teammate who is not on the team, itself, and — since contract 6 — the same request the person already chose to keep with this coworker | The person's tap decides; Continue makes the coworker do it | Ask ‹teammate› / Continue with ‹coworker›; a later message closes the pills | The tile's small print ("Editor could take this · Writing and content") and the coworker's sentence; receipts name the outcome, including "you asked to keep this here" | `team-tools.test.mjs`, `team.test.ts`, `open-coworker-team` |
 | Proposing a new teammate | Contract `## My team`; `team_suggest` + `suggestionGuard` | The request, the team, `team/suggestions.jsonl` | When uncovered work comes up twice in a conversation or once when ongoing, or the person asks who could do it. The handler refuses a role a teammate covers, a role declined within fourteen days, and a second proposal in one day | The person's tap decides | Add to team / Not now | Small print "Suggested by Nova · Customer support"; the guards read "Checked the team · …" | `team.test.mjs`, `team-tools.test.mjs`, `open-coworker-team` |
-| The shape of an answer: reply, document, assignment, Worker | Contract `### Which shape an answer takes` (one rule, one example each); the tool descriptions | The request | A reply for what fits in a few sentences; a document beside the reply past about 120 words; an assignment whenever the person named a schedule; a Worker for one goal with an end that is not on a clock. Tie-break: a schedule wins over a Worker, a document beside a short reply over a long reply | A long reply with no document folds behind *Show the rest* and leaves a one-line reminder in the documents index until the next document | Ask for a shape by name; put a document aside; steer or stop a Worker; change or remove an assignment | Receipts: "Wrote a document · Launch plan", "Started a Worker · Market scan", "Created assignment · Move the car · Every weekday at 9:00 AM" | Verify shape selection and contract wording directly; `open-coworker-documents` (document effects), `open-coworker-team` (Worker delegation), `open-coworker-local-first` (scheduling) |
+| The shape of an answer: reply, document, responsibility, Event, Worker | Contract `### Which shape an answer takes`; tool descriptions | The request | A reply for a few sentences; a document for a substantial artifact; an assignment for ongoing owned work; an Event for a scheduled goal-oriented working session with a lead and participants; a Worker for bounded heavy work rather than a clock | Keep useful long detail beside the reply; clarify ambiguous timing before scheduling | Request a shape by name; manage its existing record | Confirm the returned record, never call queued work complete | `open-coworker-documents`, `open-coworker-team`, `open-coworker-local-first`, `open-coworker-all-hands` |
 | Who answers in a group, in what order | `lib/facilitator.ts`; scorer in `lib/groups.ts` | Members with roles, missions, and who is busy; the last 12 visible lines; the last 5 speaking orders; the message and its mentions | One strict JSON plan, validated (unknown or duplicate coworkers, the wrong count, ignored mentions, a dependency the wrong way are rejected), repaired once, tried once on the next model, else the deterministic scorer (role and mission words, last speaker +0.5, then the first member). Mentions always rule; without a name one speaker, never more than three | The scorer | `@name`, `@everyone`; Group details › Advanced for the model | "Choosing who should respond…", then "Scout is replying… then Editor" — the who, not the why, by design (the facilitator is silent; its briefs are in the turn record) | `facilitator.test.ts`, `groups.test.ts`, `open-coworker-group-conversation` |
 | Sequential or parallel; one follow-up; a wrap-up | The plan | The plan | Parallel only when replies do not depend on one another; a dependency forces sequential; at most one follow-up; a wrap-up only when the facilitator asked | Sequential | — | Replies settle in the plan's order; *Nothing to add.* is a quiet line | `facilitator.test.ts`, `groups.test.ts` |
 
@@ -434,8 +468,9 @@ sentence or current revision passed.
 
 **How hard a coworker thinks**
 
-App model defaults cover conversation, thinking Workers, delivery Workers, and
-the facilitator. Empty model/effort choices mean role-based automatic, not a
+**Settings → Model defaults** has four shared roles: Conversation, Deep thinking,
+Delivery, and Chat turn assignment (the facilitator). Each uses the existing
+model/effort picker. Empty model/effort choices mean role-based automatic, not a
 new LLM router. Empty or app-chosen coworker records inherit conversation defaults;
 legacy personal/unknown selections stay overrides. Choosing a personal model
 opts out, while turning inheritance back on retains that override for later.
@@ -855,8 +890,10 @@ and `src/lib/onboarding-team.test.ts`.
 
 *Use this Mac* (and the same screen under OpenWork › AI models) gets a person
 without an account to a working coworker in a minute, using what they already
-pay for. One component (`ui/local-providers.tsx`; the rules in
-`lib/local-providers.ts`, detection in `electron/local-providers.mjs`) shows:
+pay for. The models the app promotes are OpenWork's own: the account's models
+after *Continue with OpenWork*, and OpenWork's free model for people without an
+account once it is released. One component (`ui/local-providers.tsx`; the rules
+in `lib/local-providers.ts`, detection in `electron/local-providers.mjs`) shows:
 
 - **Found on this Mac** — one flat row per thing the app found, with one line
   saying what Connect does, and **Connect**. Detection is presence-only and
@@ -900,8 +937,22 @@ pay for. One component (`ui/local-providers.tsx`; the rules in
   OpenCode lose it too; a key from the environment cannot be disconnected here
   and says where to remove it. A stored API key is labelled as a key, not a
   ChatGPT subscription, even when Codex credentials are also detected.
-- **A free model is ready now** — the free provider's default model (nothing
-  to set up); the default until something else is connected.
+- **OpenWork's free model** — the row for people without an account. It is
+  driven by the engine's `openwork-free` provider (standard Luna,
+  `OPENWORK_FREE_PROVIDER_ID` / `OPENWORK_FREE_MODEL_ID` in `lib/threads.ts`,
+  the same ids as the desktop's free-access contract). Until that free service
+  is released and connected, the row reads *Coming soon* and explains that
+  coworkers without an account will start there for free; it offers no
+  action and states no allowance terms. Once the provider appears in the catalog the row names
+  the model and offers *Start with this* / *Use for ‹coworker›*. The row never
+  points at OpenCode's own catalog.
+- **OpenCode's catalog (`opencode`) is not promoted.** It gets no row here and
+  no recommendation anywhere; its models stay listed last in the model picker
+  (tagged *OpenCode*) so a person can still choose them in settings and for
+  testing. The tier `opencode` in `lib/threads.ts` carries this: it is absent
+  from `MODEL_TIER_ORDER`, so `recommendModel` and the implicit Automatic
+  anchor never pick it, and the picker says why nothing is recommended
+  ("sign in to OpenWork or connect an AI provider") instead of hiding it.
 - **Add another** — **Choose** lists the well-known providers the AI service
   offers (OpenAI,
   Anthropic, Google, OpenRouter, GitHub Copilot, xAI, Mistral, Groq, DeepSeek)
@@ -914,19 +965,27 @@ pay for. One component (`ui/local-providers.tsx`; the rules in
   banner. **Set up ChatGPT** requires supported sign-in metadata found on this
   Mac; a generic OAuth method or installed ChatGPT app is not detection.
   **Explore templates** requires the current OpenAI OAuth connection with models;
-  **Explore models** can appear when only the existing free catalog is available.
+  **Explore models** can appear when nothing of the person's own is connected
+  (only OpenWork's free model or OpenCode's catalog answers).
   These are navigation only, dismissed per context for the session. They never
   select a model, import credentials or send work. Ordinary OpenAI sign-in remains
   available manually under Add another. Replacing an existing OpenAI connection
   requires disconnect confirmation; a saved entry requires deliberate replacement,
   and environment keys must be removed outside the app. Zero models is not usable
-  ChatGPT evidence. Anonymous inference and no-login growth remain deferred to
-  #4621 and its rollout, not included in this alpha candidate.
+  ChatGPT evidence. The free service itself (allowance, sign-in-free
+  credentials, version floor) is the desktop stack's #4620/#4644 and its Den
+  rollout; this app only reads the resulting `openwork-free` provider and
+  presents it as unavailable until then. No allowance, billing or promotion
+  terms are hardcoded here.
 
 When nobody chose a model, `recommendModel` prefers the OpenWork account, then
-a subscription or key on this Mac, then a local model server, then the free
-model; a model chosen on the local mode screen before the first coworker
-existed becomes that coworker's model. Existing coworkers keep their choice.
+a subscription or key on this Mac, then a local model server, then OpenWork's
+free model — never OpenCode's catalog; a model chosen on the local mode screen
+before the first coworker existed becomes that coworker's model. When only
+OpenCode's catalog is connected nothing is recommended: the coworker's model
+stays blank, the composer explains that a model is needed, and the person can
+still choose an OpenCode model in Coworker settings. Existing coworkers keep
+their choice.
 `coworker.md` records who chose (`modelChosenBy`: the app, the person, or
 unsaid — read as the person's), so the rule reads the same after a relaunch:
 a model the app picked is explained under the AI model in Coworker settings in
@@ -977,18 +1036,20 @@ is saved. A model the person fixed is never swapped.
 ### Compose models around the work
 
 The sidebar's Worker defaults section has separate Deep thinking model
-and Delivery model choices, each with supported exact effort. Both initially
-use the coworker's main model. The picker names that model and previews its Worker
-effort. These are provider-neutral choices from the connected
+and Delivery model overrides, each with supported exact effort. An empty override
+uses the corresponding app role default; an empty app role selects deep (thinking)
+or standard (delivery) around the coworker's anchor, with the same-provider and
+known-cost guards above. These are provider-neutral choices from the connected
 catalog, not fixed model tiers or automatic upgrades. New Workers snapshot the
 resolved provider, model and effort; existing pinned work does not change when
 settings change. Records from before this feature retain owner-model behavior.
 
-Settings > General lists each coworker's main model, selection mode and effort.
-Expand Edit models & effort to change the same saved settings as the sidebar.
-There is no app-wide model default. Use recommended model selects a connected
-recommendation once, not a default that changes in the background. Default effort
-adapts to the task unless a supported fixed thinking effort takes priority.
+**Settings → Model defaults** owns the four shared roles described above.
+Coworker settings retains personal model, selection mode and effort overrides;
+turning conversation inheritance on keeps that personal override for later.
+Use recommended model selects a connected recommendation once, not a default that
+changes in the background. Default effort adapts to the task unless a supported
+fixed thinking effort takes priority.
 Open folder sits beside the app's coworker directory in AI & local setup and
 beside the individual coworker's path in the sidebar. It opens only those
 app-owned directories through the trusted native window.
@@ -1170,6 +1231,32 @@ Keep releases size-aware: prefer existing/native APIs, bundle build-only inputs,
 and require a measured payload cost before adding a production dependency.
 [Release size](RELEASE-SIZE.md) owns dependency classification, package reports,
 target budgets, and the checks run before release artifacts are uploaded.
+
+### Toolchain
+
+Open Coworker moves independently of the OpenWork desktop app where the
+dependency is its own: Electron 44 (Node 24, Chromium 152; macOS 13 or later),
+Vite 8 with Rolldown/Oxc and `@vitejs/plugin-react` 6, TypeScript 7 (the native
+`tsc`; there is no in-process compiler API, so tests that need diagnostics
+spawn the CLI), Tailwind 4 and marked 18. The renderer builds for `esnext`
+because it only ever runs inside this app's Chromium; `@types/node` follows the
+Electron runtime, not the newest release. Cold screens — local setup, Settings
+with the provider editor and model pickers, factory reset, onboarding replay,
+the connected-apps panel, and the computer, browser and MCP app hosts — are
+`React.lazy` chunks behind `Suspense`, so the startup chunk carries the team,
+discussions and groups only.
+
+Runtime libraries the embedded server imports at run time (`zod`,
+`@opencode-ai/sdk`, `@modelcontextprotocol/*`, `undici`, `drizzle-orm`, `yaml`,
+`minimatch`, `jsonc-parser`) stay on the workspace resolution shared with
+`apps/server` and the workspace packages this app bundles: a second copy costs
+renderer bytes and gives the server a version the desktop never ran. Refresh
+those together with `apps/server`, not here. `esbuild` stays on the repository
+override; it only bundles the main process and the maintenance helper.
+`@modelcontextprotocol/ext-apps` 2 requires the MCP v2 client stack
+(`@modelcontextprotocol/core` / `client`) in the app host; adopting it is a
+migration of `src/ui/mcp-app-frame.tsx` and its callers with the MCP apps
+journey, not a version bump.
 
 The macOS DMG is an Open Coworker-owned installation surface rather than the
 electron-builder default: two quiet installation stations hold the native app
@@ -1564,41 +1651,182 @@ Electron build mirrors the embedded server's runtime dependencies, prepares
 the same versioned sidecar used by OpenWork Desktop, and includes both as
 application resources.
 
-## All Hands (optional)
+## Calendar, responsibilities and Events
 
-Enable **Settings → All Hands** to gather your coworkers in one persistent group
-conversation, created automatically under **Group chats**. Add at least two coworkers first. The space shows current team
-activity with links to its source conversations. **Gather the team** requests a
-briefing; **Find our next move** asks for a recommendation. Normal chat,
-@mentions, follow-up questions, and assignments use the existing group-chat
-engine and each coworker's chosen model.
+**Chat | Calendar** lives above search in the left team rail and changes the view
+of the same workplace. Chat remains mounted while Calendar is visible, preserving
+drafts and native work. Calendar replaces the coworker/group-chat lists in that
+same rail with **Your team's calendar**, coworker visibility and source filters;
+there is no second filter sidebar inside the main calendar. Switching back restores
+Chat's search, selection and conversation filters. Calendar filters share one
+App-owned preference state and stay selected across mode changes.
 
-In assignment mode, Enter reveals and focuses the owner chooser immediately;
-no model call is needed to suggest an owner. Escape or dismiss returns to the
-draft, and only an explicit owner choice starts the assignment. While creating
-it, the chooser names the owner and ignores duplicate choices. Completion does
-not take focus away from a document the person has started editing.
+In Chat, the small calendar icon immediately before a coworker's Ready/status dot
+opens that coworker's schedule. It is an independent button, not a nested action
+inside the chat button. The funnel beside **Group chats** opens a compact menu to show ordinary chats,
+Event conversations, or both; its toggles are not permanently exposed in the rail.
 
-Sending shows acknowledgement before preparation finishes. Status, queue,
-receipts and conversation activity refresh independently, so a slow activity
-read does not stall the other observations. Timeline and execution snapshots
-remain paired, and the initial idle state stays **Checking activity** until
-activity and receipts have been read. Existing routing and model choices remain
-unchanged.
+Calendar has **Day, Week and Month** views. Day and Week position work on a
+24-hour grid with overlapping entries in separate lanes and a current-time line.
+Month shows the full date grid, adjacent dates and overflow links to Day. The
+calendar's coworker and source filters apply to all three views. Small entries
+remain selectable; work without a recorded duration uses a 30-minute layout
+default without inventing a saved end time. Local clock changes are indicated;
+repeated-hour draft slots choose the first occurrence.
 
-Set a focus in Settings, or write **Focus on …** in the conversation to remember
-it. Group details lets you choose the participating coworkers and facilitator
-model. Briefings ask for evidence, timestamps, missing information, and proposed
-next steps; a scheduled briefing does not authorize executing those proposals.
+Selecting an empty time or date opens a prefilled draft in the **right sidebar**;
+it schedules nothing until Save. Event details, editing, responsibility history
+and exact-revision artifact reading share that inline panel. There is no modal
+scrim or focus trap, and the calendar remains usable beside an open draft. A view
+change preserves the draft. On narrow windows the grid scrolls rather than placing
+the panel over it. The old Agenda preference migrates to Week without resetting
+coworker or source filters.
 
-All Hands is off by default. Once enabled, its default rhythm is 09:00 in this
-computer's timezone. Choose morning and afternoon, or only when asked. Automatic
-briefings require the app to be open; returning later runs today's latest eligible
-slot once, without replaying previous days. A slot is reserved before requesting
-inference to avoid repeating a billed request after a crash. Interrupted or failed
-replies use the conversation's existing recovery controls. Normal model usage
-applies. Disabling the feature stops future automatic briefings and hides its
-navigation, retaining history, focus, and unsent drafts for re-enabling.
+**Responsibilities** are ongoing work owned by a coworker. Calendar projects their
+existing schedules and retained run records; it creates no duplicate automation.
+Planned entries have dashed borders, while actual entries represent recorded runs.
+Past days never invent executions by expanding today's recurrence rule backward.
+Local, OpenWork Cloud and legacy OpenWork desktop placements remain distinct.
+Local history currently retains twelve runs; the Cloud client returns its first
+fifty definitions and recent history, with partial-availability warnings. Calendar
+is not an unlimited historical audit or an external calendar integration.
+
+**Events** are scheduled working sessions with one accountable lead and one or more
+coworkers. **New event** collects the title, Goal, optional Working prompt, participants,
+lead, start/timezone, optional duration, recurrence and maximum native replies.
+Participants use one searchable multi-select field with removable coworker-avatar
+chips, rather than a checklist. Search by name or role; keyboard arrows and Enter
+add a coworker without submitting the form. Selected coworkers are excluded from
+suggestions, and the owner's chip is marked. Removing the owner clears that choice
+and requires another owner before saving. Selection remains a draft until Save.
+Recurrence reuses once/daily/weekly rules (including weekdays). Repeating Events
+can have an optional **Repeat until** date, inclusive through the end of that day
+in the Event's timezone; it limits occurrence starts, not the last session's duration.
+There are no monthly rules, per-occurrence exceptions or all-day events. Edits apply to future sessions and
+never rewrite an accepted session snapshot. Pause stops future scheduling, not
+work already accepted; Cancel stops the selected run and keeps completed work.
+Changing participants while a session is live is refused. State-only pause/archive
+still works when a peer or attached revision is unavailable. Resume selects the next
+future occurrence and never replays paused slots. An expired one-off or ended series
+requires a new time/end date to resume; Run now is a separate explicit action.
+
+The required **Goal** uses `objective`: what the session should accomplish. The
+optional **Working prompt** uses `description`: instructions or an agenda for each
+session. Outcomes never overwrite these fields. At session start—not while merely
+queued—the native service freezes the previous delivered summary, pending work
+questions and proposed follow-ups, plus the latest attempt's status. A failed or
+cancelled attempt does not silently erase the last unresolved items. Changed rosters
+prevent automatic sharing of old content with new identities.
+
+Carry-forward context is bounded: a 1,000-character summary, four questions and
+four follow-ups of 180 characters each. Truncated previews say to read the full
+source session before concluding; omissions are not resolved work. Original outcomes
+retain their full text. The current Event detail shows the complete latest delivered
+pending questions and follow-ups, with a path to their source session. Permission
+requests and prior approvals are not work questions and never carry authority forward.
+
+Events use the existing group conversation, facilitator for human follow-ups,
+native participant threads and collaboration admission. Scheduled work runs a
+bounded contribution round, waits for delegated work and its published handbacks,
+then asks the lead for a structured conclusion. Summary, decisions, accomplishments,
+pending questions, proposed follow-ups and contributors remain with each occurrence.
+Outcome status is explicitly provisional until the lead's native reply succeeds
+and is published. A delivered summary can still describe a partially successful
+session. Cancellation/expiry keeps proven published contributions even when the
+whole participant round did not finish; no replacement summary is fabricated.
+Missing conclusions or failed contributions are partial, never fabricated success.
+Further open-ended discussion uses normal chat; it does not rewrite that outcome.
+Contributions and lead conclusions use the shared Conversation model default or
+their coworker's override. Delegated work uses the Thinking/Delivery Worker defaults.
+Human follow-up routing uses Chat turn assignment; scheduled phases already have
+an explicit participant plan, so they do not call the facilitator. New admissions
+read current defaults; already-admitted turns and existing Workers retain their
+model/effort pins. Events do not add a separate model picker or model policy.
+Scheduled phase retries go through the Event rather than replaying a group message.
+Create follow-up assignments from the responsible coworker's chat; Event-chat
+assignment creation is not yet enabled.
+
+The native scheduler runs independently of the selected view while OpenCoworker is
+running. Events do not yet have Cloud placement. It claims a durable occurrence
+before dispatch, catches up at most the latest missed slot, and does not overlap
+sessions sharing one event group. Normal model usage applies. Reply limits cover
+native turns, including delegated work and handbacks—not tokens or dollars. With
+no duration, a 240-minute safety limit still applies. Stop remains visibly pending
+if native cessation cannot be confirmed; no automatic continuation is admitted.
+Existing group/Worker permissions remain in effect, with no inherited private
+browser or computer-control grants.
+
+**Artifacts remain with their owners.** Event references distinguish documents
+used, created and modified, with owner identity and exact revision. Viewing a
+recorded revision does not move/copy the document into the Event. Open current
+document is a separate action. Pruned revisions and unavailable owners are
+reported, never replaced with different bytes. Private document contents are not
+automatically shared with other participants. The first slice supports the existing
+Coworker and shared-group document stores, not arbitrary external-file indexing.
+
+### Conversational Event tools
+
+Contract 13 teaches the workplace distinction and the following tools:
+
+| Tool | Purpose |
+|---|---|
+| `coworker_workplace_calendar` | Read basic local team schedules with observed timestamps. |
+| `coworker_event_details` | Read a permitted Event's Goal, Working prompt, current status, latest delivered summary and pending questions; `runId` selects one accepted session. |
+| `coworker_event_create` | Create an Event including the requesting coworker, for a direct human request. |
+| `coworker_event_update` | Replace the future definition using full input and `expectedRevision`; membership is checked against the previous definition. |
+| `coworker_event_manage` | Pause/resume/archive with a revision, run now, or cancel an exact run. |
+| `coworker_event_document_read` | Read a permitted exact artifact revision. |
+| `coworker_event_conclude` | Only the admitted lead's conclusion may record a provisional outcome. |
+
+New private admissions receive a small scoped Event index alongside, not inside,
+automatic memory. It includes the trusted time/timezone, relevant Event IDs, due
+times and status; full content stays on-demand. Accepted context and model pins
+are preserved during observation recovery. Event records remain app-owned, not
+files for coworkers to edit or schedules to mirror into soul/working memory.
+
+Management requires a current participant handling a **direct human request**.
+The native host validates the exact execution, workspace, tool call, raw input and
+caller identity, and revalidates after queued waits. Host transport cancellation
+fences uncommitted writes. Scheduled phases, Workers, consultations and automatic
+continuations cannot initiate these writes; Event/assignment scheduling tools are
+also disabled on scheduled Event work. Human origin is not intent: the coworker
+must perform only what the person requested, not generate its own jobs.
+
+Durable operation receipts deduplicate retries and equivalent requests from multiple
+speakers in one human group request. At most five distinct Event changes are admitted
+per human request. Lost acknowledgements call for inspecting records, not a new write
+request. Completed effects keep their receipts; no duplicate invocation is used to
+manufacture confirmation. These controls do not grant browser/computer access or
+authorize external writes. Cloud responsibility visibility remains in the existing
+calendar/assignment paths; native Event awareness is local-only.
+
+Prompt accounting keeps files + registered MCP within the existing 34k/36k character
+budgets; native Event tool metadata has a separate 10k ceiling. Private Event context
+is at most 3,500 characters; scheduled dynamic references at most 6,000, excluding
+the full Goal/Working prompt. Other native plugins and the engine prompt are separate
+layers, so these limits are not a claim about the total model request size.
+
+### All Hands is an Event template
+
+Choose **New event → All Hands**, select the accountable lead and save. The
+template gathers the team for an evidence-based briefing and proposed next steps;
+it grants no permission to execute those proposals. There is no separate Settings
+section or renderer-owned briefing timer.
+
+Existing All Hands settings migrate once, preserving their original group and
+transcript, enabled/paused state, focus, manual rhythm and reserved occurrence.
+Morning and afternoon become two Event definitions sharing that original history,
+without overlapping runs. Their participant list cannot diverge; create a separate
+Event for a different roster. A disabled briefing is not activated during migration.
+Legacy groups beyond the 20-participant Event limit stay intact but unmigrated.
+
+Source owners: `src/lib/events.ts` (validated contract), `src/lib/calendar.ts`
+(read-only projection), `electron/events.mjs` (definitions and session lifecycle),
+`electron/event-execution.mjs` (identity and reply reservations), and
+`electron/event-plugin.mjs` (context-bound tools). Persistence extends the existing
+serialized `.collaboration/state.json`; group identity and document ownership remain
+in their existing stores. The covering native journey remains
+`evals/specs/open-coworker-all-hands.e2e.test.ts`.
 
 ## Durable collaboration
 

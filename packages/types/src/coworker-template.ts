@@ -10,7 +10,7 @@ export const coworkerTemplateSchema = z.object({
   role: z.string().trim().min(1).max(160),
   mission: z.string().trim().min(1).max(4000),
   instructions: z.string().trim().max(16000).default(""),
-  avatarColor: z.enum(["blue", "violet", "mint", "orange", "rose", "slate", "sand", "sage"]).default("blue"),
+  avatarColor: z.enum(["blue", "violet", "mint", "orange", "rose", "slate", "sand", "sage", "sky", "lagoon", "lime", "lemon", "coral", "grape"]).default("blue"),
   avatarGlasses: z.enum(["round", "square", "oval", "none", "sunglasses", "monocle", "star"]).default("round"),
   provisioning: z.enum(["automatic", "optional"]).default("optional"),
 }).strict()

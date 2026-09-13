@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { coworkerBridge, type CoworkerSummary, type LocalResponsibility, type ProviderSyncRun, type RuntimeInfo, type TeamStates } from "@/lib/bridge";
+import { abilitiesSummary } from "@/lib/abilities";
+import { CoworkerAbilitiesEditor } from "@/ui/coworker-abilities";
 import { describeHeaderStatus, describeNow, describeOutcome, mergeRecentWork, relativeTime } from "@/lib/activity-summary";
 import type { ConnectState } from "@/lib/connect";
 import { describeCoworkerSummary, showSummaryLine, summaryRowTitle, type CoworkerSummaryLine, type SummaryKind } from "@/lib/coworker-summary";
@@ -10,12 +12,12 @@ import { CoworkerModelSettings } from "@/ui/coworker-model-settings";
 import { createCoworkerThreads, recommendModel, type CoworkerActivity, type ThreadListItem } from "@/lib/threads";
 import { acknowledgeCoworker, AvatarControls, CoworkerAvatar } from "@/ui/coworker-avatar";
 import { PersonalityPicker } from "@/ui/personality-picker";
-import { CapabilitiesPanel } from "@/ui/capabilities";
 import { ActivityIcon, AppsIcon, Button, ErrorNote, IconButton, MemoryIcon, SlidersIcon } from "@/ui/kit";
 import { useResizablePanel } from "@/ui/use-resizable-panel";
 import { PanelContent, PanelHeader, PanelLevel, usePanelNavigation } from "@/ui/panel-nav";
 import { pushCrumb, routeDepth, type PanelCrumb } from "@/lib/panel-route";
 import {
+  ABILITIES_CRUMB,
   ACTIVITY_CRUMBS,
   APPS_TOOLS_CRUMB,
   PANEL_VIEWS,
@@ -40,6 +42,9 @@ import { AssignmentsPanel } from "@/ui/assignments";
 import type { WorkerSummary } from "@/lib/workers";
 import { Row, RowList, useReturnFocus } from "@/ui/rows";
 import type { SettingsSection } from "@/ui/openwork-settings";
+
+// Connected apps and tools open on request; the panel loads the first time it is shown.
+const CapabilitiesPanel = lazy(() => import("@/ui/capabilities").then((module) => ({ default: module.CapabilitiesPanel })));
 
 const CONTEXT_PANEL_WIDTH_KEY = "open-coworker.context-panel-width";
 const CONTEXT_PANEL_DEFAULT_WIDTH = 360;
@@ -76,6 +81,10 @@ export function HeaderStatusWord({ activity, engineManaged }: { activity: Cowork
 export type CoworkerHomeRequest =
   | { id: number; kind: "settings"; section: "model" }
   | { id: number; kind: "thread"; threadId: string }
+  | { id: number; kind: "discussion"; threadId: string; onOpened?: () => Promise<void> }
+  | { id: number; kind: "activity"; threadId: string }
+  | { id: number; kind: "document"; documentId: string }
+  | { id: number; kind: "responsibilities" }
   | { id: number; kind: "turn"; prompt: string };
 
 /**
@@ -177,7 +186,7 @@ export function CoworkerHome({
   const [settingsFocus, setSettingsFocus] = useState<{ id: number; section: "model" } | null>(null);
   const [assignmentDraft, setAssignmentDraft] = useState<{ id: number; text: string } | null>(null);
   const [discussionDraft, setDiscussionDraft] = useState<{ id: number; text: string } | null>(null);
-  const [openThreadRequest, setOpenThreadRequest] = useState<{ id: number; threadId: string } | null>(null);
+  const [openThreadRequest, setOpenThreadRequest] = useState<{ id: number; threadId: string; kind?: "thread" | "discussion" | "activity"; onOpened?: () => Promise<void> } | null>(null);
   /** The coworker's one-off assignment threads, as the conversation column lists them, and what each waits on the person for. */
   const [assignmentThreads, setAssignmentThreads] = useState<ThreadListItem[]>([]);
   const [assignmentAttention, setAssignmentAttention] = useState<Record<string, string>>({});
@@ -214,7 +223,7 @@ export function CoworkerHome({
   const nav = usePanelNavigation<PanelView>({
     initialView: "overview",
     isView: isPanelView,
-    open: !contextPanel.collapsed,
+    open: active && !contextPanel.collapsed,
     onEscapeAtRoot: contextPanel.collapse,
     onRequestOpen: contextPanel.expand,
   });
@@ -252,28 +261,38 @@ export function CoworkerHome({
   /** A request passed from a teammate, to send in the open discussion; the id makes repeats distinct. */
   const [turnRequest, setTurnRequest] = useState<{ id: number; prompt: string } | null>(null);
   const handledRequestRef = useRef(0);
-  useEffect(() => {
-    if (!request || handledRequestRef.current === request.id) return;
-    handledRequestRef.current = request.id;
-    if (request.kind === "thread") {
-      setOpenThreadRequest({ id: request.id, threadId: request.threadId });
-      return;
-    }
-    if (request.kind === "turn") {
-      setTurnRequest({ id: request.id, prompt: request.prompt });
-      return;
-    }
-    openSettingsSection(request.section, request.id);
-  }, [openSettingsSection, request]);
   const collapseContextPanel = contextPanel.collapse;
   const toRoot = nav.toRoot;
-  /** Moving to another coworker returns to the conversation; the panel does not follow. */
+  // Reset before applying an incoming document/settings request on this mount.
   useEffect(() => {
     collapseContextPanel();
     toRoot("overview");
     setBesideDocumentId("");
     setBesidePath(null);
   }, [collapseContextPanel, coworker.slug, toRoot]);
+  useEffect(() => {
+    if (!request) { setOpenThreadRequest(null); return; }
+    if (handledRequestRef.current === request.id) return;
+    handledRequestRef.current = request.id;
+    if (request.kind === "thread" || request.kind === "discussion" || request.kind === "activity") {
+      setOpenThreadRequest(request);
+      return;
+    }
+    if (request.kind === "turn") {
+      setTurnRequest({ id: request.id, prompt: request.prompt });
+      return;
+    }
+    if (request.kind === "document") {
+      setOpenDocumentRequest({ id: request.id, documentId: request.documentId });
+      openActivityLevel("documents");
+      return;
+    }
+    if (request.kind === "responsibilities") {
+      openActivityLevel("assignments");
+      return;
+    }
+    openSettingsSection(request.section, request.id);
+  }, [openActivityLevel, openSettingsSection, request]);
   useEffect(() => {
     const onResize = () => setWindowWidth(window.innerWidth);
     window.addEventListener("resize", onResize);
@@ -498,6 +517,7 @@ export function CoworkerHome({
             </IconButton>
           </header>
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <Suspense fallback={null}>
             <CapabilitiesPanel
               mode="beside"
               runtime={runtime}
@@ -515,6 +535,7 @@ export function CoworkerHome({
               onPush={(crumb) => setBesidePath(pushCrumb({ view: "settings", path: besidePath }, crumb).path)}
               onSetPath={(path) => setBesidePath(path)}
             />
+            </Suspense>
           </div>
         </section>
       ) : null}
@@ -663,11 +684,22 @@ export function CoworkerHome({
                 onOpenModelDefaults={() => onOpenOpenWork("model-defaults")}
                 onOpenMemory={() => nav.showView("memory")}
                 onOpenAppsTools={() => nav.push(APPS_TOOLS_CRUMB, APPS_TOOLS_CRUMB.id)}
+                onOpenAbilities={() => nav.push(ABILITIES_CRUMB, ABILITIES_CRUMB.id)}
                 focus={settingsFocus}
               />
             </PanelLevel>
           ) : null}
+          {contextView === "settings" && settingsLevel.kind === "abilities" ? (
+            <PanelLevel key="abilities" direction={nav.direction}>
+              <CoworkerAbilitiesEditor
+                key={`${coworker.slug}:${coworker.createdAt}`}
+                coworker={coworker}
+                onCoworkerChanged={onCoworkerChanged}
+              />
+            </PanelLevel>
+          ) : null}
           {contextView === "settings" && settingsLevel.kind === "apps-tools" ? (
+            <Suspense fallback={null}>
             <CapabilitiesPanel
               runtime={runtime}
               session={session}
@@ -695,6 +727,7 @@ export function CoworkerHome({
                 },
               }}
             />
+            </Suspense>
           ) : null}
         </PanelContent>
           </>
@@ -882,6 +915,7 @@ function CoworkerSettings({
   onOpenModelDefaults,
   onOpenMemory,
   onOpenAppsTools,
+  onOpenAbilities,
   focus,
 }: {
   runtime: RuntimeInfo;
@@ -895,6 +929,7 @@ function CoworkerSettings({
   onOpenMemory: () => void;
   /** Apps & tools is the first level under these settings. */
   onOpenAppsTools: () => void;
+  onOpenAbilities: () => void;
   /** Section to bring into view on open; the id makes repeat requests distinct. */
   focus: { id: number; section: "model" } | null;
 }) {
@@ -968,9 +1003,17 @@ function CoworkerSettings({
           id={APPS_TOOLS_CRUMB.id}
           icon={<AppsIcon />}
           title={APPS_TOOLS_CRUMB.title}
-          status={`Apps, skills, and the tools ${coworker.name} can use`}
+          status="Browse available apps, skills, and tools"
           onOpen={onOpenAppsTools}
           testId="settings-row-apps-tools"
+        />
+        <Row
+          id={ABILITIES_CRUMB.id}
+          icon={<SlidersIcon />}
+          title={ABILITIES_CRUMB.title}
+          status={abilitiesSummary(coworker.abilities)}
+          onOpen={onOpenAbilities}
+          testId="settings-row-abilities"
         />
       </RowList>
 

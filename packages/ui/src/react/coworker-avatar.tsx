@@ -8,15 +8,26 @@ export type { AvatarColor, AvatarGlasses } from "./coworker-avatar-artwork";
 export { acknowledgeCoworker } from "./coworker-avatar-motion";
 export type { AvatarMotion, AvatarReaction } from "./coworker-avatar-motion";
 
-const AVATAR_COLORS: Array<{ id: AvatarColor; label: string; swatch: string }> = [
-  { id: "blue", label: "OpenWork blue", swatch: "#b8c9f0" },
-  { id: "violet", label: "Violet", swatch: "#c8c1e2" },
-  { id: "mint", label: "Mint", swatch: "#b2d5cb" },
-  { id: "orange", label: "Orange", swatch: "#e4c3ad" },
-  { id: "rose", label: "Rose", swatch: "#e2c1cb" },
-  { id: "slate", label: "Pearl", swatch: "#e3e6ea" },
-  { id: "sand", label: "Sand", swatch: "#ded0b0" },
-  { id: "sage", label: "Sage", swatch: "#becab4" },
+/** Two rows: the original soft colors, then bolder ones that stand out in a busy team. */
+const AVATAR_COLOR_ROWS: Array<Array<{ id: AvatarColor; label: string; swatch: string }>> = [
+  [
+    { id: "blue", label: "OpenWork blue", swatch: "#b8c9f0" },
+    { id: "violet", label: "Violet", swatch: "#c8c1e2" },
+    { id: "mint", label: "Mint", swatch: "#b2d5cb" },
+    { id: "orange", label: "Orange", swatch: "#e4c3ad" },
+    { id: "rose", label: "Rose", swatch: "#e2c1cb" },
+    { id: "slate", label: "Pearl", swatch: "#e3e6ea" },
+    { id: "sand", label: "Sand", swatch: "#ded0b0" },
+    { id: "sage", label: "Sage", swatch: "#becab4" },
+  ],
+  [
+    { id: "sky", label: "Sky", swatch: "#a1d0fd" },
+    { id: "lagoon", label: "Lagoon", swatch: "#73dfe0" },
+    { id: "lime", label: "Lime", swatch: "#addb88" },
+    { id: "lemon", label: "Lemon", swatch: "#e4ca5f" },
+    { id: "coral", label: "Coral", swatch: "#fdb6ac" },
+    { id: "grape", label: "Grape", swatch: "#e3b6ff" },
+  ],
 ];
 
 const AVATAR_GLASSES: Array<{ id: AvatarGlasses; label: string }> = [
@@ -90,6 +101,30 @@ export function GroupAvatars({ members, size = 26, animated = true, motion = "qu
   );
 }
 
+function ColorSwatches({ color, onColorChange }: { color: AvatarColor; onColorChange: (color: AvatarColor) => void }) {
+  return (
+    <div className="flex flex-col gap-2">
+      {AVATAR_COLOR_ROWS.map((row, index) => (
+        <div key={index} className="flex flex-wrap gap-2">
+          {row.map((option) => (
+            <button
+              key={option.id}
+              aria-label={option.label}
+              aria-pressed={color === option.id}
+              className={`avatar-swatch ${color === option.id ? "is-selected" : ""}`}
+              onClick={() => onColorChange(option.id)}
+              title={option.label}
+              type="button"
+            >
+              <span style={{ backgroundColor: option.swatch }} />
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function AvatarControls({
   color,
   glasses,
@@ -109,21 +144,7 @@ export function AvatarControls({
       <>
         <div className="flex items-center gap-3 py-2.5" role="group" aria-label="Color">
           <span className="w-20 shrink-0 text-xs text-mist">Color</span>
-          <div className="flex flex-wrap gap-2">
-            {AVATAR_COLORS.map((option) => (
-              <button
-                key={option.id}
-                aria-label={option.label}
-                aria-pressed={color === option.id}
-                className={`avatar-swatch ${color === option.id ? "is-selected" : ""}`}
-                onClick={() => onColorChange(option.id)}
-                title={option.label}
-                type="button"
-              >
-                <span style={{ backgroundColor: option.swatch }} />
-              </button>
-            ))}
-          </div>
+          <ColorSwatches color={color} onColorChange={onColorChange} />
         </div>
         <div className="flex items-center gap-3 py-2.5" role="group" aria-label="Glasses">
           <span className="w-20 shrink-0 text-xs text-mist">Glasses</span>
@@ -150,21 +171,7 @@ export function AvatarControls({
     <div className="space-y-4">
       <fieldset>
         <legend className="mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-mist">Color</legend>
-        <div className="flex flex-wrap gap-2">
-          {AVATAR_COLORS.map((option) => (
-            <button
-              key={option.id}
-              aria-label={option.label}
-              aria-pressed={color === option.id}
-              className={`avatar-swatch ${color === option.id ? "is-selected" : ""}`}
-              onClick={() => onColorChange(option.id)}
-              title={option.label}
-              type="button"
-            >
-              <span style={{ backgroundColor: option.swatch }} />
-            </button>
-          ))}
-        </div>
+        <ColorSwatches color={color} onColorChange={onColorChange} />
       </fieldset>
       <fieldset>
         <legend className="mb-2 text-[10px] font-semibold uppercase tracking-[0.15em] text-mist">Glasses</legend>

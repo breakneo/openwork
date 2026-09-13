@@ -18,6 +18,12 @@
   transform-origin: center;
 }
 
+/* The whole character leans a little toward where it looks; reactions and gestures play over this. */
+.coworker-avatar__pointer-body {
+  transform: rotate(var(--avatar-lean, 0deg));
+  transition: transform 340ms ease-out;
+}
+
 .coworker-avatar__pointer-features {
   transform: translate(var(--avatar-feature-look-x, 0px), var(--avatar-feature-look-y, 0px));
   transition: transform 220ms ease-out;
@@ -40,13 +46,32 @@
   transform-origin: 82.5px 57px;
 }
 
-.coworker-avatar[data-motion-paused="false"][data-reaction="none"]:not([data-gaze="pointer"]):is([data-motion="playful"], [data-motion="presentation"]) .coworker-avatar__body {
+/* Floating is three layers on one clock: the body rises, its shadow stays nearer the ground, and the
+ * face rides on its own slightly longer clock so the composite never visibly repeats.
+ * Only the artwork moves; the SVG bounds, layout and pointer target stay fixed. */
+.coworker-avatar[data-motion-paused="false"]:is([data-motion="attentive"], [data-motion="playful"], [data-motion="presentation"]) .coworker-avatar__body {
   animation: avatar-float var(--avatar-float-duration, 8.8s) ease-in-out var(--avatar-float-delay, 0s) infinite;
 }
 
-/* Only the artwork drifts; the rail's layout and pointer target stay fixed. */
-.coworker-avatar[data-motion="navigation"][data-motion-paused="false"][data-reaction="none"]:not([data-gaze="pointer"]) .coworker-avatar__body {
+.coworker-avatar[data-motion-paused="false"]:is([data-motion="attentive"], [data-motion="playful"], [data-motion="presentation"]) .coworker-avatar__depth {
+  animation: avatar-depth-float var(--avatar-float-duration, 8.8s) ease-in-out var(--avatar-float-delay, 0s) infinite;
+}
+
+.coworker-avatar[data-motion="navigation"][data-motion-paused="false"] .coworker-avatar__body {
   animation: avatar-navigation-float var(--avatar-float-duration, 8.8s) ease-in-out var(--avatar-float-delay, 0s) infinite;
+}
+
+.coworker-avatar[data-motion="navigation"][data-motion-paused="false"] .coworker-avatar__depth {
+  animation: avatar-navigation-depth-float var(--avatar-float-duration, 8.8s) ease-in-out var(--avatar-float-delay, 0s) infinite;
+}
+
+.coworker-avatar[data-motion-paused="false"]:not([data-motion="quiet"]) .coworker-avatar__features {
+  animation: avatar-features-drift var(--avatar-drift-duration, 12s) ease-in-out var(--avatar-float-delay, 0s) infinite;
+}
+
+/* Meeting the pointer holds the float where it is rather than snapping it home; it resumes on leave. */
+.coworker-avatar[data-gaze="pointer"][data-motion-paused="false"] :is(.coworker-avatar__body, .coworker-avatar__depth, .coworker-avatar__features) {
+  animation-play-state: paused;
 }
 
 .coworker-avatar[data-reaction="engage"] .coworker-avatar__pointer-body {
@@ -57,17 +82,34 @@
   animation: avatar-wake 1s ease-in-out;
 }
 
+/* Rare idle gestures: a quick shiver with the eyes squeezed shut, and a small perk-up with a blink at the top. */
+.coworker-avatar[data-reaction="shake"] .coworker-avatar__pointer-body {
+  animation: avatar-shake 720ms ease-in-out;
+}
+
+.coworker-avatar[data-reaction="perk"] .coworker-avatar__pointer-body {
+  animation: avatar-perk 820ms ease-in-out;
+}
+
 .coworker-avatar:is([data-motion="quiet"], [data-motion="navigation"]) {
   --avatar-reaction-lift: -1.4px;
   --avatar-reaction-turn: 0.35deg;
 }
 
 :is(.coworker-avatar, .coworker-mark)[data-blinking="true"] :is(.coworker-avatar__pupils, .coworker-mark__pupils) {
-  animation: avatar-blink 200ms ease-in-out;
+  animation: avatar-blink 220ms ease-in-out;
 }
 
 .coworker-avatar[data-reaction="wake"] .coworker-avatar__pupils {
   animation: avatar-blink 240ms ease-in-out 180ms;
+}
+
+.coworker-avatar[data-reaction="shake"] .coworker-avatar__pupils {
+  animation: avatar-squeeze 460ms ease-in-out 60ms;
+}
+
+.coworker-avatar[data-reaction="perk"] .coworker-avatar__pupils {
+  animation: avatar-blink 220ms ease-in-out 320ms;
 }
 
 /* Freeze motion children, not static root tilt or structural artwork transforms. */
@@ -124,9 +166,42 @@
   50% { transform: translateY(-3.4px) rotate(1deg); }
 }
 
+/* The shadow lags the body: it separates and lightens as the body rises, tucking back in as it settles. */
+@keyframes avatar-navigation-depth-float {
+  0%, 100% { transform: translate(0, 0); opacity: 1; }
+  50% { transform: translate(0.9px, 1.7px); opacity: 0.82; }
+}
+
 @keyframes avatar-float {
   0%, 100% { transform: translateY(0) rotate(0deg); }
   48% { transform: translateY(-2.4px) rotate(0.35deg); }
+}
+
+@keyframes avatar-depth-float {
+  0%, 100% { transform: translate(0, 0); opacity: 1; }
+  48% { transform: translate(0.6px, 1.2px); opacity: 0.86; }
+}
+
+/* The face sits in front, so it travels a touch further and on a longer clock than the body. */
+@keyframes avatar-features-drift {
+  0%, 100% { transform: translate(-0.35px, 0.4px); }
+  50% { transform: translate(0.35px, -0.55px); }
+}
+
+@keyframes avatar-shake {
+  0%, 100% { transform: rotate(0deg); }
+  14% { transform: rotate(-1.8deg); }
+  30% { transform: rotate(1.5deg); }
+  46% { transform: rotate(-1deg); }
+  62% { transform: rotate(0.55deg); }
+  80% { transform: rotate(-0.2deg); }
+}
+
+@keyframes avatar-perk {
+  0%, 100% { transform: translateY(0) scale(1); }
+  18% { transform: translateY(0.6px) scale(1.015, 0.975); }
+  46% { transform: translateY(-2.6px) scale(0.985, 1.03); }
+  72% { transform: translateY(0.3px) scale(1.01, 0.99); }
 }
 
 @keyframes avatar-engage {
@@ -141,9 +216,15 @@
   68% { transform: translateY(0) rotate(-0.2deg); }
 }
 
+/* Lids close quickly and open more slowly, like a real blink. */
 @keyframes avatar-blink {
   0%, 100% { transform: scaleY(1); }
-  50% { transform: scaleY(0.1); }
+  36% { transform: scaleY(0.1); }
+}
+
+@keyframes avatar-squeeze {
+  0%, 100% { transform: scaleY(1); }
+  22%, 72% { transform: scaleY(0.1); }
 }
 
 @media (prefers-reduced-motion: reduce) {

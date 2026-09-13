@@ -145,7 +145,7 @@ describe("/coworker announcement", () => {
     const avatar = renderToStaticMarkup(createElement(CoworkerAvatar, { name: "Editor", color: "rose", glasses: "square" }));
     expect(avatar).toContain('aria-label="Editor avatar"');
     expect(avatar).toContain("#e2c1cb");
-    const palettes: Record<AvatarColor, string> = { blue: "#b8c9f0", violet: "#c8c1e2", mint: "#b2d5cb", orange: "#e4c3ad", rose: "#e2c1cb", slate: "#e3e6ea", sand: "#ded0b0", sage: "#becab4" };
+    const palettes: Record<AvatarColor, string> = { blue: "#b8c9f0", violet: "#c8c1e2", mint: "#b2d5cb", orange: "#e4c3ad", rose: "#e2c1cb", slate: "#e3e6ea", sand: "#ded0b0", sage: "#becab4", sky: "#a1d0fd", lagoon: "#73dfe0", lime: "#addb88", lemon: "#e4ca5f", coral: "#fdb6ac", grape: "#e3b6ff" };
     const glasses: AvatarGlasses[] = ["round", "square", "oval", "none", "sunglasses", "monocle"];
     for (const color of Object.keys(palettes) as AvatarColor[]) for (const style of glasses) for (const size of [22, 96]) {
       const props = { name: "Editor", identity: "editor", color, glasses: style, size, animated: false };

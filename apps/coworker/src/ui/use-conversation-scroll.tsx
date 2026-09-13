@@ -11,6 +11,8 @@ export function useConversationScroll(scope: string, active: boolean, ready: boo
   const position = useRef<ReadingPosition>(positions.get(scope) ?? { top: 0, pinned: true, anchor: null, offset: 0 });
   const [away, setAway] = useState(!position.current.pinned);
   const follow = useRef<() => void>(() => {});
+  const revealAnchor = useRef<(anchor: string) => boolean>(() => false);
+  const reveal = useCallback((anchor: string) => revealAnchor.current(anchor), []);
 
   const jumpToLatest = useCallback(() => {
     position.current = { top: 0, pinned: true, anchor: null, offset: 0 };
@@ -70,6 +72,18 @@ export function useConversationScroll(scope: string, active: boolean, ready: boo
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) reading();
     };
     follow.current = schedule;
+    revealAnchor.current = (anchor) => {
+      const node = anchors().find((entry) => entry.dataset.scrollAnchor === anchor);
+      if (!node) return false;
+      cancelAnimationFrame(frame);
+      position.current.pinned = false;
+      box.scrollTop += node.getBoundingClientRect().top - box.getBoundingClientRect().top - Math.max(16, (box.clientHeight - node.offsetHeight) / 2);
+      remember();
+      writtenTop = box.scrollTop;
+      setAway(true);
+      node.focus({ preventScroll: true });
+      return true;
+    };
     restore();
     box.addEventListener("scroll", scrolled, { passive: true });
     box.addEventListener("wheel", wheel, { passive: true });
@@ -90,10 +104,11 @@ export function useConversationScroll(scope: string, active: boolean, ready: boo
       box.removeEventListener("pointerdown", pointer);
       box.removeEventListener("keydown", key);
       follow.current = () => {};
+      revealAnchor.current = () => false;
     };
   }, [active, ready, scope]);
 
-  return { scrollRef, contentRef, away, jumpToLatest };
+  return { scrollRef, contentRef, away, jumpToLatest, reveal };
 }
 
 export function JumpToLatest({ onClick }: { onClick: () => void }) {

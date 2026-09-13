@@ -294,7 +294,8 @@ body.is-resizing-panel * {
 }
 
 /* The front card: nearly upright, and after the welcome it follows the pointer within tiny limits —
-   at most 0.8° of turn, 1px of travel, and a contact shadow that leans 1px the other way. */
+   at most 0.8° of turn and 1px of travel here, plus the shared avatar's own lean of at most 1.5°,
+   and a contact shadow that leans 1px the other way. */
 .mascot-stack__front {
   z-index: 3;
   width: var(--mascot-size);
@@ -322,6 +323,7 @@ body.is-resizing-panel * {
 
 .mascot-stack:not(.is-gazing) .mascot-stack__front .coworker-avatar__pointer-gaze,
 .mascot-stack:not(.is-gazing) .mascot-stack__front .coworker-avatar__pointer-features,
+.mascot-stack:not(.is-gazing) .mascot-stack__front .coworker-avatar__pointer-body,
 .mascot-stack:not(.is-gazing) .mascot-stack__front .coworker-mark__pointer-gaze {
   transform: none;
 }

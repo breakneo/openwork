@@ -1,9 +1,14 @@
 import type { Ref } from "react";
 import type { AvatarMotion } from "./coworker-avatar-motion";
 
-export type AvatarColor = "blue" | "violet" | "mint" | "orange" | "rose" | "slate" | "sand" | "sage";
+export type AvatarColor =
+  | "blue" | "violet" | "mint" | "orange" | "rose" | "slate" | "sand" | "sage"
+  | "sky" | "lagoon" | "lime" | "lemon" | "coral" | "grape";
 export type AvatarGlasses = "round" | "square" | "oval" | "none" | "sunglasses" | "monocle" | "star";
 
+/* Soft colors keep their original values. The bold six share the same lightness steps
+ * (fill, edge, depth) at two to three times the chroma, so glasses stay legible and the
+ * cut-paper construction reads the same; each sits between existing hues, not on one. */
 const PALETTES: Record<AvatarColor, { fill: string; edge: string; depth: string }> = {
   blue: { fill: "#b8c9f0", edge: "#91a9dc", depth: "#7389b7" },
   violet: { fill: "#c8c1e2", edge: "#aaa1d0", depth: "#81789f" },
@@ -13,6 +18,12 @@ const PALETTES: Record<AvatarColor, { fill: string; edge: string; depth: string 
   slate: { fill: "#e3e6ea", edge: "#c2c8d0", depth: "#939aa4" },
   sand: { fill: "#ded0b0", edge: "#c1ae86", depth: "#95825c" },
   sage: { fill: "#becab4", edge: "#9eaf91", depth: "#788b6c" },
+  sky: { fill: "#a1d0fd", edge: "#63b1f9", depth: "#4c8bc5" },
+  lagoon: { fill: "#73dfe0", edge: "#25c2c3", depth: "#1d989a" },
+  lime: { fill: "#addb88", edge: "#89bd5b", depth: "#6b9544" },
+  lemon: { fill: "#e4ca5f", edge: "#c5aa2b", depth: "#9c851a" },
+  coral: { fill: "#fdb6ac", edge: "#f2897c", depth: "#bf6b60" },
+  grape: { fill: "#e3b6ff", edge: "#c692e6", depth: "#9c72b6" },
 };
 
 export type StaticCoworkerAvatarProps = {

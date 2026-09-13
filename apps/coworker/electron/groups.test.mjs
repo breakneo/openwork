@@ -3,13 +3,24 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { marked } from "marked";
+import { z } from "zod";
 import { createCollaboration, nativeMessageId } from "./collaboration.mjs";
+import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS } from "./activity-inbox.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
 import { normalizeSettings } from "./settings.mjs";
 import { withInteractiveQuestionDefault } from "./collaboration-plugin.mjs";
+import { createEvents, assertEventToolContext, assertEventHumanOrigin, eventToolCatalog, eventNativeSchemas } from "./events.mjs";
+import { EVENT_PLUGIN } from "./event-plugin.mjs";
+import { createCoworkerToolsServer } from "./coworker-tools.mjs";
+import { coworkerIdentity, EVENT_CONTEXT_LIMIT, EVENT_DYNAMIC_LIMIT } from "./event-execution.mjs";
+import { eventInputSchema } from "../src/lib/events.ts";
+import { updateAllHands, prepareAllHands, claimAllHands, readAllHands } from "./all-hands.mjs";
 import { createWorker, getWorker, nextWorkerState, parseWorkerReport, prepareWorkerTurn, queueWorkerSteer, updateWorker } from "./workers.mjs";
-import { createCoworkerThreads } from "../src/lib/threads.ts";
+import { connectedModelCatalog, createCoworkerThreads } from "../src/lib/threads.ts";
+import { resolveDiscussionModel } from "../src/lib/model-choice.ts";
+import { fixtureCatalog, fixtureProvider } from "../src/lib/provider-catalog.fixture.ts";
 import {
   INTERRUPTED_TURN_MESSAGE,
   MAX_TURNS,
@@ -251,6 +262,10 @@ test("an action line names its coworker and what it links to", async () => {
   });
 });
 
+const fixtureCreatedAt = "2026-09-11T00:00:00.000Z";
+const fixtureIdentity = { coworkerCreatedAt: fixtureCreatedAt };
+const fixtureCoworker = async (slug) => ({ slug, name: slug, role: "", mission: "", workspaceId: `workspace_${slug}`, createdAt: fixtureCreatedAt });
+
 function nativeFixture(onSend = async () => {}) {
   const histories = new Map();
   const requests = [];
@@ -262,6 +277,7 @@ function nativeFixture(onSend = async () => {}) {
   const snapshot = (threadId) => ({ threadId, title: threadId, status: { type: held.has(threadId) ? "busy" : "idle" }, messages: histories.get(threadId) ?? [], todos: [] });
   return { requests, aborted, histories, held, interactions, decisions, clientFor: async (slug) => ({
     workspaceId: `workspace_${slug}`,
+    coworkerCreatedAt: fixtureCreatedAt,
     pendingInteractions: async (threadId) => interactions.get(threadId) ?? { permissions: [], questions: [] },
     replyPermission: async (request, reply) => { decisions.push({ slug, request, reply }); interactions.delete(request.sessionID); held.delete(request.sessionID); },
     replyQuestion: async (request, answers) => { decisions.push({ slug, request, answers }); interactions.delete(request.sessionID); held.delete(request.sessionID); },
@@ -276,9 +292,9 @@ function nativeFixture(onSend = async () => {}) {
         const reply = { id: `assistant_${++sequence}`, role: "assistant", parentId: input.messageId, completedAt: null, error: null, parts: [{ type: "tool", callId: `call_${sequence}` }] };
         messages.push({ id: input.messageId, role: "user", parentId: null, parts: [...(input.context ? [{ type: "text", text: input.context, synthetic: true }] : []), { type: "text", text: input.prompt }] }, reply);
         histories.set(threadId, messages);
-        await onSend({ slug, threadId, input, reply });
+        const answer = await onSend({ slug, threadId, input, reply });
         reply.completedAt = Date.now();
-        reply.parts.push({ type: "text", text: slug === "editor" ? "CHECKED PUBLIC FACT" : "Original task followed up." });
+        reply.parts.push({ type: "text", text: typeof answer === "string" ? answer : slug === "editor" ? "CHECKED PUBLIC FACT" : "Original task followed up." });
       }
       return { threadId, messageId: input.messageId, messageCountBefore: 0, acceptedAt: Date.now(), alreadyPresent: present };
     },
@@ -296,13 +312,225 @@ async function eventually(check) {
   assert.fail("The collaboration did not settle within the module check's deadline.");
 }
 
-test("idle collaboration does not copy settled history and still accepts new work", async (t) => {
+async function publishFixture(home, source) {
+  const executionId = source.executionId ?? source.id;
+  const event = await appendGroupEvent(home, source.owner.groupId, { id: `evt_${executionId}`, executionId, kind: source.state === "succeeded" ? "coworker" : "status", slug: source.owner.slug, threadId: source.owner.threadId, text: source.result || source.error });
+  return { eventId: event.id, event };
+}
+
+test("Activity mentions require standalone @you in visible prose", () => {
+  for (const value of ["@you", "A decision, @YOU?", "**@You**, choose one.", "(@you)", "Question:@you!", "Hello,@you", "- @you: which option?", "[ask @you](https://example.test)", "```js\n@you\n```\n\nOutside: @you."]) assert.equal(mentionsYou(value), true, value);
+  for (const value of ["you", "@yourself", "@you-two", "@you_two", "@you2", "@youé", "@@you", "name@you", "person@you.test", "@you.test", "https://example.test/@you", "https://example.test/?ask=@you", "www.example.test/@you", "[source](https://example.test/@you)", "<https://example.test/@you>", "`@you`", "``literal ` @you``", "```js\n@you\n```", "~~~\n@you\n~~~", "```\n@you", "    @you", "> @you", "> Quoted person\n@you", "> > @you", "**name**@you", "@you**more**", "\\@you"]) assert.equal(mentionsYou(value), false, value);
+});
+
+test("Activity parsing failures never fail private completion or group publication", async (t) => {
+  await withHome(async (home) => {
+    const parser = t.mock.method(marked, "lexer", () => { throw new Error("Unusual Markdown"); });
+    let service;
+    let groups;
+    let publications = 0;
+    const fixture = nativeFixture(async ({ slug, threadId, input, reply }) => {
+      if (!input.prompt.startsWith("Continue") && input.prompt.includes("Ask the editor once")) {
+        const trusted = await service.context(slug, { sessionID: threadId, messageID: reply.id, callID: reply.parts[0].callId });
+        await service.request(trusted, "consultation", { to: "editor", question: "Check the fact" }, fixtureIdentity);
+      }
+      return "@you, review the result.";
+    });
+    service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 5,
+      consult: (task) => groups.consultation(task),
+      publish: (task) => { publications++; return publishFixture(home, task); },
+      publishExecution: (entry) => { publications++; return publishFixture(home, entry); },
+    });
+    groups = createGroupExecution({ directory: home, collaboration: service, clientFor: fixture.clientFor, coworkerFor: fixtureCoworker, coordinator: async () => ({}), catalogFor: async () => ({ models: [] }), pollMs: 5 });
+    try {
+      const privateReply = await service.submit({ owner: { ...fixtureIdentity, slug: "scout", threadId: "private-parser", conversationId: "private-parser", kind: "private" }, prompt: "A normal private reply" });
+      await eventually(async () => (await service.read((state) => state.executions[privateReply.id])).state === "succeeded");
+      const group = await createGroup(home, { name: "Parser check", participantSlugs: ["scout", "editor"] });
+      await groups.start();
+      await groups.submit(group.id, { clientMessageId: "parser-group", text: "@scout Ask the editor once" });
+      await eventually(async () => (await service.listActivity()).length === 4 && !(await groups.status(group.id)).active);
+      assert.ok(parser.mock.callCount() >= 4, "each capture actually encountered the parser failure");
+      assert.ok((await service.listActivity()).every((item) => item.kind === "reply"), "classification falls back without failing the source");
+      assert.equal(publications, 2, "consultation and group continuation publish once, without notification retries");
+      assert.deepEqual(fixture.aborted, []);
+      assert.ok(await service.read((state) => Object.values(state.executions).every((entry) => entry.state === "succeeded" && !entry.publicationAttempts && !entry.publicationFailed && (!entry.groupReply || entry.groupReply.published))));
+      const before = await service.listActivity();
+      await service.change((state) => {
+        const source = { ...state.executions[privateReply.id], activityRecorded: false };
+        recordActivity(state, source, { get text() { throw new Error("Unexpected projection input"); } });
+        assert.equal(source.state, "succeeded");
+      });
+      assert.deepEqual(await service.listActivity(), before, "a recording failure leaves the index intact");
+    } finally { await groups.stop(); await service.stop(); parser.mock.restore(); }
+  });
+});
+
+test("Activity recovery preserves creation identity and never backfills a missing pin", async () => {
   await withHome(async (home) => {
     const fixture = nativeFixture();
-    const service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 5 });
+    const replacement = "2026-09-12T00:00:00.000Z";
+    const options = { directory: home, pollMs: 5, clientFor: async (slug) => ({ ...await fixture.clientFor(slug), coworkerCreatedAt: replacement }) };
+    let service = createCollaboration({ ...options, pollMs: 60_000 });
+    const owner = { ...fixtureIdentity, slug: "scout", workspaceId: "workspace_scout", threadId: "replacement", conversationId: "replacement", kind: "private" };
+    try {
+      const original = await service.submit({ owner, messageId: "queued-original", prompt: "Do not move this work" });
+      const legacy = await service.submit({ owner: { ...owner, threadId: "legacy-pin", conversationId: "legacy-pin", coworkerCreatedAt: null }, messageId: "missing-pin", prompt: "Legacy work" });
+      const child = await service.request({ entry: legacy, callId: "worker" }, "worker", { name: "Legacy result", goal: "Old check" });
+      await service.completeWorker({ slug: "scout", id: child.structured.worker.id, status: "finished" }, [{ kind: "finding", report: "done", text: "Recovered result" }]);
+      await service.change((state) => {
+        delete state.tasks[legacy.taskId].coworkerCreatedAt;
+        delete state.executions[legacy.id].coworkerCreatedAt;
+      });
+      await service.stop();
+      service = createCollaboration(options);
+      await service.start();
+      await eventually(async () => (await service.read((state) => state.executions[original.id])).state === "failed" && (await service.read((state) => state.tasks[legacy.taskId])).state === "succeeded");
+      assert.equal(fixture.requests.some((request) => request.messageId === original.messageId), false, "same workspace, different creation identity cannot admit old work");
+      assert.equal(await service.read((state) => state.tasks[original.taskId].coworkerCreatedAt), fixtureCreatedAt);
+      const followup = await service.read((state) => state.executions[state.tasks[legacy.taskId].executionId]);
+      assert.equal(followup.continuation, true);
+      assert.equal(followup.coworkerCreatedAt, null, "client admission cannot fill an old task's missing identity");
+      assert.deepEqual(await service.listActivity(), []);
+      await service.submit({ owner: { ...owner, coworkerCreatedAt: replacement }, messageId: "fresh-replacement", prompt: "New request" });
+      await eventually(async () => (await service.listActivity()).length === 1);
+      assert.equal((await service.listActivity())[0].coworkerCreatedAt, replacement);
+      await service.change((state) => { delete state.activity[0].coworkerCreatedAt; });
+      const inbox = createActivityInbox({ collaboration: service, coworkers: async () => [{ ...await fixtureCoworker("scout"), createdAt: replacement }], groups: async () => [] });
+      assert.deepEqual(await inbox.list(), [], "an old index row without creation identity also fails closed");
+    } finally { await service.stop(); }
+  });
+});
+
+test("Activity persists only final private text, explicit read state, and original workspace identity", async () => {
+  await withHome(async (home) => {
+    let clock = 1000;
+    const fixture = nativeFixture(async ({ input, reply, threadId }) => {
+      reply.parts.push({ type: "reasoning", text: "SECRET REASONING @you" }, { type: "text", text: "HIDDEN @you", synthetic: true });
+      reply.parts[0].toolOutput = "SECRET TOOL @you";
+      fixture.histories.get(threadId).splice(-1, 0, { id: `early_${reply.id}`, role: "assistant", parentId: input.messageId, completedAt: 1, parts: [{ type: "text", text: "TOOL ACK @you" }] });
+      if (input.prompt === "fail") reply.error = { message: "Deliberate failure" };
+      return input.prompt === "long" ? `${"Visible result. ".repeat(35)}@YOU, which option?` : "Final visible answer.";
+    });
+    const options = { directory: home, clientFor: fixture.clientFor, pollMs: 5, now: () => clock, onSuccess: async () => { throw new Error("Optional memory capture unavailable"); } };
+    let service = createCollaboration(options);
+    let actors = [await fixtureCoworker("scout")];
+    const inbox = () => createActivityInbox({ collaboration: service, coworkers: async () => actors, groups: () => listGroups(home) });
+    const owner = { ...fixtureIdentity, slug: "scout", threadId: "ses_inbox", conversationId: "ses_inbox", kind: "private" };
+    try {
+      for (const prompt of ["plain", "long", "fail"]) {
+        const entry = await service.submit({ owner, messageId: `msg_${prompt}`, prompt, track: true });
+        await eventually(async () => ["succeeded", "failed"].includes((await service.read((state) => state.executions[entry.id])).state));
+        clock += 100;
+      }
+      const items = await inbox().list();
+      assert.equal(items.length, 2);
+      assert.deepEqual(items.map((item) => item.kind), ["mention", "reply"]);
+      assert.equal(items[0].preview.length, 400, "classification uses the complete final text before clipping");
+      assert.equal(items[1].preview, "Final visible answer.", "no earlier acknowledgements, tool output, synthetic text or reasoning");
+      assert.deepEqual(items[0].target, { kind: "private", threadId: owner.threadId });
+      assert.equal(items[0].workspaceId, "workspace_scout");
+      assert.equal(items[0].coworkerCreatedAt, fixtureCreatedAt);
+      assert.equal(items[0].readAt, null);
+      await inbox().markRead([items[0].id, items[0].id, "unknown"]);
+      clock += 100;
+      let read = await inbox().markRead([items[0].id]);
+      assert.equal(read[0].readAt, 1300, "idempotent Read keeps the first native timestamp");
+      assert.equal(read[1].readAt, null, "unlisted IDs stay unread");
+      assert.deepEqual(await inbox().markRead([]), read);
+      for (const ids of [undefined, [""], [1], Array(301).fill(items[0].id)]) await assert.rejects(inbox().markRead(ids), /300 Activity IDs/);
+      await assert.rejects(inbox().markRead([items[0].id], "yes"), /read or unread/);
+      await service.stop();
+      service = createCollaboration(options);
+      assert.deepEqual(await inbox().list(), read);
+      await service.submit({ owner, messageId: "msg_long", prompt: "long", track: true });
+      assert.deepEqual(await inbox().list(), read, "replaying admission preserves the item and readAt");
+      assert.equal(fixture.requests.length, 3);
+      read = await inbox().markRead([items[0].id], false);
+      assert.equal(read[0].readAt, null);
+      actors = [{ ...await fixtureCoworker("scout"), createdAt: "2026-09-12T00:00:00.000Z" }];
+      assert.deepEqual(await inbox().list(), []);
+      assert.deepEqual(await inbox().markRead([items[0].id]), []);
+      assert.equal((await service.listActivity())[0].readAt, null, "a hidden source cannot be marked by guessing its ID");
+      actors = [];
+      assert.deepEqual(await inbox().list(), []);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Activity source receipts survive bounded pruning and restart", async () => {
+  await withHome(async (home) => {
+    const options = { directory: home, clientFor: nativeFixture().clientFor };
+    let service = createCollaboration(options);
+    try {
+      await service.change((state) => {
+        for (let index = 0; index <= MAX_ACTIVITY_ITEMS; index++) {
+          const id = `source_${index}`;
+          const owner = { slug: "scout", kind: "private", threadId: "private", conversationId: "private" };
+          state.tasks[id] = { id, state: "succeeded", executionId: id, activityEligible: true };
+          const entry = state.executions[id] = { ...fixtureIdentity, id, taskId: id, owner, state: "succeeded", workspaceId: "workspace_scout" };
+          recordActivity(state, entry, { text: "Visible result", at: index });
+        }
+      });
+      const items = await service.listActivity();
+      assert.equal(items.length, MAX_ACTIVITY_ITEMS);
+      assert.deepEqual([items[0].at, items.at(-1).at], [300, 1]);
+      await service.stop();
+      service = createCollaboration(options);
+      await service.change((state) => recordActivity(state, state.executions.source_0, { text: "Replayed result", at: 999 }));
+      assert.deepEqual(await service.listActivity(), items, "a pruned source cannot reappear with a newer timestamp");
+      assert.equal(await service.read((state) => state.executions.source_0.activityRecorded), true);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Activity migration keeps old origins, reconstructed continuations and queued group history silent", async () => {
+  await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const options = { directory: home, clientFor: fixture.clientFor, pollMs: 5 };
+    let service = createCollaboration({ ...options, pollMs: 60_000 });
+    const groupOptions = { directory: home, clientFor: fixture.clientFor, coworkerFor: fixtureCoworker, coordinator: async () => ({}), catalogFor: async () => ({ models: [] }) };
+    let groups = createGroupExecution({ ...groupOptions, collaboration: service, pollMs: 60_000 });
+    const owner = { slug: "scout", threadId: "legacy", conversationId: "legacy", kind: "private" };
+    try {
+      const group = await createGroup(home, { name: "Old group", participantSlugs: ["scout", "editor"] });
+      const root = await service.submit({ owner, messageId: "old_origin", prompt: "Old origin" });
+      const worker = await service.request({ entry: root, callId: "old_child" }, "worker", { name: "Old worker", goal: "Old check" });
+      await service.completeWorker({ id: worker.structured.worker.id, slug: "scout", status: "finished" }, [{ kind: "finding", report: "done", text: "Old findings" }]);
+      await groups.submit(group.id, { clientMessageId: "old_group", text: "@scout Old group turn" });
+      await groups.stop();
+      await service.stop();
+      const file = path.join(home, ".collaboration", "state.json");
+      const legacy = JSON.parse(await readFile(file, "utf8"));
+      delete legacy.activity;
+      for (const task of Object.values(legacy.tasks)) delete task.activityEligible;
+      for (const request of legacy.groups[group.id].queue) { delete request.activityEligible; delete request.coworkerCreatedAts; }
+      await writeFile(file, JSON.stringify(legacy));
+      service = createCollaboration(options);
+      groups = createGroupExecution({ ...groupOptions, collaboration: service, pollMs: 5 });
+      await service.start();
+      await groups.start();
+      await eventually(async () => (await service.read((state) => state.tasks[root.taskId])).state === "succeeded" && !(await groups.status(group.id)).active);
+      assert.ok(fixture.requests.some((request) => request.prompt.startsWith("Continue the original task")));
+      assert.deepEqual(await service.listActivity(), []);
+      const reconstructed = { slug: "scout", id: "wrk_reconstructed", name: "Old Worker", goal: "Old result", status: "finished" };
+      await service.attachWorker(reconstructed, owner);
+      await service.completeWorker(reconstructed, [{ kind: "finding", report: "done", text: "Recovered findings" }]);
+      await eventually(async () => (await service.receipts({ slug: owner.slug, threadId: owner.threadId })).every((receipt) => receipt.state === "succeeded"));
+      assert.deepEqual(await service.listActivity(), []);
+      await service.submit({ owner: { ...owner, ...fixtureIdentity }, messageId: "new_origin", prompt: "New origin" });
+      await eventually(async () => (await service.listActivity()).length === 1);
+    } finally { await groups.stop(); await service.stop(); }
+  });
+});
+
+test("idle collaboration does not copy settled history and still accepts new work", async (t) => {
+  await withHome(async (home) => {
+    let clock = Date.now();
+    const integrated = await eventFixture(home, { startGroups: false, now: () => clock });
+    const { native: fixture, collaboration: service, events } = integrated;
     const owner = { slug: "scout", threadId: "ses_idle", conversationId: "ses_idle", kind: "private" };
     await service.change((state) => {
-      state.tasks.settled = { id: "settled", state: "succeeded", result: "kept history ".repeat(10_000) };
+      state.tasks.settled = { id: "settled", owner, state: "succeeded", result: "kept history ".repeat(10_000) };
     });
     const clone = globalThis.structuredClone;
     let historyCopies = 0;
@@ -314,21 +542,44 @@ test("idle collaboration does not copy settled history and still accepts new wor
     });
     try {
       await service.start();
+      await Promise.all([events.tick(), events.tick()]);
       await eventually(() => reads >= 10);
-      assert.equal(historyCopies, 0, "idle ticks must not clone the store or completed task payloads");
+      assert.equal(historyCopies, 0, "idle collaboration and Event ticks must not clone the store or completed task payloads");
+      const startsAt = clock + 60_000;
+      const input = { ...eventInput(["scout"]), startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" } };
+      const future = await events.create(input);
+      const paused = await events.create({ ...input, state: "paused" });
+      historyCopies = 0;
+      await events.tick();
+      assert.equal(historyCopies, 0, "future and paused definitions require no history copies");
+      clock = startsAt;
+      await Promise.all([events.tick(), events.tick()]);
+      const due = await events.get(future.id);
+      assert.equal(due.runs.length, 1);
+      assert.equal(due.runs[0].scheduledFor, startsAt);
+      assert.equal(due.runs[0].status, "running", "a newly due occurrence still reaches group admission");
+      assert.equal((await events.get(paused.id)).runs.length, 0);
+      await events.cancel(future.id, due.runs[0].id);
+      const manual = await events.runNow(paused.id, "manual-after-idle");
+      await events.tick();
+      assert.equal((await events.get(paused.id)).runs[0].status, "running", "manual admissions advance even when no schedule is due");
+      await events.cancel(paused.id, manual.id);
+      historyCopies = 0;
+      await events.tick();
+      assert.equal(historyCopies, 0, "finished Event history stays idle after cancellation");
       spy.mock.restore();
       await service.submit({ owner, messageId: "msg_after_idle", prompt: "New work", track: true });
       await eventually(async () => fixture.requests.length === 1 && (await service.threadState(owner.slug, owner.threadId)).pending === null);
       assert.equal(fixture.requests[0].prompt, "New work");
       assert.equal(await service.read((state) => state.tasks.settled.result.length), "kept history ".length * 10_000);
-    } finally { spy.mock.restore(); await service.stop(); }
+    } finally { spy.mock.restore(); await integrated.stop(); }
   });
 });
 
 test("automatic memory captures only terminal private success and recalls raw requests in a new thread", async () => {
   await withHome(async (home) => {
     await mkdir(path.join(home, "scout"));
-    const owner = { slug: "scout", threadId: "private-first", conversationId: "private-first", kind: "private" };
+    const owner = { ...fixtureIdentity, slug: "scout", threadId: "private-first", conversationId: "private-first", kind: "private" };
     const prompt = "My release checklist has exactly 17 items.";
     const captured = [];
     const memory = createConversationMemory({ directory: home });
@@ -352,6 +603,9 @@ test("automatic memory captures only terminal private success and recalls raw re
       const first = await service.submit({ owner, prompt, track: true });
       await eventually(() => captured.length === 1);
       assert.equal(captured[0].continuation, true, "the initial success still awaiting a Worker is not captured");
+      assert.equal((await service.listActivity()).length, 1, "the Worker acknowledgement and raw findings do not enter Activity");
+      assert.equal((await service.listActivity())[0].id, `activity_${captured[0].id}`);
+      assert.equal(captured[0].coworkerCreatedAt, fixtureCreatedAt, "Worker continuations retain the original identity");
       assert.equal(captured[0].requestText, prompt);
       assert.match(captured[0].prompt, /^Continue the original task/);
       assert.equal((await service.read((state) => state.executions[first.id])).prompt, prompt);
@@ -395,13 +649,13 @@ test("automatic memory captures published group replies in only their shared sco
       groupsFor: async (slug) => (await listGroups(home)).filter((group) => group.participantSlugs.includes(slug)).map((group) => group.id),
     });
     const published = [];
-    const fixture = nativeFixture();
+    const fixture = nativeFixture(async ({ input }) => input.prompt.includes("Other group budget") ? "@YOU, which budget applies?" : undefined);
     const service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 5,
       memoryContext: (owner) => memory.context(owner),
       onSuccess: (entry) => entry.owner.kind === "private" ? memory.capture(entry) : Promise.resolve(),
     });
     const groups = createGroupExecution({ directory: home, collaboration: service, clientFor: fixture.clientFor, pollMs: 5,
-      coworkerFor: async (slug) => ({ slug, name: slug, role: "", mission: "" }),
+      coworkerFor: fixtureCoworker,
       coordinator: async () => ({}), catalogFor: async () => ({ models: [] }),
       onPublished: async (entry) => {
         const timeline = await readGroupTimeline(home, entry.owner.groupId);
@@ -411,7 +665,7 @@ test("automatic memory captures published group replies in only their shared sco
       },
     });
     try {
-      const privateOwner = { slug: "scout", threadId: "private", conversationId: "private", kind: "private" };
+      const privateOwner = { ...fixtureIdentity, slug: "scout", threadId: "private", conversationId: "private", kind: "private" };
       await service.submit({ owner: privateOwner, prompt: "PRIVATE CHECKLIST", track: true });
       await eventually(async () => (await memory.read(privateOwner)).recent.length === 2);
       await groups.start();
@@ -424,7 +678,20 @@ test("automatic memory captures published group replies in only their shared sco
       for (const { entry, timeline, marked } of published) {
         assert.equal(marked, true);
         assert.ok(timeline.some((event) => event.kind === "coworker" && event.threadId === entry.owner.threadId && event.turnId === entry.owner.turnId && event.text === entry.result), "capture follows actual timeline publication");
+        const item = (await service.listActivity()).find((item) => item.id === `activity_${entry.id}`);
+        assert.equal(item.kind, entry.owner.groupId === other.id ? "mention" : "reply", "group replies and human mentions each produce one row");
+        assert.deepEqual(item.target, { kind: "group", groupId: entry.owner.groupId, eventId: timeline.find((event) => event.executionId === entry.id).id });
       }
+      assert.equal((await service.listActivity()).length, 4, "a group mention does not also create a reply row");
+      let actors = [await fixtureCoworker("scout")];
+      const inbox = createActivityInbox({ collaboration: service, coworkers: async () => actors, groups: () => listGroups(home) });
+      actors = [{ ...actors[0], createdAt: "2026-09-12T00:00:00.000Z" }];
+      assert.deepEqual(await inbox.list(), [], "same path/workspace replacement cannot see private or group sources");
+      actors = [await fixtureCoworker("scout")];
+      await updateGroup(home, other.id, { participantSlugs: ["editor", "ops"] });
+      assert.equal((await inbox.list()).some((item) => item.target.groupId === other.id), false, "removed members cannot reveal old shared Activity");
+      await archiveGroup(home, first.id);
+      assert.equal((await inbox.markRead((await service.listActivity()).map((item) => item.id))).length, 1, "markRead returns the same current membership filters");
       const firstOwner = { slug: "scout", kind: "group", groupId: first.id };
       const store = await memory.read(firstOwner);
       assert.deepEqual(store.recent.filter((entry) => entry.speaker === "user").map((entry) => entry.text), [messages[0], messages[2]], "group prompt wrappers are not user facts");
@@ -497,6 +764,7 @@ test("shutdown retains group participant ownership until a cancelled raw write s
     const signal = new AbortController();
     let started = false;
     const groups = createGroupExecution({ directory: home, setupTimeoutMs: 20,
+      coworkerFor: fixtureCoworker,
       clientFor: async () => ({ createThread: async () => ({ id: "participant" }) }),
       collaboration: { registerOwner: async () => { started = true; await release.promise; await writeFile(path.join(home, "late-owner"), "last write"); } },
     });
@@ -589,8 +857,8 @@ test("a focused consultation and a Worker resume the immutable private origin ex
       await assert.rejects(service.context(slug, { sessionID: threadId, messageID: reply.id, callID: "made-up-call" }), /admitted parent/);
       await assert.rejects(service.request(trusted, "consultation", { to: "scout", question: "self" }), /cannot ask itself/);
       const consultation = { to: "editor", question: "Check the public fact", context: "SHARED FACT", continuation: { objective: "PRIVATE ORIGIN ONLY", completedActions: ["Read the brief"], resumeInstructions: "Use the two results." } };
-      const first = await service.request(trusted, "consultation", consultation);
-      const duplicate = await service.request(trusted, "consultation", consultation);
+      const first = await service.request(trusted, "consultation", consultation, fixtureIdentity);
+      const duplicate = await service.request(trusted, "consultation", consultation, fixtureIdentity);
       assert.equal(first.structured.collaboration.id, duplicate.structured.collaboration.id);
       const worker = await service.request({ ...trusted, callId: "second-native-call" }, "worker", { name: "Bounded check", goal: "Check once", continuation: consultation.continuation });
       workerId = worker.structured.worker.id;
@@ -601,11 +869,11 @@ test("a focused consultation and a Worker resume the immutable private origin ex
         await service.completeWorker({ slug, id: input.id, status: "finished" }, [{ kind: "finding", text: "WORKER RESULT" }]);
         return { id: input.id, status: "finished" };
       }, cancelWorker: async () => {},
-      publish: (task) => task.groupId ? appendGroupEvent(home, task.groupId, { id: `answer_${task.id}`, kind: "coworker", slug: task.to, text: task.result }) : undefined,
+      publish: (task) => task.groupId ? publishFixture(home, task) : undefined,
     });
-    groups = createGroupExecution({ directory: home, collaboration: service, coworkerFor: async (slug) => ({ slug, name: slug, role: "", mission: "" }), clientFor: fixture.clientFor });
+    groups = createGroupExecution({ directory: home, collaboration: service, coworkerFor: fixtureCoworker, clientFor: fixture.clientFor });
     try {
-      const owner = { slug: "scout", threadId: "ses_private", conversationId: "ses_private", kind: "private" };
+      const owner = { ...fixtureIdentity, slug: "scout", threadId: "ses_private", conversationId: "ses_private", kind: "private" };
       await service.registerOwner({ ...owner, threadId: "ses_other", conversationId: "ses_other" });
       await service.submit({ owner, messageId: "msg_request", prompt: "PRIVATE ORIGIN ONLY", track: true });
       await eventually(async () => (await service.receipts({ slug: "scout", threadId: "ses_private" }))[0]?.state === "succeeded");
@@ -624,6 +892,11 @@ test("a focused consultation and a Worker resume the immutable private origin ex
       const events = await readGroupTimeline(home, group.id);
       assert.equal(events.filter((event) => event.slug === "scout").length, 1);
       assert.equal(events.filter((event) => event.slug === "editor").length, 1);
+      const items = await service.listActivity();
+      assert.equal(items.length, 2, "one consultation publication and one final private follow-up");
+      assert.ok(items.every((item) => item.coworkerCreatedAt === fixtureCreatedAt));
+      assert.deepEqual(items.find((item) => item.slug === "editor").target, { kind: "group", groupId: group.id, eventId: events.find((event) => event.slug === "editor").id });
+      assert.deepEqual(items.find((item) => item.slug === "scout").target, { kind: "private", threadId: "ses_private" });
       assert.ok((await service.excludedThreads("editor")).includes(question.threadId));
       await assert.rejects(service.registerOwner({ slug: "editor", threadId: question.threadId, conversationId: question.threadId, kind: "private" }), /another conversation/);
     } finally { await groups.stop(); await service.stop(); }
@@ -848,6 +1121,15 @@ test("the backend group runner cancels every parallel native speaker", async () 
       await groups.submit(group.id, { clientMessageId: "parallel-completed", text: "@everyone Another independent check." });
       await eventually(() => fixture.requests.filter((request) => request.slug !== ".coordinator").length === 4);
       const editor = fixture.requests.filter((request) => request.slug === "editor").at(-1);
+      const editorExecution = (await service.activityEntries({ groupId: group.id })).find((entry) => entry.messageId === editor.messageId);
+      assert.ok(editorExecution);
+      const documents = await Promise.all([1, 2].map((revision) => appendGroupEvent(home, group.id, {
+        id: `evt_document_brief_${revision}`, kind: "status", status: "document", documentId: "brief", revision,
+        executionId: editorExecution.executionId, threadId: editor.threadId, text: `Editor updated Brief · revision ${revision}`,
+      })));
+      const writing = await groups.activity(group.id, (scope) => service.activityEntries(scope));
+      assert.ok(writing.executions.some((entry) => entry.messageId === editor.messageId && entry.state === "running"), "document receipts must not hide a live native reply");
+      assert.deepEqual(writing.timeline.filter((event) => event.status === "document"), documents);
       fixture.held.delete(editor.threadId);
       await eventually(async () => (await service.activityEntries({ groupId: group.id })).some((entry) => entry.messageId === editor.messageId && entry.state === "succeeded"));
       const buffered = await groups.activity(group.id, (scope) => service.activityEntries(scope));
@@ -861,6 +1143,7 @@ test("the backend group runner cancels every parallel native speaker", async () 
       });
       assert.equal(handedOff.timeline.filter((event) => event.kind === "coworker" && event.slug === "editor").length, 1);
       assert.equal(handedOff.executions.some((entry) => entry.messageId === editor.messageId), false, "publication between activity and timeline reads must not duplicate the reply");
+      assert.deepEqual(handedOff.timeline.filter((event) => event.status === "document"), documents, "Stop and publication retain artifact execution provenance");
       assert.deepEqual((await getGroup(home, group.id)).turns[1].speakers.map((speaker) => speaker.status), ["stopped", "succeeded"]);
     } finally { await groups.stop(); await service.stop(); }
   });
@@ -916,13 +1199,13 @@ test("group continuations yield to routing and all foreground speakers, includin
         child = await service.request(trusted, "worker", { name: "Group check", goal: "Check result.md" });
       } else if (slug === "editor") fixture.held.add(threadId);
     });
-    service = createCollaboration({ directory: home, pollMs: 5, spawn: async (_slug, input) => ({ id: input.id, status: "running" }), cancelWorker: async () => {}, clientFor: async (slug, options = {}) => {
+    service = createCollaboration({ directory: home, pollMs: 5, publishExecution: (entry) => publishFixture(home, entry), spawn: async (_slug, input) => ({ id: input.id, status: "running" }), cancelWorker: async () => {}, clientFor: async (slug, options = {}) => {
       setups.push({ slug, ...options });
       if (holdSetup && options.kind === "review") { preparing = true; await setupGate; }
       return fixture.clientFor(slug);
     } });
     const groups = createGroupExecution({ directory: home, collaboration: service, clientFor: fixture.clientFor, pollMs: 5,
-      coworkerFor: async (slug) => ({ slug, name: slug, role: "Research and architecture", mission: "Deep analysis", model: "test/model" }),
+      coworkerFor: async (slug) => ({ ...await fixtureCoworker(slug), role: "Research and architecture", mission: "Deep analysis", model: "test/model" }),
       coordinator: async () => { if (child) { routing = true; await routeGate; } return { workspaceId: "coordinator" }; },
       catalogFor: async () => ({ models: [{ id: "test/model", providerId: "test", modelId: "model", variants: [], source: "local", tier: "key", toolCall: true, status: "active", label: "Test", releaseDate: "" }] }),
     });
@@ -943,6 +1226,10 @@ test("group continuations yield to routing and all foreground speakers, includin
       assert.ok(setups.some((entry) => entry.slug === "editor" && entry.requestText === "Hello"), "effort receives the raw request, not role or prompt wrappers");
       fixture.held.clear();
       await eventually(async () => (await service.receipts({ groupId: group.id }))[0]?.state === "succeeded");
+      await eventually(async () => {
+        const parent = await service.read((state) => state.tasks[state.tasks[child.structured.collaboration.id].parentId]);
+        return (await service.listActivity()).some((item) => item.target.eventId === `evt_${parent.executionId}`);
+      });
       assert.equal(setups.find((entry) => entry.kind === "review").requestText, "@scout Delegate the original");
       const origin = await service.read((state) => state.tasks[state.tasks[child.structured.collaboration.id].parentId]);
       holdSetup = true;
@@ -1078,13 +1365,17 @@ test("a dependency-free tool-free retry retains its message ID", async () => {
       return { ...client, retryTurn: async (threadId, input) => { retries++; fixture.histories.set(threadId, []); return client.sendTurn(threadId, input); } };
     } });
     try {
-      const root = await service.submit({ owner: { slug: "scout", threadId: "ses_tool_free", conversationId: "ses_tool_free", kind: "private" }, messageId: "msg_tool_free", prompt: "Reply without tools" });
+      const root = await service.submit({ owner: { ...fixtureIdentity, slug: "scout", threadId: "ses_tool_free", conversationId: "ses_tool_free", kind: "private" }, messageId: "msg_tool_free", prompt: "Reply without tools" });
       await eventually(async () => (await service.read((state) => state.executions[root.id])).state === "failed" && fixture.aborted.length > 0);
       const retry = await service.submit({ ...root, retry: true, retryByPerson: true });
       assert.equal(retry.messageId, root.messageId);
       await eventually(async () => (await service.read((state) => state.executions[root.id])).state === "succeeded");
       assert.equal(retries, 1);
       assert.equal(fixture.histories.get(root.owner.threadId).filter((message) => message.role === "user").length, 1);
+      assert.equal(await service.read((state) => state.tasks[root.taskId].activityEligible), true, "known retry is not a legacy import");
+      assert.deepEqual((await service.listActivity()).map((item) => [item.id, item.coworkerCreatedAt]), [[`activity_${root.id}`, fixtureCreatedAt]]);
+      await service.submit({ ...root, retry: false });
+      assert.equal((await service.listActivity()).length, 1, "same-ID replay still deduplicates the successful retry");
     } finally { await service.stop(); }
   });
 });
@@ -1191,16 +1482,16 @@ test("a nested consultation delivers the final child continuation to its parent 
     const fixture = nativeFixture(async ({ slug, threadId, input, reply }) => {
       if (input.prompt === "Private task" || input.prompt === "Focused B question") {
         const trusted = await service.context(slug, { sessionID: threadId, messageID: reply.id, callID: reply.parts[0].callId });
-        await service.request(trusted, "consultation", { to: slug === "scout" ? "editor" : "ops", question: slug === "scout" ? "Focused B question" : "Focused C question", continuation: { objective: input.prompt, resumeInstructions: "Synthesize the requested answer." } });
+        await service.request(trusted, "consultation", { to: slug === "scout" ? "editor" : "ops", question: slug === "scout" ? "Focused B question" : "Focused C question", continuation: { objective: input.prompt, resumeInstructions: "Synthesize the requested answer." } }, fixtureIdentity);
         reply.parts.push({ type: "text", text: "ACKNOWLEDGEMENT ONLY" });
       } else if (slug === "editor") reply.parts.push({ type: "text", text: "FINAL B SYNTHESIS" });
     });
     service = createCollaboration({ directory: home, clientFor: async (slug, options) => { selections.push({ slug, ...options }); return fixture.clientFor(slug); }, pollMs: 5,
-      consult: async (task) => ({ owner: { slug: task.to, threadId: `ses_${task.to}`, conversationId: "grp_nested", groupId: "grp_nested", kind: "consultation" }, prompt: task.input.question }),
-      publish: async (task) => { published.push({ id: task.id, result: task.result }); },
+      consult: async (task) => ({ owner: { slug: task.to, threadId: `ses_${task.to}`, conversationId: "grp_nested00", groupId: "grp_nested00", kind: "consultation" }, prompt: task.input.question }),
+      publish: async (task) => { published.push({ id: task.id, result: task.result }); return publishFixture(home, task); },
     });
     try {
-      const root = await service.submit({ owner: { slug: "scout", threadId: "ses_private", conversationId: "ses_private", kind: "private" }, messageId: "msg_nested", prompt: "Private task" });
+      const root = await service.submit({ owner: { ...fixtureIdentity, slug: "scout", threadId: "ses_private", conversationId: "ses_private", kind: "private" }, messageId: "msg_nested", prompt: "Private task" });
       await eventually(async () => (await service.read((state) => state.tasks[root.taskId])).state === "succeeded");
       const final = fixture.requests.filter((request) => request.threadId === "ses_private" && request.prompt.startsWith("Continue the original task"));
       assert.equal(final.length, 1);
@@ -1210,6 +1501,12 @@ test("a nested consultation delivers the final child continuation to its parent 
       for (const kind of ["reply", "review"]) assert.equal(selections.find((selection) => selection.slug === "editor" && selection.kind === kind).requestText, "Focused B question", "new consultations and their reviews retain the question, not the continuation wrapper");
       assert.equal(new Set(published.map((entry) => entry.id)).size, 2);
       assert.equal(published.length, 2);
+      const items = await service.listActivity();
+      assert.equal(items.length, 3, "nested publications and the private origin are captured once each");
+      assert.equal(items.filter((item) => item.slug === "editor").length, 1, "consultation continuation publication is not counted twice");
+      assert.ok(items.every((item) => item.coworkerCreatedAt === fixtureCreatedAt), "nested consultation continuations inherit the pinned target identity");
+      assert.match(items.find((item) => item.slug === "editor").preview, /FINAL B SYNTHESIS/);
+      assert.ok(items.every((item) => !item.preview.includes("ACKNOWLEDGEMENT ONLY")));
     } finally { await service.stop(); }
   });
 });
@@ -1295,7 +1592,7 @@ test("projection failure stops after three attempts and retry restores delivery 
     let available = false;
     const service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 5,
       consult: async () => ({ owner: { slug: "editor", threadId: "ses_projection", conversationId: "grp_projection", groupId: "grp_projection", kind: "consultation" }, prompt: "Focused question" }),
-      publish: async () => { attempts++; if (!available) throw new Error("Local projection failed"); },
+      publish: async (task) => { attempts++; if (!available) throw new Error("Local projection failed"); return publishFixture(home, task); },
     });
     try {
       const root = await service.submit({ owner: { slug: "scout", threadId: "ses_origin", conversationId: "ses_origin", kind: "private" }, messageId: "msg_projection", prompt: "Original task" });
@@ -1304,6 +1601,7 @@ test("projection failure stops after three attempts and retry restores delivery 
       assert.equal(attempts, 3);
       assert.match((await service.receipts({ slug: "scout", threadId: "ses_origin" }))[0].error, /three attempts|could not be shown/);
       assert.equal(fixture.requests.filter((request) => request.prompt.startsWith("Continue the original task")).length, 0);
+      assert.deepEqual(await service.listActivity(), [], "an unpublished reply has no Activity row");
       available = true;
       await service.retry(root.taskId);
       await eventually(async () => (await service.receipts({ slug: "scout", threadId: "ses_origin" }))[0].state === "succeeded");
@@ -1351,7 +1649,7 @@ test("group retry sends a new follow-up and retains the accepted tool-bearing at
     });
     const options = { directory: home, clientFor: fixture.clientFor, pollMs: 5 };
     let service = createCollaboration(options);
-    const groupOptions = { directory: home, clientFor: fixture.clientFor, pollMs: 5, coworkerFor: async (slug) => ({ slug, name: slug, role: "", mission: "" }) };
+    const groupOptions = { directory: home, clientFor: fixture.clientFor, pollMs: 5, coworkerFor: fixtureCoworker };
     let groups = createGroupExecution({ ...groupOptions, collaboration: service });
     try {
       const group = await createGroup(home, { name: "Pair", participantSlugs: ["scout", "editor"] });
@@ -1382,6 +1680,8 @@ test("group retry sends a new follow-up and retains the accepted tool-bearing at
       assert.deepEqual(await service.read((state) => state.groups[group.id].recoveryRequests), [{ id: followUp.clientMessageId, turnId: failed.id, attempt: 1 }]);
       await repeatAccepted();
       const delivered = (await readGroupTimeline(home, group.id)).find((event) => event.kind === "coworker");
+      const inboxBeforeReplay = await service.markActivityRead((await service.listActivity()).map((item) => item.id));
+      assert.equal(inboxBeforeReplay.length, 1);
       for (const crash of ["before-append", "before-receipt"]) {
         await groups.stop();
         await service.stop();
@@ -1411,6 +1711,7 @@ test("group retry sends a new follow-up and retains the accepted tool-bearing at
         assert.equal(activity.timeline.filter((event) => event.id === delivered.id).length, 1);
         assert.equal(activity.executions.length, 0);
         assert.equal(fixture.requests.length, 2, "delivery recovery does not replay native work");
+        assert.deepEqual(await service.listActivity(), inboxBeforeReplay, "publication replay does not reset readAt or duplicate Activity");
         await eventually(async () => !(await groups.status(group.id)).active);
         await repeatAccepted();
       }
@@ -1518,4 +1819,1022 @@ test("cancellation during native setup prevents admission after setup returns", 
       assert.equal((await service.read((state) => state.executions[entry.id])).state, "cancelled");
     } finally { release(); await service.stop(); }
   });
+});
+
+const eventOutcome = { summary: "Reviewed the evidence and recorded the remaining question.", decisions: ["Keep the current plan."], accomplishments: ["Reviewed both contributions."], openQuestions: ["Who approves the next step?"], followUps: ["Ask the person before executing the proposal."] };
+function eventInput(slugs = ["scout", "editor"]) {
+  const startsAt = Date.now() - 1000;
+  return { title: "Evidence review", description: "", template: "working-session", state: "active", artifacts: [], objective: "Review current evidence, do not execute proposals.", leadSlug: slugs[0], participantSlugs: slugs,
+    startsAt, schedule: { kind: "once", at: startsAt, timezone: "Etc/UTC" }, durationMinutes: 5, maxReplies: slugs.length + 1 };
+}
+
+async function eventFixture(home, options = {}) {
+  let services;
+  const members = options.members ?? Object.fromEntries(["scout", "editor"].map((slug) => [slug, { slug, name: slug, role: "Reviewer", mission: "Review evidence", model: "test/model", path: path.join(home, slug), createdAt: "2026-09-10T00:00:00.000Z", workspaceId: `workspace_${slug}` }]));
+  const native = options.native ?? nativeFixture(async ({ slug, threadId, input, reply }) => {
+    const service = services.current;
+    if (!options.noConclusion && input.prompt.includes("Phase: conclusion")) {
+      const args = { outcome: eventOutcome };
+      const callID = `conclude_${reply.id}`;
+      reply.parts.push({ type: "tool", tool: "coworker_event_conclude", toolStatus: "running", callId: callID, toolInput: args });
+      await service.events.executeNative(slug, { name: "event_conclude", args, context: { sessionID: threadId, messageID: reply.id, callID, directory: path.join(home, slug) } });
+      reply.parts.at(-1).toolStatus = "completed";
+    }
+    await options.onSend?.({ ...service, slug, threadId, input, reply, native });
+  });
+  services = options.services ?? { current: null };
+  const clientFor = async (slug, request = {}) => {
+    const client = await native.clientFor(slug, request);
+    return { ...client, ...(members[slug] ? { coworkerIdentity: coworkerIdentity(members[slug]), coworkerCreatedAt: members[slug].createdAt } : {}), ...(options.resolveModel ? { resolvedModel: options.resolveModel(slug, request) } : {}), getThreadSnapshot: async (...args) => ({ ...await client.getThreadSnapshot(...args), directory: path.join(home, slug) }) };
+  };
+  let events;
+  let groups;
+  const collaboration = createCollaboration({ directory: home, clientFor, pollMs: 5, setupTimeoutMs: options.setupTimeoutMs ?? 30_000,
+    validateOwner: (owner) => events.validateOwner(owner), consult: (task) => groups.consultation(task),
+    spawn: options.spawn ?? (async (_slug, input) => ({ id: input.id, status: "running" })), cancelWorker: async () => {},
+    onExecutionEnd: (entry, snapshot) => events.captureExecution(entry, snapshot),
+    memoryContext: options.memoryContext,
+    executionContext: (owner) => events.context(owner),
+    publish: (task) => publishFixture(home, task),
+    publishExecution: (entry) => entry.owner.groupId ? publishFixture(home, entry) : undefined,
+  });
+  groups = createGroupExecution({ directory: home, collaboration, clientFor, coworkerFor: async (slug) => {
+    if (!members[slug]) throw new Error("Coworker not found."); return members[slug];
+  }, eventContext: (request, slug) => events.requestContext(request, slug), conversationContext: (groupId, expected) => events.conversationContext(groupId, expected),
+    coordinator: options.coordinator, catalogFor: options.catalogFor, settings: options.settings, onPublished: options.onPublished, pollMs: 5 });
+  events = createEvents({ directory: home, collaboration, groups, coworkerFor: async (slug) => { if (!members[slug]) throw new Error("Coworker not found."); return members[slug]; }, coworkers: async () => Object.values(members),
+    resolveContext: async (slug, context, expected) => {
+      const trusted = await collaboration.context(slug, context, expected, assertEventToolContext);
+      await options.onContextResolved?.(slug, expected, trusted);
+      return trusted;
+    },
+    readArtifact: options.readArtifact ?? (async () => { throw new Error("No artifact fixture."); }),
+    readExecution: async (entry) => (await clientFor(entry.owner.slug, { model: entry.model, observationOnly: true })).getThreadSnapshot(entry.owner.threadId),
+    now: options.now,
+  });
+  const current = { events, groups, collaboration, native, members, services,
+    stop: async () => { await events.stop(); await groups.stop(); await collaboration.stop(); },
+    settle: async (id) => {
+      await eventually(async () => { await events.tick(); const { runs } = await events.get(id); return runs.length > 0 && runs.every((run) => !["queued", "running", "waiting"].includes(run.status)); });
+      return (await events.get(id)).runs;
+    },
+  };
+  services.current = current;
+  await events.start();
+  if (options.startGroups !== false) { await groups.start(); await collaboration.start(); }
+  return current;
+}
+
+async function eventCall(source, name, args, callID = `${name}_${source.reply.id}`) {
+  let part = source.reply.parts.find((part) => part.callId === callID);
+  if (!part) { part = { type: "tool", callId: callID }; source.reply.parts.push(part); }
+  Object.assign(part, { tool: `coworker_${name}`, toolStatus: "running", toolInput: args });
+  try {
+    return JSON.parse((await source.events.executeNative(source.slug, { name, args, context: {
+      sessionID: source.threadId, messageID: source.reply.id, callID, directory: source.members[source.slug].path,
+    } })).text);
+  } finally { part.toolStatus = "completed"; }
+}
+
+test("event occurrences claim once, persist exact participants and accept only the lead's native conclusion", async () => {
+  await withHome(async (home) => {
+    let rejected = 0;
+    const service = await eventFixture(home, { onSend: async ({ events, slug, threadId, input, reply }) => {
+      if (!input.prompt.includes("Phase: contributions")) return;
+      const args = { outcome: eventOutcome }; const callID = `spoof_${reply.id}`;
+      reply.parts.push({ type: "tool", tool: "coworker_event_conclude", toolStatus: "running", callId: callID, toolInput: args });
+      await assert.rejects(events.executeNative(slug, { name: "event_conclude", args, context: { sessionID: threadId, messageID: reply.id, callID, directory: path.join(home, slug) } }), /Only the admitted lead/);
+      reply.parts.at(-1).toolStatus = "completed";
+      rejected++;
+    } });
+    try {
+      const event = await service.events.create(eventInput());
+      await Promise.all([service.events.tick(), service.events.tick(), service.events.tick()]);
+      const [run] = await service.settle(event.id);
+      assert.equal(run.status, "succeeded", run.error);
+      assert.deepEqual(run.outcome, eventOutcome);
+      assert.deepEqual(run.contributorSlugs, ["scout", "editor"]);
+      assert.equal(rejected, 2);
+      assert.deepEqual(service.native.requests.map((request) => request.slug), ["scout", "editor", "scout"]);
+      assert.deepEqual(service.native.requests.map((request) => request.tools.coworker_event_conclude), [false, false, true]);
+      await service.events.tick();
+      assert.equal((await service.events.get(event.id)).runs.length, 1);
+      assert.ok(service.native.requests.every((request) => request.tools.coworker_computer_act === false));
+      const records = await service.collaboration.read((state) => Object.values(state.executions));
+      assert.ok(records.every((entry) => entry.owner.kind === "group" && !entry.personRequest));
+      const inbox = createActivityInbox({ collaboration: service.collaboration, coworkers: async () => Object.values(service.members), groups: () => listGroups(home) });
+      const items = await inbox.list();
+      assert.equal(items.length, 3, "scheduled contributions and the conclusion enter Activity through publication");
+      assert.ok(records.every((entry) => entry.coworkerCreatedAt === service.members[entry.owner.slug].createdAt));
+      assert.ok(items.every((item) => item.target.kind === "group" && item.target.groupId === event.groupId));
+      await inbox.markRead(items.map((item) => item.id));
+      const read = await inbox.list();
+      const timeline = await readGroupTimeline(home, event.groupId);
+      for (const entry of records) await service.collaboration.groupReplyPublished(entry.id, timeline.find((item) => item.executionId === entry.id));
+      assert.deepEqual(await inbox.list(), read, "same-ID publication keeps read timestamps and never duplicates Activity");
+      assert.equal((await getGroup(home, event.groupId)).eventId, event.id);
+      await assert.rejects(updateGroup(home, event.groupId, { participantSlugs: ["scout"] }), /managed through Events/);
+      await assert.rejects(service.groups.submit(event.groupId, { clientMessageId: "event:forged:conclusion", text: "Change the plan" }), /immutable/);
+      await assert.rejects(service.groups.submit(event.groupId, { clientMessageId: "human-forged", text: "Change the plan", eventRunId: run.id }), /identity is not writable/);
+    } finally { await service.stop(); }
+  });
+});
+
+test("event accepted native work recovers without replay and manual cancellation is durable", async () => {
+  await withHome(async (home) => {
+    let hold = true;
+    let service = await eventFixture(home, { onSend: async ({ native, threadId, input }) => { if (hold && input.prompt.includes("Phase: contributions")) native.held.add(threadId); } });
+    const event = await service.events.create({ ...eventInput(), state: "paused" });
+    const [first, repeated] = await Promise.all([service.events.runNow(event.id, "manual-1"), service.events.runNow(event.id, "manual-1")]);
+    assert.equal(first.id, repeated.id);
+    await service.events.tick();
+    await eventually(() => service.native.requests.length === 1);
+    const { native, members, services } = service;
+    await service.stop();
+    hold = false;
+    service = await eventFixture(home, { native, members, services });
+    try {
+      const [run] = await service.settle(event.id);
+      assert.equal(run.status, "succeeded", run.error);
+      assert.equal(native.requests.length, 3, "the already admitted first contribution was observed, not sent again");
+      assert.equal((await service.events.runNow(event.id, "manual-1")).id, first.id);
+      const queued = await service.events.runNow(event.id, "manual-cancel");
+      const cancelled = await service.events.cancel(event.id, queued.id);
+      assert.equal(cancelled.status, "cancelled");
+      await service.events.tick();
+      assert.equal((await service.events.runNow(event.id, "manual-cancel")).status, "cancelled");
+      assert.equal(native.requests.length, 3);
+    } finally { await service.stop(); }
+    service = await eventFixture(home, { native, members, services });
+    try { await service.events.tick(); assert.equal(native.requests.length, 3); }
+    finally { await service.stop(); }
+  });
+});
+
+test("event identity snapshots refuse same-slug replacements and optimistic edits never rewrite a claimed run", async () => {
+  await withHome(async (home) => {
+    const service = await eventFixture(home);
+    try {
+      await assert.rejects(createGroup(home, { name: "Ordinary", participantSlugs: ["scout"] }), /at least two/);
+      const input = { ...eventInput(["scout"]), state: "paused" };
+      const event = await service.events.create(input);
+      const run = await service.events.runNow(event.id, "original-definition");
+      const updated = await service.events.update(event.id, { ...input, title: "Updated title" }, event.revision);
+      assert.equal(updated.revision, 2);
+      await assert.rejects(service.events.update(event.id, input, 1), /EVENT_CONFLICT/);
+      assert.equal((await service.events.get(event.id)).runs[0].event.title, run.event.title);
+      service.members.scout = { ...service.members.scout, createdAt: "2026-09-11T00:00:00.000Z" };
+      await service.events.tick();
+      const result = (await service.events.get(event.id)).runs[0];
+      assert.equal(result.status, "failed");
+      assert.match(result.error, /original identity/);
+      assert.equal(service.native.requests.length, 0);
+      await assert.rejects(service.events.update(event.id, input, 2), /original identity/);
+    } finally { await service.stop(); }
+  });
+});
+
+test("event dependencies release the group queue before final continuation and lead synthesis", async () => {
+  await withHome(async (home) => {
+    let child;
+    const service = await eventFixture(home, { onSend: async ({ collaboration, slug, input }) => {
+      if (slug !== "scout" || !input.prompt.includes("Phase: contributions")) return;
+      const entry = await collaboration.read((state) => Object.values(state.executions).find((entry) => entry.messageId === input.messageId));
+      const response = await collaboration.request({ entry, callId: "delegated" }, "worker", { name: "Evidence", goal: "Check the evidence", continuation: { objective: "Review evidence", resumeInstructions: "Use the result in your contribution" } });
+      child = response.structured.collaboration.id;
+    } });
+    try {
+      const event = await service.events.create({ ...eventInput(), maxReplies: 5 });
+      await service.events.tick();
+      await eventually(async () => child && !(await service.groups.status(event.groupId)).active);
+      await service.events.tick();
+      assert.equal((await service.events.get(event.id)).runs[0].phase, "waiting");
+      assert.equal(service.native.requests.length, 2, "the lead has not concluded while a Worker is pending");
+      await service.groups.submit(event.groupId, { clientMessageId: "progress-during-event", text: "@editor How is the evidence progressing?" });
+      await eventually(async () => !(await service.groups.status(event.groupId)).active && service.native.requests.length === 3);
+      const ordinary = await service.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.groupRequestId === "progress-during-event"));
+      assert.equal(ordinary.owner.eventRunId, undefined);
+      assert.match(ordinary.prompt, /ordinary conversation/);
+      assert.match(ordinary.prompt, /"status":"waiting"/);
+      const task = await service.collaboration.read((state) => state.tasks[child]);
+      const worker = { id: task.workerId, slug: "scout", pendingTurn: { messageId: "worker-step-1" } };
+      await service.collaboration.admitEventWorker(worker);
+      await service.collaboration.admitEventWorker(worker);
+      await assert.rejects(service.collaboration.admitEventWorker({ ...worker, pendingTurn: { messageId: "worker-step-2" } }), /reply budget/);
+      await service.collaboration.complete(child, { state: "succeeded", result: "Evidence verified" });
+      const [run] = await service.settle(event.id);
+      assert.equal(run.status, "succeeded", run.error);
+      assert.equal(service.native.requests.length, 5);
+      assert.match(service.native.requests[3].prompt, /automatic follow-up/);
+      assert.match(service.native.requests[4].prompt, /Phase: conclusion/);
+      const usage = await service.collaboration.read((state) => state.workplaceEvents.runs[run.id].usage);
+      assert.equal(Object.keys(usage).length, 5, "the same Worker admission costs one reply and its handback has reserved room");
+      const items = await service.collaboration.listActivity();
+      assert.equal(items.length, 5, "scheduled replies, the human group reply and Worker handback are published once");
+      assert.ok(items.every((item) => item.coworkerCreatedAt === service.members[item.slug].createdAt));
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event consultations retain the accepted recipient identity through publication and handback", async () => {
+  await withHome(async (home) => {
+    let childId;
+    const service = await eventFixture(home, { onSend: async ({ collaboration, slug, input, reply }) => {
+      const entry = await collaboration.read((state) => Object.values(state.executions).find((entry) => entry.messageId === input.messageId));
+      if (entry.owner.kind === "consultation") reply.parts.push({ type: "text", text: "@you, approve the next step?" });
+      if (slug !== "scout" || !input.prompt.includes("Phase: contributions")) return;
+      const receipt = await collaboration.request({ entry, callId: "event-consultation" }, "consultation", { to: "editor", question: "Check this public fact", continuation: { objective: "Review evidence", resumeInstructions: "Use the answer in your contribution" } });
+      childId = receipt.structured.collaboration.id;
+    } });
+    try {
+      service.members.editor.createdAt = "2026-09-09T00:00:00.000Z";
+      const event = await service.events.create({ ...eventInput(), maxReplies: 5 });
+      const [run] = await service.settle(event.id);
+      assert.equal(run.status, "succeeded", run.error);
+      const child = await service.collaboration.read((state) => state.tasks[childId]);
+      assert.equal(child.coworkerCreatedAt, service.members.editor.createdAt);
+      assert.equal(child.owner.coworkerCreatedAt, child.coworkerCreatedAt);
+      assert.equal(child.origin.coworkerCreatedAt, service.members.scout.createdAt);
+      assert.equal(child.owner.eventRunId, run.id);
+      const inbox = createActivityInbox({ collaboration: service.collaboration, coworkers: async () => Object.values(service.members), groups: () => listGroups(home) });
+      const items = await inbox.list();
+      assert.equal(items.length, 5);
+      assert.ok(items.every((item) => item.coworkerCreatedAt === service.members[item.slug].createdAt));
+      const answer = items.find((item) => item.id === `activity_${child.executionId}`);
+      assert.equal(answer.kind, "mention");
+      assert.equal(answer.target.groupId, event.groupId);
+      assert.equal((await readGroupTimeline(home, event.groupId)).filter((item) => item.executionId === child.executionId).length, 1);
+      service.members.editor = { ...service.members.editor, createdAt: "2026-09-12T00:00:00.000Z" };
+      assert.ok((await inbox.list()).every((item) => item.slug !== "editor"));
+    } finally { await service.stop(); }
+  });
+});
+
+test("legacy All Hands migration preserves its group, disabled/manual rhythm and claimed occurrence", async () => {
+  await withHome(async (home) => {
+    await updateAllHands(home, { enabled: true, frequency: "twice", morning: "00:00", afternoon: "00:01" });
+    const group = await prepareAllHands(home, [{ slug: "scout" }, { slug: "editor" }]);
+    await appendGroupEvent(home, group.id, { kind: "user", text: "Retain this conversation" });
+    const settings = await readAllHands(home);
+    await writeFile(path.join(home, ".all-hands.json"), JSON.stringify({ ...settings, enabledAt: Date.now() - 86400000, lastRequestedAt: Date.now(), lastOccurrence: "reserved" }));
+    let service = await eventFixture(home);
+    const { native, members, services } = service;
+    try {
+      const events = await service.events.list();
+      assert.equal(events.length, 2);
+      assert.ok(events.every((event) => event.groupId === group.id && event.nextDueAt > Date.now()));
+      assert.equal(await claimAllHands(home), null);
+      await service.events.tick();
+      assert.equal(native.requests.length, 0);
+      assert.equal((await readGroupTimeline(home, group.id))[0].text, "Retain this conversation");
+    } finally { await service.stop(); }
+    service = await eventFixture(home, { native, members, services });
+    try { assert.equal((await service.events.list()).length, 2); assert.equal(await claimAllHands(home), null); }
+    finally { await service.stop(); }
+  });
+  await withHome(async (home) => {
+    await updateAllHands(home, { enabled: true, frequency: "manual" });
+    const group = await prepareAllHands(home, [{ slug: "scout" }, { slug: "editor" }]);
+    await updateAllHands(home, { enabled: false });
+    const service = await eventFixture(home);
+    try {
+      const [event] = await service.events.list();
+      assert.equal(event.groupId, group.id); assert.equal(event.state, "paused"); assert.equal(event.nextDueAt, null);
+      await service.events.tick(); assert.equal(service.native.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+  await withHome(async (home) => {
+    await updateAllHands(home, { enabled: true, frequency: "manual" });
+    const group = await prepareAllHands(home, [{ slug: "scout" }, { slug: "editor" }]);
+    const scout = { slug: "scout", name: "Scout", role: "Reviewer", mission: "Review", createdAt: "2026-09-10T00:00:00.000Z", path: path.join(home, "scout"), workspaceId: "workspace_scout" };
+    const service = await eventFixture(home, { members: { scout } });
+    try {
+      const [event] = await service.events.list();
+      assert.equal(event.groupId, group.id); assert.equal(event.state, "active"); assert.equal(event.nextDueAt, null);
+      assert.deepEqual(event.participantSlugs, ["scout", "editor"], "migration does not silently drop the missing identity");
+      service.members.editor = { ...scout, slug: "editor", name: "Replacement", path: path.join(home, "editor"), workspaceId: "workspace_editor" };
+      const run = await service.events.runNow(event.id, "missing-legacy-member");
+      await service.events.tick();
+      const saved = (await service.events.get(event.id)).runs.find((item) => item.id === run.id);
+      assert.equal(saved.status, "failed"); assert.match(saved.error, /original identity was unavailable/);
+      assert.equal(service.native.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+});
+
+test("event artifacts use exact native document receipts without sharing private content or another group's outcome", async () => {
+  await withHome(async (home) => {
+    const documents = {
+      1: { id: "brief", title: "Private source title", revision: 1, body: "PRIVATE-ARTIFACT-BODY" },
+      2: { id: "brief", title: "Private source title", revision: 2, body: "UPDATED-PRIVATE-ARTIFACT-BODY" },
+    };
+    let event;
+    let other;
+    let run;
+    let denied = false;
+    const service = await eventFixture(home, { readArtifact: async (artifact) => {
+      const document = documents[artifact.revision];
+      if (!document) throw new Error("Exact revision unavailable"); return document;
+    }, onSend: async ({ events, slug, threadId, input, reply }) => {
+      if (!input.prompt.includes("Phase: contributions")) return;
+      const invoke = async (name, args) => {
+        const callID = `${name}_${reply.id}`;
+        reply.parts.push({ type: "tool", tool: `coworker_${name}`, toolStatus: "running", callId: callID, toolInput: args });
+        try { return await events.executeNative(slug, { name, args, context: { sessionID: threadId, messageID: reply.id, callID, directory: path.join(home, slug) } }); }
+        finally { reply.parts.at(-1).toolStatus = "completed"; }
+      };
+      const calendar = JSON.parse((await invoke("workplace_calendar", {})).text);
+      assert.ok(calendar.events.some((item) => item.id === other.id));
+      assert.ok(calendar.events.filter((item) => item.state === "paused").every((item) => item.occurrences.length === 0));
+      assert.ok(!JSON.stringify(calendar).includes("PRIVATE-CONTEXT"));
+      await assert.rejects(invoke("event_details", { id: other.id }), /only to its participants/);
+      if (slug === "editor") {
+        assert.ok(!input.prompt.includes("Private source title"));
+        await assert.rejects(invoke("event_document_read", { id: event.id, runId: run.id, artifact: event.artifacts[0] }), /another coworker identity/);
+        denied = true;
+      } else {
+        for (const tool of ["external_document_update", "external_coworker_document_update"]) {
+          reply.parts.push({ type: "tool", tool, callId: tool, toolStatus: "completed", toolInput: { id: "brief" }, toolMetadata: { structuredContent: { document: { ...documents[1], action: "updated" } } } });
+        }
+        reply.parts.push({ type: "tool", tool: "coworker_document_update", callId: "document_write", toolStatus: "completed", toolInput: { id: "brief" }, toolMetadata: { openworkMcpApp: { isError: false, structuredContent: { document: { ...documents[2], action: "updated" } } } } });
+      }
+    } });
+    try {
+      const artifact = { owner: { kind: "coworker", slug: "scout", createdAt: service.members.scout.createdAt }, documentId: "brief", title: "ignored title", revision: 1, relation: "used", contributorSlug: "scout" };
+      other = await service.events.create({ ...eventInput(), state: "paused", description: "PRIVATE-CONTEXT" });
+      event = await service.events.create({ ...eventInput(), state: "paused", artifacts: [artifact] });
+      run = await service.events.runNow(event.id, "artifact-session");
+      const [finished] = await service.settle(event.id);
+      assert.equal(finished.status, "succeeded", finished.error);
+      assert.equal(denied, true);
+      assert.deepEqual(finished.artifacts.map((item) => [item.revision, item.relation]), [[1, "used"], [2, "modified"]]);
+      assert.ok(service.native.requests.every((request) => !request.prompt.includes("PRIVATE-ARTIFACT-BODY")));
+      assert.equal((await service.events.documentRead(event.id, run.id, finished.artifacts[0])).revision, 1);
+      const receipts = await service.collaboration.read((state) => state.workplaceEvents.runs[run.id].artifactReceipts);
+      assert.ok(receipts.some((receipt) => receipt.callId === "document_write" && receipt.executionId && receipt.messageId));
+      assert.ok(receipts.every((receipt) => !receipt.callId.startsWith("external_")), "external document tools cannot claim local artifact provenance");
+      await assert.rejects(service.events.documentRead(event.id, run.id, { ...artifact, revision: 3 }), /not recorded/);
+    } finally { await service.stop(); }
+  });
+});
+
+test("event reply and duration budgets are enforced and a missing lead outcome stays partial", async () => {
+  await withHome(async (home) => {
+    const service = await eventFixture(home, { noConclusion: true, onSend: async ({ collaboration, input }) => {
+      if (!input.prompt.includes("Phase: contributions")) return;
+      const entry = await collaboration.read((state) => Object.values(state.executions).find((entry) => entry.messageId === input.messageId));
+      await assert.rejects(collaboration.request({ entry, callId: "over-budget" }, "worker", { name: "Extra work", goal: "Not within this budget" }), /only the participant round/);
+    } });
+    try {
+      const event = await service.events.create({ ...eventInput(["scout"]), durationMinutes: null });
+      const [run] = await service.settle(event.id);
+      assert.equal(run.status, "partial"); assert.equal(run.outcome, null);
+      assert.equal(service.native.requests.length, 2);
+      const stored = await service.collaboration.read((state) => state.workplaceEvents.runs[run.id]);
+      assert.equal(stored.deadlineAt - stored.startedAt, 240 * 60_000);
+      const expired = await service.events.runNow(event.id, "expiry");
+      await service.collaboration.change((state) => { state.workplaceEvents.runs[expired.id].deadlineAt = Date.now() - 1; });
+      await service.events.tick();
+      const after = (await service.events.get(event.id)).runs.find((run) => run.id === expired.id);
+      assert.equal(after.status, "partial"); assert.match(after.error, /duration limit/);
+      assert.equal(service.native.requests.length, 2);
+    } finally { await service.stop(); }
+  });
+});
+
+test("event Stop retains exact native failures across restart and cannot release work before confirmed idle", async () => {
+  await withHome(async (home) => {
+    let mode = "throw";
+    let aborts = 0;
+    let sends = 0;
+    const pin = { providerId: "fixture", modelId: "held", variant: "low" };
+    const observations = [];
+    const native = nativeFixture(async ({ threadId }) => { native.held.add(threadId); });
+    const documents = new Map();
+    const finishDocument = (request, id) => {
+      const document = { id, title: id, revision: 1, body: "Evidence completed while Stop was waiting for native idle." };
+      documents.set(id, document);
+      const reply = native.histories.get(request.threadId).find((message) => message.role === "assistant" && message.parentId === request.messageId);
+      reply.parts.push({ type: "tool", tool: "coworker_document_create", callId: `write_${id}`, toolStatus: "completed", toolInput: { title: id }, toolMetadata: { structuredContent: { document: { ...document, action: "created" } } } });
+      return document;
+    };
+    const readArtifact = async (artifact) => documents.get(artifact.documentId);
+    const clientFor = native.clientFor;
+    native.clientFor = async (slug, options = {}) => {
+      const client = await clientFor(slug);
+      observations.push(options);
+      return { ...client, resolvedModel: options.model ?? (options.observationOnly ? undefined : pin),
+        getThreadSnapshot: async (...args) => structuredClone(await client.getThreadSnapshot(...args)),
+        waitForThread: async (...args) => structuredClone(await client.waitForThread(...args)),
+        sendTurn: (...args) => { sends++; return client.sendTurn(...args); },
+        abortThread: async (...args) => {
+          aborts++;
+          if (mode === "throw") throw new Error("fixture native abort transport refused");
+          if (mode === "release") return client.abortThread(...args);
+          return { accepted: true };
+        },
+      };
+    };
+    let service = await eventFixture(home, { native, readArtifact, setupTimeoutMs: 200 });
+    try {
+      const event = await service.events.create({ ...eventInput(), state: "paused" });
+      const first = await service.events.runNow(event.id, "cancel-native");
+      await service.events.tick();
+      await eventually(() => native.requests.length === 1);
+      await eventually(async () => (await service.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.owner.eventRunId === first.id)))?.acceptance);
+      await assert.rejects(service.events.cancel(event.id, first.id), /fixture native abort transport refused/);
+      const waiting = (await service.events.get(event.id)).runs.find((run) => run.id === first.id);
+      assert.equal(waiting.status, "waiting"); assert.equal(waiting.finishedAt, null);
+      assert.match(waiting.error, /Stop not confirmed.*fixture native abort transport refused/);
+      assert.ok(await service.collaboration.read((state) => state.workplaceEvents.runs[first.id].cleanupPending));
+      assert.ok(await service.collaboration.read((state) => Object.values(state.executions).some((entry) => entry.cleanupPending && entry.cleanupError.includes("transport refused"))));
+      const pendingEntry = await service.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.owner.eventRunId === first.id));
+      const observer = await native.clientFor(pendingEntry.owner.slug, { observationOnly: true, model: pin });
+      await service.events.captureExecution(pendingEntry, await observer.getThreadSnapshot(pendingEntry.owner.threadId));
+      assert.equal(await service.collaboration.read((state) => Object.values(state.executions).some((entry) => entry.owner.eventRunId === first.id && entry.eventArtifactsCaptured)), false, "an earlier busy snapshot must not finish artifact capture");
+      const successor = await service.events.runNow(event.id, "after-cancel");
+      const { members, services } = service;
+      await service.stop();
+      service = await eventFixture(home, { native, members, services, readArtifact, setupTimeoutMs: 200 });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(native.requests.length, 1, "restart must not revive the cancelled speaker or admit the queued successor");
+      mode = "ack";
+      await assert.rejects(service.events.tick(), /Native stop .* was not confirmed/);
+      assert.ok(observations.some((options) => options.observationOnly === true && options.model?.modelId === pin.modelId), "recovered native cleanup observes its saved model without resolving today's default");
+      assert.equal(native.requests.length, 1, "an abort acknowledgement does not release admission");
+      let settled = false;
+      const before = aborts;
+      const stopping = service.events.cancel(event.id, first.id).then((result) => { settled = true; return result; });
+      await eventually(() => aborts > before);
+      assert.equal(settled, false);
+      assert.equal((await service.events.get(event.id)).runs.find((run) => run.id === first.id).finishedAt, null);
+      const recoveredDocument = finishDocument(native.requests[0], "late-recovered");
+      assert.equal(await service.collaboration.read((state) => Object.values(state.executions).some((entry) => entry.owner.eventRunId === first.id && entry.eventArtifactsCaptured)), false, "recovered cleanup cannot finish capture before idle");
+      native.held.clear();
+      const stopped = await stopping;
+      assert.equal(stopped.status, "cancelled"); assert.equal(typeof stopped.finishedAt, "number");
+      assert.equal(stopped.outcome, null);
+      assert.deepEqual(stopped.artifacts.map(({ documentId, revision, relation }) => ({ documentId, revision, relation })), [{ documentId: recoveredDocument.id, revision: 1, relation: "created" }]);
+      assert.deepEqual(await service.events.documentRead(event.id, first.id, stopped.artifacts[0]), recoveredDocument);
+      const captured = await service.collaboration.read((state) => ({ entry: Object.values(state.executions).find((entry) => entry.owner.eventRunId === first.id), receipts: state.workplaceEvents.runs[first.id].artifactReceipts }));
+      assert.equal(captured.entry.eventArtifactsCaptured, true);
+      assert.equal(captured.receipts.length, 1);
+      assert.deepEqual([captured.receipts[0].executionId, captured.receipts[0].messageId, captured.receipts[0].callId], [captured.entry.id, native.requests[0].messageId, "write_late-recovered"]);
+      assert.deepEqual((await service.events.cancel(event.id, first.id)).artifacts, stopped.artifacts, "repeated cancellation keeps the same artifact receipt");
+      assert.equal(await service.collaboration.read((state) => state.workplaceEvents.runs[first.id].cleanupPending), false);
+      assert.ok(await service.collaboration.read((state) => Object.values(state.executions).filter((entry) => entry.owner.eventRunId === first.id).every((entry) => !entry.cleanupPending)));
+      await service.events.tick();
+      await eventually(() => native.requests.length === 2);
+      assert.ok(await service.collaboration.read((state) => Object.values(state.executions).some((entry) => entry.owner.eventRunId === successor.id && entry.sentAt)));
+      assert.equal(await service.collaboration.read((state) => Object.values(state.executions).filter((entry) => entry.owner.eventRunId === first.id).length), 1);
+      const liveBefore = aborts;
+      const liveStopping = service.events.cancel(event.id, successor.id);
+      await eventually(() => aborts > liveBefore);
+      const liveDocument = finishDocument(native.requests[1], "late-live");
+      const livePending = (await service.events.get(event.id)).runs.find((run) => run.id === successor.id);
+      assert.equal(livePending.status, "waiting"); assert.equal(livePending.finishedAt, null);
+      native.held.clear();
+      const liveStopped = await liveStopping;
+      assert.equal(liveStopped.status, "cancelled"); assert.equal(liveStopped.outcome, null);
+      assert.deepEqual(liveStopped.artifacts.map((artifact) => artifact.documentId), [liveDocument.id]);
+      assert.deepEqual(await service.events.documentRead(event.id, successor.id, liveStopped.artifacts[0]), liveDocument);
+      await service.events.tick();
+      assert.equal(native.requests.length, 2, "Stop capture must not replay a turn, resume a cancelled participant or synthesize an outcome");
+      assert.equal(sends, 2, "cleanup only reads native history; it never resubmits an admitted message");
+      assert.equal(await service.collaboration.read((state) => state.workplaceEvents.runs[successor.id].artifactReceipts.length), 1);
+    } finally { mode = "release"; await service.stop(); }
+  });
+});
+
+test("event budgets reserve every originating handback before delegation while allowing funded parallel Workers", async () => {
+  for (const maxReplies of [6, 7]) await withHome(async (home) => {
+    const children = [];
+    const spawned = [];
+    const rejected = [];
+    const service = await eventFixture(home, {
+      spawn: async (slug, input) => { spawned.push({ slug, id: input.id }); return { id: input.id, status: "running" }; },
+      onSend: async ({ collaboration, input, slug }) => {
+        if (!input.prompt.includes("Phase: contributions")) return;
+        const entry = await collaboration.read((state) => Object.values(state.executions).find((entry) => entry.messageId === input.messageId));
+        try {
+          const receipt = await collaboration.request({ entry, callId: `worker-${slug}` }, "worker", { name: `${slug} evidence`, goal: "Check the evidence without executing proposals", continuation: { objective: "Review evidence", resumeInstructions: "Report the verified findings" } });
+          children.push(receipt.structured.collaboration.id);
+        } catch (error) { assert.match(error.message, /reply budget/); rejected.push(slug); }
+      },
+    });
+    try {
+      const event = await service.events.create({ ...eventInput(), template: "all-hands", maxReplies });
+      await service.events.tick();
+      await eventually(async () => !(await service.groups.status(event.groupId)).active && service.native.requests.length === 2 && spawned.length === children.length);
+      assert.equal(children.length, maxReplies === 6 ? 1 : 2);
+      assert.deepEqual(rejected, maxReplies === 6 ? ["editor"] : []);
+      const tasks = await service.collaboration.read((state) => children.map((id) => state.tasks[id]));
+      const admissions = await Promise.all(tasks.map((task) => service.collaboration.admitEventWorker({ id: task.workerId, slug: task.origin.slug, pendingTurn: { messageId: `step-${task.id}` } })));
+      assert.ok(admissions.every((entry) => entry.promptPrefix.includes("read-only") && entry.promptPrefix.includes("no new permissions")));
+      assert.equal(spawned.length, children.length, "rejected delegation must not start a Worker");
+      await Promise.all(children.map((id) => service.collaboration.complete(id, { state: "succeeded", result: "Current evidence was checked; proposed work was not executed." })));
+      const [run] = await service.settle(event.id);
+      assert.equal(run.status, "succeeded", run.error);
+      const handbacks = service.native.requests.filter((request) => request.prompt.includes("automatic follow-up"));
+      assert.equal(handbacks.length, children.length);
+      assert.ok(handbacks.every((request) => request.prompt.includes("All Hands briefing is read-only")));
+      assert.equal(Object.keys(await service.collaboration.read((state) => state.workplaceEvents.runs[run.id].usage)).length, 3 + 2 * children.length);
+      assert.ok(service.native.requests.at(-1).prompt.includes("Phase: conclusion"));
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event conversation uses ordinary routing and recovery without granting outcome authority or replaying calendar history", async () => {
+  await withHome(async (home) => {
+    let event;
+    let run;
+    let failedOnce = false;
+    let preview;
+    let outcomeRefused = false;
+    let snapshotRead;
+    const service = await eventFixture(home, {
+      coordinator: async () => ({ workspaceId: "workspace_.coordinator" }),
+      catalogFor: async () => ({ models: [{ id: "test/model", providerId: "test", modelId: "model", variants: [], source: "local", tier: "key", toolCall: true, status: "active", label: "Test", releaseDate: "" }] }),
+      onSend: async ({ events, slug, threadId, input, reply }) => {
+        if (slug === ".coordinator") {
+          reply.parts.push({ type: "text", text: JSON.stringify({ addressedSlugs: ["scout"], speakers: [{ slug: "scout" }], mode: "sequential" }) });
+          return;
+        }
+        if (!input.prompt.includes("This is ordinary conversation")) return;
+        const invoke = async (name, args) => {
+          const callID = `${name}_${reply.id}`;
+          reply.parts.push({ type: "tool", tool: `coworker_${name}`, toolStatus: "running", callId: callID, toolInput: args });
+          try { return await events.executeNative(slug, { name, args, context: { sessionID: threadId, messageID: reply.id, callID, directory: path.join(home, slug) } }); }
+          finally { reply.parts.at(-1).toolStatus = "completed"; }
+        };
+        await assert.rejects(invoke("event_conclude", { outcome: { ...eventOutcome, summary: "This ordinary reply must not replace the outcome." } }), /Only the admitted lead/);
+        outcomeRefused = true;
+        snapshotRead = JSON.parse((await invoke("event_details", { id: event.id, runId: run.id })).text);
+        if (input.prompt.includes("RECOVERY-CHECK") && !failedOnce) { failedOnce = true; throw new Error("fixture ordinary reply failed"); }
+        if (input.prompt.includes("CALENDAR-CHECK")) preview = JSON.parse((await invoke("workplace_calendar", { after: Date.now() - 4 * 86400000, before: Date.now() + 5 * 86400000 })).text);
+      },
+    });
+    const idle = async () => eventually(async () => !(await service.groups.status(event.groupId)).active);
+    try {
+      const input = { ...eventInput(), state: "paused" };
+      event = await service.events.create(input);
+      await service.events.runNow(event.id, "first-session");
+      [run] = await service.settle(event.id);
+      await service.events.update(event.id, { ...input, title: "New definition, retained outcome" }, event.revision);
+      await service.groups.submit(event.groupId, { clientMessageId: "human-progress", text: "@scout How did the review go?" });
+      await idle();
+      const turn = (await getGroup(home, event.groupId)).turns.find((turn) => turn.clientMessageId === "human-progress");
+      assert.equal(turn.routedBy, "facilitator"); assert.equal(turn.status, "succeeded");
+      assert.equal(outcomeRefused, true);
+      assert.equal(snapshotRead.event.title, run.event.title);
+      assert.deepEqual(snapshotRead.runs[0].outcome, run.outcome);
+      assert.deepEqual((await service.events.get(event.id)).runs, [run]);
+      const ordinary = await service.collaboration.read((state) => Object.values(state.executions).filter((entry) => entry.groupRequestId === "human-progress"));
+      assert.ok(ordinary.every((entry) => !entry.owner.eventRunId && !entry.owner.eventPhase));
+      assert.ok(ordinary.every((entry) => entry.owner.conversationIdentity.groupId === event.groupId));
+      await service.groups.submit(event.groupId, { clientMessageId: "human-failure", text: "@scout RECOVERY-CHECK" });
+      await idle();
+      const failed = (await getGroup(home, event.groupId)).turns.find((turn) => turn.clientMessageId === "human-failure");
+      assert.equal(failed.status, "failed");
+      await service.groups.submit(event.groupId, { clientMessageId: "human-continue", text: failed.prompt, turnId: failed.id });
+      await idle();
+      assert.equal((await getGroup(home, event.groupId)).turns.find((turn) => turn.id === failed.id).status, "succeeded");
+      const scheduled = (await getGroup(home, event.groupId)).turns.find((turn) => turn.clientMessageId.startsWith("event:"));
+      await assert.rejects(service.groups.submit(event.groupId, { clientMessageId: "phase-continue", text: scheduled.prompt, turnId: scheduled.id }), /immutable/);
+      await assert.rejects(service.groups.remove(event.groupId, scheduled.clientMessageId), /Cancel the Event run/);
+      const paused = await service.events.create({ ...eventInput(), state: "paused" });
+      const at = Date.now();
+      const clock = new Date(at);
+      const schedule = { kind: "daily", timezone: "Etc/UTC", hour: clock.getUTCHours(), minute: clock.getUTCMinutes() };
+      const future = await service.events.create({ ...eventInput(), startsAt: at + 2 * 86400000, schedule });
+      const overdue = await service.events.create({ ...eventInput(), startsAt: at - 3 * 86400000, schedule });
+      await service.groups.submit(event.groupId, { clientMessageId: "human-calendar", text: "@scout CALENDAR-CHECK" });
+      await idle();
+      assert.deepEqual(preview.events.find((item) => item.id === paused.id).occurrences, []);
+      assert.deepEqual(preview.events.find((item) => item.id === event.id).occurrences, [], "an exhausted once schedule must not be projected again");
+      assert.ok(preview.events.find((item) => item.id === future.id).occurrences.every((slot) => slot >= future.nextDueAt));
+      const overdueSlots = preview.events.find((item) => item.id === overdue.id).occurrences;
+      assert.ok(overdueSlots.includes(overdue.nextDueAt));
+      assert.ok(overdueSlots.every((slot) => slot === overdue.nextDueAt || slot >= at), "only the authoritative overdue slot, never fabricated missed history");
+      const before = service.native.requests.length;
+      const identity = service.members.scout;
+      await service.groups.submit(event.groupId, { clientMessageId: "queued-identity-check", text: "@scout Do not give this to a replacement." });
+      service.members.scout = { ...identity, createdAt: "2026-09-12T00:00:00.000Z" };
+      await idle();
+      assert.equal(service.native.requests.length, before, "identity is rechecked after acceptance and before native routing or reply admission");
+      await assert.rejects(service.groups.submit(event.groupId, { clientMessageId: "replacement-check", text: "Hi" }), /original identity/);
+      service.members.scout = identity;
+      assert.deepEqual((await service.events.get(event.id)).runs, [run]);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Event group Stop cancels both All Hands rhythms and ordinary queued messages while leaving phase controls protected", async () => {
+  await withHome(async (home) => {
+    await updateAllHands(home, { enabled: true, frequency: "twice" });
+    const legacy = await prepareAllHands(home, [{ slug: "scout" }, { slug: "editor" }]);
+    await updateAllHands(home, { enabled: false });
+    const service = await eventFixture(home, { onSend: async ({ native, threadId, input }) => { if (input.prompt.includes("Phase: contributions")) native.held.add(threadId); } });
+    try {
+      const events = await service.events.list();
+      assert.equal(events.length, 2);
+      assert.equal((await service.events.conversationContext(legacy.id)).identity.eventId, (await getGroup(home, legacy.id)).eventId);
+      const first = await service.events.runNow(events[0].id, "morning-now");
+      const second = await service.events.runNow(events[1].id, "afternoon-now");
+      await service.events.tick();
+      await eventually(() => service.native.requests.length === 1);
+      await service.groups.submit(legacy.id, { clientMessageId: "human-next", text: "@scout How is the briefing?" });
+      await service.groups.submit(legacy.id, { clientMessageId: "human-remove", text: "@editor Never send this queued request." });
+      await service.groups.remove(legacy.id, "human-remove");
+      const phaseId = await service.collaboration.read((state) => state.workplaceEvents.runs[first.id].requests.contributions.id);
+      await assert.rejects(service.groups.remove(legacy.id, phaseId), /Cancel the Event run/);
+      await service.events.cancelGroup(legacy.id);
+      await eventually(async () => !(await service.groups.status(legacy.id)).active);
+      assert.equal((await service.events.get(events[0].id)).runs[0].status, "cancelled");
+      assert.equal((await service.events.get(events[1].id)).runs[0].status, "cancelled");
+      assert.equal((await service.events.get(events[1].id)).runs[0].id, second.id);
+      assert.equal(service.native.requests.length, 1, "queued human messages do not start while Stop cancels the Event runs");
+      assert.deepEqual(await service.collaboration.read((state) => state.groups[legacy.id].queue), []);
+      await assert.rejects(service.groups.submit(legacy.id, { clientMessageId: "human-next", text: "Same stopped request" }), /cancelled/);
+      await service.groups.submit(legacy.id, { clientMessageId: "after-group-stop", text: "@editor What was retained?" });
+      await eventually(async () => !(await service.groups.status(legacy.id)).active && service.native.requests.length === 2);
+      assert.equal((await service.events.get(events[0].id)).runs.length, 1);
+      assert.equal((await service.events.get(events[1].id)).runs.length, 1);
+    } finally { await service.stop(); }
+  });
+});
+
+test("Events share Conversation and Facilitator defaults while recovery, recall and observations retain admitted pins", async () => {
+  await withHome(async (home) => {
+    const provider = fixtureProvider({ id: "fixture", name: "Role models", models: Object.fromEntries(["chat", "chat-next", "personal", "facilitator"].map((id) => [id, { name: id, variants: { high: {}, minimal: {}, low: {}, medium: {} } }])) });
+    const catalog = connectedModelCatalog(fixtureCatalog({ all: [provider], connected: [provider.id] }));
+    let settings = normalizeSettings({ modelDefaults: { conversation: { model: "fixture/chat", modelVariant: "low" }, facilitator: { model: "fixture/facilitator", modelVariant: "minimal" } } });
+    const members = Object.fromEntries(["scout", "editor"].map((slug) => [slug, { slug, name: slug, role: "Reviewer", mission: "Review evidence", model: "fixture/personal", modelVariant: "medium", modelMode: "fixed", useAppModelDefaults: slug === "scout", path: path.join(home, slug), createdAt: "2026-09-10T00:00:00.000Z", workspaceId: `workspace_${slug}` }]));
+    const ranked = [];
+    const observations = [];
+    const published = [];
+    let hold = true;
+    const options = {
+      members, settings: async () => settings,
+      coordinator: async () => ({ workspaceId: "workspace_.coordinator" }), catalogFor: async () => catalog,
+      memoryContext: async (owner) => owner.kind === "group" ? "GROUP-ONLY-RECALL" : "",
+      onPublished: async (entry) => { published.push({ slug: entry.owner.slug, model: entry.model }); },
+      resolveModel: (slug, request) => {
+        if (request.observationOnly) { observations.push({ slug, model: request.model }); return request.model ?? undefined; }
+        if (request.model) return request.model;
+        assert.equal(typeof request.requestText, "string", "preparation and reads must not invoke model ranking");
+        const choice = resolveDiscussionModel(catalog, members[slug], request.requestText, settings.modelDefaults);
+        assert.ok(choice.model, choice.reason);
+        const model = { providerId: choice.model.providerId, modelId: choice.model.modelId, variant: choice.variant };
+        ranked.push({ slug, model });
+        return model;
+      },
+      onSend: async ({ slug, threadId, input, reply, native }) => {
+        if (slug === ".coordinator") reply.parts.push({ type: "text", text: JSON.stringify({ addressedSlugs: ["editor"], speakers: [{ slug: "editor" }], mode: "sequential" }) });
+        else if (hold && slug === "scout" && input.prompt.includes("Phase: contributions")) native.held.add(threadId);
+      },
+    };
+    let service = await eventFixture(home, options);
+    try {
+      const event = await service.events.create({ ...eventInput(), state: "paused" });
+      const accepted = await service.events.runNow(event.id, "model-default-event");
+      await service.events.tick();
+      await eventually(() => service.native.requests.length === 1);
+      const first = await service.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.owner.eventRunId === accepted.id));
+      assert.deepEqual(first.model, { providerId: "fixture", modelId: "chat", variant: "low" });
+      settings = normalizeSettings({ ...settings, modelDefaults: { ...settings.modelDefaults, conversation: { model: "fixture/chat-next", modelVariant: "high" } } });
+      const { native, services } = service;
+      await service.stop();
+      hold = false;
+      service = await eventFixture(home, { ...options, native, services });
+      const [completed] = await service.settle(event.id);
+      assert.equal(completed.status, "succeeded", completed.error);
+      assert.deepEqual(native.requests.map((request) => [request.slug, request.model.modelId, request.model.variant]), [["scout", "chat", "low"], ["editor", "personal", "medium"], ["scout", "chat-next", "high"]]);
+      assert.equal(ranked.length, 3, "recovery and artifact/context observations do not re-rank the accepted model");
+      assert.ok(observations.some((entry) => entry.model?.modelId === "chat" && entry.model.variant === "low"));
+      assert.deepEqual((await service.collaboration.read((state) => state.executions[first.id])).model, first.model);
+      assert.ok(native.requests.every((request) => request.context?.includes("GROUP-ONLY-RECALL") && !request.prompt.includes("GROUP-ONLY-RECALL")), "upstream synthetic recall stays separate from Event/user prompts");
+      assert.deepEqual(published.map((entry) => entry.slug), ["scout", "editor", "scout"], "the upstream group publication memory hook survives the Event merge");
+      await service.groups.submit(event.groupId, { clientMessageId: "human-role-followup", text: "@editor How did the review go?" });
+      await eventually(async () => !(await service.groups.status(event.groupId)).active && native.requests.length === 5);
+      assert.deepEqual(native.requests[3].model, { providerId: "fixture", modelId: "facilitator", variant: "minimal" });
+      assert.deepEqual(native.requests[4].model, { providerId: "fixture", modelId: "personal", variant: "medium" });
+      assert.equal((await service.events.get(event.id)).runs.length, 1, "the human follow-up is not a new scheduled phase");
+    } finally { hold = false; await service.stop(); }
+  });
+});
+
+test("Event management uses direct human authority and durable operation receipts across replay and restart", async () => {
+  await withHome(async (home) => {
+    let outsider, created, updated, sourceForResume, pauseReceipt;
+    const at = Date.now() + 3600000;
+    const input = { ...eventInput(), title: "  Native planning  ", startsAt: at, schedule: { kind: "once", at, timezone: "Etc/UTC" }, state: "paused" };
+    let service = await eventFixture(home, { onSend: async (source) => {
+      if (source.input.prompt === "DIRECT EVENT WRITES") {
+        created = await eventCall(source, "event_create", { input }, "create-original");
+        assert.deepEqual(await eventCall(source, "event_create", { input }, "create-repeat"), created);
+        const patch = { ...input, title: "Native planning", description: "A changed working prompt" };
+        const args = { id: created.event.id, input: patch, expectedRevision: created.event.revision };
+        updated = await eventCall(source, "event_update", args, "update-original");
+        await source.events.update(created.event.id, { ...patch, title: "Edited by the person" }, updated.event.revision);
+        assert.deepEqual(await eventCall(source, "event_update", args, "update-repeat"), updated, "the accepted receipt survives a later revision");
+        await assert.rejects(eventCall(source, "event_create", { input: { ...input, title: "Changed call arguments" } }, "create-original"), /different accepted arguments/);
+        await assert.rejects(eventCall(source, "event_update", { id: outsider.id, input: { ...eventInput(), state: "paused", startsAt: at, schedule: input.schedule }, expectedRevision: outsider.revision }, "join-other"), /original identity|participants/);
+        for (let index = 0; index < 3; index++) await eventCall(source, "event_create", { input: { ...input, title: `Additional requested event ${index}` } }, `extra-${index}`);
+        await assert.rejects(eventCall(source, "event_create", { input: { ...input, title: "Beyond request limit" } }, "over-limit"), /5-operation/);
+        sourceForResume = source;
+        source.native.held.add(source.threadId);
+      } else if (source.input.prompt.includes("The person's message: @scout HUMAN-PAUSE")) {
+        const editor = source.members.editor;
+        delete source.members.editor;
+        try {
+          const current = (await source.events.get(created.event.id)).event;
+          pauseReceipt = await eventCall(source, "event_manage", { id: current.id, action: "pause", expectedRevision: current.revision });
+        } finally { source.members.editor = editor; }
+        const manualArgs = { id: created.event.id, action: "run_now" };
+        const manual = await eventCall(source, "event_manage", manualArgs, "run-manual");
+        assert.deepEqual(await eventCall(source, "event_manage", manualArgs, "run-manual-repeat"), manual);
+        const cancelled = await eventCall(source, "event_manage", { id: created.event.id, action: "cancel_run", runId: manual.run.id }, "cancel-manual");
+        assert.equal(cancelled.run.status, "cancelled");
+        assert.equal(cancelled.run.leadSlug, "scout");
+      }
+    } });
+    try {
+      outsider = await service.events.create({ ...eventInput(["editor"]), state: "paused", startsAt: at, schedule: input.schedule });
+      const owner = { slug: "scout", threadId: "ses_event_management", conversationId: "ses_event_management", kind: "private" };
+      const root = await service.collaboration.submit({ owner, prompt: "DIRECT EVENT WRITES", messageId: "msg_event_management", track: true });
+      await eventually(() => sourceForResume && service.native.held.has(owner.threadId));
+      assert.equal((await service.events.list()).length, 5);
+      const receipts = await service.collaboration.read((state) => Object.values(state.workplaceEvents.writeReceipts));
+      assert.equal(receipts.length, 5);
+      const acceptedContext = await service.collaboration.read((state) => state.executions[root.id].executionContext);
+      assert.ok(acceptedContext.length <= EVENT_CONTEXT_LIMIT);
+      const { native, members, services } = service;
+      await service.stop();
+      sourceForResume.reply.completedAt = null;
+      const firstPart = sourceForResume.reply.parts.find((part) => part.callId === "create-original");
+      firstPart.toolInput = { input }; firstPart.toolStatus = "running";
+      native.held.add(owner.threadId);
+      service = await eventFixture(home, { native, members, services });
+      const source = { ...service, slug: "scout", threadId: owner.threadId, reply: sourceForResume.reply };
+      await eventually(async () => {
+        try { await service.collaboration.context("scout", { sessionID: owner.threadId, messageID: source.reply.id, callID: "create-original", directory: members.scout.path }, { name: "coworker_event_create", args: { input } }, assertEventToolContext); return true; }
+        catch { return false; }
+      });
+      assert.deepEqual(await eventCall(source, "event_create", { input }, "create-original"), created);
+      assert.equal((await service.events.list()).length, 5);
+      assert.equal((await service.events.get(created.event.id)).event.revision, 3);
+      assert.equal(await service.collaboration.read((state) => state.executions[root.id].executionContext), acceptedContext, "observation recovery does not replace accepted Event context");
+      source.reply.completedAt = Date.now(); native.held.clear();
+      await eventually(async () => (await service.collaboration.read((state) => state.executions[root.id])).state === "succeeded");
+      const current = (await service.events.get(created.event.id)).event;
+      await service.events.update(current.id, { ...eventInputSchema.parse(current), state: "active" }, current.revision);
+      await service.groups.submit(current.groupId, { clientMessageId: "human-pause", text: "@scout HUMAN-PAUSE" });
+      await eventually(async () => !(await service.groups.status(current.groupId)).active);
+      assert.equal(pauseReceipt?.event.state, "paused", "a verified human group turn can disable despite a missing peer");
+      const groupEntry = await service.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.groupRequestId === "human-pause"));
+      assert.equal(groupEntry.personRequest, true); assert.equal(groupEntry.tools.coworker_computer_act, false);
+      for (const patch of [{ personRequest: false }, { continuation: true }, { continuedFrom: "earlier" }, { attempts: 1 }, { owner: { ...owner, kind: "worker" } }, { owner: { ...owner, kind: "consultation" } }, { owner: { ...owner, eventRunId: "scheduled" } }]) {
+        assert.throws(() => assertEventHumanOrigin({ ...groupEntry, ...patch }), /direct human request/);
+      }
+      const awareness = await service.events.context({ ...owner, coworkerIdentity: coworkerIdentity(members.scout) });
+      assert.ok(awareness.length <= EVENT_CONTEXT_LIMIT); assert.ok(!awareness.includes(outsider.id));
+    } finally { service.native.held.clear(); await service.stop(); }
+  });
+});
+
+test("Event continuity freezes at start and stop retains published contributions without inventing a delivered outcome", async () => {
+  await withHome(async (home) => {
+    let stopId, partialId;
+    const document = { id: "retained", title: "Retained work", revision: 1, body: "A real retained result." };
+    const service = await eventFixture(home, { readArtifact: async () => document, onSend: async (source) => {
+      const entry = await source.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.messageId === source.input.messageId));
+      if (!entry?.owner.eventRunId) return;
+      assert.equal(source.input.tools.coworker_event_create, false); assert.equal(source.input.tools.coworker_assignment_create, false);
+      if (entry.owner.eventRunId === stopId && source.slug === "scout") source.reply.parts.push({ type: "tool", tool: "coworker_document_create", callId: "created-before-stop", toolStatus: "completed", toolInput: { title: document.title }, toolMetadata: { openworkMcpApp: { structuredContent: { document: { ...document, action: "created" } } } } });
+      if (entry.owner.eventRunId === stopId && source.slug === "editor") source.native.held.add(source.threadId);
+      if (entry.owner.eventRunId === partialId && source.slug === "editor") throw new Error("A contribution could not finish.");
+      if (entry.owner.eventRunId === partialId && entry.owner.eventPhase === "conclusion") source.native.held.add(source.threadId);
+    } });
+    try {
+      const event = await service.events.create({ ...eventInput(), state: "paused", description: "The working prompt stays intact." });
+      await service.events.runNow(event.id, "delivered-first");
+      const [first] = await service.settle(event.id);
+      assert.equal(first.outcomeStatus, "delivered");
+      const stopping = await service.events.runNow(event.id, "stopped-second"); stopId = stopping.id;
+      const queued = await service.events.runNow(event.id, "partial-third"); partialId = queued.id;
+      assert.equal(queued.continuity, undefined, "queued occurrences do not prematurely freeze continuity");
+      await service.events.tick();
+      await eventually(async () => service.native.held.size > 0 && (await service.events.get(event.id)).runs.find((run) => run.id === stopId).contributorSlugs.includes("scout"));
+      const stopped = await service.events.cancel(event.id, stopId);
+      assert.deepEqual(stopped.contributorSlugs, ["scout"]); assert.equal(stopped.artifacts[0].relation, "created");
+      assert.equal(stopped.outcome, null); assert.equal(stopped.outcomeStatus, null);
+      await eventually(async () => {
+        await service.events.tick();
+        return (await service.events.get(event.id)).runs.find((run) => run.id === partialId).outcomeStatus === "provisional";
+      });
+      const live = (await service.events.get(event.id)).runs.find((run) => run.id === partialId);
+      assert.equal(live.continuity.sourceRunId, first.id); assert.equal(live.continuity.previousRunId, stopped.id);
+      assert.deepEqual(live.continuity.openQuestions, first.outcome.openQuestions);
+      assert.deepEqual(live.continuity.followUps, first.outcome.followUps);
+      const request = await service.collaboration.read((state) => state.groups[event.groupId].queue[0]);
+      const prompt = await service.events.requestContext(request, event.leadSlug);
+      const prefix = `Scheduled workplace event ${event.title}.\nObjective: ${event.objective}\nWorking prompt: ${event.description}\n\n`;
+      assert.ok(prompt.startsWith(prefix)); assert.ok(prompt.slice(prefix.length).length <= EVENT_DYNAMIC_LIMIT);
+      service.native.held.clear();
+      const finished = (await service.settle(event.id)).find((run) => run.id === partialId);
+      assert.equal(finished.status, "partial"); assert.equal(finished.outcomeStatus, "delivered");
+      assert.equal((await service.events.get(event.id)).continuity.sourceRunId, partialId);
+      assert.equal(finished.continuity.sourceRunId, first.id, "the started occurrence retains its original continuity");
+      const fullOutcome = { ...finished.outcome, summary: "S".repeat(1001), openQuestions: Array.from({ length: 6 }, (_, index) => `${index}: ${"Q".repeat(181)}`), followUps: Array.from({ length: 5 }, (_, index) => `${index}: ${"F".repeat(181)}`) };
+      await service.collaboration.change((state) => { state.workplaceEvents.runs[partialId].outcome = fullOutcome; });
+      const preview = await service.events.get(event.id);
+      assert.deepEqual({ summaryLength: preview.continuity.summary.length, questions: preview.continuity.openQuestions.length, followUps: preview.continuity.followUps.length,
+        itemLength: preview.continuity.openQuestions[0].length, note: preview.continuity.note.length <= 240 && /6 questions, 5 follow-ups total/.test(preview.continuity.note)
+          && preview.continuity.note.includes("Read sourceRunId via event_details before concluding; omitted items are not resolved."),
+        source: preview.runs.find((run) => run.id === partialId).outcome },
+      { summaryLength: 1000, questions: 4, followUps: 4, itemLength: 180, note: true, source: fullOutcome }, "truncated continuity directs a full source read without changing the complete source outcome");
+      service.members.ops = { ...service.members.editor, slug: "ops", name: "Ops", path: path.join(home, "ops"), workspaceId: "workspace_ops" };
+      const current = (await service.events.get(event.id)).event;
+      await service.events.update(event.id, { ...eventInputSchema.parse(current), participantSlugs: ["scout", "editor", "ops"], maxReplies: 4 }, current.revision);
+      const changed = await service.events.get(event.id);
+      assert.equal(changed.continuity.sourceRunId, null); assert.equal(changed.continuity.summary, "");
+      assert.match(changed.continuity.note, /snapshot differs/);
+    } finally { service.native.held.clear(); await service.stop(); }
+  });
+});
+
+test("Event recurrence ends inclusively and state-only disabling survives unavailable participants and pruned artifacts", async () => {
+  await withHome(async (home) => {
+    let clock = Date.UTC(2026, 8, 11, 10), available = true;
+    const service = await eventFixture(home, { startGroups: false, now: () => clock, readArtifact: async () => {
+      if (!available) throw new Error("Revision was pruned");
+      return { id: "brief", title: "Brief", revision: 1, body: "Existing artifact" };
+    } });
+    try {
+      const end = Date.UTC(2026, 8, 10, 9);
+      const event = await service.events.create({ ...eventInput(), startsAt: Date.UTC(2026, 8, 8, 9), schedule: { kind: "daily", hour: 9, minute: 0, timezone: "Etc/UTC" }, repeatUntil: end });
+      await service.events.tick();
+      const detail = await service.events.get(event.id);
+      assert.equal(detail.runs.length, 1); assert.equal(detail.runs[0].scheduledFor, end); assert.equal(detail.event.nextDueAt, null);
+      await service.events.cancel(event.id, detail.runs[0].id);
+      clock += 8 * 86400000; await service.events.tick();
+      assert.equal((await service.events.get(event.id)).runs.length, 1, "an ended repetition does not manufacture more occurrences");
+      const future = clock + 86400000;
+      const withArtifact = await service.events.create({ ...eventInput(), startsAt: future, schedule: { kind: "once", at: future, timezone: "Etc/UTC" }, artifacts: [{ owner: { kind: "coworker", slug: "scout", createdAt: service.members.scout.createdAt }, documentId: "brief", title: "Brief", revision: 1, relation: "used", contributorSlug: "scout" }] });
+      delete service.members.editor; available = false;
+      const paused = await service.events.update(withArtifact.id, { ...eventInputSchema.parse(withArtifact), state: "paused" }, withArtifact.revision);
+      assert.equal(paused.state, "paused"); assert.equal(paused.nextDueAt, null);
+      const archived = await service.events.update(paused.id, { ...eventInputSchema.parse(paused), state: "archived" }, paused.revision);
+      assert.equal(archived.state, "archived");
+      const expired = await service.events.create({ ...eventInput(["scout"]), state: "paused", startsAt: clock - 1, schedule: { kind: "once", at: clock - 1, timezone: "Etc/UTC" } });
+      await assert.rejects(service.events.update(expired.id, { ...eventInputSchema.parse(expired), state: "active" }, expired.revision), /one-time event has no future occurrence/);
+      const repeating = await service.events.create({ ...eventInput(["scout"]), state: "paused", startsAt: clock - 86400000, schedule: { kind: "weekly", daysOfWeek: [1, 2, 3, 4, 5], hour: 9, minute: 0, timezone: "Etc/UTC" }, repeatUntil: clock + 8 * 86400000 });
+      const resumed = await service.events.update(repeating.id, { ...eventInputSchema.parse(repeating), state: "active", title: "Renamed weekday review" }, repeating.revision);
+      assert.ok(resumed.nextDueAt > clock && resumed.nextDueAt <= resumed.repeatUntil);
+      assert.equal((await getGroup(home, resumed.groupId)).name, resumed.title);
+      assert.equal(service.native.requests.length, 0);
+      assert.deepEqual(eventToolCatalog().map((tool) => tool.name).slice(-3), ["coworker_event_create", "coworker_event_update", "coworker_event_manage"]);
+    } finally { await service.stop(); }
+  });
+});
+
+test("queued Event writes reject ended tool parts and abandoned HTTP transports without accepting a run", async () => {
+  for (const mode of ["tool-ended", "transport"]) await withHome(async (home) => {
+    const prepared = Promise.withResolvers(), finish = Promise.withResolvers();
+    const abandoned = new AbortController();
+    let preparing = false, validations = 0, source, requestPromise, backendPromise, serverSignal, server;
+    let target;
+    const service = await eventFixture(home, {
+      readArtifact: async () => { preparing = true; await prepared.promise; return { id: "gate", title: "Gate", revision: 1, body: "Fixture only" }; },
+      onContextResolved: (_slug, expected) => { if (expected.name === "coworker_event_manage") validations++; },
+      onSend: async (current) => {
+        if (current.input.prompt !== "EVENT QUEUE CANCELLATION") return;
+        const args = { id: target.id, action: "run_now" };
+        const part = { type: "tool", tool: "coworker_event_manage", toolStatus: "running", callId: "queued-run", toolInput: args };
+        current.reply.parts.push(part);
+        const input = { name: "event_manage", args, context: { sessionID: current.threadId, messageID: current.reply.id, callID: part.callId, directory: current.members.scout.path }, signal: { aborted: false } };
+        source = { ...current, part };
+        if (mode === "transport") {
+          requestPromise = fetch(server.url.replace(/\/mcp$/, "/context"), { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer fixture-event-transport" }, body: JSON.stringify(input), signal: abandoned.signal });
+          await assert.rejects(requestPromise);
+        } else {
+          requestPromise = current.events.executeNative("scout", input);
+          await assert.rejects(requestPromise, /exact active native execution/);
+        }
+        await finish.promise;
+      },
+    });
+    let blocker;
+    try {
+      target = await service.events.create({ ...eventInput(), state: "paused" });
+      blocker = service.events.create({ ...eventInput(["scout"]), state: "paused", title: "Hold Event serial preparation", artifacts: [{ owner: { kind: "coworker", slug: "scout", createdAt: service.members.scout.createdAt }, documentId: "gate", title: "Gate", revision: 1, relation: "used", contributorSlug: "scout" }] });
+      await eventually(() => preparing);
+      if (mode === "transport") server = await createCoworkerToolsServer({ resolveSlug: (token) => token === "fixture-event-transport" ? "scout" : null, handlers: {}, onContextTool: (slug, input, signal) => {
+        serverSignal = signal;
+        assert.notEqual(input.signal, signal, "payloads cannot supply transport authority");
+        backendPromise = service.events.executeNative(slug, input, signal);
+        void backendPromise.catch(() => {});
+        return backendPromise;
+      } });
+      const root = await service.collaboration.submit({ owner: { slug: "scout", threadId: "ses_queued_event_tool", conversationId: "ses_queued_event_tool", kind: "private" }, messageId: "msg_queued_event_tool", prompt: "EVENT QUEUE CANCELLATION", track: true });
+      await eventually(() => Boolean(validations === 1 && source && requestPromise));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal((await service.collaboration.read((state) => state.executions[root.id])).state, "running");
+      if (mode === "tool-ended") source.part.toolStatus = "error";
+      else {
+        assert.equal(serverSignal.aborted, false, "normal request-body end must not cancel the callback");
+        abandoned.abort();
+        await eventually(() => serverSignal.aborted);
+        assert.equal(source.part.toolStatus, "running", "transport cancellation is independent of parent/tool status");
+      }
+      prepared.resolve(); await blocker;
+      await assert.rejects(mode === "transport" ? backendPromise : requestPromise, mode === "transport" ? /transport disconnected/ : /exact active native execution/);
+      assert.deepEqual((await service.events.get(target.id)).runs, []);
+      assert.equal((await service.collaboration.read((state) => state.executions[root.id])).state, "running", "the parent may remain active but the ended call cannot commit");
+    } finally {
+      prepared.resolve(); finish.resolve(); abandoned.abort();
+      await blocker?.catch(() => {});
+      await backendPromise?.catch(() => {});
+      await service.stop(); await server?.stop();
+    }
+  });
+});
+
+test("a shared human group request deduplicates run_now across authorized participants and restart", async () => {
+  await withHome(async (home) => {
+    let event, service, hold = true, rejectSecond = true, deniedReplay = false;
+    const receipts = [];
+    const options = { onContextResolved: async (slug, expected) => {
+      if (slug === "editor" && expected.name === "coworker_event_manage" && rejectSecond) {
+        rejectSecond = false;
+        await service.collaboration.change((state) => { state.workplaceEvents.definitions[event.id].participantSlugs = ["scout"]; });
+      }
+    }, onSend: async (source) => {
+      if (!source.input.prompt.includes("The person's message: @everyone RUN ONE SHARED OCCURRENCE")) return;
+      const args = { id: event.id, action: "run_now" };
+      if (source.slug === "editor") {
+        try {
+          await assert.rejects(eventCall(source, "event_manage", args, "unauthorized-replay"), /roster changed|participant/);
+          deniedReplay = true;
+          assert.equal(await source.collaboration.read((state) => Object.values(state.workplaceEvents.writeCalls).length), 1);
+        } finally { await source.collaboration.change((state) => { state.workplaceEvents.definitions[event.id].participantSlugs = ["scout", "editor"]; }); }
+      }
+      const receipt = await eventCall(source, "event_manage", args, `run-${source.slug}`);
+      receipts.push({ slug: source.slug, receipt });
+      if (source.slug === "scout" && hold) source.native.held.add(source.threadId);
+    } };
+    service = await eventFixture(home, options);
+    try {
+      event = await service.events.create({ ...eventInput(), state: "paused" });
+      await service.groups.submit(event.groupId, { clientMessageId: "shared-human-request", text: "@everyone RUN ONE SHARED OCCURRENCE" });
+      await eventually(() => receipts.length === 1 && service.native.held.size === 1);
+      const { native, members, services } = service;
+      await service.stop(); hold = false;
+      service = await eventFixture(home, { ...options, native, members, services });
+      await eventually(async () => receipts.length === 2 && !(await service.groups.status(event.groupId)).active);
+      assert.deepEqual(receipts.map((entry) => entry.slug), ["scout", "editor"]);
+      assert.equal(deniedReplay, true, "a cached semantic receipt never substitutes for the second caller's authorization");
+      assert.equal(receipts[0].receipt.run.id, receipts[1].receipt.run.id);
+      const detail = await service.events.get(event.id);
+      assert.equal(detail.runs.length, 1); assert.equal(detail.runs[0].status, "queued");
+      const stored = await service.collaboration.read((state) => ({ receipts: Object.values(state.workplaceEvents.writeReceipts), calls: Object.values(state.workplaceEvents.writeCalls) }));
+      assert.equal(stored.receipts.length, 1); assert.equal(stored.calls.length, 2);
+      assert.equal(new Set(stored.calls.map((call) => call.key)).size, 1);
+      assert.equal(native.requests.length, 2, "recovery observes the accepted first speaker rather than running it twice");
+    } finally { hold = false; service.native.held.clear(); await service.stop(); }
+  });
+});
+
+test("Event update plugin and catalog require full replacement fields while create retains defaults", async () => {
+  const tool = (definition) => definition;
+  tool.schema = z;
+  const requests = [];
+  const plugin = await new Function("tool", "readFile", "path", "fetch", "AbortSignal", EVENT_PLUGIN
+    .replace(/^import .*;\n/gm, "").replace("export default", "return"))(tool,
+    async () => JSON.stringify({ url: "http://127.0.0.1:1/context", token: "fixture-only" }), path,
+    async (_url, request) => { requests.push(JSON.parse(request.body)); return { ok: true, json: async () => ({ text: "Updated" }) }; }, AbortSignal)({ directory: "/fixture/workspace" });
+  const full = eventInput();
+  const names = ["description", "template", "durationMinutes", "maxReplies", "state", "artifacts"];
+  const catalog = eventToolCatalog();
+  const updateCatalog = catalog.find((entry) => entry.name === "coworker_event_update").inputSchema;
+  const fromCatalog = z.fromJSONSchema(updateCatalog);
+  const context = { sessionID: "session", messageID: "message", callID: "update", directory: "/fixture/workspace", abort: new AbortController().signal };
+  for (const name of names) {
+    const input = { ...full }; delete input[name];
+    const args = { id: "event", input, expectedRevision: 1 };
+    assert.equal(eventNativeSchemas.event_update.safeParse(args).success, false, name);
+    assert.equal(fromCatalog.safeParse(args).success, false, name);
+    await assert.rejects(plugin.tool.coworker_event_update.execute(args, context));
+    assert.equal(eventNativeSchemas.event_create.safeParse({ input }).success, true, "create may supply defaults");
+    assert.equal(plugin.tool.coworker_event_create.args.input.safeParse(input).success, true);
+  }
+  assert.equal(requests.length, 0, "incomplete updates are rejected before transport");
+  assert.equal(updateCatalog.properties.input.required.includes("repeatUntil"), false);
+  const args = { id: "event", input: { ...full, title: "  Preserve raw native arguments  " }, expectedRevision: 1 };
+  assert.equal(eventNativeSchemas.event_update.safeParse(args).success, true);
+  assert.equal(fromCatalog.safeParse(args).success, true);
+  await plugin.tool.coworker_event_update.execute(args, context);
+  assert.deepEqual(requests[0].args, args, "normalization remains after exact raw-argument context verification");
+  assert.ok(JSON.stringify(catalog).length <= 10000);
 });

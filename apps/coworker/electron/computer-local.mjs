@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { release } from "node:os";
 import path from "node:path";
@@ -56,17 +57,26 @@ export function createLocalComputerAdapter({
   fileExists = existsSync,
   spawnChild = spawn,
   mcp = loadMcp,
+  onSetupReturn = () => {},
   timeouts = {},
 } = {}) {
-  const limits = { probe: 5_000, handshake: 5_000, call: 120_000, close: 7_000, ...timeouts };
+  const limits = { probe: 5_000, handshake: 5_000, call: 120_000, close: 7_000, setupPoll: 1_000, setupLifetime: 300_000, ...timeouts };
   // Do not pass provider credentials, Node preload flags or dynamic-loader overrides.
   const env = Object.fromEntries(["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER", "TMPDIR"]
     .filter((key) => typeof process.env[key] === "string" && !process.env[key].startsWith("()"))
     .map((key) => [key, process.env[key]]));
-  let setupPending = null;
-  let setupPermission = null;
+  let companion = null;
+  let setupEpoch = 0;
+  let inspectPending = null;
 
-  async function inspect() {
+  function inspect() {
+    if (!inspectPending) {
+      inspectPending = probe().finally(() => { inspectPending = null; });
+    }
+    return inspectPending;
+  }
+
+  async function probe() {
     // Darwin 23 is macOS 14. Never start a newer native binary on an older OS.
     if (platform !== "darwin" || Number.parseInt(osRelease, 10) < 23 || !/^\d+\./.test(osRelease)) {
       return { readiness: "unsupported", detail: "This Mac requires macOS 14 or later for Computer Use." };
@@ -126,46 +136,210 @@ export function createLocalComputerAdapter({
     }
   }
 
+  function clearSetupTimers(record) {
+    clearTimeout(record.pollTimer);
+    clearTimeout(record.expiryTimer);
+    record.pollTimer = null;
+    record.expiryTimer = null;
+  }
+
+  function stopCompanion(record) {
+    if (record.exited) return Promise.resolve();
+    if (record.stopping) return record.stopping;
+    clearSetupTimers(record);
+    record.lifetime.abort(new Error("Computer Use permission setup closed."));
+    record.stopping = (async () => {
+      if (!record.child) {
+        if (companion === record) companion = null;
+        return;
+      }
+      try { record.child.stdin.end(`${JSON.stringify({ type: "close" })}\n`); } catch {}
+      try {
+        await bounded(() => record.terminated, limits.close);
+      } catch {
+        try { record.child.kill("SIGKILL"); } catch {}
+        try { await bounded(() => record.terminated, limits.close); } catch {
+          throw new Error("Computer Use permission setup termination could not be confirmed. The helper may still be running.");
+        }
+      }
+    })();
+    void record.stopping.catch(() => {});
+    return record.stopping;
+  }
+
+  async function dismissSetup(setupId) {
+    if (setupId !== undefined && setupId !== companion?.setupId) return;
+    setupEpoch++;
+    const record = companion;
+    if (record) await stopCompanion(record);
+  }
+
+  async function writeSetup(record, message) {
+    if (!record.ready || record.exited || record.lifetime.signal.aborted) throw new Error("Computer Use permission setup is closed.");
+    await bounded(() => new Promise((resolve, reject) => {
+      try {
+        record.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+          if (error) reject(new Error("Could not deliver the Computer Use permission setup message."));
+          else resolve();
+        });
+      } catch {
+        reject(new Error("Could not deliver the Computer Use permission setup message."));
+      }
+    }), limits.handshake, record.lifetime.signal);
+    record.lifetime.signal.throwIfAborted();
+  }
+
+  async function publishStatus(record, state) {
+    if (!record?.ready || record.lifetime.signal.aborted) return;
+    const { readiness, permissions } = state;
+    try {
+      await writeSetup(record, { type: "status", readiness, ...(permissions ? { permissions } : {}) });
+    } catch {
+      await stopCompanion(record).catch(() => {});
+    }
+  }
+
+  function refreshSetup(record) {
+    if (record.lifetime.signal.aborted || !record.ready || !record.visible) return Promise.resolve();
+    if (!record.refreshPending) {
+      record.refreshPending = (async () => {
+        const state = await inspect();
+        await publishStatus(record, state);
+      })().finally(() => { record.refreshPending = null; });
+    }
+    return record.refreshPending;
+  }
+
+  function scheduleSetupPoll(record) {
+    clearTimeout(record.pollTimer);
+    record.pollTimer = null;
+    if (!record.ready || !record.visible || record.lifetime.signal.aborted) return;
+    record.pollTimer = setTimeout(() => {
+      void refreshSetup(record).finally(() => scheduleSetupPoll(record));
+    }, limits.setupPoll);
+    record.pollTimer.unref?.();
+  }
+
+  async function startCompanion(record, permission) {
+    try {
+      const state = await bounded(() => inspect(), limits.probe + limits.close, record.lifetime.signal);
+      record.lifetime.signal.throwIfAborted();
+      if (record.epoch !== setupEpoch || companion !== record) throw new Error("Computer Use permission setup cancelled.");
+      if (!state.binary) throw new Error(state.detail);
+      const child = spawnChild(state.binary, ["permissions-coworker", permission], { env, stdio: ["pipe", "pipe", "ignore"] });
+      record.child = child;
+      record.terminated = new Promise((resolve) => {
+        child.once("close", () => {
+          record.exited = true;
+          clearSetupTimers(record);
+          record.lifetime.abort(new Error("Computer Use permission setup exited."));
+          if (companion === record) companion = null;
+          resolve();
+        });
+      });
+      let acceptReady;
+      const ready = new Promise((resolve) => { acceptReady = resolve; });
+      const fail = () => { void stopCompanion(record).catch(() => {}); };
+      child.on("error", fail);
+      child.stdin.on("error", fail);
+      child.stdout.on("error", fail);
+      child.stdout.on("end", fail);
+      let pending = "";
+      let total = 0;
+      let lines = 0;
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => {
+        if (record.lifetime.signal.aborted) return;
+        total += Buffer.byteLength(chunk);
+        if (total > 65_536) { fail(); return; }
+        pending += chunk;
+        let newline;
+        while ((newline = pending.indexOf("\n")) !== -1) {
+          const line = pending.slice(0, newline);
+          pending = pending.slice(newline + 1);
+          if (Buffer.byteLength(line) > 4_096 || ++lines > 2_048) { fail(); return; }
+          let event;
+          try { event = JSON.parse(line); } catch { fail(); return; }
+          if (!event || typeof event !== "object" || Array.isArray(event)) { fail(); return; }
+          const keys = event.event === "requested" ? ["event", "permission"] : event.event === "visibility" ? ["event", "visible"] : ["event"];
+          if (Object.keys(event).some((key) => !keys.includes(key))) { fail(); return; }
+          if (!record.ready) {
+            if (event.event !== "ready") { fail(); return; }
+            record.ready = true;
+            acceptReady();
+          } else if (event.event === "requested") {
+            if (!["accessibility", "screenRecording"].includes(event.permission)) { fail(); return; }
+          } else if (event.event === "refresh") {
+            void refreshSetup(record);
+          } else if (event.event === "visibility" && typeof event.visible === "boolean") {
+            record.visible = event.visible;
+            scheduleSetupPoll(record);
+          } else if (event.event === "return") {
+            fail();
+            try { void Promise.resolve(onSetupReturn()).catch(() => {}); } catch {}
+            return;
+          } else {
+            fail(); return;
+          }
+        }
+        if (Buffer.byteLength(pending) > 4_096) fail();
+      });
+      record.expiryTimer = setTimeout(fail, limits.setupLifetime);
+      record.expiryTimer.unref?.();
+      await bounded(() => ready, limits.handshake, record.lifetime.signal);
+      record.lifetime.signal.throwIfAborted();
+      void publishStatus(record, state);
+      scheduleSetupPoll(record);
+      return { setupId: record.setupId };
+    } catch (error) {
+      try { await stopCompanion(record); } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Computer Use permission setup failed and termination could not be confirmed.");
+      }
+      throw error;
+    }
+  }
+
   return {
     id: "this-mac",
     label: "This Mac",
     placement: "desktop",
     protocol: protocolVersion,
     async readiness() {
-      const { readiness, detail, permissions } = await inspect();
+      const record = companion;
+      const state = await inspect();
+      await publishStatus(record, state);
+      const { readiness, detail, permissions } = state;
       return { readiness, detail, ...(permissions ? { permissions } : {}) };
     },
     async setup(permission) {
       if (!["accessibility", "screenRecording"].includes(permission)) throw new Error("Choose Accessibility or Screen Recording settings.");
-      if (setupPending) {
-        if (setupPermission !== permission) throw new Error("Finish the current macOS permission request first.");
-        return setupPending;
+      if (companion?.lifetime.signal.aborted) throw new Error("Computer Use permission setup termination has not been confirmed.");
+      if (companion?.starting) {
+        if (companion.permission !== permission) throw new Error("Finish the current macOS permission request first.");
+        return companion.starting;
       }
-      setupPermission = permission;
-      setupPending = (async () => {
-        const state = await inspect();
-        if (!state.binary) throw new Error(state.detail);
-        // Match --check and MCP's responsible application. Do not use LaunchServices.
-        const child = spawnChild(state.binary, ["permissions", permission], { env, stdio: "ignore" });
-        let failed = false;
-        child.on("error", () => { failed = true; });
-        const exited = new Promise((resolve) => {
-          child.once("close", resolve);
-        });
+      const setupId = randomUUID();
+      if (companion) {
+        const record = companion;
+        record.setupId = setupId;
         try {
-          const code = await bounded(() => exited, limits.call);
-          if (failed || code !== 0) throw new Error("Could not open macOS permission settings. Open System Settings > Privacy & Security manually.");
+          await writeSetup(record, { type: "request", permission });
         } catch (error) {
-          if (child.exitCode === null && child.signalCode === null) {
-            child.kill("SIGKILL");
-            await bounded(() => exited, limits.close);
+          try { await stopCompanion(record); } catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], "Computer Use permission request failed and termination could not be confirmed.");
           }
           throw error;
         }
-      })().finally(() => { setupPending = null; setupPermission = null; });
-      return setupPending;
+        return { setupId };
+      }
+      const record = { setupId, permission, epoch: setupEpoch, lifetime: new AbortController(), visible: true, ready: false, exited: false };
+      companion = record;
+      record.starting = startCompanion(record, permission).finally(() => { record.starting = null; });
+      return record.starting;
     },
+    dismissSetup,
     async connect({ onUi = () => {}, onClose = () => {} } = {}) {
+      await dismissSetup();
       const state = await inspect();
       if (state.readiness !== "ready") throw new Error(state.detail);
       const { Client, StdioClientTransport, uiNotificationSchema } = await mcp();

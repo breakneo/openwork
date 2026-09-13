@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
@@ -26,29 +26,50 @@ function fixture(options = {}) {
   const adapter = createLocalComputerAdapter({
     platform: "darwin", osRelease: "25.0.0", resourcesPath: "/fixture/Resources",
     fileExists: () => options.exists !== false,
-    timeouts: { probe: 40, handshake: 80, call: 100, close: 100 },
+    timeouts: { probe: 40, handshake: 80, call: 100, close: 100, ...options.timeouts },
     spawnChild(command, args, spawnOptions) {
       spawned.push({ command, args, options: spawnOptions });
-      const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), exitCode: null, signalCode: null, signals: [], unreferenced: false });
+      const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), exitCode: null, signalCode: null, signals: [], messages: [], unreferenced: false });
+      child.finish = (code = 0) => {
+        if (child.finished) return;
+        child.finished = true;
+        child.exitCode = code;
+        child.emit("exit", code);
+        child.emit("close", code);
+        child.stdout.end();
+      };
+      child.stdin = new Writable({
+        write(chunk, encoding, callback) {
+          const message = JSON.parse(chunk.toString());
+          child.messages.push(message);
+          if (message.type === "request" && options.writeHang) { child.acknowledge = callback; return; }
+          callback(message.type === "request" && options.writeError ? new Error("private fixture write error") : undefined);
+        },
+        final(callback) {
+          callback();
+          if (!options.deferSetupClose) queueMicrotask(() => child.finish());
+        },
+      });
       child.kill = (signal) => {
         child.signals.push(signal);
-        if (signal !== "SIGUSR1" && !options.ignoreKill) queueMicrotask(() => child.emit("close", null));
+        if (signal !== "SIGUSR1" && !options.ignoreKill) queueMicrotask(() => child.finish(null));
         return true;
       };
       child.unref = () => { child.unreferenced = true; };
       children.push(child);
       queueMicrotask(() => {
-        if (options.spawnError) {
+        if (options.spawnError || (args[0] === "permissions-coworker" && options.setupError)) {
           child.emit("error", new Error("fixture spawn error"));
-          child.emit("close", -2);
+          child.finish(-2);
           return;
         }
         child.emit("spawn");
-        if ((args[0] === "--check" && !options.checkHang) || (args[0] === "permissions" && !options.setupHang)) {
-          if (args[0] === "--check") child.stdout.write(options.output ?? JSON.stringify({ ...permissions, ...options.permissions }));
-          child.exitCode = args[0] === "--check" ? options.checkCode ?? 0 : options.setupCode ?? 0;
-          child.emit("exit", child.exitCode);
-          child.emit("close", child.exitCode);
+        if (args[0] === "--check" && !options.checkHang) {
+          child.stdout.write(options.output ?? JSON.stringify({ ...permissions, ...options.permissions }));
+          child.finish(options.checkCode ?? 0);
+        } else if (args[0] === "permissions-coworker") {
+          if (options.setupCode !== undefined) child.finish(options.setupCode);
+          else if (!options.setupHang) child.stdout.write(options.setupOutput ?? '{"event":"ready"}\n');
         }
       });
       return child;
@@ -95,7 +116,7 @@ function fixture(options = {}) {
 
 test("readiness is a fresh read-only protocol/permission probe with no private metadata", async () => {
   const f = fixture();
-  assert.deepEqual(Object.keys(f.adapter).sort(), ["connect", "id", "label", "placement", "protocol", "readiness", "setup"]);
+  assert.deepEqual(Object.keys(f.adapter).sort(), ["connect", "dismissSetup", "id", "label", "placement", "protocol", "readiness", "setup"]);
   assert.equal(f.adapter.id, "this-mac");
   assert.equal(f.adapter.label, "This Mac");
   assert.equal(f.adapter.placement, "desktop");
@@ -168,23 +189,262 @@ test("stalled probes kill only their own child and report unconfirmed terminatio
   }
 });
 
-test("explicit setup requests only the chosen permission in the same helper context, without a GUI or control session", async () => {
-  const f = fixture({ permissions: { ok: false, accessibility: false } });
+test("explicit setup coalesces startup, resolves on ready and reuses one coach with fresh ownership tickets", async (t) => {
+  const f = fixture({ permissions: { ok: false, accessibility: false }, setupHang: true });
+  t.after(() => f.adapter.dismissSetup());
   for (const invalid of [undefined, "setup", "mcp", "Privacy_AllFiles"]) await assert.rejects(f.adapter.setup(invalid), /Choose Accessibility/);
   assert.equal(f.spawned.length, 0);
-  await Promise.all([f.adapter.setup("accessibility"), f.adapter.setup("accessibility")]);
-  assert.deepEqual(f.spawned.map(({ args }) => args), [["--check"], ["permissions", "accessibility"]]);
+  const first = f.adapter.setup("accessibility");
+  const repeated = f.adapter.setup("accessibility");
+  await assert.rejects(f.adapter.setup("screenRecording"), /Finish the current/);
+  await delay(1);
+  const coach = f.children[1];
+  coach.stdout.write('{"event":"rea');
+  coach.stdout.write('dy"}\n{"event":"requested","permission":"accessibility"}\n');
+  const [a, b] = await Promise.all([first, repeated]);
+  assert.deepEqual(a, b);
+  assert.deepEqual(Object.keys(a), ["setupId"]);
+  assert.equal(typeof a.setupId, "string");
+  assert.equal(coach.exitCode, null, "ready resolves while the coach remains alive");
+  assert.deepEqual(f.spawned.map(({ args }) => args), [["--check"], ["permissions-coworker", "accessibility"]]);
   assert.equal(f.spawned[0].command, f.spawned[1].command);
-  assert.equal(f.spawned[1].options.stdio, "ignore");
-  await f.adapter.setup("screenRecording");
-  assert.deepEqual(f.spawned.at(-1).args, ["permissions", "screenRecording"]);
-  assert.equal((await f.adapter.readiness()).permissions.accessibility, false, "opening settings does not grant permission");
+  assert.deepEqual(f.spawned[1].options.stdio, ["pipe", "pipe", "ignore"]);
+  assert.deepEqual(f.spawned[1].options.env, f.spawned[0].options.env);
+  const c = await f.adapter.setup("screenRecording");
+  const d = await f.adapter.setup("screenRecording");
+  assert.notEqual(a.setupId, c.setupId);
+  assert.notEqual(c.setupId, d.setupId);
+  assert.deepEqual(coach.messages.filter(({ type }) => type === "request"), [
+    { type: "request", permission: "screenRecording" }, { type: "request", permission: "screenRecording" },
+  ]);
+  await f.adapter.dismissSetup(a.setupId);
+  await f.adapter.dismissSetup(c.setupId);
+  assert.equal(coach.finished, undefined);
+  assert.equal((await f.adapter.readiness()).permissions.accessibility, false, "ready and requested events do not grant permission");
   assert.equal(f.connections.length, 0);
-  const failed = fixture({ setupCode: 1 });
-  await assert.rejects(failed.adapter.setup("accessibility"), /Could not open macOS/);
-  const hung = fixture({ setupHang: true });
-  await assert.rejects(hung.adapter.setup("screenRecording"), /timed out/);
-  assert.deepEqual(hung.children[1].signals, ["SIGKILL"]);
+  assert.equal(f.spawned.filter(({ args }) => args[0] === "permissions-coworker").length, 1);
+  await f.adapter.dismissSetup(d.setupId);
+  assert.equal(coach.finished, true);
+  assert.deepEqual(coach.messages.at(-1), { type: "close" });
+});
+
+test("malformed, oversized, failed and hanging coach startup are bounded and cleaned up", async () => {
+  for (const options of [
+    { setupOutput: "private native log\n" }, { setupOutput: '{"event":"requested","permission":"accessibility"}\n' },
+    { setupOutput: '{"event":"ready","extra":"private"}\n' }, { setupOutput: "x".repeat(4_097) },
+    { setupOutput: "x".repeat(65_537) }, { setupOutput: '{"event":"ready"}\n{"event":"ready"}\n' },
+    { setupOutput: '{"event":"ready"}\n' + '{"event":"refresh"}\n'.repeat(2_048) },
+    { setupOutput: '{"event":"ready"}\n{"event":"visibility","visible":"yes"}\n' },
+    { setupOutput: '{"event":"ready"}\n{"event":"requested","permission":"other"}\n' },
+    { setupOutput: "null\n" }, { setupCode: 1 }, { setupError: true }, { setupHang: true, deferSetupClose: true },
+  ]) {
+    const f = fixture(options);
+    await assert.rejects(f.adapter.setup("accessibility"), (error) => {
+      assert.doesNotMatch(error.message, /private native|private fixture/);
+      return true;
+    });
+    assert.equal(f.children[1].finished, true);
+    assert.equal(f.connections.length, 0);
+    if (options.setupHang) assert.deepEqual(f.children[1].signals, ["SIGKILL"]);
+  }
+});
+
+test("setup request waits for a bounded write acknowledgement and never retries uncertain delivery", async (t) => {
+  const options = { writeHang: true };
+  const f = fixture(options);
+  t.after(() => f.adapter.dismissSetup());
+  const first = await f.adapter.setup("accessibility");
+  const coach = f.children[1];
+  let finished = false;
+  const next = f.adapter.setup("screenRecording").then((ticket) => { finished = true; return ticket; });
+  await delay(1);
+  await f.adapter.dismissSetup(first.setupId);
+  assert.equal(finished, false);
+  assert.equal(coach.finished, undefined);
+  coach.acknowledge();
+  const latest = await next;
+  assert.notEqual(latest.setupId, first.setupId);
+  const failed = f.adapter.setup("screenRecording");
+  await assert.rejects(failed, /timed out/);
+  assert.equal(coach.messages.filter(({ type }) => type === "request").length, 2);
+  assert.equal(coach.finished, true);
+  coach.acknowledge();
+  await delay(1);
+  assert.equal(f.connections.length, 0);
+  const broken = fixture({ writeError: true });
+  await broken.adapter.setup("accessibility");
+  await assert.rejects(broken.adapter.setup("screenRecording"), (error) => {
+    assert.doesNotMatch(error.message, /private fixture/);
+    return true;
+  });
+  assert.equal(broken.children[1].messages.filter(({ type }) => type === "request").length, 1);
+  assert.equal(broken.children[1].finished, true);
+});
+
+test("fresh simultaneous checks coalesce and forward only safe status, preserving unknown failures", async (t) => {
+  const options = { permissions: { ok: false, accessibility: false } };
+  const f = fixture(options);
+  t.after(() => f.adapter.dismissSetup());
+  await Promise.all([f.adapter.readiness(), f.adapter.readiness()]);
+  assert.equal(f.spawned.length, 1);
+  await f.adapter.setup("accessibility");
+  const coach = f.children[2];
+  assert.deepEqual(coach.messages.at(-1), { type: "status", readiness: "setup-required", permissions: { accessibility: false, screenRecording: true } });
+  for (const failure of [{ output: "private invalid probe" }, { checkCode: 1 }, { permissions: { accessibility: "unknown" } }]) {
+    Object.assign(options, { output: undefined, checkCode: 0, permissions: {} }, failure);
+    const before = f.spawned.length;
+    const [a, b] = await Promise.all([f.adapter.readiness(), f.adapter.readiness()]);
+    assert.equal(f.spawned.length, before + 1);
+    assert.equal(a.readiness, "unavailable");
+    assert.equal(b.permissions, undefined);
+    assert.deepEqual(coach.messages.at(-1), { type: "status", readiness: "unavailable" });
+  }
+  Object.assign(options, { permissions: {}, output: undefined, checkCode: 0 });
+  assert.equal((await f.adapter.readiness()).readiness, "ready");
+  assert.equal(f.connections.length, 0);
+  assert.equal(coach.finished, undefined, "readiness does not complete setup or admit control");
+});
+
+test("polling pauses when hidden, resumes when visible and stops on EOF, exit, dismissal or lifetime", async () => {
+  for (const ending of ["eof", "exit", "dismiss", "expiry"]) {
+    const f = fixture({ timeouts: { setupPoll: 5, setupLifetime: ending === "expiry" ? 90 : 1_000 } });
+    await f.adapter.setup("accessibility");
+    const coach = f.children[1];
+    await delay(16);
+    assert.ok(f.spawned.length > 2);
+    coach.stdout.write('{"event":"visibility","visible":false}\n');
+    await delay(2);
+    const hiddenCount = f.spawned.length;
+    await delay(16);
+    assert.equal(f.spawned.length, hiddenCount);
+    coach.stdout.write('{"event":"visibility","visible":true}\n');
+    await delay(16);
+    assert.ok(f.spawned.length > hiddenCount);
+    if (ending === "eof") coach.stdout.end();
+    else if (ending === "exit") coach.finish();
+    else if (ending === "dismiss") await f.adapter.dismissSetup();
+    else await delay(100);
+    await delay(2);
+    assert.equal(coach.finished, true);
+    const count = f.spawned.length;
+    await delay(16);
+    assert.equal(f.spawned.length, count);
+    assert.equal(f.connections.length, 0);
+    await f.adapter.dismissSetup();
+  }
+});
+
+test("only a native return event invokes the host callback, safely once, never passive completion", async (t) => {
+  for (const rejects of [false, true]) {
+    let returns = 0;
+    const f = fixture({ dependencies: { onSetupReturn() {
+      returns++;
+      if (rejects) return Promise.reject(new Error("private callback failure"));
+      throw new Error("private callback failure");
+    } } });
+    t.after(() => f.adapter.dismissSetup());
+    await f.adapter.setup("accessibility");
+    const coach = f.children[1];
+    coach.stdout.write('{"event":"refresh"}\n');
+    await f.adapter.readiness();
+    assert.equal(returns, 0);
+    coach.stdout.write('{"event":"return"}\n{"event":"return"}\n');
+    await delay(1);
+    assert.equal(returns, 1);
+    assert.equal(coach.finished, true);
+    await f.adapter.setup("accessibility");
+    await f.adapter.dismissSetup();
+    assert.equal(returns, 1);
+    assert.equal(f.connections.length, 0);
+  }
+});
+
+test("dismissal cancels pending inspect without late GUI startup and invalidates only its own epoch", async () => {
+  const options = { checkHang: true };
+  const f = fixture(options);
+  const pending = f.adapter.setup("accessibility");
+  const rejected = assert.rejects(pending, /closed/);
+  await delay(1);
+  await f.adapter.dismissSetup();
+  await rejected;
+  assert.equal(f.children.length, 1);
+  options.checkHang = false;
+  const next = f.adapter.setup("screenRecording");
+  f.children[0].stdout.write(JSON.stringify(permissions));
+  f.children[0].finish();
+  const ticket = await next;
+  assert.deepEqual(f.spawned.map(({ args }) => args), [["--check"], ["permissions-coworker", "screenRecording"]]);
+  await f.adapter.dismissSetup(ticket.setupId);
+  const pollingOptions = { timeouts: { setupPoll: 5, probe: 1_000 } };
+  const polling = fixture(pollingOptions);
+  await polling.adapter.setup("accessibility");
+  const coach = polling.children[1];
+  pollingOptions.checkHang = true;
+  coach.stdout.write('{"event":"refresh"}\n');
+  await delay(1);
+  const check = polling.children[2];
+  assert.ok(check);
+  await polling.adapter.dismissSetup();
+  const messages = coach.messages.length;
+  check.stdout.write(JSON.stringify(permissions));
+  check.finish();
+  await delay(16);
+  assert.equal(coach.messages.length, messages, "a late check cannot write to a dismissed coach");
+  assert.equal(polling.spawned.length, 3, "teardown cannot restart polling or a coach");
+});
+
+test("dismissal waits for its own child close, preserves unconfirmed state and blocks overlap or control", async () => {
+  const f = fixture({ deferSetupClose: true, ignoreKill: true, timeouts: { close: 10 } });
+  const ticket = await f.adapter.setup("accessibility");
+  const coach = f.children[1];
+  const closing = f.adapter.dismissSetup(ticket.setupId);
+  await assert.rejects(closing, /termination could not be confirmed/);
+  assert.deepEqual(coach.signals, ["SIGKILL"]);
+  assert.equal(coach.finished, undefined, "sending SIGKILL is not an exit receipt");
+  await assert.rejects(f.adapter.dismissSetup(), /termination could not be confirmed/);
+  await assert.rejects(f.adapter.setup("screenRecording"), /termination has not been confirmed/);
+  await assert.rejects(f.adapter.connect(), /termination could not be confirmed/);
+  assert.equal(f.spawned.length, 2);
+  assert.equal(f.connections.length, 0);
+  assert.equal(coach.messages.filter(({ type }) => type === "close").length, 1);
+  coach.finish();
+  await f.adapter.dismissSetup();
+  const connection = await f.adapter.connect();
+  await connection.close();
+  const startup = fixture({ setupHang: true, deferSetupClose: true, ignoreKill: true, timeouts: { handshake: 10, close: 10 } });
+  await assert.rejects(startup.adapter.setup("accessibility"), /termination could not be confirmed/);
+  await assert.rejects(startup.adapter.setup("screenRecording"), /termination has not been confirmed/);
+  assert.equal(startup.spawned.length, 2);
+  startup.children[1].finish();
+  await startup.adapter.dismissSetup();
+});
+
+test("connect dismisses startup and waits for the established coach to exit before control admission", async () => {
+  const f = fixture({ deferSetupClose: true });
+  await f.adapter.setup("accessibility");
+  const coach = f.children[1];
+  let admitted = false;
+  const pending = f.adapter.connect().then((connection) => { admitted = true; return connection; });
+  await delay(5);
+  assert.equal(admitted, false);
+  assert.equal(f.connections.length, 0);
+  coach.finish();
+  const connection = await pending;
+  assert.equal(f.connections.length, 1);
+  await connection.close();
+  const options = { checkHang: true };
+  const late = fixture(options);
+  const setup = late.adapter.setup("accessibility");
+  const rejected = assert.rejects(setup, /closed/);
+  await delay(1);
+  const connecting = late.adapter.connect();
+  options.checkHang = false;
+  late.children[0].stdout.write(JSON.stringify(permissions));
+  late.children[0].finish();
+  const runtime = await connecting;
+  await rejected;
+  assert.ok(late.spawned.every(({ args }) => args[0] === "--check"));
+  await runtime.close();
 });
 
 test("connections are dedicated, allowlist-bound and return raw MCP results only to their caller", async () => {

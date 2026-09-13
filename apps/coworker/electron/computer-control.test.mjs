@@ -54,17 +54,17 @@ function fixture(overrides = {}) {
   const adapter = { id: "this-mac", label: "This Mac", placement: "desktop", protocol: COMPUTER_PROTOCOL,
     readiness: async () => { readinessReads++; return { readiness: "ready", detail: "Native service ready.", permissions: { accessibility: true, screenRecording: true } }; }, setup: async () => { setups++; },
     connect: async (channel) => { connects++; channels.push(channel); if (overrides.connect) await overrides.connect(); return transport; } };
-  const broker = createComputerControl({ adapters: [adapter, ...(overrides.adapters ?? [])], cleanupMs: 20, operationMs: overrides.operationMs ?? 1000, pollMs: 2,
+  const broker = createComputerControl({ adapters: [adapter, ...(overrides.adapters ?? [])], cleanupMs: overrides.cleanupMs ?? 20, operationMs: overrides.operationMs ?? 1000, pollMs: 2,
     onRevoke: overrides.onRevoke,
     now: overrides.now,
-    discussionFor: async (slug, threadId) => {
+    discussionFor: async (slug, threadId, options) => {
       discussionReads++;
-      await overrides.discussionFor?.(slug, threadId);
+      await overrides.discussionFor?.(slug, threadId, options);
       if (!discussions.get(`${slug}:${threadId}`)) throw new Error("Not a saved private discussion.");
       return { workspaceId: slug === "scout" ? workspace : `workspace-${slug}`, directory: slug === "scout" ? directory : `/workspace/${slug}` };
     },
-    resolveContext: async (slug, context, expected) => {
-      await overrides.resolveContext?.(slug, context, expected);
+    resolveContext: async (slug, context, expected, options) => {
+      await overrides.resolveContext?.(slug, context, expected, options);
       const assertActive = () => { if (!active || controller.signal.aborted) throw new Error("Native call stopped."); };
       assertActive();
       return { entry: { id: executionId ?? `execution-${slug}-${context.sessionID}`, messageId, workspaceId: `workspace-${slug}` }, ...(context.sessionID === "worker" && overrides.delegatedOrigin ? { origin: { threadId: overrides.delegatedOrigin } } : {}), signal: controller.signal, assertActive };
@@ -184,6 +184,92 @@ test("calls waiting in the first ownership lookup or grant lookup cannot inherit
     assert.equal(f.counts().connects, 0); assert.deepEqual(f.notifications, []);
     assert.equal((await f.snapshot()).enabled, true, "the stale request must not revoke the new grant");
     await f.broker.reset(true);
+  }
+});
+
+test("ownership deadlines release admission and the queue without late input or late revocation", { timeout: 4000 }, async () => {
+  for (const [kind, index] of [["resolve", 1], ["discussion", 1], ["resolve", 2], ["discussion", 2], ["resolve", 3]]) {
+    const entered = deferred(); const released = deferred();
+    const reads = { resolve: 0, discussion: 0 };
+    let armed = false;
+    const lookup = async (stage, options) => {
+      if (!armed || ++reads[stage] !== index || kind !== stage) return;
+      armed = false; entered.resolve(options.signal);
+      await released.promise;
+      throw new Error("Late ownership read failed.");
+    };
+    const f = fixture({ now: () => 1000, cleanupMs: 30, operationMs: 200,
+      resolveContext: (slug, context, expected, options) => lookup("resolve", options),
+      discussionFor: (slug, threadId, options) => lookup("discussion", options) });
+    try {
+      await f.enable(); armed = true;
+      const pending = f.execute("open", openArgs).then((value) => payload(value).message, (error) => error.message);
+      const signal = await entered.promise;
+      assert.match(await pending, /timed out/, `${kind} ${index}`);
+      assert.equal(signal.aborted, true);
+      assert.equal(f.sent.some((item) => item.name === "computer_open_session"), false);
+      const enabled = await f.enable();
+      assert.equal(payload(await f.execute("discover")).ok, true, "a hanging read must not hold the serialized queue");
+      released.resolve(); await tick(); await tick();
+      const snapshot = await f.snapshot();
+      assert.equal(snapshot.enabled, true); assert.equal(snapshot.revision, enabled.revision);
+      assert.equal(f.sent.some((item) => item.name === "computer_open_session"), false);
+    } finally { armed = false; released.resolve(); await f.broker.reset(true); }
+  }
+});
+
+test("the total tool deadline includes admission and queue wait, and an expired slot cannot break native ordering", { timeout: 3000 }, async () => {
+  const reading = deferred(); const admitted = deferred(); const entered = deferred(); const released = deferred();
+  let delayed;
+  let first = true;
+  const f = fixture({ cleanupMs: 600, operationMs: 400, resolveContext: async (slug, context) => {
+    if (context.callID === delayed) { delayed = undefined; reading.resolve(); await admitted.promise; }
+  }, callTool: async (name) => {
+    if (name === "computer_discover" && first) { first = false; entered.resolve(); await released.promise; }
+    return result({ ok: true, state: "active" });
+  } });
+  try {
+    await f.enable();
+    const call = f.request("open", openArgs); delayed = call.context.callID;
+    const expired = assert.rejects(f.broker.execute("scout", call), /timed out/);
+    await reading.promise;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const running = f.execute("discover"); await entered.promise;
+    admitted.resolve();
+    await expired;
+    assert.equal(f.sent[0].options.signal.aborted, false, "the older native operation still has its own budget");
+    const following = f.execute("discover"); await tick(); await tick();
+    assert.equal(f.sent.length, 1, "expiry must not release a slot ahead of its unfinished predecessor");
+    released.resolve();
+    assert.equal(payload(await running).ok, true); assert.equal(payload(await following).ok, true);
+    assert.deepEqual(f.sent.map((item) => item.name), ["computer_discover", "computer_discover"]);
+    await assert.rejects(f.broker.execute("scout", call), /timed out/);
+  } finally { admitted.resolve(); released.resolve(); await f.broker.reset(true); }
+});
+
+test("Stop and admitted cancellation abort hanging owner reads immediately without engine access or late input", { timeout: 3000 }, async () => {
+  for (const stop of ["stop", "cancel"]) for (const index of [2, 3]) {
+    const entered = deferred(); const released = deferred();
+    let reads = 0;
+    const f = fixture({ cleanupMs: 500, resolveContext: async (slug, context, expected, options) => {
+      if (expected.name === "coworker_computer_act" && ++reads === index) { entered.resolve(options.signal); await released.promise; }
+    } });
+    try {
+      const enabled = await f.enable(); await f.execute("open", openArgs);
+      const call = f.request("act", { observation_id: "observed", action: { type: "press", ref: "button" } });
+      const pending = f.broker.execute("scout", call).then((value) => payload(value).message, (error) => error.message);
+      const signal = await entered.promise;
+      const before = { reads, ...f.reads() };
+      const stopped = stop === "stop" ? f.broker.stop({ ...f.scope, expectedRevision: enabled.revision }) : f.broker.execute("scout", { ...call, cancel: true });
+      assert.equal(signal.aborted, true);
+      assert.deepEqual({ reads, ...f.reads() }, before, "Stop must use the admitted grant, not a fresh lookup");
+      await stopped; assert.match(await pending, /disabled|revoked/);
+      const next = await f.enable(); await f.execute("open", openArgs);
+      released.resolve(); await tick(); await tick();
+      assert.equal(f.sent.some((item) => item.name === "computer_act"), false);
+      assert.equal((await f.snapshot()).revision, next.revision);
+      assert.equal((await f.snapshot()).enabled, true);
+    } finally { released.resolve(); await f.broker.reset(true); }
   }
 });
 
@@ -347,6 +433,58 @@ test("takeover dispatches promptly and resume tolerates ordinary state replaceme
     assert.equal(f.notifications.filter((value) => value.action === "resume").length, changed === "status" ? 1 : 0);
     assert.equal(f.counts().closes, 0); assert.equal((await f.snapshot()).enabled, true);
     await f.broker.reset(true);
+  }
+});
+
+test("standalone observations cannot cross takeover or Continue, including concurrent duplicate reads", { timeout: 3000 }, async () => {
+  for (const continued of [false, true]) {
+    const entered = deferred(); const released = deferred();
+    let hold = false;
+    const f = fixture({ callTool: async (name) => {
+      if (name === "computer_open_session") {
+        f.emit(approvalState({ windows: [{ id: 12, title: "One" }, { id: 13, title: "Two" }] }));
+        f.emit(approvalState({ phase: "working", canContinue: true }));
+        return result({ ok: true, state: "active", session_id: "native-session" });
+      }
+      if (name === "computer_observe") {
+        if (hold) { entered.resolve(); return released.promise; }
+        return observationResult("fresh");
+      }
+      return result({ ok: true, state: name === "computer_close_session" ? "closed" : "active" });
+    } });
+    try {
+      await f.enable(); await f.execute("open", openArgs);
+      hold = true;
+      const call = f.request("observe", { include_image: true });
+      const observing = f.broker.execute("scout", call);
+      await entered.promise;
+      const duplicate = f.broker.execute("scout", call);
+      await tick();
+      await f.broker.interact({ ...f.scope, id: "native-ui", action: "takeover" });
+      f.emit(approvalState({ phase: "paused", canContinue: true }));
+      if (continued) {
+        await f.broker.interact({ ...f.scope, id: "native-ui", action: "resume" });
+        f.emit(approvalState({ phase: "working", canContinue: true }));
+      }
+      released.resolve(observationResult("before-takeover"));
+      for (const value of await Promise.all([observing, duplicate])) {
+        assert.equal(value.isError, true);
+        assert.equal(payload(value).code, "observation_required");
+        assert.doesNotMatch(JSON.stringify(value), /before-takeover|IMAGE_DATA/);
+      }
+      assert.equal(f.sent.filter((item) => item.name === "computer_observe").length, 2, "the duplicate must not recapture");
+      if (!continued) {
+        await f.broker.interact({ ...f.scope, id: "native-ui", action: "resume" });
+        f.emit(approvalState({ phase: "working", canContinue: true }));
+      }
+      const action = { observation_id: "before-takeover", action: { type: "press", ref: "button" } };
+      assert.equal(payload(await f.execute("act", action)).code, "observation_required");
+      assert.equal(f.sent.some((item) => item.name === "computer_act"), false);
+      hold = false;
+      assert.equal(payload(await f.execute("observe")).observation_id, "fresh");
+      await f.execute("act", { ...action, observation_id: "fresh" });
+      assert.equal(f.sent.filter((item) => item.name === "computer_act").length, 1);
+    } finally { released.resolve(observationResult("before-takeover")); await f.broker.reset(true); }
   }
 });
 
@@ -771,11 +909,13 @@ test("takeover observed between calls waits in the next tool without replaying a
   await f.broker.endTurn({ id: "execution-scout-one" });
 });
 
-test("Continue and cancellation after an action preserve its receipt without redispatch", async () => {
-  for (const cancel of [false, true]) {
+test("Continue and cancellation after an uncertain or partial action preserve its receipt without redispatch or capture", async () => {
+  for (const partial of [false, true]) for (const cancel of [false, true]) {
     const polling = deferred();
     let continued = false;
-    const receipt = result({ ok: false, code: "input_uncertain", state: "paused", next: "human_takeover", receipt: { status: "uncertain", dispatched: true } }, true);
+    const receipt = result(partial ? { ok: false, status: "partial", completed: 1, failed_step: 1, may_have_acted: true, next: "human_takeover",
+      steps: [{ index: 0, status: "dispatched" }, { index: 1, status: "failed", code: "human_takeover" }] }
+      : { ok: false, code: "input_uncertain", state: "paused", next: "human_takeover", receipt: { status: "uncertain", dispatched: true } }, true);
     const f = fixture({ callTool: async (name) => {
       if (name === "computer_open_session") return result({ ok: true, session_id: "native-session", state: "active" });
       if (name === "computer_observe") return observationResult();
@@ -793,14 +933,165 @@ test("Continue and cancellation after an action preserve its receipt without red
     if (cancel) f.controller.abort(); else continued = true;
     const response = await acting;
     assert.deepEqual(response.content[0], receipt.content[0]);
-    assert.equal(JSON.parse(response.content[1].text).actions_replayed, false);
+    assert.equal(response.isError, true);
+    const handoff = JSON.parse(response.content[1].text);
+    assert.equal(handoff.actions_replayed, false); assert.equal(handoff.fresh_observation_required, true);
+    assert.equal(handoff.next, cancel ? "human_takeover" : "observe");
     assert.equal(f.sent.filter((item) => item.name === "computer_act").length, 1);
+    assert.equal(f.sent.filter((item) => item.name === "computer_observe").length, 1, "Continue cannot capture across the handoff");
+    assert.equal(response.content.some((part) => part.type === "image"), false);
     if (!cancel) {
       assert.deepEqual(await f.broker.execute("scout", call), response);
       assert.equal(payload(await f.execute("act", call.args)).code, "observation_required");
     }
     await f.broker.reset(true);
   }
+});
+
+test("a truthful partial batch preserves its error and ordered steps and observes once, with or without a native image", async () => {
+  for (const image of [true, false]) {
+    const partial = result({ ok: false, status: "partial", request_id: "native", completed: 2, failed_step: 2, may_have_acted: true, next: "observe",
+      steps: [{ index: 0, action: "click", status: "dispatched" }, { index: 1, action: "type", status: "dispatched" }, { index: 2, action: "key", status: "failed", code: "blocked_shortcut" }] }, true);
+    const f = fixture({ callTool: async (name) => {
+      if (name === "computer_open_session") return result({ ok: true, session_id: "native-session", state: "active" });
+      if (name === "computer_observe") return image ? observationResult("after-batch") : result({ ok: true, observation_id: "after-batch" });
+      if (name === "computer_act") return partial;
+      return result({ ok: true, state: "closed" });
+    } });
+    try {
+      await f.enable(); await f.execute("open", openArgs);
+      const actions = [{ type: "click", x: 10, y: 20 }, { type: "type", text: "hello" }, { type: "key", key: "q", modifiers: ["command"] }];
+      await assert.rejects(f.execute("act", { observation_id: "observed", action: actions[0], actions }), /exactly one of action or actions/);
+      await assert.rejects(f.execute("act", { observation_id: "observed" }), /exactly one of action or actions/);
+      const call = f.request("act", { observation_id: "observed", actions });
+      const response = await f.broker.execute("scout", call);
+      const dispatched = f.sent.filter((item) => item.name === "computer_act");
+      assert.equal(dispatched.length, 1); assert.deepEqual(dispatched[0].args.actions, actions); assert.equal(dispatched[0].args.action, undefined);
+      assert.equal(response.isError, true); assert.deepEqual(payload(response), payload(partial));
+      assert.deepEqual(response.content[0], partial.content[0]);
+      assert.equal(postStatus(response).ok, true);
+      assert.equal(response.content.some((part) => part.type === "image"), image);
+      assert.deepEqual(await f.broker.execute("scout", call), response);
+      assert.equal(f.sent.filter((item) => item.name === "computer_act").length, 1);
+      assert.equal(f.sent.filter((item) => item.name === "computer_observe").length, 2);
+    } finally { await f.broker.reset(true); }
+  }
+});
+
+test("partial receipts survive post-read lookup hangs, native read timeouts, and takeover without late capture", { timeout: 3000 }, async () => {
+  for (const mode of ["owner-timeout", "native-timeout", "takeover"]) {
+    const entered = deferred(); const released = deferred();
+    let acted = false;
+    let ownerHeld = false;
+    const receipt = result({ ok: false, status: "partial", completed: 1, failed_step: 1, may_have_acted: true, next: "observe",
+      steps: [{ index: 0, status: "dispatched" }, { index: 1, status: "failed", code: "blocked_shortcut" }] }, true);
+    const f = fixture({ operationMs: mode === "native-timeout" ? 200 : 100, resolveContext: async (slug, context, expected, options) => {
+      if (acted && !ownerHeld && expected.name === "coworker_computer_act" && mode !== "native-timeout") {
+        ownerHeld = true; entered.resolve(options.signal); await released.promise;
+      }
+    }, callTool: async (name) => {
+      if (name === "computer_open_session") {
+        f.emit(approvalState({ windows: [{ id: 12, title: "One" }, { id: 13, title: "Two" }] }));
+        f.emit(approvalState({ phase: "working", canContinue: true }));
+        return result({ ok: true, session_id: "native-session", state: "active" });
+      }
+      if (name === "computer_act") { acted = true; return receipt; }
+      if (name === "computer_observe") {
+        if (acted && mode === "native-timeout") { entered.resolve(); await released.promise; }
+        return observationResult(acted ? "late-observation" : "before-action");
+      }
+      return result({ ok: true, state: "closed" });
+    } });
+    try {
+      await f.enable(); await f.execute("open", openArgs);
+      const call = f.request("act", { observation_id: "before-action", actions: [{ type: "press", ref: "button" }, { type: "key", key: "q" }] });
+      const acting = f.broker.execute("scout", call);
+      const signal = await entered.promise;
+      if (mode === "native-timeout") await new Promise((resolve) => setTimeout(resolve, 50));
+      const concurrent = f.broker.execute("scout", call).then((value) => value, (error) => error);
+      await tick();
+      if (mode === "takeover") { await f.broker.interact({ ...f.scope, id: "native-ui", action: "takeover" }); released.resolve(); }
+      const response = await acting;
+      assert.equal(response.isError, true); assert.deepEqual(response.content[0], receipt.content[0]);
+      assert.equal(postStatus(response).ok, false);
+      assert.deepEqual(await concurrent, response, "a duplicate waiting for a known receipt must preserve it across revocation");
+      assert.doesNotMatch(JSON.stringify(response), /IMAGE_DATA|late-observation/);
+      if (mode === "owner-timeout") assert.equal(signal.aborted, true);
+      if (mode === "native-timeout") assert.equal((await f.snapshot()).cleanupPending, true);
+      released.resolve(); await tick(); await tick();
+      const before = f.sent.length;
+      if (mode !== "takeover") await f.enable();
+      const duplicate = await f.broker.execute("scout", call);
+      assert.deepEqual(duplicate.content[0], receipt.content[0]); assert.equal(postStatus(duplicate).ok, false);
+      assert.doesNotMatch(JSON.stringify(duplicate), /IMAGE_DATA|late-observation/);
+      assert.equal(f.sent.length, before);
+      assert.equal(f.sent.filter((item) => item.name === "computer_act").length, 1);
+      assert.equal(f.sent.filter((item) => item.name === "computer_observe").length, mode === "native-timeout" ? 2 : 1);
+    } finally { released.resolve(); await f.broker.reset(true); }
+  }
+});
+
+test("duplicate receipts retain only the latest observation and invalidate content on reads, input, handoff, and close", { timeout: 3000 }, async () => {
+  const entered = deferred(); const released = deferred();
+  let sequence = 0;
+  let hold = false;
+  const f = fixture({ callTool: async (name, args) => {
+    if (name === "computer_open_session") {
+      f.emit(approvalState({ windows: [{ id: 12, title: "One" }, { id: 13, title: "Two" }] }));
+      f.emit(approvalState({ phase: "working", canContinue: true }));
+      return result({ ok: true, session_id: "native-session", state: "active" });
+    }
+    if (name === "computer_observe") {
+      sequence++;
+      return { ...result({ ok: true, observation_id: `observation-${sequence}`, elements: [{ ref: "button", name: `OBSERVED_${sequence}` }] }),
+        content: [...result({ ok: true, observation_id: `observation-${sequence}`, elements: [{ ref: "button", name: `OBSERVED_${sequence}` }] }).content,
+          { type: "image", mimeType: "image/png", data: `IMAGE_${sequence}` }] };
+    }
+    if (name === "computer_act") {
+      if (hold) { hold = false; entered.resolve(); await released.promise; }
+      return result({ ok: true, status: "dispatched", request_id: args.request_id });
+    }
+    return result({ ok: true, state: "closed" });
+  } });
+  const withheld = (value, original, next) => {
+    assert.deepEqual(value.content[0], original.content[0]);
+    assert.equal(postStatus(value).ok, false); assert.equal(postStatus(value).next, next);
+    assert.doesNotMatch(JSON.stringify(value), /IMAGE_|OBSERVED_|observation-\d/);
+  };
+  try {
+    await f.enable();
+    const open = f.request("open", openArgs);
+    const opened = await f.broker.execute("scout", open);
+    assert.deepEqual(await f.broker.execute("scout", open), opened);
+    const read = f.request("observe", { include_image: true, elements: "all" });
+    await f.broker.execute("scout", read);
+    assert.equal(f.sent.at(-1).args.elements, "all");
+    withheld(await f.broker.execute("scout", open), opened, "observe");
+    const call = f.request("act", { observation_id: "observation-2", action: { type: "press", ref: "button" } });
+    const receipt = await f.broker.execute("scout", call);
+    assert.match(JSON.stringify(receipt), /IMAGE_3/);
+    assert.deepEqual(await f.broker.execute("scout", call), receipt);
+    assert.equal(payload(await f.broker.execute("scout", read)).code, "already_completed");
+    hold = true;
+    const next = f.request("act", { observation_id: "observation-3", action: { type: "press", ref: "button" } });
+    const acting = f.broker.execute("scout", next); await entered.promise;
+    withheld(await f.broker.execute("scout", call), receipt, "observe");
+    released.resolve(); const latest = await acting;
+    assert.match(JSON.stringify(latest), /IMAGE_4/);
+    await f.broker.interact({ ...f.scope, id: "native-ui", action: "takeover" });
+    withheld(await f.broker.execute("scout", next), latest, "human_takeover");
+    f.emit(approvalState({ phase: "paused", canContinue: true }));
+    await f.broker.interact({ ...f.scope, id: "native-ui", action: "resume" });
+    f.emit(approvalState({ phase: "working", canContinue: true }));
+    await f.execute("observe");
+    withheld(await f.broker.execute("scout", next), latest, "human_takeover");
+    const last = f.request("act", { observation_id: "observation-5", action: { type: "press", ref: "button" } });
+    const lastResult = await f.broker.execute("scout", last);
+    await f.execute("close");
+    withheld(await f.broker.execute("scout", last), lastResult, "human_takeover");
+    assert.equal(f.sent.filter((item) => item.name === "computer_act").length, 3);
+    assert.equal(f.sent.filter((item) => item.name === "computer_observe").length, 6);
+  } finally { released.resolve(); await f.broker.reset(true); }
 });
 
 test("stop revokes immediately, serializes a late open, and retains uncertain cleanup", async () => {
@@ -902,6 +1193,46 @@ test("native approval denial is preserved verbatim and requires a fresh person e
   assert.equal((await f.snapshot()).enabled, false);
   await assert.rejects(f.execute("open", openArgs), /disabled/);
   assert.equal(f.sent.length, 1);
+});
+
+test("pre-admission cancellation is bounded and cannot revoke a later grant or admit its delayed input", { timeout: 3000 }, async () => {
+  for (const worker of [false, true]) for (const change of ["stop", "reset", "timeout", "new-execution"]) {
+    const entered = deferred(); const released = deferred();
+    let hold = false;
+    const f = fixture({ delegatedOrigin: "one", cleanupMs: change === "timeout" ? 30 : 500,
+      resolveContext: async (slug, context, expected, options) => {
+        if (hold) { hold = false; entered.resolve(options.signal); await released.promise; }
+      } });
+    try {
+      const enabled = await f.enable(); hold = true;
+      const call = f.request("open", openArgs, worker ? { slug: "scout", threadId: "worker" } : f.scope);
+      const cancelled = f.broker.execute("scout", { ...call, cancel: true }).then((value) => value, (error) => error);
+      const signal = await entered.promise;
+      await assert.rejects(f.broker.execute("scout", call), /cancelled before admission/);
+      if (change === "stop") await f.broker.stop({ ...f.scope, expectedRevision: enabled.revision });
+      if (change === "reset") await f.broker.reset();
+      if (change === "timeout") { assert.match((await cancelled).message, /timed out/); assert.equal(signal.aborted, true); }
+      const next = change === "new-execution" ? enabled : await f.enable();
+      if (change === "new-execution") await f.execute("open", openArgs, worker ? f.scope : { slug: "scout", threadId: "worker" });
+      released.resolve(); await cancelled; await tick();
+      assert.equal((await f.snapshot()).revision, next.revision); assert.equal((await f.snapshot()).enabled, true);
+      await assert.rejects(f.broker.execute("scout", call), /cancelled before admission/);
+      assert.equal(f.counts().connects, change === "new-execution" ? 1 : 0);
+    } finally { released.resolve(); await f.broker.reset(true); }
+  }
+});
+
+test("a cancellation with different native input cannot cancel the real request", async () => {
+  const f = fixture({ resolveContext: async (slug, context, expected) => {
+    if (expected.args.purpose === "Wrong input") throw new Error("Not the exact native input.");
+  } });
+  try {
+    await f.enable();
+    const call = f.request("open", openArgs);
+    await assert.rejects(f.broker.execute("scout", { ...call, args: { ...openArgs, purpose: "Wrong input" }, cancel: true }), /exact native input/);
+    assert.equal(payload(await f.broker.execute("scout", call)).ok, true);
+    assert.equal(f.sent.filter((item) => item.name === "computer_open_session").length, 1);
+  } finally { await f.broker.reset(true); }
 });
 
 test("native cancellation can beat HTTP admission and prevents a delayed call from opening", async () => {

@@ -1,5 +1,5 @@
 import { ActionMenu } from "@/ui/kit";
-import { Fragment, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Fragment, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { coworkerBridge, type CoworkerSummary, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
@@ -54,8 +54,6 @@ import {
 } from "@/lib/discussions";
 import type { EffortStop } from "@/lib/effort";
 import { EffortDial } from "@/ui/effort-dial";
-import { ComputerControl } from "@/ui/computer-control";
-import { DiscussionBrowser } from "@/ui/browser-panel";
 import { PopoverDisclosure, TechnicalText } from "@/ui/details-popover";
 import { carryVariant, chooseFallbackModel, describeModelChoice, markAutoPicked, resolveDiscussionModel, wasAutoPicked, type ModelLane } from "@/lib/model-choice";
 import { usesAppConversationDefault, type ModelDefaults } from "@/lib/model-defaults";
@@ -117,11 +115,16 @@ import { DocumentCard } from "@/ui/documents";
 import { documentCardsFromCalls, isDocumentTool, shouldFoldReply, splitReplyLead } from "@/lib/documents";
 import { newcomerLine, teamCardsFromCalls } from "@/lib/team";
 import { TeamCardsForTurn, type TeamHooks } from "@/ui/team-cards";
-import { McpAppFrame } from "@/ui/mcp-app-frame";
 import { WorkPopover, workPopoverPlacement, type WorkPopoverPlacement } from "@/ui/work-popover";
 import { appendVoiceDraft, privateVoiceReply, type VoiceExpectation } from "@/lib/voice";
 import { useVoice, type VoiceActivation, type VoiceController, type VoicePreparation } from "@/ui/use-voice";
 import { VoicePanel, VoiceToggle } from "@/ui/voice";
+
+// Computer, browser and interactive app hosts are discussion-time features;
+// their views (and the MCP app bridge) load when a discussion first needs them.
+const ComputerControl = lazy(() => import("@/ui/computer-control").then((module) => ({ default: module.ComputerControl })));
+const DiscussionBrowser = lazy(() => import("@/ui/browser-panel").then((module) => ({ default: module.DiscussionBrowser })));
+const McpAppFrame = lazy(() => import("@/ui/mcp-app-frame").then((module) => ({ default: module.McpAppFrame })));
 
 type TranscriptToolCall = {
   partId: string;
@@ -360,7 +363,7 @@ export function ThreadsPanel({
   /** A ready-to-send discussion message (for example, "explain this run"); the id makes repeats distinct. */
   discussionDraft?: AssignmentDraft;
   /** Set by the context rail to jump straight into a thread; the id makes repeat requests distinct. */
-  openThreadRequest?: { id: number; threadId: string } | null;
+  openThreadRequest?: { id: number; threadId: string; kind?: "thread" | "discussion" | "activity"; onOpened?: () => Promise<void> } | null;
   /** The one-off assignment threads as this column lists them, and what each waits on the person for, so the panel's Assignments show the same ones. */
   onAssignmentsChange?: (items: ThreadListItem[], attention: Record<string, string>) => void;
   /** A message to send in the open discussion as soon as it exists (a request passed from a teammate); the id makes repeats distinct. */
@@ -458,15 +461,6 @@ export function ThreadsPanel({
     if (!discussionDraft) return;
     setOpenThreadId("");
   }, [discussionDraft]);
-
-  useEffect(() => {
-    if (!openThreadRequest?.threadId) return;
-    if (openThreadRequest.threadId === discussionThreadId) {
-      setOpenThreadId("");
-      return;
-    }
-    setOpenThreadId(openThreadRequest.threadId);
-  }, [discussionThreadId, openThreadRequest]);
 
   const refresh = useCallback(async () => {
     if (!threads || !listingActive.current) return;
@@ -597,6 +591,29 @@ export function ThreadsPanel({
     }
   }, [coworker.slug, discussionThreadId, onCoworkerChanged]);
 
+  const handledThreadRequest = useRef(0);
+  useEffect(() => {
+    if (!openThreadRequest?.threadId || handledThreadRequest.current === openThreadRequest.id) return;
+    handledThreadRequest.current = openThreadRequest.id;
+    if (openThreadRequest.kind === "activity") {
+      // Live status can refer to a discussion or an assignment. Resolve the saved
+      // registry instead of changing the native ownership when the person replies.
+      void loadDiscussionRegistry(coworker.slug).then((ids) => {
+        if (handledThreadRequest.current !== openThreadRequest.id) return;
+        if (ids.includes(openThreadRequest.threadId) || discussionThreadId === openThreadRequest.threadId) void openDiscussion(openThreadRequest.threadId);
+        else setOpenThreadId(openThreadRequest.threadId);
+      }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+      return;
+    }
+    if (openThreadRequest.kind === "discussion") {
+      // Activity knows this is a private discussion. Use its existing registry
+      // and selection path, never the generic assignment viewer.
+      void openDiscussion(openThreadRequest.threadId);
+      return;
+    }
+    setOpenThreadId(openThreadRequest.threadId === discussionThreadId ? "" : openThreadRequest.threadId);
+  }, [coworker.slug, discussionThreadId, openDiscussion, openThreadRequest]);
+
   const createAssignment = useCallback(async (outcome: string, messages: ReadonlyArray<DiscussionMessage>) => {
     if (!threads) throw new Error("This coworker needs a workspace before it can take an assignment.");
     const thread = await threads.client.createThread({
@@ -720,6 +737,7 @@ export function ThreadsPanel({
       coworker={coworker}
       runtime={runtime}
       kind="discussion"
+      activityRequest={openThreadRequest?.kind === "discussion" && openThreadRequest.threadId === discussionThreadId ? openThreadRequest : null}
       preparedVoice={preparedVoice?.threadId === discussionThreadId ? preparedVoice : undefined}
       onVoicePreparedHandled={() => setPreparedVoice((current) => current?.threadId === discussionThreadId ? null : current)}
       browserEligible={registeredDiscussions.includes(discussionThreadId)}
@@ -1068,7 +1086,9 @@ function ThreadView({
   browserEligible = false,
   preparedVoice,
   onVoicePreparedHandled,
+  activityRequest,
 }: {
+  activityRequest?: { id: number; onOpened?: () => Promise<void> } | null;
   active: boolean;
   threads: NonNullable<ReturnType<typeof createCoworkerThreads>>;
   threadId: string;
@@ -1110,6 +1130,17 @@ function ThreadView({
 }) {
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [transcriptLoaded, setTranscriptLoaded] = useState(false);
+  const [transcriptReadStartedAt, setTranscriptReadStartedAt] = useState(0);
+  const acknowledgedActivity = useRef(0);
+  const [activityOpenError, setActivityOpenError] = useState("");
+  useEffect(() => {
+    if (!active || !activityRequest?.onOpened || acknowledgedActivity.current === activityRequest.id || transcriptReadStartedAt < activityRequest.id) return;
+    acknowledgedActivity.current = activityRequest.id;
+    setActivityOpenError("");
+    void activityRequest.onOpened().catch((cause) => {
+      if (viewMounted.current && acknowledgedActivity.current === activityRequest.id) setActivityOpenError(cause instanceof Error ? cause.message : "The conversation opened, but read status could not be saved.");
+    });
+  }, [active, activityRequest, transcriptReadStartedAt]);
   const [readErrors, setReadErrors] = useState<Record<string, string>>({});
   const refreshGeneration = useRef(0);
   const turnRevision = useRef(0);
@@ -1273,7 +1304,7 @@ function ThreadView({
       setTurnsLoaded(true);
     });
     void observe("interactions", () => threads.listThreadInteractions(threadId), setPending);
-    return observe("transcript", () => threads.client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(10_000) }), (snapshot) => {
+    return observe("transcript", async () => ({ readStartedAt: Date.now(), snapshot: await threads.client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(10_000) }) }), ({ snapshot, readStartedAt }) => {
       const transcript = toTranscript(snapshot);
       const nativeMessages = new Map(snapshot.messages.map((message) => [message.id, message]));
       for (const message of snapshot.messages) knownMessages.current.set(message.id, { role: message.role, parentId: message.parentId, ended: knownMessages.current.get(message.id)?.ended || message.completedAt !== null || message.error !== null });
@@ -1334,6 +1365,7 @@ function ThreadView({
         })),
       );
       setTranscriptLoaded(true);
+      setTranscriptReadStartedAt(readStartedAt);
     });
   }, [coworker.slug, refreshReads, refreshScope, stopScope, threads, threadId, titleDiscussionAfterFirstMessage]);
 
@@ -2204,7 +2236,7 @@ function ThreadView({
           </>
         )}
       />
-      {active && kind === "discussion" && browserEligible && headerSlots.tools ? createPortal(<ComputerControl key={`${coworker.slug}:${threadId}`} slug={coworker.slug} threadId={threadId} statusSlot={controlStatusSlot} floatingSlot={floatingSlot} openRequest={computerOpenRequest} onOpenRequestHandled={() => setComputerOpenRequest(0)} onBackToConversation={() => voice.fieldRef.current?.focus()} />, headerSlots.tools) : null}
+      {active && kind === "discussion" && browserEligible && headerSlots.tools ? createPortal(<Suspense fallback={null}><ComputerControl key={`${coworker.slug}:${threadId}`} slug={coworker.slug} threadId={threadId} statusSlot={controlStatusSlot} floatingSlot={floatingSlot} openRequest={computerOpenRequest} onOpenRequestHandled={() => setComputerOpenRequest(0)} onBackToConversation={() => voice.fieldRef.current?.focus()} /></Suspense>, headerSlots.tools) : null}
       {/* Progress and problems show inline in the conversation; this keeps the turn state readable to assistive tech and tests. */}
       <div className="@container/discussion min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-col @min-[760px]/discussion:flex-row">
@@ -2219,6 +2251,7 @@ function ThreadView({
         style={{ overflowAnchor: "none" }}
       >
         <div ref={contentRef} className="mx-auto max-w-3xl space-y-3">
+          {activityOpenError ? <p role="alert" className="text-xs text-amber">{activityOpenError}</p> : null}
           {!transcriptLoaded && !readErrors.transcript ? <p role="status" className="text-xs text-mist">Loading conversation...</p> : null}
           {freshDiscussion ? <QuietEmptyConversation coworker={coworker} proposerName={team?.coworkers.find((member) => member.slug === coworker.suggestedBy?.slug)?.name ?? ""} /> : null}
           <TranscriptAppContext.Provider value={{ sessionId: threadId, engine: "v1", readOnly: !active || kind !== "discussion" }}>
@@ -2371,7 +2404,7 @@ function ThreadView({
         />
       )}
       </div>
-      {kind === "discussion" && browserEligible ? <DiscussionBrowser key={`${coworker.slug}:${threadId}`} active={active} slug={coworker.slug} threadId={threadId} actionsSlot={headerSlots.tools} statusSlot={controlStatusSlot} floatingSlot={floatingSlot} openRequest={browserOpenRequest} /> : null}
+      {kind === "discussion" && browserEligible ? <Suspense fallback={null}><DiscussionBrowser key={`${coworker.slug}:${threadId}`} active={active} slug={coworker.slug} threadId={threadId} actionsSlot={headerSlots.tools} statusSlot={controlStatusSlot} floatingSlot={floatingSlot} openRequest={browserOpenRequest} /></Suspense> : null}
       </div>
       </div>
     </section>
@@ -2385,7 +2418,7 @@ type ConversationBlock =
   | { kind: "ended"; message: TranscriptMessage; ended: "stopped" | "failed" };
 
 /** Safe conversation-scoped facts only; progress inspection is a separate surface. */
-export function CollaborationReceipts({ receipts }: { receipts: import("@/lib/bridge").CollaborationReceipt[] }) {
+export function CollaborationReceipts({ receipts, canRetry, retryUnavailable }: { receipts: import("@/lib/bridge").CollaborationReceipt[]; canRetry?: (receipt: import("@/lib/bridge").CollaborationReceipt) => boolean; retryUnavailable?: ReactNode }) {
   const [error, setError] = useState("");
   const act = async (action: () => Promise<unknown>) => {
     setError("");
@@ -2400,7 +2433,7 @@ export function CollaborationReceipts({ receipts }: { receipts: import("@/lib/br
         return dependency.groupId ? <button key={dependency.id} type="button" className="underline underline-offset-2" onClick={() => window.dispatchEvent(new CustomEvent("coworker:open-group", { detail: dependency.groupId }))}>{label}</button> : <span key={dependency.id}>{label}</span>;
       })}
       {!["succeeded", "failed", "cancelled"].includes(receipt.state) ? <button type="button" className="underline underline-offset-2" title="Stop this task, its delegated work, and its automatic follow-up" onClick={() => void act(() => coworkerBridge.collaboration.cancel(receipt.id))}>Stop task</button> : null}
-      {receipt.state === "failed" ? <button type="button" className="underline underline-offset-2" onClick={() => void act(() => coworkerBridge.collaboration.retry(receipt.id))}>Continue with available results</button> : null}
+      {receipt.state === "failed" ? canRetry?.(receipt) === false ? retryUnavailable : <button type="button" className="underline underline-offset-2" onClick={() => void act(() => coworkerBridge.collaboration.retry(receipt.id))}>Continue with available results</button> : null}
     </div>)}
     {error ? <p role="alert" className="text-xs text-mist">{error}</p> : null}
   </div>;
@@ -3034,14 +3067,16 @@ function ToolAppFrame({ call, client }: { call: TranscriptToolCall; client: Cowo
   if (app && result) {
     return (
       <div className="mt-1.5">
-        <McpAppFrame
-          client={client}
-          app={app}
-          toolName={call.tool}
-          input={inputRef.current.value}
-          result={result}
-          onClose={() => { releaseRef.current?.(); setApp(null); }}
-        />
+        <Suspense fallback={null}>
+          <McpAppFrame
+            client={client}
+            app={app}
+            toolName={call.tool}
+            input={inputRef.current.value}
+            result={result}
+            onClose={() => { releaseRef.current?.(); setApp(null); }}
+          />
+        </Suspense>
       </div>
     );
   }

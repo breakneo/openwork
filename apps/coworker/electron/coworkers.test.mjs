@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { createTemplateInstaller, exportCoworkerTemplate, parseCoworkerTemplateFile, templateScope } from "./templates.mjs";
 import { usesAppConversationDefault } from "../src/lib/model-defaults.ts";
+import { defaultCoworkerAbilities } from "../src/lib/abilities.ts";
 import {
   AGENTS_CONTRACT_VERSION,
   agentsContractVersion,
@@ -26,6 +27,7 @@ import {
   retireCoworker,
   serializeFrontmatter,
   updateCoworker,
+  updateCoworkerAbilities,
   writeCoworkerFile,
 } from "./coworkers.mjs";
 
@@ -35,6 +37,36 @@ async function tempCoworkersDir() {
   roots.push(dir);
   return path.join(dir, "coworkers");
 }
+
+test("abilities persist per identity without losing profile edits or widening empty selections", async () => {
+  const dir = await tempCoworkersDir();
+  const alpha = await createCoworker(dir, { name: "Abilities Alpha" });
+  const beta = await createCoworker(dir, { name: "Abilities Beta" });
+  assert.deepEqual(alpha.abilities, defaultCoworkerAbilities());
+  const selected = { version: 1, revision: 0, skills: { mode: "selected", ids: ["cloud:skill:example"] }, mcpServers: { mode: "selected", ids: [] } };
+  const [saved] = await Promise.all([
+    updateCoworkerAbilities(dir, alpha.slug, { createdAt: alpha.createdAt, expectedRevision: 0, abilities: selected }),
+    updateCoworker(dir, alpha.slug, { mission: "Keep this concurrent profile change." }),
+  ]);
+  assert.equal(saved.abilities.revision, 1);
+  const reloaded = await getCoworker(dir, alpha.slug);
+  assert.deepEqual(reloaded.abilities, { ...selected, revision: 1 });
+  assert.equal(reloaded.mission, "Keep this concurrent profile change.");
+  assert.deepEqual((await getCoworker(dir, beta.slug)).abilities, defaultCoworkerAbilities());
+  await assert.rejects(updateCoworkerAbilities(dir, alpha.slug, { createdAt: alpha.createdAt, expectedRevision: 0, abilities: selected }), /changed elsewhere/);
+  await updateCoworker(dir, alpha.slug, { abilities: defaultCoworkerAbilities() });
+  assert.deepEqual((await getCoworker(dir, alpha.slug)).abilities, reloaded.abilities, "the generic patch cannot replace the dedicated selection");
+  const restoredAll = await updateCoworkerAbilities(dir, alpha.slug, { createdAt: alpha.createdAt, expectedRevision: 1, abilities: { ...reloaded.abilities, skills: { ...selected.skills, mode: "all" }, mcpServers: { mode: "all", ids: [] } } });
+  assert.deepEqual(restoredAll.abilities.skills.ids, selected.skills.ids, "switching back to all keeps the person's saved picks");
+  const retired = await retireCoworker(dir, alpha.slug);
+  const replacement = await createCoworker(dir, { name: alpha.name });
+  assert.deepEqual(replacement.abilities, defaultCoworkerAbilities());
+  await assert.rejects(updateCoworkerAbilities(dir, replacement.slug, { createdAt: alpha.createdAt, expectedRevision: 0, abilities: selected }), /replaced/);
+  await retireCoworker(dir, replacement.slug, { now: Date.now() + 10_000 });
+  assert.deepEqual((await restoreCoworker(dir, retired.archiveId)).abilities, restoredAll.abilities);
+  assert.deepEqual(parseFrontmatter('---\nabilities: malformed\n---\n').data.abilities.skills, { mode: "selected", ids: [] });
+  assert.deepEqual(parseFrontmatter('---\nabilities: malformed\n---\n').data.abilities.mcpServers, { mode: "selected", ids: [] });
+});
 
 test("template import gives a recoverable message for invalid JSON and private fields", () => {
   for (const contents of ["not json", JSON.stringify({ kind: "coworker", schemaVersion: 1, name: "Invalid", memory: "private" })]) {
@@ -95,7 +127,7 @@ test("avatar choices survive creation, template export and import, and reload", 
   const dir = await tempCoworkersDir();
   const importedDir = await tempCoworkersDir();
   const install = createTemplateInstaller(importedDir, (input) => createCoworker(importedDir, input));
-  const appearance = { avatarColor: "sage", avatarGlasses: "monocle" };
+  const appearance = { avatarColor: "coral", avatarGlasses: "monocle" };
   const created = await createCoworker(dir, { name: "Classic", ...appearance });
   const template = parseCoworkerTemplateFile(JSON.stringify(await exportCoworkerTemplate(dir, created.slug)));
   const imported = await install({ scope: "file", items: [{ id: created.slug, versionId: "one", template }], installIds: [created.slug] });
@@ -463,15 +495,15 @@ test("restore refuses to overwrite a live coworker and permanent delete is expli
   assert.equal((await listCoworkers(coworkersDir)).length, 1, "the live twin is untouched");
 });
 
-test("the refreshed contract keeps the soul and memory untouched and carries the scheduling and self sections", async () => {
+test("the version 13 contract upgrades without changing identity, soul or memory", async () => {
   const coworkersDir = await tempCoworkersDir();
   const coworker = await createCoworker(coworkersDir, { name: "Pilot", role: "Ops" });
   const soulPath = path.join(coworker.path, "soul.md");
   const workingPath = path.join(coworker.path, "memory", "working.md");
   await writeFile(soulPath, "# Soul — Pilot\n\n## Role\n\nOps lead, edited by hand.\n", "utf8");
   await writeFile(workingPath, "# Working memory — Pilot\n\n## Now\n\n- Halfway through the audit.\n", "utf8");
-  // An older contract without the tool sections, and a config a person extended by hand.
-  await writeFile(path.join(coworker.path, "AGENTS.md"), "<!-- open-coworker-contract: 3 -->\n# Pilot — coworker contract\n\nOld words.\n", "utf8");
+  // The previous contract and a config a person extended by hand.
+  await writeFile(path.join(coworker.path, "AGENTS.md"), "<!-- open-coworker-contract: 13 -->\n# Pilot — coworker contract\n\nOld words.\n", "utf8");
   await writeFile(path.join(coworker.path, "opencode.json"), JSON.stringify({ instructions: ["soul.md"], mcp: { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } } }), "utf8");
 
   const { changed } = await repairCoworkerContract(coworkersDir, "pilot");
@@ -479,9 +511,8 @@ test("the refreshed contract keeps the soul and memory untouched and carries the
   const agents = await readFile(path.join(coworker.path, "AGENTS.md"), "utf8");
   assert.equal(agents, agentsTemplate({ name: "Pilot" }));
   assert.equal(agentsContractVersion(agents), AGENTS_CONTRACT_VERSION);
-  assert.match(agents, /## Scheduling/);
-  assert.match(agents, /## Keeping memory and soul current/);
-  assert.doesNotMatch(agents, /## Working memory duty/);
+  assert.equal(agentsContractVersion(agents), 14);
+  assert.deepEqual(await getCoworker(coworkersDir, "pilot"), coworker);
   const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
   assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md", "documents/index.md", "team/roster.md"]);
   assert.deepEqual(config.mcp, { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } });

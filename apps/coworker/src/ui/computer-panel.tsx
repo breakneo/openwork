@@ -6,7 +6,7 @@ import { Button } from "@/ui/kit";
 type Presentation = NonNullable<Awaited<ReturnType<typeof coworkerBridge.computer.presentation>>>;
 type Observation = Omit<Presentation, "frame"> & { frame?: NonNullable<Presentation["frame"]> & { key: string } };
 type Interaction = "approve" | "deny" | "takeover" | "resume";
-const inputLabels: Record<string, string> = { move: "Moving", click: "Click", double_click: "Double click", drag: "Dragging", scroll: "Scrolling", key: "Key press", type: "Typing", press: "Press", set_value: "Editing" };
+const inputLabels: Record<string, string> = { move: "Moving", click: "Click", double_click: "Double click", triple_click: "Triple click", drag: "Dragging", scroll: "Scrolling", key: "Key press", type: "Typing", press: "Press", set_value: "Editing" };
 const pausedPhases = ["paused", "person_interacting", "ready_to_continue", "requery_required"];
 
 /** This is a watch surface. Only the explicit controls below can hand back control. */
@@ -303,7 +303,7 @@ export function ComputerPanel({ slug, threadId, slot, enabled, canStop, controls
             {loadedFrame !== null && pointer ? <div className="pointer-events-none absolute inset-0" role="img" aria-label="Latest computer input position" data-testid="coworker-computer-input">
               {trail.length > 1 ? <svg className="absolute inset-0 h-full w-full text-spark" viewBox={`0 0 ${imageWidth} ${imageHeight}`} aria-hidden="true"><polyline points={trail.join(" ")} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.7" /></svg> : null}
               <div className="coworker-computer-pointer absolute" data-action={pointer.action} style={{ left: `${pointer.x * 100}%`, top: `${pointer.y * 100}%` }}>
-                {pointer.action === "click" || pointer.action === "double_click" ? <span key={pointer.sequence} className="coworker-computer-click" aria-hidden="true" /> : null}
+                {pointer.action === "click" || pointer.action === "double_click" || pointer.action === "triple_click" ? <span key={pointer.sequence} className="coworker-computer-click" aria-hidden="true" /> : null}
                 <svg viewBox="0 0 20 26" width="18" height="24" className="relative drop-shadow-md" aria-hidden="true"><path d="M1 1v19l5-5 4 9 4-2-4-8h8Z" fill="var(--color-snow)" stroke="var(--color-ink)" strokeWidth="1.5" strokeLinejoin="round" /></svg>
               </div>
             </div> : null}
