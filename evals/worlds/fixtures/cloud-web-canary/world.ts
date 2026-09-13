@@ -147,13 +147,13 @@ export async function attachedCanary(seed: Seed, { place }: { place: Place }) {
     },
     async page() {
       // Read only DOM/location facts; never install fake controls or serialize grants/URLs.
-      const value = await callFunctionOnSurface(web, `(gateway, den) => ({
+      const value = await callFunctionOnSurface(web, (gateway: string, den: string) => ({
         atGateway: location.origin === gateway,
         atDen: location.origin === den,
         route: location.origin === gateway ? location.pathname + location.hash : "",
         takeover: document.querySelector('[data-testid="cloud-workspace-takeover"]')?.getAttribute('data-cloud-workspace-state') ?? null,
-        assistant: [...document.querySelectorAll('[data-message-role="assistant"]')].map(node => node.textContent ?? '').join('\\n')
-      })`, [gatewayUrl, webUrl]);
+        assistant: [...document.querySelectorAll('[data-message-role="assistant"]')].map(node => node.textContent ?? '').join('\n')
+      }), [gatewayUrl, webUrl]);
       if (!record(value) || typeof value.atGateway !== "boolean" || typeof value.atDen !== "boolean"
         || typeof value.route !== "string" || typeof value.assistant !== "string"
         || !(value.takeover === null || typeof value.takeover === "string")) throw new Error("Invalid canary page observation");
@@ -161,14 +161,14 @@ export async function attachedCanary(seed: Seed, { place }: { place: Place }) {
     },
     async partialReply(prefix: string, complete: string) {
       // Observe visibility and incompleteness together, before the next SSE chunk.
-      const value = await callFunctionOnSurface(web, `(prefix, complete) =>
+      const value = await callFunctionOnSurface(web, (prefix: string, complete: string) =>
         [...document.querySelectorAll('[data-message-role="assistant"]')].some(node => {
           const rect = node.getBoundingClientRect();
           const text = node.textContent ?? '';
           return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight
             && getComputedStyle(node).visibility !== 'hidden'
             && text.includes(prefix) && !text.includes(complete);
-        })`, [prefix, complete]);
+        }), [prefix, complete]);
       if (typeof value !== "boolean") throw new Error("Invalid partial-answer observation");
       return value;
     },
