@@ -10,14 +10,25 @@ import type { ModelSelectionPreferences } from "./model-intelligence-index.ts";
 import type { Personality } from "./personalities";
 import type { WorkerEvent, WorkerLifespan, WorkerSummary } from "./workers";
 import type { AssignedCoworkerTemplate } from "@openwork/types/coworker-template";
-import type { HeadlessThreadModel, HeadlessTurnAcceptance } from "@openwork/headless-threads";
+import type { HeadlessThreadModel, HeadlessTurnAcceptance } from "@openwork/headless-threads/v2";
 import type { ThreadTurnState } from "./thread-queue.ts";
 import type { ExecutionActivity } from "./progress-activity.ts";
 import type { PendingInteractions, PermissionReply } from "./threads.ts";
 import { eventInputSchema, eventArtifactSchema, type EventInput, type WorkplaceEvent, type EventRun, type EventDetail, type EventArtifact } from "./events";
 
+export type MessageReactionScope =
+  | { kind: "private"; slug: string; threadId: string }
+  | { kind: "group"; groupId: string };
+export type MessageReaction = {
+  messageId: string;
+  emoji: string;
+  actor: { slug: string; name: string; createdAt: string };
+  updatedAt: number;
+};
+export type MessageReactionSnapshot = { revision: number; reactions: MessageReaction[] };
+
 export type GroupInteraction = { executionId: string; slug: string; threadId: string; workspaceId: string; deadline: number; pending: PendingInteractions };
-export type CoworkerActivityItem = {
+export type CoworkerReplyActivityItem = {
   id: string;
   kind: "reply" | "mention";
   at: number;
@@ -26,8 +37,18 @@ export type CoworkerActivityItem = {
   coworkerCreatedAt: string;
   preview: string;
   readAt: number | null;
-  target: { kind: "private"; threadId: string } | { kind: "group"; groupId: string; eventId: string };
+  target: { kind: "private"; threadId: string } | { kind: "group"; groupId: string; eventId: string; workplaceEventId?: string; runId?: string; scheduledFor?: number };
 };
+export type EventReminderActivityItem = {
+  id: string;
+  kind: "event-reminder";
+  at: number;
+  readAt: number | null;
+  title: string;
+  preview: string;
+  target: { kind: "event"; eventId: string; groupId: string; scheduledFor: number };
+};
+export type CoworkerActivityItem = CoworkerReplyActivityItem | EventReminderActivityItem;
 export type GroupInteractionReply = { groupId: string; executionId: string; slug: string; threadId: string; workspaceId: string; requestId: string } & ({ kind: "permission"; reply: PermissionReply } | { kind: "question"; answers: string[][]; reply?: never } | { kind: "question"; reply: "reject"; answers?: never });
 
 export type CollaborationReceipt = {
@@ -121,6 +142,7 @@ export type GroupTimelineEvent = {
   title?: string;
   part?: GroupSpeakerPart;
   documentId?: string;
+  documentSummary?: string;
   revision?: number;
 };
 
@@ -374,6 +396,10 @@ export type EngineProviderSummary = {
   source: string;
   connected: boolean;
   modelCount: number;
+  /** Native integration identity, distinct from the provider and stored credential. */
+  integrationID?: string;
+  /** Native key method availability; absent only in older readiness snapshots. */
+  acceptsKey?: boolean;
 };
 
 export type LocalProvidersReadiness = {
@@ -384,7 +410,7 @@ export type LocalProvidersReadiness = {
   ownerToken: string;
   providers: EngineProviderSummary[];
   /** Provider id → the AI service's own sign-in flows (browser or device code). */
-  signIns: Record<string, Array<{ index: number; label: string }>>;
+  signIns: Record<string, Array<{ index: number; label: string; integrationID?: string; methodID?: string }>>;
 };
 
 export type LocalProviderConnected = { status: "connected"; providerId: string; label: string; modelCount: number };
@@ -400,6 +426,9 @@ export type ProviderSignInStart = {
   code: string;
   instructions: string;
   label: string;
+  integrationID?: string;
+  methodID?: string;
+  mode?: "auto" | "code";
 };
 
 export type ProviderSignInStatus = { state: "waiting" | "connected" | "failed"; error: string; modelCount: number };
@@ -478,6 +507,7 @@ type BridgeWindow = Window & {
   __COWORKER__?: {
     invoke: (command: string, payload?: unknown) => Promise<BridgeResponse>;
     onDeepLink?: (listener: (urls: string[]) => void) => () => void;
+    onReactionsChanged?: (listener: (change: { scope: MessageReactionScope; revision: number }) => void) => () => void;
   };
 };
 
@@ -492,6 +522,13 @@ async function invoke<T>(command: string, payload?: unknown): Promise<T> {
 }
 
 export const coworkerBridge = {
+  reactions: {
+    read: (scope: MessageReactionScope) => invoke<MessageReactionSnapshot>("reactions:read", scope),
+    onChanged: (listener: (change: { scope: MessageReactionScope; revision: number }) => void): (() => void) => {
+      const host: BridgeWindow = window;
+      return host.__COWORKER__?.onReactionsChanged?.(listener) ?? (() => undefined);
+    },
+  },
   activity: {
     list: () => invoke<CoworkerActivityItem[]>("activity.list"),
     markRead: (ids: string[], read = true) => invoke<CoworkerActivityItem[]>("activity.markRead", { ids, read }),
@@ -540,7 +577,9 @@ export const coworkerBridge = {
     state: (slug: string, threadId: string) => invoke<ThreadTurnState>("turns.state", { slug, threadId }),
     update: (slug: string, threadId: string, previous: ThreadTurnState, next: ThreadTurnState) => invoke<ThreadTurnState>("turns.update", { slug, threadId, previous, next }),
     /** Explicit person recovery may return a NEW messageId and continuation prompt after tool work. */
-    send: (input: { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<HeadlessTurnAcceptance & { prompt: string }>("turns.send", input),
+    selectSkill: (input: { slug: string; uri: string; label: string; account: { baseUrl: string; orgId: string; email: string } }) => invoke<import("./skill-selection.ts").SelectedSkill>("turns.selectSkill", input),
+    validateSkills: (slug: string, fields: import("./skill-selection.ts").SkillFields) => invoke<void>("turns.validateSkills", { slug, ...fields }),
+    send: (input: import("./skill-selection.ts").SkillFields & { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<HeadlessTurnAcceptance & { prompt: string }>("turns.send", input),
     cancel: (slug: string, threadId: string, messageId?: string) => invoke<{ ok: boolean }>("turns.cancel", { slug, threadId, messageId }),
   },
   templates: {
@@ -615,8 +654,10 @@ export const coworkerBridge = {
     /** Add the proposed coworker; it inherits the proposer's model and remembers who proposed it. */
     accept: (slug: string, suggestionId: string, name?: string) => invoke<CoworkerSummary>("team.accept", { slug, suggestionId, name }),
     decline: (slug: string, suggestionId: string) => invoke<{ id: string; state: TeamSuggestionState; at: number }>("team.decline", { slug, suggestionId }),
-    referralResolved: (slug: string, referralId: string, outcome: "asked" | "continued") =>
-      invoke<{ id: string; state: TeamReferralState; at: number }>("team.referralResolved", { slug, referralId, outcome }),
+    referralResolved: (slug: string, referralId: string, ...resolution: [outcome: "asked" | "continued"] | [outcome: "offered", expectedAt: number]) => {
+      const [outcome, expectedAt] = resolution;
+      return invoke<{ id: string; state: TeamReferralState; at: number }>("team.referralResolved", { slug, referralId, outcome, expectedAt });
+    },
   },
   files: {
     list: (slug: string) => invoke<CoworkerMemoryFile[]>("coworkers.files.list", { slug }),
@@ -692,7 +733,7 @@ export const coworkerBridge = {
     list: (slug: string) => invoke<WorkerSummary[]>("workers.list", { slug }),
     get: (slug: string, id: string) => invoke<WorkerSummary>("workers.get", { slug, id }),
     /** A missing lifespan means the default turn budget; a Worker is never unbounded by accident. */
-    spawn: (slug: string, input: { name: string; goal: string; purpose?: import("./workers.ts").WorkerPurpose; lifespan?: WorkerLifespan; spawnedFromThreadId?: string; control?: "browser" | "computer" }) =>
+    spawn: (slug: string, input: import("./skill-selection.ts").SkillFields & { name: string; goal: string; purpose?: import("./workers.ts").WorkerPurpose; lifespan?: WorkerLifespan; spawnedFromThreadId?: string; control?: "browser" | "computer" }) =>
       invoke<WorkerSummary>("workers.spawn", { slug, ...input }),
     approveControl: (input: { slug: string; id: string; expectedRevision: number }) => invoke<WorkerSummary>("workers.approveControl", input),
     revokeControl: (input: { slug: string; id: string; expectedRevision: number }) => invoke<WorkerSummary>("workers.revokeControl", input),

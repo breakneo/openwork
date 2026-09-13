@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { GroupDocument, GroupDocumentSummary, GroupDocumentsApi } from "@/lib/group-documents";
 import { Button, Empty, ErrorNote, inputClass } from "@/ui/kit";
 import { DocumentMarkdown } from "@/ui/markdown";
+import { useDocumentNavigationGuard, type DocumentNavigationGuard } from "@/ui/documents";
 
 export type { GroupDocumentsApi } from "@/lib/group-documents";
 
-type Props = { api: GroupDocumentsApi; groupId: string; openId?: string; onClose: () => void };
+type Props = { api: GroupDocumentsApi; groupId: string; openId?: string; openRequestId?: number; onClose: () => void; navigationGuard?: DocumentNavigationGuard };
 const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 
 /** A different group remounts the observer so late reads cannot cross group boundaries. */
@@ -13,7 +14,7 @@ export function GroupDocuments(props: Props) {
   return <GroupDocumentPanel key={props.groupId} {...props} />;
 }
 
-function GroupDocumentPanel({ api, groupId, openId = "", onClose }: Props) {
+function GroupDocumentPanel({ api, groupId, openId = "", openRequestId, onClose, navigationGuard }: Props) {
   const [items, setItems] = useState<GroupDocumentSummary[] | null>(null);
   const [document, setDocument] = useState<GroupDocument | null>(null);
   const [history, setHistory] = useState<GroupDocument[] | null>(null);
@@ -27,6 +28,8 @@ function GroupDocumentPanel({ api, groupId, openId = "", onClose }: Props) {
   const [discard, setDiscard] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const request = useRef(0);
+  const navigationMessage = () => editing ? "Save or cancel the shared document draft before opening another source." : busy ? "Wait for the shared document request to finish before opening another source." : null;
+  useDocumentNavigationGuard(navigationGuard, navigationMessage);
 
   useEffect(() => () => { request.current++; }, []);
   useEffect(() => {
@@ -49,9 +52,10 @@ function GroupDocumentPanel({ api, groupId, openId = "", onClose }: Props) {
 
   const [selectedId, setSelectedId] = useState(openId);
   useEffect(() => {
-    // An incoming open request must not discard a conflict draft.
-    if (!editing && !busy) setSelectedId(openId);
-  }, [openId]);
+    const message = navigationMessage();
+    if (message) { setError(message); return; }
+    setSelectedId(openId);
+  }, [openId, openRequestId]);
   useEffect(() => {
     const version = ++request.current;
     setDocument(null); setHistory(null); setPreview(null); setError("");

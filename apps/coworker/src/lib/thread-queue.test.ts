@@ -22,6 +22,9 @@ import {
   withThreadTurns,
   type ThreadTurnState,
 } from "./thread-queue.ts";
+import { createComposerDraftStore, mergeSkillSelections, parseComposerDraft, selectionFields, type ComposerDraft, type SelectedSkill } from "./skill-selection.ts";
+const draft: ComposerDraft = { text: "Keep these unsent words", skills: [{ id: "native_exact", label: "Useful skill", workspaceId: "ws_fixture", source: { type: "openwork-cloud", uri: "skill://fixture", scope: "opaque-A" }, account: { baseUrl: "https://example.invalid", orgId: "org_fixture", accountId: "user_fixture" } }] };
+const selected = selectionFields(draft.skills);
 
 test("a missing, empty, or malformed file is simply nothing unfinished", () => {
   for (const text of [null, undefined, "", "   ", "{not json", "[]", '{"threads": 4}', '{"threads": {"ses_1": {"pending": {"prompt": "no id"}, "next": [{"id": "q", "text": "  "}]}}}']) {
@@ -31,13 +34,18 @@ test("a missing, empty, or malformed file is simply nothing unfinished", () => {
 
 test("the file round-trips, drops threads with nothing unfinished, and tolerates missing numbers", () => {
   const state: ThreadTurnState = {
-    pending: { messageId: "msg_1", prompt: "Draft the note.", startedAt: 100, stoppedAt: null },
-    next: [{ id: "q_1", text: "And the summary.", queuedAt: 110 }, { id: "q_2", text: "Then email it.", queuedAt: 120 }],
+    pending: { messageId: "msg_1", prompt: "Draft the note.", ...selected, startedAt: 100, stoppedAt: null },
+    next: [{ id: "q_1", text: "And the summary.", ...selected, queuedAt: 110 }, { id: "q_2", text: "Then email it.", queuedAt: 120 }],
   };
   const file = withThreadTurns(withThreadTurns({ schemaVersion: 1, threads: {} }, "ses_1", state), "ses_2", EMPTY_THREAD_TURNS);
   const text = serializeTurnsFile(file);
   assert.equal(text.endsWith("\n"), true);
   const parsed = parseTurnsFile(text);
+  assert.deepEqual(parseComposerDraft(JSON.stringify(draft)), draft, "selected IDs and labels survive reload/transfer");
+  assert.deepEqual(parseComposerDraft(null, "Use the Useful skill"), { text: "Use the Useful skill", skills: [] }, "v1 words never infer selections");
+  const next = takeQueued(threadTurns(parsed, "ses_1"), "q_1");
+  assert.deepEqual(next.message?.skillSelections, draft.skills, "edit queued/send now retains the selection");
+  assert.deepEqual(markStopped(threadTurns(parsed, "ses_1"), 150).pending?.skills, selected.skills);
   assert.deepEqual(parsed, { schemaVersion: 1, threads: { ses_1: state } });
   assert.deepEqual(threadTurns(parsed, "ses_2"), EMPTY_THREAD_TURNS);
   assert.deepEqual(
@@ -70,6 +78,72 @@ test("a queued message can be taken out to edit or send now, or removed; unknown
   assert.deepEqual(takeQueued(state, "q_9"), { state, message: null });
   assert.deepEqual(removeQueued(state, "q_1").next.map((item) => item.id), ["q_2"]);
   assert.equal(removeQueued(state, "q_9"), state);
+  const selectedState = enqueue(EMPTY_THREAD_TURNS, { id: "q_selected", text: "Queued words A", queuedAt: 1, ...selected });
+  const onDisk = serializeTurnsFile(withThreadTurns({ schemaVersion: 1, threads: {} }, "thread", selectedState));
+  const oldSkill = draft.skills[0]!;
+  const conflicts: SelectedSkill[] = [
+    { ...oldSkill, workspaceId: "ws_other" },
+    { ...oldSkill, account: { ...oldSkill.account!, orgId: "other" } },
+    { ...oldSkill, account: { ...oldSkill.account!, accountId: "other" } },
+    { ...oldSkill, account: { ...oldSkill.account!, baseUrl: "https://other.invalid" } },
+    { ...oldSkill, source: { ...oldSkill.source!, uri: "skill://other" } },
+    { ...oldSkill, source: { ...oldSkill.source!, scope: "opaque-B" } },
+    { id: oldSkill.id, label: oldSkill.label, workspaceId: oldSkill.workspaceId },
+  ];
+  for (const newer of conflicts) {
+    const current: ComposerDraft = { text: "Unsent words B", skills: [newer] };
+    const taken = takeQueued(selectedState, "q_selected");
+    assert.throws(() => mergeSkillSelections(current.skills, taken.message!.skillSelections!), /conflicting/);
+    assert.equal(current.text, "Unsent words B");
+    assert.deepEqual(current.skills, [newer]);
+    assert.deepEqual(threadTurns(parseTurnsFile(onDisk), "thread"), selectedState, "conflict leaves the original queue record durable");
+    assert.throws(() => mergeSkillSelections([oldSkill], [newer]), /conflicting/, "merge order cannot discard either provenance");
+  }
+  assert.equal(mergeSkillSelections([oldSkill], [{ ...oldSkill, label: "Updated label" }]).length, 1, "labels are not authority");
+});
+
+test("initial draft admission is bound before Enter; late send/queue acknowledgements use per-key CAS across remounts", async () => {
+  const files = new Map<string, string>();
+  const store = createComposerDraftStore({ read: (key) => parseComposerDraft(files.get(key) ?? null), write: (key, value) => { files.set(key, JSON.stringify(value)); } });
+  store.update("new", draft);
+  const source = store.read("new");
+  const transferred = store.transfer(source, "discussion");
+  const initial = store.bindSubmission("discussion", "msg_original", source.value);
+  let next = EMPTY_THREAD_TURNS;
+  let acknowledge = () => {};
+  const ack = new Promise<void>((resolve) => { acknowledge = resolve; });
+  const admitted = ack.then(() => store.finishSubmission(initial, true));
+  const enter = () => {
+    const snapshot = store.read("discussion");
+    const submission = store.beginSubmission(snapshot, "msg_duplicate");
+    if (submission) next = enqueue(next, { id: submission.messageId, text: snapshot.value.text, queuedAt: 1, ...selectionFields(snapshot.value.skills) });
+  };
+  enter(); enter();
+  assert.equal(next.next.length, 0, "delayed initial acknowledgement plus Enter cannot queue a new-ID duplicate");
+  assert.equal(initial.messageId, "msg_original");
+  // Another mount owns the same key and types B before A's callback runs.
+  const unsubscribe = store.subscribe("discussion", () => {}); unsubscribe();
+  const draftB: ComposerDraft = { text: "New words B", skills: [{ ...draft.skills[0]!, source: { ...draft.skills[0]!.source!, scope: "opaque-B" } }] };
+  store.update("discussion", draftB);
+  acknowledge(); await admitted;
+  assert.deepEqual(store.read("discussion").value, draftB);
+  assert.deepEqual(JSON.parse(files.get("discussion")!), draftB, "late A acknowledgement cannot clear persisted B");
+  const queuedB = store.beginSubmission(store.read("discussion"), "queued_B"); assert.ok(queuedB);
+  store.update("discussion", { text: "New words C", skills: [] });
+  store.finishSubmission(queuedB, true);
+  assert.equal(store.read("discussion").value.text, "New words C", "queued-save acknowledgement has the same CAS protection");
+  // Returning to identical A bytes is still a newer revision (ABA).
+  store.update("discussion", draft);
+  assert.equal(store.clear(transferred), false);
+  assert.deepEqual(store.read("discussion").value, draft);
+  store.update("new", draftB);
+  assert.throws(() => store.transfer(source, "another"), /changed during transfer/);
+  assert.equal(store.clear(source), false);
+  assert.deepEqual(store.read("new").value, draftB);
+  assert.throws(() => store.transfer(store.read("new"), "discussion"), /changed during transfer/, "late transfer cannot overwrite an edited destination");
+  const latest = store.beginSubmission(store.read("discussion"), "msg_latest"); assert.ok(latest);
+  store.finishSubmission(latest, true);
+  assert.deepEqual(store.read("discussion").value, { text: "", skills: [] }, "only the acknowledged revision clears");
 });
 
 test("the pending turn is begun, stopped, and cleared without touching Next", () => {
@@ -130,7 +204,7 @@ test("the store reads one file per coworker, caches it, serializes writes, and f
     const begun = beginPending(EMPTY_THREAD_TURNS, { messageId: "msg_1", prompt: "Draft", startedAt: 1 });
     await Promise.all([
       saveThreadTurns("nova", "ses_1", begun),
-      saveThreadTurns("nova", "ses_2", enqueue(EMPTY_THREAD_TURNS, { id: "q", text: "Later", queuedAt: 2 })),
+      saveThreadTurns("nova", "ses_2", enqueue(EMPTY_THREAD_TURNS, { id: "q", text: "Later", ...selected, queuedAt: 2 })),
     ]);
     assert.deepEqual(writes, [`nova/${TURNS_FILE}`, `nova/${TURNS_FILE}`]);
     const onDisk = parseTurnsFile(files.get(`nova/${TURNS_FILE}`));
@@ -146,7 +220,7 @@ test("the store reads one file per coworker, caches it, serializes writes, and f
       readFile: async (slug, path) => files.get(`${slug}/${path}`) ?? Promise.reject(new Error("ENOENT")),
       writeFile: async (slug, path, content) => { files.set(`${slug}/${path}`, content); },
     });
-    assert.deepEqual(await loadThreadTurns("nova", "ses_2"), { pending: null, next: [{ id: "q", text: "Later", queuedAt: 2 }] });
+    assert.deepEqual(await loadThreadTurns("nova", "ses_2"), { pending: null, next: [{ id: "q", text: "Later", ...selected, queuedAt: 2 }] });
     assert.deepEqual(await loadThreadTurns("scout", "ses_2"), EMPTY_THREAD_TURNS);
   } finally {
     configureTurnStore(null);

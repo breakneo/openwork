@@ -10,15 +10,17 @@
  * file through injected IO (the main-process bridge in the app, memory in
  * tests) and keeps one coherent cache per coworker.
  */
+import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { skillSelectionsSchema, type SkillFields } from "./skill-selection.ts";
 export const TURNS_FILE = "turns.json";
 
-export type QueuedMessage = {
+export type QueuedMessage = SkillFields & {
   id: string;
   text: string;
   queuedAt: number;
 };
 
-export type PendingTurnRecord = {
+export type PendingTurnRecord = SkillFields & {
   messageId: string;
   prompt: string;
   startedAt: number;
@@ -53,12 +55,17 @@ function parsePending(value: unknown): PendingTurnRecord | null {
     prompt: value.prompt,
     startedAt: finite(value.startedAt) ?? 0,
     stoppedAt: finite(value.stoppedAt),
+    ...parseSkillFields(value),
   };
 }
 
 function parseQueued(value: unknown): QueuedMessage | null {
   if (!isRecord(value) || typeof value.id !== "string" || !value.id || typeof value.text !== "string" || !value.text.trim()) return null;
-  return { id: value.id, text: value.text, queuedAt: finite(value.queuedAt) ?? 0 };
+  return { id: value.id, text: value.text, queuedAt: finite(value.queuedAt) ?? 0, ...parseSkillFields(value) };
+}
+
+function parseSkillFields(value: Record<string, unknown>): SkillFields {
+  return { ...(value.skills !== undefined ? { skills: nativeV2SkillsSchema.parse(value.skills) } : {}), ...(value.skillSelections !== undefined ? { skillSelections: skillSelectionsSchema.parse(value.skillSelections) } : {}) };
 }
 
 /** Tolerant read: a missing, empty, or malformed file is simply no unfinished turns anywhere. */
@@ -75,8 +82,9 @@ export function parseTurnsFile(text: string | null | undefined): TurnsFile {
       if (pending || next.length > 0) file.threads[threadId] = { pending, next };
     }
     return file;
-  } catch {
-    return file;
+  } catch (cause) {
+    if (cause instanceof SyntaxError) return file;
+    throw new Error("The saved turn's skill selection is unreadable. Its words and original record have been kept.", { cause });
   }
 }
 
@@ -127,8 +135,8 @@ export function takeQueued(state: ThreadTurnState, id: string): { state: ThreadT
   return { state: removeQueued(state, id), message };
 }
 
-export function beginPending(state: ThreadTurnState, turn: { messageId: string; prompt: string; startedAt: number }): ThreadTurnState {
-  return { ...state, pending: { messageId: turn.messageId, prompt: turn.prompt, startedAt: turn.startedAt, stoppedAt: null } };
+export function beginPending(state: ThreadTurnState, turn: SkillFields & { messageId: string; prompt: string; startedAt: number }): ThreadTurnState {
+  return { ...state, pending: { ...turn, stoppedAt: null } };
 }
 
 export function markStopped(state: ThreadTurnState, stoppedAt: number): ThreadTurnState {

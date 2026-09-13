@@ -1,8 +1,9 @@
 import { patternDrafts, workPattern } from "@/lib/work-patterns";
-import { CalendarView, type CalendarRequest } from "@/ui/calendar";
+import { CalendarView, type CalendarEventTarget, type CalendarRequest } from "@/ui/calendar";
 import { useCalendarData } from "@/ui/calendar-data";
 import { useCalendarPreferences } from "@/ui/calendar-preferences";
-import type { EventArtifact } from "@/lib/events";
+import { eventForTarget, groupEventTarget, type EventArtifact } from "@/lib/events";
+import type { DocumentNavigationGuard } from "@/ui/documents";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { coworkerBridge, type CoworkerActivityItem, type CoworkerGroupSummary, type CoworkerSummary, type CoworkerTemplateSync, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
 import { acknowledgeCoworker } from "@/ui/coworker-avatar";
@@ -48,6 +49,7 @@ import { AppLoader, CoworkerMark } from "@/ui/brand";
 import type { SettingsSection } from "@/ui/openwork-settings";
 import { VoiceContext } from "@/ui/use-voice";
 import { useActivityInbox } from "@/ui/use-activity-inbox";
+import type { ActivityDocumentTarget } from "@/ui/activity-inbox";
 
 // Whole-window or rarely opened screens load on first use so the startup chunk
 // carries the team, discussions and groups only. Local setup shares the provider
@@ -82,6 +84,32 @@ export default function App() {
   const [groups, setGroups] = useState<CoworkerGroupSummary[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const [mainContent, setMainContent] = useState<CoworkerMainContent>("chat");
+  const [activityContext, setActivityContext] = useState<"chat" | "calendar">("chat");
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
+  const [groupEventSource, setGroupEventSource] = useState<(CalendarEventTarget & { groupId: string }) | null>(null);
+  const [navigationNotice, setNavigationNotice] = useState("");
+  const readerNavigation: DocumentNavigationGuard = useRef(null);
+  const coworkersRef = useRef(coworkers);
+  coworkersRef.current = coworkers;
+  const allowSourceNavigation = useCallback(() => {
+    const message = readerNavigation.current?.() ?? "";
+    setNavigationNotice(message);
+    return !message;
+  }, []);
+  const navigationGeneration = useRef(0);
+  const requestSequence = useRef(0);
+  const navigate = useCallback((view: CoworkerMainContent, exitActivity = false) => {
+    navigationGeneration.current += 1;
+    setNavigationNotice("");
+    if (view !== "activity") setActivityContext(view);
+    setMainContent((current) => current === "activity" && view !== "activity" && !exitActivity ? "activity" : view);
+  }, []);
+  const calendarConversationOrigin = useRef<{ groupId: string; eventId: string } | null>(null);
+  const calendarEventId = useRef<string | null>(null);
+  const rememberCalendarEvent = useCallback((eventId: string | null) => {
+    navigationGeneration.current += 1;
+    calendarEventId.current = eventId;
+  }, []);
   const [calendarRequest, setCalendarRequest] = useState<CalendarRequest | null>(null);
   const [groupDocumentRequest, setGroupDocumentRequest] = useState<{ id: number; groupId: string; documentId: string } | null>(null);
   const calendar = useCalendarData(coworkers, session, Boolean(runtime));
@@ -98,7 +126,7 @@ export default function App() {
     setGroups((current) => [group, ...current.filter((item) => item.id !== group.id)].sort((a, b) => b.updatedAt - a.updatedAt));
   }, []);
   /** A request made of one coworker's view from elsewhere: a group's "Choose AI model" or an assignment it created. */
-  const [homeRequest, setHomeRequest] = useState<(CoworkerHomeRequest & { slug: string }) | null>(null);
+  const [homeRequest, setHomeRequest] = useState<(CoworkerHomeRequest & { slug: string; createdAt?: string }) | null>(null);
   const [groupDetailsOpen, setGroupDetailsOpen] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [onboardingReady, setOnboardingReady] = useState(false);
@@ -196,14 +224,16 @@ export default function App() {
     const timer = window.setInterval(() => void refresh().catch(() => undefined), 2000);
     const open = (event: Event) => {
       if (event instanceof CustomEvent && typeof event.detail === "string") {
-        void coworkerBridge.groups.get(event.detail).then((group) => { if (!group.archivedAt) { setGroups((current) => current.some((entry) => entry.id === group.id) ? current : [...current, group]); setActivityGroupRequest(null); setSelectedGroupId(group.id); setMainContent("chat"); setGroupDetailsOpen(false); } });
+        const generation = ++navigationGeneration.current;
+        void coworkerBridge.groups.get(event.detail).then((group) => { if (!group.archivedAt && generation === navigationGeneration.current && allowSourceNavigation()) { setGroups((current) => current.some((entry) => entry.id === group.id) ? current : [...current, group]); setActivityGroupRequest(null); setGroupDocumentRequest(null); setHomeRequest(null); setGroupEventSource(null); calendarConversationOrigin.current = null; setSelectedActivityId(null); setSelectedGroupId(group.id); navigate("chat"); setGroupDetailsOpen(false); } }).catch(() => undefined);
       }
     };
     window.addEventListener("coworker:open-group", open);
     return () => { cancelled = true; window.clearInterval(timer); window.removeEventListener("coworker:open-group", open); };
-  }, [runtime?.serverUrl, coworkers, setGroupLine, factoryResetOpen]);
+  }, [runtime?.serverUrl, coworkers, setGroupLine, factoryResetOpen, navigate, allowSourceNavigation]);
 
   const openGlobalSettings = useCallback((section: SettingsSection = "general") => {
+    navigationGeneration.current += 1;
     const opener = document.activeElement;
     settingsReturnFocusRef.current = opener instanceof HTMLElement && opener !== document.body ? opener : null;
     setGlobalSettingsMounted(true);
@@ -791,8 +821,9 @@ export default function App() {
   const liveGroups = groups.filter((group) => !group.archivedAt);
   const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? null;
   const eventGroupIds = new Set(calendar.events.map((event) => event.groupId));
-  const selectedEvent = calendar.events.find((event) => event.groupId === selectedGroup?.id);
-  const selectedEventLink = selectedEvent ? { id: selectedEvent.id, title: selectedEvent.title } : selectedGroup?.eventId ? { id: selectedGroup.eventId, title: selectedGroup.name } : undefined;
+  const selectedEventTarget = selectedGroup ? groupEventTarget(selectedGroup, calendar.events, groupEventSource ?? undefined) : undefined;
+  const selectedEvent = selectedEventTarget ? eventForTarget(calendar.events, calendar.eventRuns, selectedEventTarget) : undefined;
+  const selectedEventLink = selectedEventTarget ? { id: selectedEventTarget.eventId, title: selectedEvent?.title ?? selectedGroup?.name ?? "Event" } : undefined;
   const visibleActivityBySlug: Record<string, CoworkerActivity> = {};
   for (const coworker of coworkers) {
     const attention = attentionBySlug[coworker.slug];
@@ -839,25 +870,85 @@ export default function App() {
 
   /** Open another coworker's conversation, optionally with a message to send there as the person's own. */
   function visitCoworker(slug: string, prompt?: string) {
+    if (!allowSourceNavigation()) return false;
     acknowledgeCoworker(slug);
+    setSelectedActivityId(null);
     setGroupDetailsOpen(false);
     setActivityGroupRequest(null);
     setSelectedGroupId("");
     setSelectedSlug(slug);
-    setMainContent("chat");
-    setHomeRequest(prompt ? { id: Date.now(), slug, kind: "turn", prompt } : null);
+    setGroupDocumentRequest(null);
+    setGroupEventSource(null);
+    calendarConversationOrigin.current = null;
+    navigate("chat");
+    setHomeRequest(prompt ? { id: nextRequestId(), slug, kind: "turn", prompt } : null);
+    return true;
+  }
+
+  function nextRequestId() {
+    requestSequence.current = Math.max(Date.now(), requestSequence.current + 1);
+    return requestSequence.current;
+  }
+
+  function resumeCalendar() {
+    navigate("calendar");
+    setGroupDetailsOpen(false);
+  }
+
+  function exitActivity() {
+    navigate("chat", true);
+  }
+
+  async function requestCalendar(input: Omit<CalendarRequest, "id">, activityId: string | null = null) {
+    const generation = ++navigationGeneration.current;
+    let at = input.at;
+    let notice = input.notice;
+    if (input.eventId && at === undefined) {
+      const run = input.runId ? calendar.eventRuns.find((entry) => entry.id === input.runId && entry.eventId === input.eventId) : undefined;
+      const event = calendar.events.find((entry) => entry.id === input.eventId);
+      at = input.runId ? run?.scheduledFor : event?.nextDueAt ?? event?.startsAt;
+      if (at === undefined) {
+        try {
+          const detail = await coworkerBridge.events.get(input.eventId);
+          at = input.runId ? detail.runs.find((entry) => entry.id === input.runId)?.scheduledFor : detail.event.nextDueAt ?? detail.event.startsAt;
+          if (at === undefined) notice = "This session's date is unavailable. Its requested history is kept selected.";
+        } catch {
+          notice = "The event's date could not be loaded. Your current calendar date is kept; check the event details.";
+        }
+      }
+    }
+    if (generation !== navigationGeneration.current) return;
+    setSelectedActivityId(activityId);
+    calendarConversationOrigin.current = null;
+    setCalendarRequest({ ...input, at, notice, id: nextRequestId() });
+    setActivityGroupRequest(null);
+    resumeCalendar();
+  }
+
+  function openActivityEvent(target: CalendarEventTarget) {
+    void requestCalendar({ ...target, fromActivity: true }, `event:${target.eventId}:${target.at ?? ""}:${target.runId ?? ""}`);
   }
 
   async function openActivityItem(item: CoworkerActivityItem) {
+    const generation = ++navigationGeneration.current;
     const current = (await coworkerBridge.activity.list()).find((entry) => entry.id === item.id);
+    if (generation !== navigationGeneration.current) return;
     if (!current) throw new Error("This activity is no longer available. Refresh Activity to update the list.");
+    if (current.kind === "event-reminder") {
+      await requestCalendar({ eventId: current.target.eventId, at: current.target.scheduledFor, fromActivity: true, reminderId: current.id }, current.id);
+      return;
+    }
+    if (!allowSourceNavigation()) return;
     const owner = await coworkerBridge.coworkers.get(current.slug);
-    if (owner.createdAt !== current.coworkerCreatedAt || owner.workspaceId !== current.workspaceId || !coworkers.some((member) => member.slug === owner.slug && member.createdAt === owner.createdAt)) {
+    if (generation !== navigationGeneration.current) return;
+    if (owner.createdAt !== current.coworkerCreatedAt || owner.workspaceId !== current.workspaceId || !coworkersRef.current.some((member) => member.slug === owner.slug && member.createdAt === owner.createdAt && member.workspaceId === owner.workspaceId)) {
       throw new Error("This activity belongs to an earlier coworker identity. It has not been opened in a replacement's workspace.");
     }
     const group = current.target.kind === "group" ? await coworkerBridge.groups.get(current.target.groupId) : null;
-    if (group?.archivedAt) throw new Error("This conversation has been archived. Refresh Activity to update the list.");
-    const id = Date.now();
+    if (generation !== navigationGeneration.current || !allowSourceNavigation()) return;
+    if (group && (group.archivedAt !== null || !group.participantSlugs.includes(current.slug))) throw new Error("This conversation is no longer available to this coworker. Refresh Activity to update the list.");
+    calendarConversationOrigin.current = null;
+    const id = nextRequestId();
     const onOpened = async () => {
       setHomeRequest((request) => request?.id === id ? null : request);
       setActivityGroupRequest((request) => request?.id === id ? null : request);
@@ -867,44 +958,112 @@ export default function App() {
       replaceGroup(group);
       setSelectedGroupId(group.id);
       setGroupDocumentRequest(null);
+      setHomeRequest(null);
+      setGroupEventSource(current.target.workplaceEventId ? { groupId: group.id, eventId: current.target.workplaceEventId, runId: current.target.runId, at: current.target.scheduledFor } : null);
       setActivityGroupRequest({ id, groupId: group.id, eventId: current.target.eventId, onOpened });
     } else if (current.target.kind === "private") {
       setSelectedGroupId("");
       setSelectedSlug(current.slug);
       setActivityGroupRequest(null);
-      setHomeRequest({ id, slug: current.slug, kind: "discussion", threadId: current.target.threadId, onOpened });
+      setGroupDocumentRequest(null);
+      setGroupEventSource(null);
+      setHomeRequest({ id, slug: current.slug, createdAt: current.coworkerCreatedAt, kind: "discussion", threadId: current.target.threadId, onOpened });
     }
+    setSelectedActivityId(current.id);
     setGroupDetailsOpen(false);
-    setMainContent("chat");
+    navigate("chat");
   }
 
   function openEvent(eventId: string) {
-    setCalendarRequest({ id: Date.now(), eventId });
-    setMainContent("calendar");
-    setGroupDetailsOpen(false);
+    const origin = calendarConversationOrigin.current;
+    if (origin?.eventId === eventId && origin.groupId === selectedGroupId && calendarEventId.current === eventId) {
+      resumeCalendar();
+      return;
+    }
+    void requestCalendar(selectedEventTarget?.eventId === eventId ? selectedEventTarget : { eventId });
   }
 
-  async function openEventConversation(groupId: string) {
+  async function openEventConversation(groupId: string, target?: CalendarEventTarget) {
+    const generation = ++navigationGeneration.current;
+    if (!allowSourceNavigation()) return;
     if (!groupId) throw new Error("This event has no recorded conversation yet.");
     const group = await coworkerBridge.groups.get(groupId);
+    if (generation !== navigationGeneration.current || !allowSourceNavigation()) return;
+    if (group.archivedAt !== null) throw new Error("This conversation has been archived. Its history has been kept.");
+    calendarConversationOrigin.current = target ? { groupId, eventId: target.eventId } : null;
+    setGroupEventSource(target ? { ...target, groupId } : null);
+    if (!target) setSelectedActivityId(null);
     replaceGroup(group);
     setActivityGroupRequest(null);
+    setGroupDocumentRequest(null);
+    setHomeRequest(null);
     setGroupDetailsOpen(false);
     setSelectedGroupId(group.id);
-    setMainContent("chat");
+    navigate("chat");
   }
 
   async function openEventArtifact(artifact: EventArtifact) {
+    const generation = ++navigationGeneration.current;
+    if (!allowSourceNavigation()) return;
     if (artifact.owner.kind === "group") {
-      await openEventConversation(artifact.owner.groupId);
-      setGroupDocumentRequest({ id: Date.now(), groupId: artifact.owner.groupId, documentId: artifact.documentId });
+      const group = await coworkerBridge.groups.get(artifact.owner.groupId);
+      if (generation !== navigationGeneration.current || !allowSourceNavigation()) return;
+      if (group.archivedAt !== null) throw new Error("This group's documents are no longer in the active team.");
+      const sourceEvent = calendar.events.find((event) => event.id === calendarEventId.current && event.groupId === group.id);
+      const origin = sourceEvent ? { groupId: group.id, eventId: sourceEvent.id } : null;
+      calendarConversationOrigin.current = origin;
+      setGroupEventSource(origin);
+      replaceGroup(group);
+      setActivityGroupRequest(null);
+      setHomeRequest(null);
+      setSelectedActivityId(null);
+      setGroupDetailsOpen(false);
+      setSelectedGroupId(group.id);
+      setGroupDocumentRequest({ id: nextRequestId(), groupId: group.id, documentId: artifact.documentId });
+      navigate("chat");
       return;
     }
     const owner = await coworkerBridge.coworkers.get(artifact.owner.slug);
+    if (generation !== navigationGeneration.current) return;
     if (owner.createdAt !== artifact.owner.createdAt) throw new Error("This reference belongs to an earlier coworker identity. It has not been opened in the replacement's documents.");
-    if (!coworkers.some((member) => member.slug === owner.slug && member.createdAt === owner.createdAt)) throw new Error("The document's owner is no longer in the active team. The reference has been kept.");
-    visitCoworker(owner.slug);
-    setHomeRequest({ id: Date.now(), slug: owner.slug, kind: "document", documentId: artifact.documentId });
+    if (!coworkersRef.current.some((member) => member.slug === owner.slug && member.createdAt === owner.createdAt)) throw new Error("The document's owner is no longer in the active team. The reference has been kept.");
+    if (!visitCoworker(owner.slug)) return;
+    setHomeRequest({ id: nextRequestId(), slug: owner.slug, createdAt: owner.createdAt, kind: "document", documentId: artifact.documentId });
+  }
+
+  async function openActivityDocument(target: ActivityDocumentTarget) {
+    const generation = ++navigationGeneration.current;
+    if (!allowSourceNavigation()) return;
+    if (target.kind === "group") {
+      const group = await coworkerBridge.groups.get(target.groupId);
+      if (generation !== navigationGeneration.current) return;
+      if (group.archivedAt !== null || group.createdAt !== target.createdAt) throw new Error("This group's documents are no longer in the active team.");
+      const document = await coworkerBridge.groups.documents.read(group.id, target.documentId);
+      if (generation !== navigationGeneration.current || !allowSourceNavigation()) return;
+      if (document.groupId !== group.id || document.id !== target.documentId) throw new Error("The requested group document was not returned.");
+      replaceGroup(group);
+      setSelectedGroupId(group.id);
+      setActivityGroupRequest(null);
+      setHomeRequest(null);
+      setGroupEventSource(null);
+      calendarConversationOrigin.current = null;
+      setGroupDetailsOpen(false);
+      setGroupDocumentRequest({ id: nextRequestId(), groupId: group.id, documentId: target.documentId });
+      setSelectedActivityId(`document:group:${group.id}:${group.createdAt}:${target.documentId}`);
+      navigate("chat");
+      return;
+    }
+    const owner = await coworkerBridge.coworkers.get(target.slug);
+    if (generation !== navigationGeneration.current) return;
+    if (owner.createdAt !== target.createdAt || !coworkersRef.current.some((member) => member.slug === owner.slug && member.createdAt === owner.createdAt)) {
+      throw new Error("This document belongs to an earlier coworker identity or a coworker no longer on the team.");
+    }
+    const document = await coworkerBridge.documents.read(owner.slug, target.documentId);
+    if (generation !== navigationGeneration.current) return;
+    if (document.id !== target.documentId || !coworkersRef.current.some((member) => member.slug === owner.slug && member.createdAt === owner.createdAt)) throw new Error("The requested document's owner changed. Refresh Activity before opening it.");
+    if (!visitCoworker(owner.slug)) return;
+    setHomeRequest({ id: nextRequestId(), slug: owner.slug, createdAt: owner.createdAt, kind: "document", documentId: target.documentId });
+    setSelectedActivityId(`document:coworker:${owner.slug}:${owner.createdAt}:${target.documentId}`);
   }
 
   function removeCoworkerFromList(slug: string) {
@@ -918,8 +1077,10 @@ export default function App() {
   const workspaceActive = !globalSettings && !factoryResetOpen && !replayOnboarding;
   const settingsActive = Boolean(globalSettings) && !factoryResetOpen && !replayOnboarding;
   const activityVisible = mainContent === "activity";
-  const calendarVisible = mainContent === "calendar" || (mainContent === "chat" && !selected && !selectedGroup);
-  const chatActive = workspaceActive && !calendarVisible && !activityVisible;
+  const contentContext = activityVisible ? activityContext : mainContent;
+  const calendarVisible = contentContext === "calendar" || (contentContext === "chat" && !selected && !selectedGroup);
+  const chatActive = workspaceActive && !calendarVisible;
+  const calendarReminder = inbox.items.find((item) => item.kind === "event-reminder" && item.id === calendarRequest?.reminderId);
 
   return (
     <VoiceContext.Provider value={{ accountKey: session ? `${sessionKey(session)}\u0000${session.userEmail}` : "signed-out", openModels: () => openGlobalSettings("models"), signIn: () => setConnecting(true) }}>
@@ -940,7 +1101,7 @@ export default function App() {
                 setCreating(false);
                 addCoworkerToList(coworker);
                 setSelectedSlug(coworker.slug);
-                setMainContent("chat");
+                navigate("chat");
               }}
             />
           </div>
@@ -952,8 +1113,9 @@ export default function App() {
               onCalendarPreferencesChange={setCalendarPreferences}
               mainContent={activityVisible ? "activity" : calendarVisible ? "calendar" : "chat"}
               onMainContentChange={(view) => {
+                if (view === "activity" && !activityVisible) setActivityContext(calendarVisible ? "calendar" : "chat");
                 setGroupDetailsOpen(false);
-                setMainContent(view);
+                navigate(view, view !== "activity");
                 if (view === "activity") { setActivityMounted(true); void inbox.refresh(); }
               }}
               chatAvailable={Boolean(selected || selectedGroup)}
@@ -967,16 +1129,32 @@ export default function App() {
               activityError={Boolean(inbox.error)}
               panel={rail}
               onSelect={(slug) => visitCoworker(slug)}
-              onOpenCalendar={(slug) => { setCalendarRequest({ id: Date.now(), coworkerSlug: slug }); setMainContent("calendar"); setGroupDetailsOpen(false); }}
+              onOpenCalendar={(slug) => { void requestCalendar({ coworkerSlug: slug }); }}
               eventGroupIds={eventGroupIds}
-              onNewCoworker={() => setCreating(true)}
+              onNewCoworker={() => { navigationGeneration.current += 1; if (allowSourceNavigation()) setCreating(true); }}
               onOpenOpenWork={() => openGlobalSettings()}
               groups={liveGroups}
               groupLines={groupLines}
               groupActiveSlugs={groupActiveSlugs}
               selectedGroupId={activityVisible ? "" : selectedGroup?.id ?? ""}
-              onSelectGroup={(id) => { setActivityGroupRequest(null); setSelectedGroupId(id); setMainContent("chat"); setGroupDetailsOpen(false); }}
-              onNewGroup={() => setCreatingGroup(true)}
+              onSelectGroup={(id) => { navigationGeneration.current += 1; if (!allowSourceNavigation()) return; setActivityGroupRequest(null); setGroupDocumentRequest(null); setHomeRequest(null); setGroupEventSource(null); calendarConversationOrigin.current = null; setSelectedActivityId(null); setSelectedGroupId(id); navigate("chat"); setGroupDetailsOpen(false); }}
+              onNewGroup={() => { navigationGeneration.current += 1; if (allowSourceNavigation()) setCreatingGroup(true); }}
+              activityContent={activityMounted ? (
+                <Suspense fallback={null}>
+                  <ActivityInbox
+                    active={workspaceActive && activityVisible && !creatingGroup}
+                    selectedId={selectedActivityId}
+                    items={inbox.items} loading={inbox.loading} error={inbox.error} busy={inbox.busy}
+                    coworkers={coworkers} groups={liveGroups} activityBySlug={visibleActivityBySlug}
+                    onRefresh={() => void inbox.refresh()} onMarkRead={inbox.markRead} onOpen={openActivityItem}
+                    onOpenDocument={openActivityDocument}
+                    calendar={calendar}
+                    onOpenEvent={openActivityEvent}
+                    onOpenCalendar={() => { setSelectedActivityId(null); resumeCalendar(); }}
+                    onNewEvent={() => { void requestCalendar({ intent: "create", fromActivity: true }); }}
+                  />
+                </Suspense>
+              ) : undefined}
             />
             {creatingGroup ? (
               <NewGroupSheet
@@ -985,9 +1163,15 @@ export default function App() {
                 onCreated={(group) => {
                   replaceGroup(group);
                   setCreatingGroup(false);
-                   setActivityGroupRequest(null);
+                  if (!allowSourceNavigation()) return;
+                  setActivityGroupRequest(null);
+                  setGroupDocumentRequest(null);
+                  setHomeRequest(null);
+                  setGroupEventSource(null);
+                  calendarConversationOrigin.current = null;
+                  setSelectedActivityId(null);
                   setSelectedGroupId(group.id);
-                  setMainContent("chat");
+                  navigate("chat");
                 }}
               />
             ) : null}
@@ -1005,26 +1189,20 @@ export default function App() {
                 }}
               />
             ) : null}
-            {activityMounted ? <div className={activityVisible ? "flex min-w-0 flex-1" : "hidden"}>
-              <Suspense fallback={null}>
-              <ActivityInbox
-                items={inbox.items} loading={inbox.loading} error={inbox.error} busy={inbox.busy}
-                coworkers={coworkers} groups={liveGroups} activityBySlug={visibleActivityBySlug}
-                groupLines={groupLines} groupActiveSlugs={groupActiveSlugs}
-                onRefresh={() => void inbox.refresh()} onMarkRead={inbox.markRead} onOpen={openActivityItem}
-                onOpenCoworker={(slug, threadId) => { visitCoworker(slug); if (threadId) setHomeRequest({ id: Date.now(), slug, kind: "activity", threadId }); }}
-                onOpenGroup={openEventConversation}
-                onBack={() => setMainContent(selected || selectedGroup ? "chat" : "calendar")}
-                backLabel={selected || selectedGroup ? "Back to chat" : "Back to calendar"}
-              />
-              </Suspense>
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col" onPointerDownCapture={() => { navigationGeneration.current += 1; }} onKeyDownCapture={() => { navigationGeneration.current += 1; }}>
+            {navigationNotice ? <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-4 py-2 text-xs text-mist">
+              <p className="min-w-0 flex-1">{navigationNotice}</p>
+              <Button variant="ghost" className="text-xs" onClick={() => navigate("chat", true)}>Return to chat</Button>
+              <Button variant="ghost" className="text-xs" onClick={() => setNavigationNotice("")}>Dismiss</Button>
             </div> : null}
-            <div className={!calendarVisible && !activityVisible ? "flex min-w-0 flex-1" : "hidden"} data-testid="chat-main-content" data-active={chatActive}>
+            <div className={!calendarVisible ? "flex min-h-0 min-w-0 flex-1" : "hidden"} data-testid="chat-main-content" data-active={chatActive}>
             {selectedGroup ? (
               <GroupChat
-                key={selectedGroup.id}
+                key={`${selectedGroup.id}:${selectedGroup.createdAt}`}
                 group={selectedGroup}
+                navigationGuard={readerNavigation}
                 active={chatActive && !groupDetailsOpen && !creatingGroup}
+                onExitActivity={activityVisible ? exitActivity : undefined}
                 activityRequest={activityGroupRequest?.groupId === selectedGroup.id ? activityGroupRequest : null}
                 event={selectedEventLink}
                 onOpenEvent={openEvent}
@@ -1039,29 +1217,25 @@ export default function App() {
                 }}
                 onActivityLine={setGroupLine}
                 onChooseModel={(slug) => {
-                  setMainContent("chat");
-                  setSelectedGroupId("");
-                  setSelectedSlug(slug);
-                  setHomeRequest({ id: Date.now(), slug, kind: "settings", section: "model" });
+                  if (visitCoworker(slug)) setHomeRequest({ id: nextRequestId(), slug, kind: "settings", section: "model" });
                 }}
                 onOpenAssignment={(slug, threadId) => {
-                  setMainContent("chat");
-                  setSelectedGroupId("");
-                  setSelectedSlug(slug);
-                  setHomeRequest({ id: Date.now(), slug, kind: "thread", threadId });
+                  if (visitCoworker(slug)) setHomeRequest({ id: nextRequestId(), slug, kind: "thread", threadId });
                 }}
                 onOpenDetails={() => setGroupDetailsOpen(true)}
               />
             ) : (
             selected ? <CoworkerHome
-              key={selected.slug}
+              key={`${selected.slug}:${selected.createdAt}`}
+              navigationGuard={readerNavigation}
               active={chatActive && !creatingGroup}
+              onExitActivity={activityVisible ? exitActivity : undefined}
               runtime={runtime}
               session={session}
               coworkers={coworkers}
               coworker={selected}
               activity={visibleActivityBySlug[selected.slug]}
-              request={homeRequest?.slug === selected.slug ? homeRequest : null}
+              request={homeRequest?.slug === selected.slug && (!homeRequest.createdAt || homeRequest.createdAt === selected.createdAt) ? homeRequest : null}
               onActivityChange={updateSelectedLiveActivity}
               onCoworkerChanged={updateCoworkerInList}
               onCoworkerRemoved={removeCoworkerFromList}
@@ -1072,18 +1246,24 @@ export default function App() {
               connect={connectBySlug[selected.slug] ?? null}
               onRepairConnect={() => syncConnect({ force: true, remint: true, slug: selected.slug })}
               onConnectAccount={() => setConnecting(true)}
-              railWidth={rail.width}
+              railWidth={activityVisible ? Math.max(RAIL_BOUNDS.min, rail.width) : rail.width}
               onCoworkerAdded={addCoworkerToList}
+              canHandOff={allowSourceNavigation}
               onHandOff={(slug, prompt) => visitCoworker(slug, prompt)}
               onVisitCoworker={(slug) => visitCoworker(slug)}
             /> : null
             )}
             </div>
-            <div className={calendarVisible ? "flex min-w-0 flex-1" : "hidden"}>
-              <CalendarView active={workspaceActive && calendarVisible && !creatingGroup && !groupDetailsOpen} coworkers={coworkers} data={calendar} preferences={calendarPreferences} onPreferencesChange={setCalendarPreferences} request={calendarRequest} onOpenConversation={openEventConversation} onOpenArtifact={openEventArtifact} onOpenResponsibility={(slug, threadId) => {
-                visitCoworker(slug);
-                setHomeRequest(threadId ? { id: Date.now(), slug, kind: "thread", threadId } : { id: Date.now(), slug, kind: "responsibilities" });
+            <div className={calendarVisible ? "flex min-h-0 min-w-0 flex-1" : "hidden"}>
+              <CalendarView active={workspaceActive && calendarVisible && !creatingGroup && !groupDetailsOpen} coworkers={coworkers} data={calendar} preferences={calendarPreferences} onPreferencesChange={setCalendarPreferences} request={calendarRequest}
+                onExitActivity={activityVisible ? () => navigate("calendar", true) : undefined}
+                activityReminder={calendarReminder ? { id: calendarReminder.id, read: calendarReminder.readAt !== null, busy: inbox.busy, onMarkRead: () => inbox.markRead([calendarReminder.id]) } : undefined}
+                onEventSelectionChange={rememberCalendarEvent}
+                onOpenConversation={openEventConversation} onOpenArtifact={openEventArtifact} onOpenResponsibility={(slug, threadId) => {
+                if (!visitCoworker(slug)) return;
+                setHomeRequest(threadId ? { id: nextRequestId(), slug, kind: "thread", threadId } : { id: nextRequestId(), slug, kind: "responsibilities" });
               }} />
+            </div>
             </div>
           </div>
         )}

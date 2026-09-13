@@ -195,7 +195,10 @@ export function describeGroupActivity(
   if (speaking) return `${nameFor(speaking.slug)} is replying…`;
   const latest = [...events].reverse().find((event) => event.kind === "user" || event.kind === "coworker");
   if (!latest) return "No messages yet";
-  if (latest.kind === "user") return "Waiting for a reply";
+  if (latest.kind === "user") {
+    const reacted = latest.turnId ? [...new Set(events.flatMap((event) => event.kind === "status" && event.status === "reacted" && event.turnId === latest.turnId && event.slug ? [event.slug] : []))] : [];
+    return reacted.length ? `${listNames(reacted.map(nameFor))} reacted` : "Waiting for a reply";
+  }
   return `${nameFor(latest.slug ?? "")} replied`;
 }
 
@@ -272,7 +275,7 @@ export function planSpeakers(plan: RoutingPlan): NonNullable<GroupTurnPatch["spe
 
 export type GroupTurnDeps = {
   /** Sends the prompt to the coworker's group thread and resolves with its visible reply and the thread it ran on. */
-  ask: (slug: string, prompt: string, signal: AbortSignal, step: { turnId: string; part: GroupSpeakerPart }) => Promise<{ text: string; threadId: string; executionId?: string }>;
+  ask: (slug: string, prompt: string, signal: AbortSignal, step: { turnId: string; part: GroupSpeakerPart; reactionTargetIds?: string[]; messageId?: string }) => Promise<{ text: string; threadId: string; executionId?: string }>;
   append: (event: Omit<GroupTimelineEvent, "id" | "at"> & { executionId?: string }) => Promise<GroupTimelineEvent>;
   /** Opens the turn record and the person's line; `created` is false when this message already has a turn. */
   begin: (input: { clientMessageId: string; prompt: string }) => Promise<{ turn: CoworkerGroupTurn; created: boolean; userEvent: GroupTimelineEvent | null }>;
@@ -291,6 +294,7 @@ type RunContext = {
   /** The visible conversation before this turn's message. */
   recent: readonly GroupTimelineEvent[];
   message: string;
+  messageId?: string;
   signal: AbortSignal;
   deps: GroupTurnDeps;
 };
@@ -305,7 +309,7 @@ function nameLookup(participants: readonly GroupParticipant[]): (slug: string) =
  * arrives, and one failure, timeout, or stop never blocks the next. Speakers
  * that already finished are never asked again.
  */
-async function runSpeakers(context: RunContext, turn: CoworkerGroupTurn, earlier: { name: string; text: string }[], only?: string): Promise<CoworkerGroupTurn> {
+async function runSpeakers(context: RunContext, turn: CoworkerGroupTurn, earlier: { name: string; text: string; messageId?: string }[], only?: string): Promise<CoworkerGroupTurn> {
   const { deps, signal } = context;
   const now = deps.now ?? Date.now;
   const nameFor = nameLookup(context.participants);
@@ -318,14 +322,21 @@ async function runSpeakers(context: RunContext, turn: CoworkerGroupTurn, earlier
   const pending = current.speakers.filter((speaker) => speaker.status !== "succeeded" && speaker.status !== "passed" && (!only || speaker.slug === only));
   const parallel = current.mode === "parallel";
   const asks = new Map<string, ReturnType<GroupTurnDeps["ask"]>>();
-  const promptFor = (speaker: GroupParticipant, part: GroupSpeakerPart, brief: string, replies: readonly { name: string; text: string }[]) =>
+  const promptFor = (speaker: GroupParticipant, part: GroupSpeakerPart, brief: string, replies: readonly { name: string; text: string; messageId?: string }[]) =>
     groupSpeakerPrompt({ group: context.group, speaker, participants: context.participants, message: context.message, recent: context.recent, earlierReplies: replies, nameFor, brief, part, plan: current });
+  const stepFor = (part: GroupSpeakerPart) => ({ turnId: current.id, part, messageId: context.messageId,
+    reactionTargetIds: [...new Set([
+      ...context.recent.filter((event) => event.kind === "user" || event.kind === "coworker").slice(-RECENT_CONTEXT_EVENTS).map((event) => event.id),
+      ...earlier.flatMap((reply) => reply.messageId ? [reply.messageId] : []),
+      ...(context.messageId ? [context.messageId] : []),
+    ])].slice(-24),
+  });
   if (parallel) {
     // Independent replies start together; they still settle into the timeline in the facilitator's order.
     for (const entry of pending.filter((speaker) => speaker.part === "reply")) {
       const speaker = context.participants.find((participant) => participant.slug === entry.slug);
       if (!speaker || signal.aborted) continue;
-      const pending = deps.ask(speaker.slug, promptFor(speaker, entry.part, entry.brief, earlier), signal, { turnId: current.id, part: entry.part });
+      const pending = deps.ask(speaker.slug, promptFor(speaker, entry.part, entry.brief, earlier), signal, stepFor(entry.part));
       pending.catch(() => undefined);
       asks.set(`${entry.slug}:${entry.part}`, pending);
       publish(await deps.record(current.id, { speaker: { slug: entry.slug, part: entry.part, status: "running", startedAt: now() } }));
@@ -354,14 +365,14 @@ async function runSpeakers(context: RunContext, turn: CoworkerGroupTurn, earlier
     const started = asks.get(key);
     if (!started) publish(await deps.record(current.id, { speaker: { slug: entry.slug, part: entry.part, status: "running", startedAt: now(), error: "" } }));
     try {
-      const reply = await (started ?? deps.ask(speaker.slug, promptFor(speaker, entry.part, entry.brief, earlier), signal, { turnId: current.id, part: entry.part }));
+      const reply = await (started ?? deps.ask(speaker.slug, promptFor(speaker, entry.part, entry.brief, earlier), signal, stepFor(entry.part)));
       if (!reply.text) throw new Error(`${speaker.name} did not reply.`);
       if (isNothingToAdd(reply.text)) {
         await deps.append({ kind: "status", slug: speaker.slug, part: entry.part, turnId: current.id, status: "passed", text: `${speaker.name} had nothing to add.`, executionId: reply.executionId });
         publish(await deps.record(current.id, { speaker: { slug: entry.slug, part: entry.part, status: "passed", threadId: reply.threadId, endedAt: now() } }));
       } else {
-        await deps.append({ kind: "coworker", slug: speaker.slug, part: entry.part, text: reply.text, turnId: current.id, threadId: reply.threadId, executionId: reply.executionId });
-        earlier.push({ name: speaker.name, text: reply.text });
+        const event = await deps.append({ kind: "coworker", slug: speaker.slug, part: entry.part, text: reply.text, turnId: current.id, threadId: reply.threadId, executionId: reply.executionId });
+        earlier.push({ name: speaker.name, text: reply.text, messageId: event.id });
         publish(await deps.record(current.id, { speaker: { slug: entry.slug, part: entry.part, status: "succeeded", threadId: reply.threadId, endedAt: now() } }));
       }
     } catch (cause) {
@@ -407,7 +418,7 @@ export async function runGroupTurn(input: {
   if (!plan) plan = fallbackPlan(message, input.participants, input.recent);
   const routed = await deps.record(begun.turn.id, { speakers: planSpeakers(plan), dependsOn: plan.dependsOn, mode: plan.dependsOn.length > 0 ? "sequential" : plan.mode, routedBy: plan.routedBy });
   deps.onTurn?.(routed);
-  return runSpeakers({ group: input.group, participants: input.participants, recent: input.recent, message, signal: input.signal, deps }, routed, []);
+  return runSpeakers({ group: input.group, participants: input.participants, recent: input.recent, message, messageId: begun.userEvent?.id, signal: input.signal, deps }, routed, []);
 }
 
 /**
@@ -430,7 +441,7 @@ export async function resumeGroupTurn(input: {
   const recent = userIndex === -1 ? input.events : input.events.slice(0, userIndex);
   const earlier = input.events
     .filter((event) => event.kind === "coworker" && event.turnId === input.turn.id)
-    .map((event) => ({ name: nameFor(event.slug ?? ""), text: event.text }));
+    .map((event) => ({ name: nameFor(event.slug ?? ""), text: event.text, messageId: event.id }));
   const pending = input.turn.speakers.filter((speaker) => speaker.status !== "succeeded" && speaker.status !== "passed" && (!input.only || speaker.slug === input.only));
   if (pending.length === 0) return input.turn;
   // The speakers about to run are queued again so the view shows them in order before the first starts.
@@ -439,7 +450,7 @@ export async function resumeGroupTurn(input: {
     turn = await input.deps.record(turn.id, { speaker: { slug: speaker.slug, part: speaker.part, status: "queued", error: "", endedAt: null } });
   }
   input.deps.onTurn?.(turn);
-  return runSpeakers({ group: input.group, participants: input.participants, recent, message: input.turn.prompt, signal: input.signal, deps: input.deps }, turn, earlier, input.only);
+  return runSpeakers({ group: input.group, participants: input.participants, recent, message: input.turn.prompt, messageId: input.events[userIndex]?.id, signal: input.signal, deps: input.deps }, turn, earlier, input.only);
 }
 
 /** The speakers of a turn that can still be continued or retried. */

@@ -1,21 +1,33 @@
-/**
- * Typed builders for the engine's provider catalog, for tests. They fill every
- * field the SDK type requires so a test can state only what it cares about
- * (a model's name, its capabilities) without casting.
- */
-import type { Model, Provider, ProviderListResponse } from "@opencode-ai/sdk/v2/client";
+/** Typed display-catalog fixtures, independent of either engine's SDK. */
+import type { connectedModelCatalog } from "./threads.ts";
+
+type Catalog = Parameters<typeof connectedModelCatalog>[0];
+type CatalogProvider = Catalog["all"][number];
+type Model = CatalogProvider["models"][string] & {
+  id: string; providerID: string; name: string; status: string; release_date: string;
+  api: { id: string; url: string; npm: string };
+  capabilities: {
+    temperature: boolean; reasoning: boolean; attachment: boolean; toolcall: boolean; interleaved: false;
+    input: Record<string, boolean>; output: Record<string, boolean>;
+  };
+  cost: { input: number; output: number; cache: { read: number; write: number } };
+  limit: { context: number; input?: number; output: number };
+  options: Record<string, unknown>; headers: Record<string, string>;
+};
+type Provider = CatalogProvider & { models: Record<string, Model>; source: string; env: string[]; options: Record<string, unknown> };
+type ProviderListResponse = Omit<Catalog, "all"> & { all: Provider[] };
 
 type ModelSketch = {
   name: string;
   family?: string;
   status?: Model["status"];
   release_date?: string;
-  capabilities?: Partial<Pick<Model["capabilities"], "toolcall" | "reasoning" | "attachment" | "temperature">>;
+  capabilities?: { toolcall?: boolean; reasoning?: boolean; attachment?: boolean; temperature?: boolean };
   variants?: Model["variants"];
 };
 
 export function fixtureModel(providerID: string, id: string, sketch: ModelSketch): Model {
-  const model: Model = {
+  return {
     id,
     providerID,
     api: { id, url: "", npm: "" },
@@ -35,10 +47,9 @@ export function fixtureModel(providerID: string, id: string, sketch: ModelSketch
     options: {},
     headers: {},
     release_date: sketch.release_date ?? "2026-01-01",
+    ...(sketch.family !== undefined ? { family: sketch.family } : {}),
+    ...(sketch.variants !== undefined ? { variants: sketch.variants } : {}),
   };
-  if (sketch.family !== undefined) model.family = sketch.family;
-  if (sketch.variants !== undefined) model.variants = sketch.variants;
-  return model;
 }
 
 export function fixtureProvider(input: {
@@ -49,7 +60,7 @@ export function fixtureProvider(input: {
   options?: Provider["options"];
   models: Record<string, ModelSketch>;
 }): Provider {
-  const models: Provider["models"] = {};
+  const models: Record<string, Model> = {};
   for (const [modelId, sketch] of Object.entries(input.models)) models[modelId] = fixtureModel(input.id, modelId, sketch);
   return {
     id: input.id,

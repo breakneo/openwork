@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { relativeTime } from "@/lib/activity-summary";
 import { coworkerBridge, type CoworkerSummary } from "@/lib/bridge";
 import {
   askToUpdatePrompt,
   cardSubline,
+  documentCardPreview,
   groupDocuments,
   type CoworkerDocument,
   type CoworkerDocumentSummary,
@@ -13,6 +14,16 @@ import {
 import { describeDiff, lineDiff, sideBySide } from "@/lib/line-diff";
 import { Button, Empty, ErrorNote, IconButton, inputClass } from "@/ui/kit";
 import { DocumentMarkdown } from "@/ui/markdown";
+
+export type DocumentNavigationGuard = RefObject<(() => string | null) | null>;
+
+export function useDocumentNavigationGuard(guard: DocumentNavigationGuard | undefined, check: () => string | null): void {
+  useLayoutEffect(() => {
+    if (!guard) return;
+    guard.current = check;
+    return () => { if (guard.current === check) guard.current = null; };
+  }, [guard, check]);
+}
 
 /** A page with a folded corner: the Documents strip icon. */
 export function DocumentsIcon({ className = "size-4" }: { className?: string }) {
@@ -137,7 +148,9 @@ export function DocumentsPanel({
   onAskToUpdate,
   canOpenBeside,
   onOpenBeside,
+  navigationGuard,
 }: {
+  navigationGuard?: DocumentNavigationGuard;
   coworker: CoworkerSummary;
   documents: CoworkerDocumentSummary[] | null;
   error: string;
@@ -151,6 +164,9 @@ export function DocumentsPanel({
 }) {
   const [selectedId, setSelectedId] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [requestError, setRequestError] = useState("");
+  const localGuard: DocumentNavigationGuard = useRef(null);
+  const readerGuard = navigationGuard ?? localGuard;
   const handledRequest = useRef<number | null>(null);
   useEffect(() => {
     markDocumentsOpened(coworker.slug);
@@ -158,22 +174,28 @@ export function DocumentsPanel({
   useEffect(() => {
     if (!openRequest || handledRequest.current === openRequest.id) return;
     handledRequest.current = openRequest.id;
-    setSelectedId(openRequest.documentId);
-  }, [openRequest]);
+    const message = readerGuard.current?.() ?? "";
+    setRequestError(message);
+    if (!message) setSelectedId(openRequest.documentId);
+  }, [openRequest, readerGuard]);
   const groups = useMemo(() => groupDocuments(documents ?? []), [documents]);
 
   if (selectedId) {
     return (
-      <DocumentReader
-        coworker={coworker}
-        documentId={selectedId}
-        onBack={() => setSelectedId("")}
-        onChanged={onRefresh}
-        onAskToUpdate={onAskToUpdate}
-        onOpenDocument={setSelectedId}
-        canOpenBeside={canOpenBeside}
-        onOpenBeside={() => onOpenBeside(selectedId)}
-      />
+      <>
+        {requestError ? <ErrorNote>{requestError}</ErrorNote> : null}
+        <DocumentReader
+          coworker={coworker}
+          documentId={selectedId}
+          onBack={() => { setSelectedId(""); setRequestError(""); }}
+          onChanged={onRefresh}
+          onAskToUpdate={onAskToUpdate}
+          onOpenDocument={setSelectedId}
+          canOpenBeside={canOpenBeside}
+          onOpenBeside={() => onOpenBeside(selectedId)}
+          navigationGuard={readerGuard}
+        />
+      </>
     );
   }
 
@@ -243,7 +265,9 @@ export function DocumentReader({
   canOpenBeside,
   onOpenBeside,
   compact = false,
+  navigationGuard,
 }: {
+  navigationGuard?: DocumentNavigationGuard;
   coworker: CoworkerSummary;
   documentId: string;
   onBack: () => void;
@@ -261,22 +285,36 @@ export function DocumentReader({
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const scope = useMemo(() => ({ active: true, revision: 0 }), [coworker.slug, coworker.createdAt, documentId]);
+  const navigationMessage = () => mode === "edit" ? "Save or cancel the document draft before opening another source." : busy ? "Wait for the document request to finish before opening another source." : null;
+  useDocumentNavigationGuard(navigationGuard, navigationMessage);
+  function navigate(action: () => void) {
+    const message = navigationMessage();
+    if (message) { setNote(message); return; }
+    action();
+  }
 
   const load = useCallback(async () => {
+    const revision = ++scope.revision;
     try {
-      setDocument(await coworkerBridge.documents.read(coworker.slug, documentId));
+      const next = await coworkerBridge.documents.read(coworker.slug, documentId);
+      if (!scope.active || scope.revision !== revision) return;
+      if (next.id !== documentId) throw new Error("The requested document was not returned.");
+      setDocument(next);
       setError("");
     } catch (cause) {
-      setError(messageOf(cause));
+      if (scope.active && scope.revision === revision) setError(messageOf(cause));
     }
-  }, [coworker.slug, documentId]);
+  }, [coworker.slug, documentId, scope]);
 
   useEffect(() => {
+    scope.active = true;
     setDocument(null);
     setMode("read");
     setNote("");
     void load();
-  }, [load]);
+    return () => { scope.active = false; };
+  }, [load, scope]);
 
   // While reading, follow the coworker's own updates without a manual refresh.
   useEffect(() => {
@@ -286,24 +324,26 @@ export function DocumentReader({
   }, [load, mode]);
 
   async function run(action: () => Promise<string>): Promise<void> {
+    scope.revision++;
     setBusy(true);
     setError("");
     try {
       const result = await action();
+      if (!scope.active) return;
       setNote(result);
       await load();
-      await onChanged();
+      if (scope.active) await onChanged();
     } catch (cause) {
-      setError(messageOf(cause));
+      if (scope.active) setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      if (scope.active) setBusy(false);
     }
   }
 
   if (!document) {
     return (
       <div className="space-y-3">
-        <BackLink onClick={onBack}>{compact ? "Close" : "All documents"}</BackLink>
+        <BackLink onClick={() => navigate(onBack)}>{compact ? "Close" : "All documents"}</BackLink>
         {error ? <ErrorNote>{error}</ErrorNote> : <Empty>Opening…</Empty>}
       </div>
     );
@@ -318,9 +358,9 @@ export function DocumentReader({
   return (
     <article className="space-y-4" data-testid="document-reader" data-document-id={document.id} data-revision={document.revision} data-status={document.status}>
       <div className="flex items-center justify-between gap-2">
-        <BackLink onClick={onBack}>{compact ? "Close" : "All documents"}</BackLink>
+        <BackLink onClick={() => navigate(onBack)}>{compact ? "Close" : "All documents"}</BackLink>
         {canOpenBeside && !compact ? (
-          <Button variant="ghost" className="px-2 text-xs" onClick={onOpenBeside} data-testid="document-open-beside">Open beside</Button>
+          <Button variant="ghost" className="px-2 text-xs" onClick={() => navigate(onOpenBeside)} data-testid="document-open-beside">Open beside</Button>
         ) : null}
       </div>
       <header className="space-y-1">
@@ -333,7 +373,7 @@ export function DocumentReader({
       </header>
       {mode === "read" ? (
         <div className="flex flex-wrap items-center gap-1.5" data-testid="document-actions">
-          <Button variant="ghost" className="px-2 text-xs" onClick={() => { setDraft(document.body); setMode("edit"); }}>Edit</Button>
+          <Button variant="ghost" className="px-2 text-xs" onClick={() => { scope.revision++; setDraft(document.body); setNote(""); setMode("edit"); }}>Edit</Button>
           <Button variant="ghost" className="px-2 text-xs" onClick={() => onAskToUpdate(askToUpdatePrompt(document.title))}>Ask {coworker.name} to update</Button>
           <Button
             variant="ghost"
@@ -365,7 +405,7 @@ export function DocumentReader({
           >
             Export
           </Button>
-          <Button variant="ghost" className="px-2 text-xs" onClick={() => setMode("history")} data-testid="document-history">History</Button>
+          <Button variant="ghost" className="px-2 text-xs" onClick={() => { scope.revision++; setMode("history"); }} data-testid="document-history">History</Button>
           {document.status !== "archived" ? (
             <Button
               variant="ghost"
@@ -388,7 +428,7 @@ export function DocumentReader({
         <DocumentMarkdown
           text={document.body}
           coworkerPath={coworker.path}
-          onOpenDocument={onOpenDocument}
+          onOpenDocument={(id) => navigate(() => onOpenDocument(id))}
           className="!mx-0 !max-w-none"
         />
       ) : null}
@@ -397,7 +437,7 @@ export function DocumentReader({
           draft={draft}
           onDraftChange={setDraft}
           busy={busy}
-          onCancel={() => setMode("read")}
+          onCancel={() => { setMode("read"); setNote(""); }}
           onSave={() => void run(async () => {
             const saved = await coworkerBridge.documents.save(coworker.slug, document.id, { body: draft });
             setMode("read");
@@ -547,34 +587,22 @@ function DiffRow({ row }: { row: ReturnType<typeof sideBySide>[number] }) {
   );
 }
 
-/**
- * The compact card a bubble ends with when the reply's turn created or updated
- * a document: title, summary, up to three highlights, and Open (Open beside when
- * the window allows). One card per document per turn; an update names the
- * section it touched.
- */
-export function DocumentCard({ card, onOpen, canOpenBeside, onOpenBeside }: { card: DocumentCardData; onOpen: () => void; canOpenBeside: boolean; onOpenBeside: () => void }) {
+export function DocumentCard({ card, onOpen, canOpenBeside = false, onOpenBeside }: { card: DocumentCardData; onOpen: () => void; canOpenBeside?: boolean; onOpenBeside?: () => void }) {
   const subline = cardSubline(card);
+  const preview = documentCardPreview(card);
   return (
-    <div className="mt-2 w-full rounded-xl border border-white/10 bg-ink/50 px-3 py-2.5 text-left" data-testid="document-card" data-document-id={card.id} data-action={card.action}>
+    <div className="w-full min-w-0 max-w-[320px] rounded-xl border border-white/10 bg-ink/50 px-3 py-2.5 text-left" data-testid="document-card" data-document-id={card.id} data-action={card.action} data-revision={card.revision ?? undefined}>
       <div className="flex items-start gap-2.5">
-        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-mist"><DocumentsIcon className="size-4" /></span>
+        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-mist" title={card.highlights.join("\n") || undefined}><DocumentsIcon className="size-4" /></span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-snow" data-testid="document-card-title">{card.title}</p>
-          {subline ? <p className="text-[10px] text-mist" data-testid="document-card-subline">{subline}</p> : null}
-          {card.summary ? <p className="mt-0.5 text-xs leading-relaxed text-mist" data-testid="document-card-summary">{card.summary}</p> : null}
-          {card.highlights.length > 0 ? (
-            <ul className="mt-1.5 space-y-0.5 text-xs text-snow/85" data-testid="document-card-highlights">
-              {card.highlights.map((highlight, index) => (
-                <li key={index} className="flex gap-1.5"><span className="text-mist" aria-hidden="true">·</span><span className="min-w-0">{highlight}</span></li>
-              ))}
-            </ul>
-          ) : null}
+          <p className="line-clamp-2 break-words text-sm font-semibold text-snow" title={card.title} data-testid="document-card-title">{card.title}</p>
+          {subline ? <p className="line-clamp-1 break-words text-[10px] text-mist" title={subline} data-testid="document-card-subline">{subline}</p> : null}
+          {preview ? <p className="mt-0.5 line-clamp-2 break-words text-xs leading-relaxed text-mist" title={card.summary.trim() || card.highlights[0]} data-testid="document-card-summary">{preview}</p> : null}
         </div>
       </div>
-      <div className="mt-2 flex items-center gap-1.5">
-        <Button variant="default" className="px-2.5 py-1 text-xs" onClick={onOpen} data-testid="document-card-open">Open</Button>
-        {canOpenBeside ? <Button variant="ghost" className="px-2 py-1 text-xs" onClick={onOpenBeside}>Open beside</Button> : null}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <Button type="button" variant="default" className="px-2.5 py-1 text-xs" title="Open current document" onClick={onOpen} data-testid="document-card-open">Open</Button>
+        {canOpenBeside && onOpenBeside ? <Button type="button" variant="ghost" className="px-2 py-1 text-xs" title="Open current document beside the conversation" onClick={onOpenBeside}>Open beside</Button> : null}
       </div>
     </div>
   );
@@ -588,7 +616,9 @@ export function DocumentBesidePane({
   onChanged,
   onAskToUpdate,
   onOpenDocument,
+  navigationGuard,
 }: {
+  navigationGuard?: DocumentNavigationGuard;
   coworker: CoworkerSummary;
   documentId: string;
   onClose: () => void;
@@ -614,6 +644,7 @@ export function DocumentBesidePane({
           onOpenDocument={onOpenDocument}
           canOpenBeside={false}
           onOpenBeside={() => undefined}
+          navigationGuard={navigationGuard}
           compact
         />
       </div>

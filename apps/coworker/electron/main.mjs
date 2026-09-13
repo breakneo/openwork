@@ -9,7 +9,6 @@ import { readAllHands, updateAllHands, prepareAllHands, claimAllHands } from "./
  * a coworker-centric renderer. It never talks to, or requires, the OpenWork
  * desktop app process.
  */
-import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -21,9 +20,17 @@ import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, shell, systemPr
 import { createVoice, installVoicePermissions } from "./voice.mjs";
 import { bindWindowAppearance, windowMaterial } from "./window-appearance.mjs";
 import { globalOpencodeConfigDir, openworkConfigDir } from "@openwork/paths";
-import { createHeadlessThreadClient, isRunning, toTranscript } from "@openwork/headless-threads";
-import { createCollaboration, collaborationId, withAbort } from "./collaboration.mjs";
+import { createHeadlessThreadClientV2 as createHeadlessThreadClient, createNativeV2Client, createNativeV2Id, toTranscript } from "@openwork/headless-threads/v2";
+import { configureNativePluginBundles, verifyNativePluginBundles } from "./native-plugin.mjs";
+import { nativeTurnAgent, NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
+import { prepareNativeTurnRoles } from "./turn-roles-plugin.mjs";
+import { dispatchNativeTurn, nativeTurnReceipt, waitForNativeTurn, verifyNativeTurnSkills } from "./native-recovery.mjs";
+import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { selectCatalogSkill, selectionFields, validateSkillSelections, sameSkillFields, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
+import { createNativeProviders } from "./native-providers.mjs";
+import { createCollaboration, collaborationId, withAbort, assertTeamConsultToolContext } from "./collaboration.mjs";
 import { createActivityInbox } from "./activity-inbox.mjs";
+import { createMessageReactionRuntime } from "./message-reactions-context.mjs";
 import { readExecutionActivity } from "../src/lib/progress-activity.ts";
 import { PROGRESS_LIMITS } from "../src/lib/progress-config.ts";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
@@ -39,7 +46,7 @@ import { installComputerPlugin } from "./computer-plugin.mjs";
 import { createComputerControl, assertPrivateComputerDiscussion, COMPUTER_TOOLS, COMPUTER_DENY, COMPUTER_STOP_GUIDANCE, trustedComputerSender } from "./computer-control.mjs";
 import { createLocalComputerAdapter } from "./computer-local.mjs";
 import { createBrowserPanel } from "@openwork/browser-tabs/electron";
-import { server as chromeDevtools } from "opencode-chrome-devtools";
+import { createBrowserTools } from "@openwork/browser-tabs/tools";
 import { assertBrowserToolContext, BROWSER_TOOLS, checkBrowserPolicy, createBrowserControl } from "./browser-control.mjs";
 import { installBrowserPlugin } from "./browser-plugin.mjs";
 import { DISCUSSION_REGISTRY_FILE, parseDiscussionRegistry } from "../src/lib/discussions.ts";
@@ -47,7 +54,7 @@ import { installProgressPlugin } from "./progress-plugin.mjs";
 import { createProgressSummaries } from "./progress-summaries.mjs";
 import { installMemoryPlugin } from "./memory-model.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
-import { connectedModelCatalog, createCoworkerThreads, eligibleProgressModels } from "../src/lib/threads.ts";
+import { createCoworkerThreads, eligibleProgressModels } from "../src/lib/threads.ts";
 import { cloudModelOptions, resolveCloudModel } from "../src/lib/cloud-responsibilities.ts";
 import { createDenAutomationsClient, listAssignedCoworkerTemplates } from "../src/lib/den.ts";
 import { createTemplateInstaller, exportCoworkerTemplate, parseCoworkerTemplateFile, templateScope } from "./templates.mjs";
@@ -101,7 +108,6 @@ import {
   updateGroupTurn,
 } from "./groups.mjs";
 import {
-  attachLocalResponsibilityThread,
   beginLocalResponsibilityRun,
   cancelQueuedLocalRun,
   createLocalResponsibility,
@@ -113,21 +119,9 @@ import {
   setLocalResponsibilityActive,
   updateLocalResponsibility,
 } from "./local-responsibilities.mjs";
-import { prepareEngineSdk, readSidecarVersion } from "./engine-sdk.mjs";
-import {
-  SignInImportError,
-  codexAuthFromFile,
-  codexAuthPath,
-  copilotAuthFromFile,
-  copilotConfigDir,
-  copilotSignedIn,
-  customProviderId,
-  detectLocalProviders,
-  listOpenAiCompatibleModels,
-  localServerProviderPatch,
-  openAiCompatibleProviderConfig,
-} from "./local-providers.mjs";
-import { resolveBundledOpencodeBinary, resolveUserDataDir } from "./runtime-paths.mjs";
+import { detectLocalProviders, listOpenAiCompatibleModels } from "./local-providers.mjs";
+import { resolveBundledOpencodeV2Binary, resolveUserDataDir } from "./runtime-paths.mjs";
+import nativeRuntime from "../native-runtime.json" with { type: "json" };
 import { assertMaintenanceSender, assertResetConfirmation, createMaintenance, createMaintenanceAdmission, resolveMaintenanceHistoryDb, validateMaintenancePaths } from "./maintenance.mjs";
 import { captureMaintenanceProcesses, maintenanceFailureDetail, prepareMaintenanceHandoff, readMaintenanceStartup } from "./maintenance-handoff.mjs";
 import { noteProgress, readChanges, trackChange, undoChange, writeTrackedFile } from "./self-memory.mjs";
@@ -164,6 +158,9 @@ import { assertControlOrigin, assertWorkerSupervisor, assertWorkerToolContext, c
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged || process.env.OPENWORK_DEV_MODE === "1";
+configureNativePluginBundles(app.isPackaged
+  ? path.join(process.resourcesPath, "native-plugins")
+  : path.resolve(process.env.OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR?.trim() || path.join(__dirname, "..", "resources", "native-plugins")));
 
 const APP_NAME = "Open Coworker";
 const APP_IDENTIFIER = isDev ? "com.differentai.opencoworker.dev" : "com.differentai.opencoworker";
@@ -228,10 +225,10 @@ const serverConfigPath = process.env.COWORKER_SERVER_CONFIG?.trim()
 // rewrites the OpenWork desktop app's engine state on the same machine.
 process.env.OPENWORK_RUNTIME_DB ||= path.join(path.dirname(serverConfigPath), "coworker-runtime.sqlite");
 process.env.OPENWORK_ENV_STORE ||= path.join(path.dirname(serverConfigPath), "coworker-env.json");
-// This desktop client renders native question cards. A non-interactive parent
-// process must not hide the tool; workspace permission rules still govern it.
-process.env.OPENCODE_ENABLE_QUESTION_TOOL = "true";
 const settingsPath = path.join(path.dirname(serverConfigPath), SETTINGS_FILE);
+// A profile-owned sibling survives Fresh start's profile/home moves. Never use
+// the shared OpenCode history or derive the native database from its env flags.
+const opencodeV2RootDir = `${path.resolve(userDataDir)}-opencode2`;
 const maintenanceAdmission = createMaintenanceAdmission();
 const responsibilityAbort = new AbortController();
 let responsibilityCleanupError;
@@ -250,7 +247,7 @@ const protocolRegistered = app.isPackaged
   && process.env.OPENWORK_ELECTRON_DISABLE_PROTOCOL_REGISTRATION !== "1"
   && !(process.platform === "linux" && process.env.APPIMAGE);
 
-/** @type {{ url: string, policyToken: string, stop: () => Promise<void>, managedOpencode: { pid: number | null, isAlive: () => boolean } | null } | null} */
+/** @type {{ url: string, policyToken: string, stop: () => Promise<void>, managedOpencodeV2: { pid: number | null, isAlive: () => boolean } | null } | null} */
 let serverHandle = null;
 let ownerToken = "";
 let engineError = "";
@@ -312,6 +309,10 @@ let deepLinkListenerReady = false;
  * @type {{ baseUrl: string, token: string, orgId: string } | null}
  */
 let denSession = null;
+// In-memory receipts only: a renderer account is not proof the embedded server applied it.
+let denSessionHandoff = Promise.resolve();
+let storedSkillSession = null;
+let appliedSkillSession = null;
 const voice = createVoice({ getSession: () => denSession, getBaseUrl: configuredDenApiBase, systemPreferences });
 
 function tokenFilePath() {
@@ -364,10 +365,10 @@ async function resolveOwnerToken(baseUrl, tokens) {
 
 function embeddedServerPath() {
   const candidates = [
-    path.resolve(__dirname, "..", "..", "server", "dist", "embedded.js"),
-    path.resolve(__dirname, "..", "server", "dist", "embedded.js"),
+    path.resolve(__dirname, "..", "..", "server", "dist", "embedded-native.js"),
+    path.resolve(__dirname, "..", "server", "dist", "embedded-native.js"),
     ...(process.resourcesPath
-      ? [path.resolve(process.resourcesPath, "server", "dist", "embedded.js")]
+      ? [path.resolve(process.resourcesPath, "server", "dist", "embedded-native.js")]
       : []),
   ];
   const found = candidates.find((candidate) => existsSync(candidate));
@@ -377,46 +378,6 @@ function embeddedServerPath() {
     );
   }
   return found;
-}
-
-function resolveOpencodeBin() {
-  return process.env.OPENWORK_OPENCODE_BIN?.trim()
-    || resolveBundledOpencodeBinary({
-      appRoot: path.resolve(__dirname, ".."),
-      resourcesPath: process.resourcesPath,
-    })
-    || "opencode";
-}
-
-/** The engine's exact version: the sidecar's record beside the binary, else what the binary says. */
-async function resolveOpencodeVersion(binary) {
-  const recorded = await readSidecarVersion(path.join(path.dirname(binary), "versions.json"));
-  if (recorded) return recorded;
-  return new Promise((resolve) => {
-    execFile(binary, ["--version"], { timeout: 8_000, windowsHide: true }, (error, stdout) => {
-      const match = /(\d+\.\d+\.\d+)/.exec(String(stdout ?? ""));
-      resolve(!error && match ? match[1] : "");
-    });
-  });
-}
-
-/**
- * Seed the engine's SDK directories before it starts, once per launch. In a
- * fresh profile the engine's own first install leaves its first read stalled
- * until a restart (see `engine-sdk.mjs`); a seeded directory makes that install
- * a no-op. Bounded and best effort: without an installer or a network the
- * engine's own path still applies.
- */
-let engineSdkPrepared = null;
-function prepareEngineSdkOnce(binary) {
-  engineSdkPrepared ??= (async () => {
-    const version = await resolveOpencodeVersion(binary);
-    return prepareEngineSdk({ version, log: debugLog });
-  })().catch((error) => {
-    console.warn("[open-coworker] could not prepare the AI service's SDK directory", error);
-    return { version: "", results: [], installer: "" };
-  });
-  return engineSdkPrepared;
 }
 
 async function fetchJson(url, init, timeoutMs = 8000) {
@@ -446,34 +407,32 @@ async function issueOwnerToken(baseUrl, hostToken) {
 
 async function startPlatformServer() {
   maintenanceAdmission.assertOpen();
-  const { startEmbeddedServer } = await import(pathToFileURL(embeddedServerPath()).href);
-  const tokens = await loadOrCreateTokens();
-  await mkdir(coworkersDir, { recursive: true });
-  const coworkers = await listCoworkers(coworkersDir);
-  const contextServer = await ensureToolsServer();
-  for (const coworker of coworkers) await installNativeCoworkerPlugins(coworker, contextServer);
-  // The registry file is the source of truth once it exists; seeds only shape
-  // the very first boot (mirrors the OpenWork desktop's embedded-server use).
-  const seedWorkspaces = existsSync(serverConfigPath) ? [] : coworkers.map((coworker) => coworker.path);
+  engineError = "";
+  try {
+    await verifyNativePluginBundles();
+    const opencodeV2Bin = resolveBundledOpencodeV2Binary({ appRoot: path.resolve(__dirname, ".."), resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }) ?? undefined;
+    const { startEmbeddedServer } = await import(pathToFileURL(embeddedServerPath()).href);
+    const tokens = await loadOrCreateTokens();
+    const movedPaths = [userDataDir, coworkersDir, serverConfigPath, settingsPath, process.env.OPENWORK_RUNTIME_DB, process.env.OPENWORK_ENV_STORE, `${path.resolve(userDataDir)}-recovery`];
+    const pathKey = (value) => process.platform === "linux" ? path.resolve(value) : path.resolve(value).toLowerCase();
+    if (movedPaths.some((value) => {
+      const moved = pathKey(value), root = pathKey(opencodeV2RootDir);
+      return moved === root || root.startsWith(`${moved}${path.sep}`) || moved.startsWith(`${root}${path.sep}`);
+    })) throw new Error("Native history must remain outside the reset storage paths.");
+    engineHistoryDb = resolveMaintenanceHistoryDb({ rootDir: opencodeV2RootDir });
+    engineHistoryError = "";
+    await mkdir(coworkersDir, { recursive: true });
+    const coworkers = await listCoworkers(coworkersDir);
+    const contextServer = await ensureToolsServer();
+    for (const coworker of coworkers) await installNativeCoworkerPlugins(coworker, contextServer);
+    // The registry file is the source of truth once it exists; seeds only shape
+    // the very first boot (mirrors the OpenWork desktop's embedded-server use).
+    const seedWorkspaces = existsSync(serverConfigPath) ? [] : coworkers.map((coworker) => coworker.path);
 
-  const binary = resolveOpencodeBin();
-  const startOnce = async (manageOpencode) => {
-    if (manageOpencode) {
-      try {
-        const bundled = !process.env.OPENWORK_OPENCODE_BIN?.trim() && binary === resolveBundledOpencodeBinary({ appRoot: path.resolve(__dirname, ".."), resourcesPath: process.resourcesPath });
-        engineHistoryDb = resolveMaintenanceHistoryDb({ env: process.env,
-          dataDirectory: path.join(process.env.XDG_DATA_HOME?.trim() || path.join(homedir(), ".local", "share"), "opencode"),
-          bundled, version: bundled ? await readSidecarVersion(path.join(path.dirname(binary), "versions.json")) : "",
-        });
-        // Pin the resolved file in the owned engine's actual launch environment.
-        process.env.OPENCODE_DB = engineHistoryDb;
-        engineHistoryError = "";
-      } catch (error) {
-        engineHistoryDb = null;
-        engineHistoryError = error.message;
-      }
-    }
-    return startEmbeddedServer({
+    serverHandle = await startEmbeddedServer({
+      engine: "v2",
+      opencodeV2Bin,
+      opencodeV2: { version: nativeRuntime.opencodeV2Version, rootDir: opencodeV2RootDir },
       host: "127.0.0.1",
       port: DEFAULT_SERVER_PORT,
       corsOrigins: ["*"],
@@ -482,31 +441,31 @@ async function startPlatformServer() {
       workspaces: seedWorkspaces,
       token: tokens.clientToken,
       hostToken: tokens.hostToken,
-      manageOpencode,
-      opencodeBin: manageOpencode ? binary : undefined,
     });
-  };
-
-  engineError = "";
-  try {
-    await prepareEngineSdkOnce(binary);
-    serverHandle = await startOnce(true);
+    if (!serverHandle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service is not running.");
+    ownerToken = await resolveOwnerToken(serverHandle.url, tokens);
+    if (denSession) {
+      // A fresh server starts with no account context; hand the session back so
+      // the signed-in user's providers keep flowing into this engine.
+      await applyDenSession(serverHandle, tokens.hostToken, denSession).catch(() => {
+        console.warn("[open-coworker] could not re-apply the OpenWork session after restart");
+      });
+    }
+    return serverHandle;
   } catch (error) {
-    // Missing/broken engine binary must not take the whole product down:
-    // fall back to a server without a managed engine and surface the reason.
-    engineError = error instanceof Error ? error.message : String(error);
-    maintenanceAdmission.assertOpen();
-    serverHandle = await startOnce(false);
+    engineError = error instanceof AggregateError
+      ? "The native AI service failed to start and cleanup is unconfirmed. Quit and reopen Open Coworker before continuing."
+      : "The native AI service could not start. Check the v2 binary and native plugin bundles, then restart.";
+    if (serverHandle) {
+      try {
+        await serverHandle.stop();
+        if (serverHandle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service is still running.");
+      }
+      catch { engineError = "The native AI service failed to start and its shutdown is unconfirmed. Quit and reopen Open Coworker before continuing."; throw new Error(engineError); }
+      serverHandle = null;
+    }
+    throw new Error(engineError);
   }
-  ownerToken = await resolveOwnerToken(serverHandle.url, tokens);
-  if (denSession) {
-    // A fresh server starts with no account context; hand the session back so
-    // the signed-in user's providers keep flowing into this engine.
-    await applyDenSession(serverHandle, tokens.hostToken, denSession).catch((error) => {
-      console.warn("[open-coworker] could not re-apply the OpenWork session after restart", error);
-    });
-  }
-  return serverHandle;
 }
 
 /**
@@ -514,19 +473,42 @@ async function startPlatformServer() {
  * member's authorized providers into the engine — the same `PUT /den-session`
  * then `POST /cloud-provider-sync/run` sequence the OpenWork desktop performs.
  */
+function queueDenSessionHandoff(work) {
+  appliedSkillSession = null;
+  const result = denSessionHandoff.then(() => { appliedSkillSession = null; return work(); });
+  denSessionHandoff = result.catch(() => undefined);
+  return result;
+}
+
+function confirmSkillSession(handle, session, result) {
+  if (session && denSession === session && serverHandle === handle && storedSkillSession?.session === session && storedSkillSession.handle === handle && ["applied", "noop"].includes(result.status)) appliedSkillSession = { handle, session };
+}
+
 async function applyDenSession(handle, hostToken, session) {
-  const headers = { "Content-Type": "application/json", "X-OpenWork-Host-Token": hostToken };
-  const response = await fetch(`${handle.url}/den-session`, {
-    method: "PUT",
-    headers,
-    body: JSON.stringify(session),
-    signal: AbortSignal.timeout(20_000),
+  return queueDenSessionHandoff(async () => {
+    storedSkillSession = null;
+    const headers = { "Content-Type": "application/json", "X-OpenWork-Host-Token": hostToken };
+    const response = await fetch(`${handle.url}/den-session`, {
+      method: "PUT", headers, body: JSON.stringify(session), signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) throw new Error(`Storing the OpenWork session failed (${response.status})`);
+    storedSkillSession = { handle, session };
+    const result = await requestCloudProviderSync(handle, hostToken, "den_session_updated");
+    confirmSkillSession(handle, session, result);
+    return result;
   });
-  if (!response.ok) throw new Error(`Storing the OpenWork session failed (${response.status})`);
-  return runCloudProviderSync(handle, hostToken, "den_session_updated");
 }
 
 async function runCloudProviderSync(handle, hostToken, reason) {
+  const session = denSession;
+  return queueDenSessionHandoff(async () => {
+    const result = await requestCloudProviderSync(handle, hostToken, reason);
+    confirmSkillSession(handle, session, result);
+    return result;
+  });
+}
+
+async function requestCloudProviderSync(handle, hostToken, reason) {
   const payload = await fetchJson(`${handle.url}/cloud-provider-sync/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-OpenWork-Host-Token": hostToken },
@@ -539,12 +521,13 @@ async function runCloudProviderSync(handle, hostToken, reason) {
 }
 
 async function clearDenSession(handle, hostToken) {
-  const response = await fetch(`${handle.url}/den-session`, {
-    method: "DELETE",
-    headers: { "X-OpenWork-Host-Token": hostToken },
-    signal: AbortSignal.timeout(60_000),
+  return queueDenSessionHandoff(async () => {
+    storedSkillSession = null;
+    const response = await fetch(`${handle.url}/den-session`, {
+      method: "DELETE", headers: { "X-OpenWork-Host-Token": hostToken }, signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) throw new Error(`Clearing the OpenWork session failed (${response.status})`);
   });
-  if (!response.ok) throw new Error(`Clearing the OpenWork session failed (${response.status})`);
 }
 
 function parseDenSessionPayload(payload) {
@@ -579,7 +562,12 @@ function configuredDenApiBase() {
 
 async function ensurePlatformServer() {
   maintenanceAdmission.assertOpen();
-  if (serverHandle) return serverHandle;
+  if (engineError) throw new Error(engineError);
+  if (startingServer) return startingServer;
+  if (serverHandle) {
+    if (!serverHandle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service stopped. Restart it before continuing.");
+    return serverHandle;
+  }
   startingServer ??= startPlatformServer().finally(() => {
     startingServer = null;
   });
@@ -595,10 +583,23 @@ async function restartPlatformServer() {
     if (startingServer) await startingServer.catch(() => undefined);
     if (serverHandle) {
       const previous = serverHandle;
+      try {
+        await previous.stop();
+        if (previous.managedOpencodeV2?.isAlive()) throw new Error("Native process is still alive.");
+      } catch {
+        engineError = "The native AI service could not confirm shutdown. Quit and reopen Open Coworker before continuing.";
+        throw new Error(engineError);
+      }
       serverHandle = null;
-      await previous.stop().catch(() => undefined);
     }
+    engineError = "";
+    nativeProviderGeneration = null;
+    signInAttempts.clear();
     warmedCoworkerWorkspaces.clear();
+    coworkerWarmups.clear();
+    toolsRegistered.clear();
+    variantsByModel.clear();
+    progressCoordinator = null;
     return ensurePlatformServer();
   });
   if (!reset.confirmed) throw new Error(COMPUTER_STOP_GUIDANCE);
@@ -615,7 +616,7 @@ function runtimeInfo() {
     denBaseUrl: process.env.COWORKER_DEN_BASE_URL?.trim() || DEFAULT_DEN_BASE_URL,
     deepLinkScheme: DEEP_LINK_SCHEME,
     deepLinksRegistered: protocolRegistered,
-    engineManaged: Boolean(serverHandle?.managedOpencode),
+    engineManaged: Boolean(serverHandle?.managedOpencodeV2?.isAlive()),
     engineError,
   };
 }
@@ -644,18 +645,21 @@ function flushPendingDeepLinks() {
 /** The efforts each model offers, read from the engine once per model per launch; "" when it could not be read. */
 const variantsByModel = new Map();
 
+async function readModelCatalog(workspaceId, { handle, signal } = {}) {
+  handle ??= await ensurePlatformServer();
+  const catalog = createCoworkerThreads({ serverUrl: handle.url, workspaceId, token: ownerToken }).listModelCatalog();
+  const result = signal ? await withAbort(catalog, signal) : await catalog;
+  if (handle !== serverHandle) throw new Error("The native AI service changed while reading models. Try again.");
+  return result;
+}
+
 async function modelVariantsFor(coworker) {
   const preference = String(coworker?.model ?? "").trim();
   if (!preference || !coworker?.workspaceId) return null;
   if (variantsByModel.has(preference)) return variantsByModel.get(preference);
   try {
-    const handle = await ensurePlatformServer();
-    const payload = await fetchJson(`${handle.url}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode/config/providers`, {
-      headers: { Authorization: `Bearer ${ownerToken}` },
-    });
-    const separator = preference.indexOf("/");
-    const provider = (payload?.providers ?? []).find((entry) => entry.id === preference.slice(0, separator));
-    const variants = Object.keys(provider?.models?.[preference.slice(separator + 1)]?.variants ?? {});
+    const catalog = await readModelCatalog(coworker.workspaceId);
+    const variants = catalog.models.find((model) => model.id === preference)?.variants ?? [];
     variantsByModel.set(preference, variants);
     return variants;
   } catch {
@@ -673,17 +677,18 @@ async function localRunModel(coworker, kind = "assignment-run", requestText) {
   const preference = String(coworker?.model ?? "").trim();
   const separator = preference.indexOf("/");
   if ((kind === "reply" || kind === "review") && typeof requestText === "string") {
-    const handle = await ensurePlatformServer();
-    const response = await fetch(`${handle.url}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode/provider`, {
-      headers: { Authorization: `Bearer ${ownerToken}` }, signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) throw new Error("The current model catalog could not be read. No replacement model was selected.");
+    const catalog = await readModelCatalog(coworker.workspaceId);
     const { modelDefaults } = await readSettings(settingsPath);
-    const decision = resolveDiscussionModel(connectedModelCatalog(await response.json()), coworker, requestText, modelDefaults);
+    const decision = resolveDiscussionModel(catalog, coworker, requestText, modelDefaults);
     if (!decision.model) throw new Error(decision.reason);
     return { providerId: decision.model.providerId, modelId: decision.model.modelId, ...(decision.variant ? { variant: decision.variant } : {}) };
   }
-  if (separator <= 0 || separator === preference.length - 1) return undefined;
+  if (separator <= 0 || separator === preference.length - 1) {
+    const handle = await ensurePlatformServer();
+    const model = await createNativeV2Client({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).defaultModel();
+    if (!model) throw new Error("No native model is available. Choose a connected model.");
+    return { providerId: model.providerID, modelId: model.id, ...(model.variant ? { variant: model.variant } : {}) };
+  }
   const fixedVariant = String(coworker?.modelVariant ?? "").trim();
   const variants = await modelVariantsFor(coworker);
   const variant = variants === null
@@ -734,7 +739,7 @@ async function executeLocalResponsibility(
     try {
       coworker = await getCoworker(coworkersDir, slug);
       if (!coworker.workspaceId) throw new Error("Coworker workspace is not ready");
-      started = await beginLocalResponsibilityRun(coworkersDir, slug, id, { trigger, runId, threadId: resumeThreadId });
+      started = await beginLocalResponsibilityRun(coworkersDir, slug, id, { trigger, runId, threadId: resumeThreadId || createNativeV2Id("ses") });
     } catch (error) {
       console.warn(`[open-coworker] local responsibility ${key} did not start`, error);
       onStarted();
@@ -744,26 +749,28 @@ async function executeLocalResponsibility(
     onStarted();
     const activeRunId = started.latestRun.id;
     let client;
-    let threadId = resumeThreadId;
+    const threadId = started.latestRun.threadId;
     try {
       const handle = await ensurePlatformServer();
-      if (!handle.managedOpencode) throw new Error(engineError || "AI is unavailable on this Mac");
+      await warmCoworkerWorkspace(coworker);
+      const model = await localRunModel(coworker, "assignment-run");
+      const agent = nativeTurnAgent({ tools: COMPUTER_DENY });
       client = createHeadlessThreadClient({
         baseUrl: handle.url,
         workspaceId: coworker.workspaceId,
         token: ownerToken,
-        defaultModel: await localRunModel(coworker, "assignment-run"),
+        defaultModel: model,
+        defaultAgent: agent,
       });
       let acceptance;
       signal.throwIfAborted();
-      if (threadId) {
-        acceptance = await client.sendTurn(threadId, { prompt: RESUME_PROMPT(started.name, resumeReason), tools: COMPUTER_DENY, signal });
+      const messageId = `msg_${activeRunId.replaceAll("-", "")}`;
+      if (resumeThreadId) {
+        acceptance = await client.sendTurn(threadId, { prompt: RESUME_PROMPT(started.name, resumeReason), messageId, agent, model, signal });
       } else {
-        const thread = await client.createThread({ title: started.name, signal });
-        threadId = thread.id;
-        await attachLocalResponsibilityThread(coworkersDir, slug, id, activeRunId, threadId);
+        await client.createThread({ threadId, title: started.name, agent, model, signal });
         signal.throwIfAborted();
-        acceptance = await client.sendTurn(threadId, { prompt: started.instructions, tools: COMPUTER_DENY, signal });
+        acceptance = await client.sendTurn(threadId, { prompt: started.instructions, messageId, agent, model, signal });
       }
       const result = await client.waitForThread(threadId, {
         signal,
@@ -913,6 +920,7 @@ const collaboration = createCollaboration({
   validateOwner: (owner) => events.validateOwner(owner),
   consult: (task) => maintenanceAdmission.run(() => groupExecution.consultation(task)),
   spawn: (slug, input) => maintenanceAdmission.run(() => spawnWorker(slug, input, "coworker")),
+  selectWorkerSkills: (slug, input) => resolveWorkerSkills(slug, input),
   cancelWorker: async (slug, id) => {
     // A requested child may never have spawned. Late spawn acknowledgements
     // re-enter this callback after the record exists and repair cleanup then.
@@ -922,7 +930,8 @@ const collaboration = createCollaboration({
   invalidateWorker: (slug, id) => { void workerControls.revokeId(slug, id); },
   memoryContext: (owner) => conversationMemory.context(owner),
   executionContext: (owner) => events.context(owner),
-  onSuccess: (entry) => entry.owner.kind === "private" ? captureConversationMemory(entry) : Promise.resolve(),
+  reactionContext: (entry, snapshot) => messageReactions.prepare(entry, snapshot),
+  onSuccess: (entry) => entry.owner.kind === "private" && !entry.reactionOnly ? captureConversationMemory(entry) : Promise.resolve(),
   onExecutionEnd: async (entry, snapshot) => {
     await computerControl.endTurn(entry);
     await events.captureExecution(entry, snapshot);
@@ -947,6 +956,14 @@ const collaboration = createCollaboration({
   }),
 });
 const activityInbox = createActivityInbox({ collaboration, coworkers: () => listCoworkers(coworkersDir), groups: () => listGroups(coworkersDir) });
+const messageReactions = createMessageReactionRuntime({
+  directory: coworkersDir, collaboration,
+  coworkerFor: (slug) => getCoworker(coworkersDir, slug),
+  assertPrivate: (slug, threadId) => savedPrivateDiscussion(slug, threadId),
+  onChange: (scope, revision) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("coworker:reactions-changed", { scope, revision });
+  },
+});
 const computerControl = createComputerControl({
   adapters: [createLocalComputerAdapter({
     // "Back to Coworker" in the native permission coach: the coach is an accessory
@@ -982,7 +999,7 @@ const browserControl = createBrowserControl({
   runTool: async (name, args, context) => {
     if (!context?.sessionID || !context.messageID || !context.callID || !context.directory || !(context.abort instanceof AbortSignal)) throw new Error("Browser tools require the validated native origin and cancellation signal.");
     context.abort.throwIfAborted();
-    browserTools ??= chromeDevtools();
+    browserTools ??= createBrowserTools();
     const tools = await browserTools;
     context.abort.throwIfAborted();
     return tools.tool[name].execute(args, context);
@@ -1014,13 +1031,7 @@ const groupExecution = createGroupExecution({
   coworkerFor: (slug) => getCoworker(coworkersDir, slug),
   coordinator: () => maintenanceAdmission.run(ensureCoordinatorWorkspace),
   catalogFor: async (workspace, signal) => {
-    const handle = await ensurePlatformServer();
-    const response = await fetch(`${handle.url}/workspace/${encodeURIComponent(workspace.workspaceId)}/opencode/provider`, { headers: { Authorization: `Bearer ${ownerToken}` }, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
-    if (!response.ok) throw new Error("The group's AI models could not be read.");
-    const result = await response.json();
-    // A model catalog is not a connection inventory. Retain the native
-    // connected-provider set so routing cannot select an unavailable provider.
-    return connectedModelCatalog(result);
+    return readModelCatalog(workspace.workspaceId, { signal });
   },
   clientFor: (slug, options) => maintenanceAdmission.run(() => collaborationClient(slug, options)),
   onPublished: (entry) => captureConversationMemory(entry),
@@ -1060,21 +1071,22 @@ async function ordinaryGroup(id) {
   if ((await getGroup(coworkersDir, id)).eventId) throw new Error("This group is managed through Events.");
 }
 
-async function collaborationClient(slug, { kind = "reply", requestText, model, observationOnly = false, signal } = {}) {
+async function collaborationClient(slug, { kind = "reply", requestText, model, agent, observationOnly = false, signal } = {}) {
   maintenanceAdmission.assertOpen();
   const coworker = slug === ".coordinator" ? await ensureCoordinatorWorkspace() : await getCoworker(coworkersDir, slug);
   const handle = await ensurePlatformServer();
-  if (!handle.managedOpencode || !coworker.workspaceId) throw new Error("The AI service is not ready. Your work has been kept.");
+  if (!coworker.workspaceId) throw new Error("The AI service is not ready. Your work has been kept.");
   if (slug !== ".coordinator") {
     const server = await ensureToolsServer();
     await installNativeCoworkerPlugins(coworker, server);
     if (!toolsRegistered.has(slug)) await registerCoworkerTools(coworker);
+    await warmCoworkerWorkspace(coworker);
   }
   signal?.throwIfAborted();
   // Legacy admissions have no model pin. Observe their native work without
   // consulting today's catalog or turning a missing selection into a failure.
   const resolvedModel = model ?? (observationOnly ? undefined : await localRunModel(coworker, kind, requestText));
-  const client = createHeadlessThreadClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, defaultModel: resolvedModel });
+  const client = skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, defaultModel: resolvedModel, defaultAgent: agent ?? (slug === ".coordinator" ? NATIVE_COORDINATOR_AGENT : "build"), captureSkillOrigin: slug !== ".coordinator" });
   client.resolvedModel = resolvedModel;
   if (slug !== ".coordinator") client.coworkerIdentity = coworkerIdentity(coworker);
   const interactions = createCoworkerThreads({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
@@ -1095,7 +1107,7 @@ async function privateOwner(slug, threadId, kind = "private") {
   return collaboration.registerOwner({ slug, threadId, conversationId: threadId, kind, workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt });
 }
 
-async function computerDiscussion(slug, threadId) {
+async function savedPrivateDiscussion(slug, threadId) {
   if (typeof threadId !== "string" || !threadId || slug === ".coordinator") throw new Error("Choose a saved private discussion.");
   const coworker = await getCoworker(coworkersDir, slug);
   if (!coworker.workspaceId) throw new Error("This coworker's workspace is not ready.");
@@ -1106,6 +1118,11 @@ async function computerDiscussion(slug, threadId) {
     collaboration.read((state) => [state.owners[`${slug}:${threadId}`], ...Object.values(state.executions).filter((entry) => entry.owner.slug === slug && entry.owner.threadId === threadId).map((entry) => entry.owner)].filter(Boolean)),
   ]);
   assertPrivateComputerDiscussion({ slug, threadId, savedIds: parseDiscussionRegistry(saved), workerIds, workers, groups, assignments, owners });
+  return coworker;
+}
+
+async function computerDiscussion(slug, threadId) {
+  const coworker = await savedPrivateDiscussion(slug, threadId);
   const client = await collaborationClient(slug, { observationOnly: true });
   const snapshot = await client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(8000) });
   if (snapshot.threadId !== threadId || !snapshot.directory || path.resolve(snapshot.directory) !== path.resolve(coworker.path) || client.workspaceId !== coworker.workspaceId) throw new Error("This native discussion does not belong to the coworker's workspace.");
@@ -1117,14 +1134,18 @@ async function computerDiscussion(slug, threadId) {
 const abilitiesCatalogReads = new Map();
 const abilitiesRuntime = createAbilitiesRuntime({
   coworkerFor: (slug) => getCoworker(coworkersDir, slug),
-  readCatalog: async (coworker) => {
+  readCatalog: async (coworker, nativeSkills) => {
     const handle = await ensurePlatformServer();
+    const request = (route) => fetchJson(`${handle.url}${route}`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    }, 5_000);
+    // Native admission already owns the skill catalog. Re-entering its proxy
+    // here would wait on the same preparation barrier from inside the plugin.
+    if (nativeSkills !== undefined) return readAbilitiesCatalog(coworker, request, nativeSkills);
     const identity = JSON.stringify([coworker.createdAt, coworker.workspaceId, handle.url, denSession?.baseUrl, denSession?.orgId, denSession?.userEmail]);
     const cached = abilitiesCatalogReads.get(coworker.path);
     if (cached?.identity === identity && cached.expiresAt > Date.now()) return cached.result;
-    const result = readAbilitiesCatalog(coworker, (route) => fetchJson(`${handle.url}${route}`, {
-      headers: { Authorization: `Bearer ${ownerToken}` },
-    }, 5_000));
+    const result = readAbilitiesCatalog(coworker, request);
     abilitiesCatalogReads.set(coworker.path, { identity, expiresAt: Date.now() + 10_000, result });
     return result;
   },
@@ -1153,14 +1174,12 @@ let progressCoordinator = null;
 async function readyProgressTransport() {
   const handle = serverHandle;
   const workspaceId = progressCoordinator?.workspaceId;
-  if (!handle?.managedOpencode || !workspaceId || !warmedCoworkerWorkspaces.has(workspaceId)) return null;
-  const response = await fetch(`${handle.url}/workspace/${encodeURIComponent(workspaceId)}/opencode/provider`, { headers: { Authorization: `Bearer ${ownerToken}` }, signal: AbortSignal.timeout(PROGRESS_LIMITS.activityReadTimeoutMs) });
-  if (!response.ok || handle !== serverHandle) return null;
-  const catalog = connectedModelCatalog(await response.json());
+  if (!handle?.managedOpencodeV2?.isAlive() || !workspaceId || !warmedCoworkerWorkspaces.has(workspaceId)) return null;
+  const catalog = await readModelCatalog(workspaceId, { handle, signal: AbortSignal.timeout(PROGRESS_LIMITS.activityReadTimeoutMs) });
   return {
     key: `${handle.url}/${workspaceId}`,
     models: eligibleProgressModels(catalog),
-    client: createHeadlessThreadClient({ baseUrl: handle.url, workspaceId, token: ownerToken, requestTimeoutMs: PROGRESS_LIMITS.timeoutMs }),
+    client: createHeadlessThreadClient({ baseUrl: handle.url, workspaceId, token: ownerToken, defaultAgent: NATIVE_COORDINATOR_AGENT, requestTimeoutMs: PROGRESS_LIMITS.timeoutMs }),
   };
 }
 
@@ -1195,7 +1214,7 @@ async function readCollaborationActivity(scope) {
   const entries = await collaboration.activityEntries(scope, PROGRESS_LIMITS.maxActivityExecutions);
   const observed = await Promise.all(entries.filter((entry) => !scope.executionId || entry.executionId === scope.executionId).map(async (entry) => {
     const empty = { replies: [], tools: [], completedSteps: 0, failedSteps: 0, available: false, nativeStatus: "unknown" };
-    if (!serverHandle?.managedOpencode) return { ...entry, ...empty };
+    if (!serverHandle?.managedOpencodeV2?.isAlive()) return { ...entry, ...empty };
     try {
       const coworker = await getCoworker(coworkersDir, entry.slug);
       if (!coworker.workspaceId) return { ...entry, ...empty };
@@ -1216,35 +1235,195 @@ function workerKey(slug, id) {
   return `${slug}:${id}`;
 }
 
+/** Read identity from the authenticated main-process account, never from draft metadata. */
+function assertSkillSession(session) {
+  if (!session || denSession !== session || appliedSkillSession?.session !== session || appliedSkillSession.handle !== serverHandle) throw new Error("The OpenWork connection is changing or has not finished syncing. Finish connecting, then select the skill again; your words are kept.");
+}
+
+async function currentSkillAccount(session, signal) {
+  if (!session) throw new Error("The selected skill's OpenWork account is signed out. Your words are kept.");
+  assertSkillSession(session);
+  const response = await fetch(`${session.baseUrl}/v1/me`, { headers: { Authorization: `Bearer ${session.token}`, "x-openwork-org-id": session.orgId }, redirect: "error", signal: signal ?? AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error("The selected skill's OpenWork account could not be verified. Your words are kept.");
+  const payload = await response.json();
+  assertSkillSession(session);
+  if (denSession !== session || typeof payload.user?.id !== "string" || !payload.user.id) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
+  return { scope: { baseUrl: session.baseUrl, orgId: session.orgId, accountId: payload.user.id }, email: payload.user.email };
+}
+
+function skillAccountKey(session) {
+  return session ? createHash("sha256").update(JSON.stringify([session.baseUrl, session.orgId, session.token])).digest("hex") : null;
+}
+
+function skillAwareClient({ captureSkillOrigin = false, ...options }) {
+  let pinnedSession;
+  let pinnedScope;
+  let validated = false;
+  const send = options.fetch ?? fetch;
+  const transport = (url, init) => {
+    const headers = new Headers(init?.headers);
+    // Neither callers nor an old client configuration may override the selected receipt.
+    headers.delete("x-openwork-native-skills-scope");
+    // Recheck at actual input admission after native preflight. Stop/cleanup must remain usable after sign-out.
+    if (init?.method === "POST" && /\/(prompt|synthetic)$/.test(new URL(url).pathname) && pinnedSession !== undefined) {
+      assertSkillSession(pinnedSession);
+      headers.set("x-openwork-native-skills-scope", pinnedScope);
+    }
+    return send(url, { ...init, headers });
+  };
+  const client = createHeadlessThreadClient({ ...options, fetch: transport });
+  client.nativeSkills = createNativeV2Client({ ...options, fetch: transport });
+  client.validateSkills = async (fields, signal) => {
+    const expectedScope = selectedCloudSkillScope(fields);
+    if (validated && expectedScope !== pinnedScope) throw new Error("The selected Cloud skill scope changed. Select it again in a new turn; your words are kept.");
+    const session = denSession;
+    const account = fields.skillSelections?.some((skill) => skill.source) ? (await currentSkillAccount(session, signal)).scope : null;
+    const catalog = await client.nativeSkills.listSkills(signal);
+    if (account) assertSkillSession(session);
+    validateSkillSelections(fields, catalog, options.workspaceId, account);
+    if (account) {
+      if (pinnedSession !== undefined && pinnedSession !== session) throw new Error("The selected skill's account revision changed. Your words are kept.");
+      pinnedSession = session;
+    }
+    pinnedScope = expectedScope;
+    validated = true;
+  };
+  if (captureSkillOrigin) client.prepareSkillOrigin = async (turn, signal) => {
+    const session = denSession;
+    const accountKey = skillAccountKey(session);
+    const preparationSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000);
+    const assertCurrent = () => {
+      if (denSession !== session || skillAccountKey(denSession) !== accountKey) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
+    };
+    let binding = null;
+    if (session) {
+      try {
+        const catalog = await client.nativeSkills.listSkills(preparationSignal);
+        assertCurrent();
+        const scopes = [...new Set(catalog.flatMap((skill) => skill.source ? [skill.source.scope] : []))];
+        if (scopes.length > 1 || scopes.some((scope) => !/^[0-9a-f]{64}$/.test(scope))) throw new Error("The selected skill's OpenWork account could not be verified. Your words are kept.");
+        if (scopes.length) {
+          const account = (await currentSkillAccount(session, preparationSignal)).scope;
+          assertCurrent();
+          assertSkillSession(session);
+          binding = { account, scope: scopes[0] };
+        }
+      } catch (error) {
+        signal?.throwIfAborted();
+        assertCurrent();
+        if (pinnedSession !== undefined) throw error;
+      }
+    }
+    if (binding?.scope) {
+      if ((pinnedSession !== undefined && pinnedSession !== session) || (pinnedScope !== undefined && pinnedScope !== binding.scope)) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
+      pinnedSession = session;
+      pinnedScope = binding.scope;
+    }
+    const receipt = { version: 1, workspaceId: options.workspaceId, messageId: turn.messageId, accountKey, account: binding?.account ?? null, scope: binding?.scope ?? null };
+    await collaboration.change((state) => {
+      assertCurrent();
+      const current = state.executions[turn.id];
+      if (!current || current.messageId !== turn.messageId || current.workspaceId !== options.workspaceId
+        || current.owner.slug !== turn.owner?.slug || current.owner.threadId !== turn.owner?.threadId
+        || current.nativeAdmission !== "prepared" || current.state !== "running") throw new Error("This execution stopped or changed before native admission.");
+      current.cloudSkillOrigin = receipt;
+    });
+    assertCurrent();
+    return receipt;
+  };
+  return client;
+}
+
+async function resolveWorkerSkills(slug, input, origin) {
+  const session = denSession;
+  const accountKey = skillAccountKey(session);
+  const ids = nativeV2SkillsSchema.parse(input.skills ?? []);
+  const inherited = origin ? selectionFields(origin.skillSelections ?? []) : input.skillSelections === undefined ? null : selectionFields(input.skillSelections);
+  if (inherited && !sameSkillFields(origin ?? input, inherited)) throw new Error("The originating turn's skill selections do not match its admitted input.");
+  const recorded = origin?.cloudSkillOrigin;
+  const receipt = recorded?.version === 1 && recorded.workspaceId === origin.workspaceId && recorded.messageId === origin.messageId
+    && typeof recorded.accountKey === "string" && /^[0-9a-f]{64}$/.test(recorded.accountKey)
+    && typeof recorded.scope === "string" && /^[0-9a-f]{64}$/.test(recorded.scope) ? structuredClone(recorded) : null;
+  let scope = selectedCloudSkillScope(inherited ?? {}) ?? receipt?.scope;
+  let account = inherited?.skillSelections.find((skill) => skill.source)?.account ?? receipt?.account;
+  const fresh = !origin && !inherited;
+  let cloudSelected = ids.some(({ id }) => id.startsWith("openwork-cloud-") || inherited?.skillSelections.some((skill) => skill.id === id && skill.source));
+  const assertSession = () => {
+    if (denSession !== session || skillAccountKey(denSession) !== accountKey || (receipt && receipt.accountKey !== accountKey)) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
+    assertSkillSession(session);
+  };
+  const assertCurrent = () => {
+    assertSession();
+    if (!scope || !account?.baseUrl || !account.orgId || !account.accountId) throw new Error("The selected skill's OpenWork account could not be verified. Your words are kept.");
+  };
+  if (cloudSelected) { if (fresh) assertSession(); else assertCurrent(); }
+  if (!ids.length) return selectionFields([]);
+  const signal = AbortSignal.timeout(30_000);
+  const coworker = await getCoworker(coworkersDir, slug);
+  if (origin && (origin.owner.slug !== slug || origin.workspaceId !== coworker.workspaceId)) throw new Error("The originating skill selection belongs to another coworker workspace.");
+  if (cloudSelected) assertSession();
+  const handle = await ensurePlatformServer();
+  if (cloudSelected) assertSession();
+  const client = skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
+  const catalog = await client.nativeSkills.listSkills(signal);
+  const selectedCloud = catalog.filter((skill) => skill.source && ids.some(({ id }) => id === skill.id));
+  cloudSelected ||= selectedCloud.length > 0;
+  if (cloudSelected) {
+    assertSession();
+    if (fresh) {
+      const scopes = [...new Set(selectedCloud.map((skill) => skill.source.scope))];
+      if (scopes.length !== 1 || !/^[0-9a-f]{64}$/.test(scopes[0])) throw new Error("The selected skill's OpenWork account could not be verified. Your words are kept.");
+      scope = scopes[0];
+    } else assertCurrent();
+    if (selectedCloud.some((skill) => skill.source.scope !== scope)) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
+    const currentAccount = (await currentSkillAccount(session, signal)).scope;
+    if (fresh) account = currentAccount;
+    assertCurrent();
+    if (currentAccount.baseUrl !== account.baseUrl || currentAccount.orgId !== account.orgId || currentAccount.accountId !== account.accountId) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
+  }
+  const fields = selectionFields(ids.map(({ id }) => inherited?.skillSelections.find((skill) => skill.id === id)
+    ?? selectCatalogSkill(catalog, { id }, coworker.workspaceId, cloudSelected ? account : null)));
+  await client.validateSkills(fields, signal);
+  if (cloudSelected) assertCurrent();
+  return fields;
+}
+
 /** Saved Worker choices never inherit a later edit to the coworker's model. */
 async function readyWorkerClient(coworker, worker = null) {
   const handle = await ensurePlatformServer();
-  if (!handle.managedOpencode) throw new Error(engineError || "AI is unavailable on this Mac");
   if (!coworker.workspaceId) throw new Error("This coworker's workspace is not ready yet.");
-  return createHeadlessThreadClient({
+  await warmCoworkerWorkspace(coworker);
+  return skillAwareClient({
     baseUrl: handle.url,
     workspaceId: coworker.workspaceId,
     token: ownerToken,
-    defaultModel: worker?.modelSnapshot ?? await localRunModel(coworker, "worker-turn"),
+    // Missing legacy pins are observation-only; recovery must not select a
+    // replacement model just to read an already-accepted input.
+    defaultModel: worker ? worker.pendingTurn?.model ?? worker.modelSnapshot ?? undefined : await localRunModel(coworker, "worker-turn"),
   });
 }
 
 async function workerModelProviders(coworker, readDefault = false) {
   const handle = await ensurePlatformServer();
-  if (!handle.managedOpencode) throw new Error(engineError || "AI is unavailable on this Mac");
-  const payload = await fetchJson(`${handle.url}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode/provider`, {
-    headers: { Authorization: `Bearer ${ownerToken}` },
-  });
-  if (!Array.isArray(payload?.all) || !Array.isArray(payload?.connected)) throw new Error("Worker model availability could not be checked. No fallback was selected.");
-  const providers = payload.all.filter((provider) => payload.connected.includes(provider.id));
-  if (!readDefault) return { ...payload, providers };
-  let config;
-  try {
-    config = await fetchJson(`${handle.url}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode/config`, { headers: { Authorization: `Bearer ${ownerToken}` } });
-  } catch {
-    throw new Error("The configured native default model could not be read. Choose a Worker model or restore the AI service; no fallback was selected.");
-  }
-  return { ...payload, providers, model: config?.model };
+  const native = createNativeV2Client({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
+  const [catalog, preferred] = await Promise.all([native.readCatalog(), readDefault ? native.defaultModel() : undefined]);
+  // Worker selection still consumes Provider[]; only native connected evidence
+  // enters that projection, and disabled models never become candidates.
+  const providers = catalog.providers.filter((provider) => catalog.connectedProviderIds.includes(provider.id)).map((provider) => ({
+    id: provider.id, name: provider.name, options: { baseURL: provider.settings?.baseURL },
+    models: Object.fromEntries(catalog.models.filter((model) => model.enabled && model.providerID === provider.id).map((model) => {
+      const price = model.cost.find((cost) => !cost.tier);
+      const modalities = (values) => Object.fromEntries(["text", "image", "audio", "video", "pdf"].map((kind) => [kind, values.some((value) => value === kind || value.startsWith(`${kind}/`))]));
+      return [model.id, {
+        name: model.name, family: model.family, variants: Object.fromEntries(model.variants.map((variant) => [variant.id, {}])),
+        status: model.status, release_date: model.time.released > 0 ? new Date(model.time.released).toISOString().slice(0, 10) : "",
+        ...(price ? { cost: { input: price.input, output: price.output } } : {}), limit: model.limit,
+        api: { npm: model.package ?? provider.package, id: model.modelID },
+        capabilities: { toolcall: model.capabilities.tools, reasoning: model.capabilities.output.includes("reasoning"), input: modalities(model.capabilities.input), output: modalities(model.capabilities.output) },
+      }];
+    })),
+  }));
+  return { providers, default: preferred ? { [preferred.providerID]: preferred.id } : {}, model: preferred ? `${preferred.providerID}/${preferred.id}` : undefined };
 }
 
 /**
@@ -1269,6 +1448,7 @@ async function spawnWorker(slug, input, spawnedBy) {
   if (input.id) {
     const existing = await getWorker(coworkersDir, slug, input.id).catch((error) => { if (error.code !== "ENOENT") throw error; return null; });
     if (existing) {
+      if (!sameSkillFields(existing, input)) throw new Error("This Worker already records different skill selections.");
       if (isWorkerFinished(existing)) await collaboration.completeWorker(existing, existing.pendingSettlement?.events ?? await readWorkerEvents(coworkersDir, slug, existing.id));
       else void admitWorkerTurn(slug, existing.id);
       return workerControls.summary(existing);
@@ -1284,7 +1464,8 @@ async function spawnWorker(slug, input, spawnedBy) {
   const { modelDefaults } = await readSettings(settingsPath);
   const catalog = await workerModelProviders(coworker, !configured && !modelDefaults[purpose].model && !coworker.model);
   const modelSnapshot = resolveWorkerModel(coworker, purpose, catalog.providers, null, catalog, modelDefaults);
-  const worker = await createWorker(coworkersDir, slug, { ...input, purpose, modelSnapshot, lifespan, spawnedBy });
+  const skills = await resolveWorkerSkills(slug, input);
+  const worker = await createWorker(coworkersDir, slug, { ...input, ...skills, purpose, modelSnapshot, lifespan, spawnedBy });
   if (spawnedBy === "person" && worker.spawnedFromThreadId) await collaboration.attachWorker(worker, await privateOwner(slug, worker.spawnedFromThreadId), { activityEligible: true });
   await appendWorkerEvent(coworkersDir, slug, worker.id, {
     kind: "status",
@@ -1362,8 +1543,25 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
     run.entry = { id: `worker:${id}:${worker.pendingTurn.messageId}`, owner: { kind: "worker", slug, threadId: worker.threadId, conversationId: worker.threadId }, messageId: worker.pendingTurn.messageId, workspaceId: coworker.workspaceId, state: "running", sentAt: Date.now() };
     let client;
     let threadId = worker.threadId;
+    const drainNative = () => {
+      if (!threadId) return Promise.resolve();
+      return run.stopping ??= (async () => {
+        const signal = AbortSignal.timeout(30_000);
+        try {
+          if (!client) throw new Error("Native cleanup could not be confirmed. Try Stop again before continuing.");
+          await withAbort(abortWorkerThread(client, threadId, signal), signal);
+        } catch (error) { run.cleanupError = error; throw error; }
+      })();
+    };
     const settle = async (outcome) => {
       run.entry.state = outcome.kind === "failed" ? "failed" : "succeeded";
+      if (outcome.kind === "failed") {
+        try { await drainNative(); }
+        catch {
+          await updateWorker(coworkersDir, slug, id, (current) => isWorkerFinished(current) ? null : { error: `${outcome.error} Native cleanup could not be confirmed. Try Stop again before continuing.` });
+          return false;
+        }
+      }
       if (run.eventOwner && run.client && threadId) {
         const snapshot = await run.client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(10_000) });
         await events.captureExecution({ ...run.entry, owner: { ...run.eventOwner, kind: "worker", threadId } }, snapshot);
@@ -1384,21 +1582,39 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
       controller.signal.throwIfAborted();
       // Accepted recovery only observes the old turn, even if access was since
       // revoked. Every new send validates the pinned choice before any inference.
-      const present = threadId && (await client.getThreadSnapshot(threadId, { signal: controller.signal })).messages.some((message) => message.id === worker.pendingTurn.messageId && message.role === "user");
+      const snapshot = threadId ? await client.getThreadSnapshot(threadId, { signal: controller.signal }) : null;
+      const present = snapshot && nativeTurnReceipt(snapshot, worker.pendingTurn.messageId).present;
+      if (present) await verifyNativeTurnSkills(client, snapshot, worker.pendingTurn, controller.signal);
+      if (!present && worker.pendingTurn.nativeAdmission !== "prepared") throw new Error("The Worker's native admission could not be confirmed. Its earlier work will not be resent; review it before starting again.");
       if (!present && lifespanSpent(worker.lifespan)) {
         await settle({ kind: "settled", report: { kind: "none", text: "" } });
         return;
       }
       if (worker.modelSnapshot && !present) resolveWorkerModel(coworker, worker.purpose, (await workerModelProviders(coworker)).providers, worker.modelSnapshot);
       controller.signal.throwIfAborted();
+      const eventTools = run.eventOwner?.eventRunId ? EVENT_SCHEDULE_DENY : EVENT_WRITE_DENY;
+      const agent = worker.pendingTurn.agent ?? (!present ? nativeTurnAgent({ tools: { ...workerTurnTools(worker.control?.surface), ...eventTools } }) : undefined);
+      if (!present) {
+        const intentThreadId = threadId || createNativeV2Id("ses");
+        worker = await updateWorker(coworkersDir, slug, id, (current) => {
+          if (current.status !== "running" || current.pendingTurn?.messageId !== worker.pendingTurn.messageId || current.pendingTurn.nativeAdmission !== "prepared") throw new Error("The Worker stopped or changed before native admission.");
+          const model = current.pendingTurn.model ?? current.modelSnapshot;
+          if (!model) throw new Error("The Worker's model was not recorded. Choose a model for a new Worker; this Worker will not switch models.");
+          const pendingTurn = { ...current.pendingTurn, agent, model };
+          if (pendingTurn.eventPromptPrefix === undefined) {
+            pendingTurn.eventPromptPrefix = run.eventPromptPrefix || "";
+            if (pendingTurn.eventPromptPrefix) pendingTurn.prompt = `${pendingTurn.eventPromptPrefix}\n\n${pendingTurn.prompt}`;
+          }
+          return { threadId: intentThreadId, pendingTurn };
+        });
+      }
       if (!threadId) {
-        // Link an empty thread before admitting work. A quit or stop during
-        // creation cannot leave an executing thread without a Worker record.
-        const thread = await client.createThread({ title: workerThreadTitle(worker.name), signal: controller.signal });
-        threadId = thread.id;
+        // The durable intent and exclusion registry precede the native write.
+        // A lost creation response retains exactly one recoverable identity.
+        threadId = worker.threadId;
         run.threadId = threadId;
         await registerWorkerThread(coworkersDir, slug, threadId);
-        await updateWorker(coworkersDir, slug, id, { threadId });
+        await client.createThread({ threadId, title: workerThreadTitle(worker.name), agent, model: worker.pendingTurn.model, signal: controller.signal });
       }
       if (isWorkerFinished(await getWorker(coworkersDir, slug, id)) || !workerControls.allowed(worker) || controller.signal.aborted) {
         controller.abort();
@@ -1411,24 +1627,20 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
       run.entry.owner.threadId = threadId; run.entry.owner.conversationId = threadId;
       await workerControls.admit(worker, run);
       controller.signal.throwIfAborted();
+      if (!present && agent !== nativeTurnAgent({ tools: { ...workerTurnTools(run.control?.surface), ...eventTools } })) throw new Error("The Worker's approved control surface changed before native admission.");
       run.active = true;
       await collaboration.admitEventWorker(worker);
-      const acceptance = await client.sendTurn(threadId, { ...worker.pendingTurn, ...(run.eventPromptPrefix ? { prompt: `${run.eventPromptPrefix}\n\n${worker.pendingTurn.prompt}` } : {}), tools: { ...workerTurnTools(run.control?.surface), ...(run.eventOwner?.eventRunId ? EVENT_SCHEDULE_DENY : EVENT_WRITE_DENY) }, signal: controller.signal });
+      const acceptance = await dispatchNativeTurn({ client, threadId, turn: worker.pendingTurn, signal: controller.signal, markAttempted: async () => {
+        worker = await updateWorker(coworkersDir, slug, id, (current) => {
+          if (current.status !== "running" || current.pendingTurn?.messageId !== worker.pendingTurn.messageId || (!present && current.pendingTurn.nativeAdmission !== "prepared")) throw new Error("The Worker stopped or changed before native admission.");
+          return { pendingTurn: { ...current.pendingTurn, nativeAdmission: "attempted" } };
+        });
+      } });
       for (const [index, steer] of (worker.pendingTurn.steers ?? []).entries()) {
         await appendWorkerEvent(coworkersDir, slug, id, { id: `evt_${collaborationId(id, worker.pendingTurn.messageId, "steer-applied", steer.id ?? index).slice(5)}`, kind: "status", by: steer.by, turnId: worker.pendingTurn.messageId, text: `Applied to admitted step: ${steer.text}` });
       }
-      // A recovered turn was already admitted before this process started.
-      // If its engine is idle, reconcile the saved reply (including a partial
-      // reply left by a crash) without resending it or awaiting new completion.
-      if (acceptance.alreadyPresent) {
-        const snapshot = await client.getThreadSnapshot(threadId, { signal: controller.signal });
-        if (!isRunning(snapshot.status)) {
-          const transcript = toTranscript(snapshot);
-          continueAfter = await settle(workerTurnOutcome({ outcome: "settled", terminalError: transcript.terminalError }, transcript, worker.pendingTurn.messageId));
-          return;
-        }
-      }
-      const result = await client.waitForThread(threadId, {
+      const result = await waitForNativeTurn(client, threadId, {
+        ...worker.pendingTurn,
         timeoutMs: worker.lifespan.kind === "until" ? Math.max(1, Math.min(WORKER_TURN_TIMEOUT_MS, worker.lifespan.at - Date.now())) : WORKER_TURN_TIMEOUT_MS,
         pollIntervalMs: 1_000,
         signal: controller.signal,
@@ -1436,23 +1648,15 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
       });
       // Stopped while it ran: the stop already recorded itself.
       if (controller.signal.aborted) return;
-      if (result.outcome === "timeout") {
-        const signal = AbortSignal.timeout(30_000);
-        await withAbort(abortWorkerThread(client, threadId, signal), signal);
-      }
+      if (result.outcome === "timeout") await drainNative();
       const outcome = result.outcome === "timeout" && lifespanSpent(worker.lifespan)
           ? { kind: "settled", report: { kind: "none", text: "" } }
           : workerTurnOutcome(result, toTranscript(result.snapshot), worker.pendingTurn.messageId);
       continueAfter = await settle(outcome);
     } catch (error) {
       if (!controller.signal.aborted) {
-        if (client && threadId) {
-          const signal = AbortSignal.timeout(30_000);
-          try { await withAbort(abortWorkerThread(client, threadId, signal), signal); }
-          catch (cleanupError) { run.cleanupError = cleanupError; }
-        }
         const failure = error instanceof Error ? error.message : String(error);
-        continueAfter = await settle({ kind: "failed", error: `${failure}${run.cleanupError ? " Native cleanup could not be confirmed. Try Stop again before continuing." : ""}` });
+        continueAfter = await settle({ kind: "failed", error: failure });
       }
     } finally {
       run.active = false;
@@ -1463,8 +1667,7 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
       // Cancelling the HTTP wait alone does not stop native execution. This
       // also covers Stop arriving while the first thread was being created.
       if (controller.signal.aborted && client && threadId) {
-        const signal = AbortSignal.timeout(30_000);
-        try { await withAbort(abortWorkerThread(client, threadId, signal), signal); }
+        try { await drainNative(); }
         catch (error) { run.cleanupError = error; console.warn("[open-coworker] Worker native cleanup is unconfirmed; use Stop to retry."); }
       }
     }
@@ -1595,7 +1798,7 @@ async function resumeWorker(slug, id, by = "person") {
  * keeps waiting; a paused one stays paused.
  */
 async function recoverInterruptedWorkers() {
-  if (workersRecovered || workersRecovering || !serverHandle?.managedOpencode) return;
+  if (workersRecovered || workersRecovering || !serverHandle?.managedOpencodeV2?.isAlive()) return;
   workersRecovering = true;
   try {
   for (const coworker of await listCoworkers(coworkersDir)) {
@@ -1701,42 +1904,22 @@ async function runCoworkerWorkspaceWarmup(coworker) {
     const contextServer = await ensureToolsServer();
     await installNativeCoworkerPlugins(coworker, contextServer);
   }
-  let handle = await ensurePlatformServer();
-  if (!handle.managedOpencode || !coworker?.workspaceId) return;
-  let lastError = null;
-  // OpenCode's very first project request also prepares its SDK directory.
-  // In a blank profile that request can stay attached to the installer even
-  // after the files are ready. Bound it once, restart the still-idle engine,
-  // then make the real readiness read against the prepared directory.
-  for (const [attempt, timeoutMs] of [20_000, 60_000].entries()) {
-    try {
-      const response = await fetch(
-        // The connected-providers read: a few kilobytes, and it is the same bootstrap the full list would wait on.
-        `${handle.url}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode/config/providers`,
-        {
-          headers: { Authorization: `Bearer ${ownerToken}` },
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      );
-      if (response.ok) {
-        await response.arrayBuffer();
-        warmedCoworkerWorkspaces.add(coworker.workspaceId);
-        return;
-      }
-      lastError = new Error(`AI service answered with HTTP ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    if (attempt === 0) {
-      const busy = activeLocalRuns.size > 0 || (await collaboration.read((state) => Object.values(state.executions).some((entry) => entry.state === "running")));
-      if (busy) break;
-      handle = await restartPlatformServer();
-      if (!handle.managedOpencode) break;
-    }
+  const handle = await ensurePlatformServer();
+  if (!coworker?.workspaceId) throw new Error("The native workspace is not registered yet.");
+  if (coworker.slug && !toolsRegistered.has(coworker.slug)) await registerCoworkerTools(coworker);
+  await nativeWorkspaceRequest(handle, coworker.workspaceId, "POST", "/api/plugin/await-activation", undefined, { timeoutMs: 60_000 });
+  const plugins = await nativeWorkspaceRequest(handle, coworker.workspaceId, "GET", "/api/plugin");
+  const required = coworker.slug
+    ? ["collaboration", "computer", "browser", "group-documents", "events", "abilities", "turn-roles"]
+    : ["progress-summary", "auto-memory"];
+  if (!Array.isArray(plugins?.data)
+    || plugins.data.some((plugin) => plugin.state?.status !== "active")
+    || required.some((id) => !plugins.data.some((plugin) => plugin.id === `coworker.${id}` && plugin.state?.status === "active"))) {
+    throw new Error(`The native plugins for ${coworker.name} are not ready. Check the plugin bundles before continuing.`);
   }
-  throw new Error(
-    `The AI service did not finish preparing ${coworker.name}. ${lastError instanceof Error ? lastError.message : "Try again."}`,
-  );
+  if (coworker.slug) await prepareNativeTurnRoles((method, route, body) => nativeWorkspaceRequest(handle, coworker.workspaceId, method, route, body));
+  if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service changed during workspace preparation.");
+  warmedCoworkerWorkspaces.add(coworker.workspaceId);
 }
 
 function warmCoworkerWorkspace(coworker) {
@@ -1746,7 +1929,7 @@ function warmCoworkerWorkspace(coworker) {
   const warmup = coworkerWarmupTail
     .catch(() => undefined)
     .then(() => runCoworkerWorkspaceWarmup(coworker))
-    .finally(() => coworkerWarmups.delete(coworker.workspaceId));
+    .finally(() => { if (coworkerWarmups.get(coworker.workspaceId) === warmup) coworkerWarmups.delete(coworker.workspaceId); });
   coworkerWarmups.set(coworker.workspaceId, warmup);
   coworkerWarmupTail = warmup;
   return warmup;
@@ -1800,6 +1983,7 @@ async function ensureToolsServer() {
     resolveSlug: (token) => maintenanceAdmission.closed ? null : toolTokenSlugs.get(token) ?? null,
     onContextTool: (slug, input, transportSignal) => maintenanceAdmission.run(async () => {
       const { name, args, context, cancel } = input;
+      if (name === "react") return messageReactions.execute(slug, args, context, transportSignal);
       if (name === "abilities_check") return abilitiesRuntime.check(slug, { ...args, ...context });
       if (name === "abilities_transform") return abilitiesRuntime.transform(slug, { ...args, ...context });
       if (Object.hasOwn(COMPUTER_TOOLS, name)) return computerControl.execute(slug, { name, args, context, cancel });
@@ -1809,15 +1993,24 @@ async function ensureToolsServer() {
       const workerTool = name === "worker_spawn" || WORKER_MANAGEMENT.includes(name);
       const trusted = workerTool
         ? await collaboration.context(slug, context, { name: `coworker_${name}`, args }, assertWorkerToolContext)
-        : await collaboration.context(slug, context);
+        : await collaboration.context(slug, context, { name: `coworker_${name}`, args }, assertTeamConsultToolContext);
       if (name === "team_consult") {
+        if (!["private", "group", "consultation", "assignment"].includes(trusted.entry.owner.kind)) throw new Error("Workers cannot manage collaboration.");
         const target = (await listCoworkers(coworkersDir)).find((coworker) => coworker.slug === args.to || coworker.name.toLowerCase() === String(args.to).toLowerCase());
         if (!target) throw new Error("Choose a teammate from the team roster.");
-        return collaboration.request(trusted, "consultation", { ...args, to: target.slug }, { workspaceId: target.workspaceId, coworkerCreatedAt: target.createdAt });
+        transportSignal?.throwIfAborted();
+        trusted.assertActive();
+        const current = await collaboration.context(slug, context, { name: "coworker_team_consult", args }, assertTeamConsultToolContext);
+        if (current.entry.id !== trusted.entry.id) throw new Error("This consultation belongs to an earlier admission.");
+        transportSignal?.throwIfAborted();
+        current.assertActive();
+        return collaboration.request(current, "consultation", { ...args, to: target.slug }, { workspaceId: target.workspaceId, coworkerCreatedAt: target.createdAt });
       }
       if (name === "worker_spawn") {
         if (args.control !== undefined) { assertControlOrigin(trusted.entry); await computerDiscussion(slug, trusted.entry.owner.threadId); trusted.assertActive(); }
-        return collaboration.request(trusted, "worker", { ...args, lifespan: args.lifespan ? lifespanFromToolArgs(args.lifespan, { purpose: args.purpose }) : undefined });
+        const skills = await resolveWorkerSkills(slug, args, trusted.entry);
+        trusted.assertActive();
+        return collaboration.request(trusted, "worker", { ...args, ...skills, lifespan: args.lifespan ? lifespanFromToolArgs(args.lifespan, { purpose: args.purpose }) : undefined });
       }
       if (WORKER_MANAGEMENT.includes(name)) {
         const worker = await getWorker(coworkersDir, slug, args.id);
@@ -1919,7 +2112,6 @@ async function listPreparedCoworkers() {
   }
 
   await ensurePlatformServer();
-  let registeredWorkspace = false;
   const prepared = [];
   for (const coworker of coworkers) {
     if (coworker.workspaceId) {
@@ -1929,7 +2121,6 @@ async function listPreparedCoworkers() {
     try {
       const workspaceId = await registerCoworkerWorkspace(coworker);
       prepared.push(await updateCoworker(coworkersDir, coworker.slug, { workspaceId }));
-      registeredWorkspace = true;
     } catch {
       // Keep the coworker visible. Its explicit repair action remains the
       // fallback when automatic registration is genuinely unavailable.
@@ -1937,9 +2128,6 @@ async function listPreparedCoworkers() {
     }
   }
 
-  if (registeredWorkspace && !serverHandle?.managedOpencode) {
-    await restartPlatformServer();
-  }
   for (const coworker of prepared) {
     await warmCoworkerWorkspace(coworker).catch((error) => {
       console.warn(`[open-coworker] could not warm ${coworker.slug}`, error);
@@ -1972,156 +2160,43 @@ async function prepareCoordinatorWorkspace() {
   }
   const workspaceId = await registerCoworkerWorkspace(coordinator);
   const updated = await updateCoordinator(coworkersDir, { workspaceId });
-  if (!serverHandle?.managedOpencode) await restartPlatformServer();
   await warmCoworkerWorkspace(updated);
   progressCoordinator = updated;
   return updated;
 }
 
 // ---------------------------------------------------------------------------
-// AI providers on this Mac. Detection is `electron/local-providers.mjs`; the
-// connect steps below only ever use the engine's own credential store
-// (`PUT`/`DELETE /auth/{provider}`), its own sign-in flows, and the embedded
-// server's runtime provider config — the same paths OpenWork Desktop uses. A
-// secret travels from a sign-in file or the person's own typing straight to
-// the engine over loopback; this process keeps none of it and logs none of it.
-
-class EngineRequestError extends Error {
-  constructor(status, body) {
-    super(engineErrorMessage(status, body));
-    this.name = "EngineRequestError";
-    this.status = status;
-    this.body = body;
-  }
-}
-
-function engineErrorMessage(status, body) {
-  const data = body && typeof body === "object" ? body : {};
-  const nested = data.data && typeof data.data === "object" ? data.data : {};
-  const message = [nested.message, data.message].find((value) => typeof value === "string" && value.trim());
-  return message ? message.trim() : `The AI service answered with HTTP ${status}.`;
-}
-
-/** A workspace to reach the engine through: the first coworker's, else the hidden coordinator's. */
-async function providerWorkspaceId() {
-  const coworkers = await listCoworkers(coworkersDir).catch(() => []);
-  const ready = coworkers.find((coworker) => coworker.workspaceId);
-  if (ready) return ready.workspaceId;
-  return (await ensureCoordinatorWorkspace()).workspaceId;
-}
-
-async function engineRequest(method, enginePath, body, { timeoutMs = 20_000, signal } = {}) {
-  const workspaceId = await providerWorkspaceId();
-  const handle = await ensurePlatformServer();
-  if (!handle.managedOpencode) throw new Error(engineError || "AI is unavailable on this Mac");
-  const response = await fetch(`${handle.url}/workspace/${encodeURIComponent(workspaceId)}/opencode${enginePath}`, {
+// Native provider attempts and presentation indexes belong to one engine and
+// workspace generation. No credential-file imports or raw provider errors reach IPC.
+async function nativeWorkspaceRequest(handle, workspaceId, method, enginePath, body, { timeoutMs = 20_000, signal } = {}) {
+  if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service changed or stopped. Refresh before continuing.");
+  if (!enginePath.startsWith("/api/")) throw new Error("Expected a native API route.");
+  const response = await fetch(`${handle.url}/workspace/${encodeURIComponent(workspaceId)}/opencode2${enginePath}`, {
     method,
     headers: {
       Authorization: `Bearer ${ownerToken}`,
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: signal ?? AbortSignal.timeout(timeoutMs),
-  });
+    redirect: "error",
+    signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]),
+    ...(method === "GET" ? {} : { keepalive: false }),
+  }).catch(() => { throw new Error("The native AI service request could not be confirmed. Refresh before trying again."); });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`The native AI service answered with HTTP ${response.status}.`);
+  }
+  if (handle !== serverHandle) { await response.body?.cancel(); throw new Error("The native AI service changed. Refresh before continuing."); }
+  if (response.status === 204) return null;
   const text = await response.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
-  if (!response.ok) throw new EngineRequestError(response.status, json);
-  return json;
+  try { return text ? JSON.parse(text) : null; }
+  catch { throw new Error("The native AI service returned an unreadable response."); }
 }
 
-/**
- * Bring a credential change into effect everywhere. The engine keeps one
- * instance per workspace directory and reads its credential store when an
- * instance is built, so every registered workspace is reloaded through the
- * embedded server (which also re-attaches each workspace's tools); `force`
- * because a store change is invisible to the server's config fingerprint.
- */
-async function reloadEngine() {
-  await providerWorkspaceId();
-  const handle = await ensurePlatformServer();
-  const headers = { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/json" };
-  const listed = await fetchJson(`${handle.url}/workspaces`, { headers });
-  const ids = (Array.isArray(listed?.items) ? listed.items : [])
-    .map((workspace) => (typeof workspace?.id === "string" ? workspace.id : ""))
-    .filter(Boolean);
-  for (const id of ids) {
-    await fetchJson(`${handle.url}/workspace/${encodeURIComponent(id)}/engine/reload`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ force: true }),
-    }, 60_000).catch((error) => {
-      console.warn(`[open-coworker] could not reload the AI service for workspace ${id}`, error);
-    });
-  }
-}
-
-/** Poll the provider list until it agrees with `expectConnected`, since a busy engine rolls over in the background. */
-async function waitForProvider(providerId, expectConnected, { timeoutMs = 30_000, pollMs = 750 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  let last = null;
-  while (Date.now() < deadline) {
-    last = (await readConnectedProviders().catch(() => [])).find((entry) => entry.id === providerId) ?? null;
-    if ((last !== null) === expectConnected) return last ? last.modelCount : 0;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return last ? last.modelCount : 0;
-}
-
-function summarizeProvider(provider, connected) {
-  return {
-    id: String(provider.id ?? ""),
-    name: typeof provider.name === "string" && provider.name.trim() ? provider.name.trim() : String(provider.id ?? ""),
-    env: Array.isArray(provider.env) ? provider.env.filter((name) => typeof name === "string") : [],
-    source: typeof provider.source === "string" ? provider.source : "",
-    connected,
-    modelCount: provider.models && typeof provider.models === "object" ? Object.keys(provider.models).length : 0,
-  };
-}
-
-/** Every provider the engine knows, connected or not: megabytes, read only when a screen needs the whole list. */
-async function readEngineProviders() {
-  const payload = await engineRequest("GET", "/provider");
-  const connected = new Set(Array.isArray(payload?.connected) ? payload.connected : []);
-  return (Array.isArray(payload?.all) ? payload.all : []).map((provider) => summarizeProvider(provider, connected.has(provider.id)));
-}
-
-/** Only the connected providers: kilobytes, so it can be polled while a change takes effect. */
-async function readConnectedProviders() {
-  const payload = await engineRequest("GET", "/config/providers");
-  return (Array.isArray(payload?.providers) ? payload.providers : []).map((provider) => summarizeProvider(provider, true));
-}
-
-/** The engine's own sign-in methods: provider id → labels of its browser/device flows. */
-async function readEngineSignIns() {
-  const methods = await engineRequest("GET", "/provider/auth").catch(() => ({}));
-  return Object.fromEntries(
-    Object.entries(methods && typeof methods === "object" ? methods : {}).map(([providerId, list]) => [
-      providerId,
-      (Array.isArray(list) ? list : []).flatMap((method, index) => (method?.type === "oauth" ? [{ index, label: String(method.label ?? "") }] : [])),
-    ]).filter(([, list]) => list.length > 0),
-  );
-}
-
-async function connectedModelCount(providerId) {
-  const provider = (await readConnectedProviders()).find((entry) => entry.id === providerId);
-  return provider ? provider.modelCount : 0;
-}
-
-/** Store a credential in the engine's own store and bring it into effect. */
-async function storeCredential(providerId, auth) {
-  await engineRequest("PUT", `/auth/${encodeURIComponent(providerId)}`, auth);
-  await reloadEngine();
-  return waitForProvider(providerId, true);
-}
-
-async function patchRuntimeProviders(patch) {
-  const handle = await ensurePlatformServer();
+async function patchRuntimeProviders(patch, handle) {
+  handle ??= await ensurePlatformServer();
   const tokens = await loadOrCreateTokens();
+  if (serverHandle !== handle) throw new Error("The native AI service changed. Refresh before continuing.");
   return fetchJson(`${handle.url}/runtime-config/providers`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", "X-OpenWork-Host-Token": tokens.hostToken },
@@ -2129,9 +2204,10 @@ async function patchRuntimeProviders(patch) {
   }, 90_000);
 }
 
-async function readRuntimeProviderIds() {
-  const handle = await ensurePlatformServer();
+async function readRuntimeProviderIds(handle) {
+  handle ??= await ensurePlatformServer();
   const tokens = await loadOrCreateTokens();
+  if (serverHandle !== handle) throw new Error("The native AI service changed. Refresh before continuing.");
   const payload = await fetchJson(`${handle.url}/runtime-config/providers`, { headers: { "X-OpenWork-Host-Token": tokens.hostToken } });
   return Object.keys(payload?.provider && typeof payload.provider === "object" ? payload.provider : {});
 }
@@ -2140,54 +2216,56 @@ function connectedResult(providerId, label, modelCount) {
   return { status: "connected", providerId, label, modelCount };
 }
 
-function plainConnectError(error) {
-  if (error instanceof SignInImportError) return error.message;
-  if (error instanceof EngineRequestError) return error.message;
-  return error instanceof Error ? error.message : String(error);
-}
+let nativeProviderGeneration = null;
+const signInAttempts = new Set();
 
-/**
- * Connect one detected finding in one step: a Codex or Copilot sign-in goes to
- * the engine as the credential its own sign-in would have stored; a local
- * server becomes an engine provider pointed at its address.
- */
-async function connectLocalProvider(id) {
-  const { found } = await detectLocalProviders({ log: debugLog });
-  const finding = found.find((entry) => entry.id === id);
-  if (!finding) throw new Error("That is no longer on this Mac. Refresh and try again.");
-  if (finding.how === "in-use") return connectedResult(finding.providerId, finding.label, await connectedModelCount(finding.providerId));
-  if (finding.how === "unavailable") throw new Error(finding.reason);
-  try {
-    if (finding.kind === "codex") {
-      const parsed = JSON.parse(await readFile(codexAuthPath(process.env, homedir()), "utf8"));
-      const modelCount = await storeCredential("openai", codexAuthFromFile(parsed));
-      return connectedResult("openai", finding.label, modelCount);
-    }
-    if (finding.kind === "copilot") {
-      const directory = copilotConfigDir(process.env, homedir());
-      const files = await Promise.all(["apps.json", "hosts.json"].map((file) => readFile(path.join(directory, file), "utf8").then(JSON.parse).catch(() => null)));
-      const parsed = files.find((file) => file && copilotSignedIn(file));
-      const modelCount = await storeCredential("github-copilot", copilotAuthFromFile(parsed));
-      return connectedResult("github-copilot", finding.label, modelCount);
-    }
-    if (finding.kind === "server") {
-      await patchRuntimeProviders(localServerProviderPatch(finding));
-      return connectedResult(finding.providerId, finding.label, await waitForProvider(finding.providerId, true));
-    }
-  } catch (error) {
-    if (error instanceof SignInImportError) {
-      return { status: "failed", providerId: finding.providerId, label: finding.label, error: expiredSignInMessage(finding), fallback: "sign-in" };
-    }
-    throw new Error(plainConnectError(error));
+async function nativeProviderContext() {
+  const handle = await ensurePlatformServer();
+  if (nativeProviderGeneration?.handle !== handle) {
+    const generation = { handle, pending: null };
+    nativeProviderGeneration = generation;
+    generation.pending = (async () => {
+      // A hidden, stable workspace keeps OAuth attempts scoped when teammates
+      // are added or retired. Model routing still reads each actual workspace.
+      const workspaceId = (await ensureCoordinatorWorkspace()).workspaceId;
+      const tokens = await loadOrCreateTokens();
+      const assertCurrent = () => {
+        if (serverHandle !== handle || nativeProviderGeneration !== generation || !handle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service changed. Refresh before continuing.");
+      };
+      const native = createNativeV2Client({ baseUrl: handle.url, workspaceId, token: ownerToken });
+      const envRequest = async (method, route, body) => {
+        assertCurrent();
+        await fetchJson(`${handle.url}${route}`, {
+          method, headers: { "Content-Type": "application/json", "X-OpenWork-Host-Token": tokens.hostToken },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        assertCurrent();
+      };
+      assertCurrent();
+      const providers = createNativeProviders({
+        engineRequest: (method, route, body, options) => { assertCurrent(); return nativeWorkspaceRequest(handle, workspaceId, method, route, body, options); },
+        readCatalog: async () => { assertCurrent(); const catalog = await native.readCatalog(); assertCurrent(); return catalog; },
+        patchRuntimeProviders: async (patch) => { assertCurrent(); const result = await patchRuntimeProviders(patch, handle); assertCurrent(); return result; },
+        readRuntimeProviderIds: async () => { assertCurrent(); const result = await readRuntimeProviderIds(handle); assertCurrent(); return result; },
+        storeCustomKey: (name, key) => envRequest("PUT", "/env", { entries: [{ key: name, value: key }] }),
+        removeCustomKey: (name) => envRequest("DELETE", `/env/${encodeURIComponent(name)}`),
+      });
+      return { workspaceId, providers };
+    })().catch((error) => {
+      if (nativeProviderGeneration === generation) nativeProviderGeneration = null;
+      throw error;
+    });
   }
-  throw new Error("This cannot be connected here.");
+  return nativeProviderGeneration.pending;
 }
 
-function expiredSignInMessage(finding) {
-  if (finding.kind === "codex") return "Codex's sign-in has expired — sign in again in Codex, then Connect.";
-  if (finding.kind === "copilot") return "Copilot's sign-in has expired — sign in again in your editor, then Connect.";
-  return "This sign-in has expired.";
-}
+const nativeProviders = async () => (await nativeProviderContext()).providers;
+const readEngineProviders = async () => (await nativeProviders()).readEngineProviders();
+const readConnectedProviders = async () => (await nativeProviders()).readConnectedProviders();
+const readEngineSignIns = async () => (await nativeProviders()).readEngineSignIns();
+const connectLocalProvider = async (id) => (await nativeProviders()).connectLocalProvider(id);
+const addCustomProvider = async (input) => (await nativeProviders()).addCustomProvider(input);
+const disconnectProvider = async (providerId, confirmed) => (await nativeProviders()).disconnect(providerId, confirmed);
 
 /** A key the person typed goes straight to the engine's store; nothing here keeps it. */
 async function saveProviderKey(providerId, key) {
@@ -2197,130 +2275,29 @@ async function saveProviderKey(providerId, key) {
   if (!trimmedKey) throw new Error("Paste the key first.");
   const provider = (await readEngineProviders()).find((entry) => entry.id === trimmedId);
   if (!provider) throw new Error("That provider is not offered here.");
-  const modelCount = await storeCredential(trimmedId, { type: "api", key: trimmedKey });
+  const modelCount = await (await nativeProviders()).storeCredential(trimmedId, trimmedKey);
   return connectedResult(trimmedId, provider.name, modelCount);
 }
 
-/** Sign-in attempts in flight: the engine waits on the browser or device flow while the renderer polls here. */
-const signInAttempts = new Map();
-const SIGN_IN_WAIT_MS = 15 * 60_000;
-
-function codeFromInstructions(instructions) {
-  const match = /code:?\s*([A-Z0-9][A-Z0-9-]{3,})/i.exec(String(instructions ?? ""));
-  return match ? match[1] : "";
-}
-
-function plainSignInError(error) {
-  const message = plainConnectError(error);
-  if (/ProviderAuthOauthCallbackFailed|callback failed/i.test(message)) return "The sign-in did not finish. Try again.";
-  if (/timed out|TimeoutError|aborted/i.test(message)) return "The sign-in took too long. Try again.";
-  return message;
-}
-
-/** Start the engine's own sign-in for a provider and wait for it in the background. */
+/** The native engine owns the OAuth attempt; status and cancellation are awaited. */
 async function startProviderSignIn(providerId, methodIndex) {
-  const trimmedId = String(providerId ?? "").trim();
-  const signIns = await readEngineSignIns();
-  const methods = signIns[trimmedId] ?? [];
-  const chosen = methods.find((method) => method.index === methodIndex) ?? methods[0];
-  if (!chosen) throw new Error("This provider has no sign-in here. Add a key instead.");
-  const inputs = trimmedId === "github-copilot" ? { deploymentType: "github.com" } : {};
-  const authorization = await engineRequest("POST", `/provider/${encodeURIComponent(trimmedId)}/oauth/authorize`, { method: chosen.index, inputs });
-  const attemptId = `sia_${randomBytes(6).toString("hex")}`;
-  const controller = new AbortController();
-  const attempt = { id: attemptId, providerId: trimmedId, state: "waiting", error: "", modelCount: 0, controller };
-  signInAttempts.set(attemptId, attempt);
-  void maintenanceAdmission.run(() => engineRequest("POST", `/provider/${encodeURIComponent(trimmedId)}/oauth/callback`, { method: chosen.index }, {
-    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(SIGN_IN_WAIT_MS)]),
-  }).then(async () => {
-    await reloadEngine();
-    attempt.modelCount = await waitForProvider(trimmedId, true);
-    attempt.state = attempt.modelCount > 0 ? "connected" : "failed";
-    attempt.error = attempt.modelCount > 0 ? "" : "The sign-in finished, but no models became available.";
-  })).catch((error) => {
-    if (controller.signal.aborted) return;
-    attempt.state = "failed";
-    attempt.error = plainSignInError(error);
-  });
-  return {
-    attemptId,
-    providerId: trimmedId,
-    url: typeof authorization?.url === "string" ? authorization.url : "",
-    code: codeFromInstructions(authorization?.instructions),
-    instructions: typeof authorization?.instructions === "string" ? authorization.instructions : "",
-    label: chosen.label,
-  };
+  const attempt = await (await nativeProviders()).startSignIn(String(providerId ?? "").trim(), methodIndex);
+  signInAttempts.add(attempt.attemptId);
+  return attempt;
 }
 
-function signInStatus(attemptId) {
-  const attempt = signInAttempts.get(String(attemptId ?? ""));
-  if (!attempt) return { state: "failed", error: "This sign-in is no longer running.", modelCount: 0 };
-  return { state: attempt.state, error: attempt.error, modelCount: attempt.modelCount };
+async function signInStatus(attemptId) {
+  const id = String(attemptId ?? "");
+  const result = await (await nativeProviders()).status(id);
+  if (result.state !== "waiting") signInAttempts.delete(id);
+  return result;
 }
 
-function cancelSignIn(attemptId) {
-  const attempt = signInAttempts.get(String(attemptId ?? ""));
-  if (!attempt) return { ok: true };
-  attempt.controller.abort();
-  attempt.state = "failed";
-  attempt.error = "Cancelled.";
-  signInAttempts.delete(attempt.id);
-  return { ok: true };
-}
-
-/** Add a server the person typed in: validated by listing its models first, then saved as an engine provider. */
-async function addCustomProvider({ name, address, key, models }) {
-  const label = String(name ?? "").trim();
-  if (!label) throw new Error("Give the server a name.");
-  const listed = await listOpenAiCompatibleModels(address, key);
-  const wanted = Array.isArray(models) ? models.filter((model) => listed.models.includes(model)) : [];
-  const chosen = wanted.length > 0 ? wanted : listed.models;
-  const providerId = customProviderId(label);
-  const trimmedKey = String(key ?? "").trim();
-  if (trimmedKey) await engineRequest("PUT", `/auth/${encodeURIComponent(providerId)}`, { type: "api", key: trimmedKey });
-  await patchRuntimeProviders({ [providerId]: openAiCompatibleProviderConfig({ name: label, address: listed.address, models: chosen }) });
-  return connectedResult(providerId, label, await waitForProvider(providerId, true));
-}
-
-/**
- * Remove what connects a provider on this Mac. A credential in the engine's
- * store is shared with OpenWork Desktop and OpenCode, so the first call only
- * says so; the renderer asks and calls again with `confirmed`.
- */
-async function disconnectProvider(providerId, confirmed) {
-  const trimmedId = String(providerId ?? "").trim();
-  const provider = (await readConnectedProviders()).find((entry) => entry.id === trimmedId);
-  if (!provider) throw new Error("That provider is not connected here.");
-  const runtimeIds = await readRuntimeProviderIds().catch(() => []);
-  const addedHere = runtimeIds.includes(trimmedId);
-  if (provider.source === "env" && !addedHere) {
-    const envName = provider.env[0] ?? "an environment variable";
-    return { removed: false, needsConfirmation: false, note: `This comes from ${envName} in your environment. Remove it there, then restart Open Coworker.` };
-  }
-  // A well-known provider's credential (a key reads as `api`, a sign-in as `custom`) lives in the
-  // store every OpenCode-based app on this Mac reads.
-  const sharedCredential = !addedHere && provider.source !== "env" && provider.source !== "config";
-  if (sharedCredential && !confirmed) {
-    return {
-      removed: false,
-      needsConfirmation: true,
-      note: `This also signs OpenWork Desktop and OpenCode out of ${provider.name} on this Mac.`,
-    };
-  }
-  await engineRequest("DELETE", `/auth/${encodeURIComponent(trimmedId)}`).catch((error) => {
-    if (!(error instanceof EngineRequestError && error.status === 404)) throw error;
-  });
-  if (addedHere) {
-    await patchRuntimeProviders({ [trimmedId]: null });
-  } else {
-    await reloadEngine();
-  }
-  await waitForProvider(trimmedId, false);
-  return { removed: true, needsConfirmation: false, note: "" };
-}
-
-function debugLog(line) {
-  if (isDev) console.debug(`[open-coworker] ${line}`);
+async function cancelSignIn(attemptId) {
+  const id = String(attemptId ?? "");
+  const result = await (await nativeProviders()).cancel(id);
+  signInAttempts.delete(id);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -2390,20 +2367,13 @@ const TRACKED_MEMORY_FILES = /^(soul\.md|memory\/(working|index)\.md|memory\/lon
  */
 async function addCoworker(input) {
   await ensurePlatformServer();
-  const hadEngine = Boolean(serverHandle?.managedOpencode);
   const coworker = await createCoworker(coworkersDir, input);
-  // Registration is registry-level and works without an engine. Do it
-  // first, then restart when no engine was managed yet: the engine only
-  // spawns when the registry holds at least one workspace, so the restart
-  // must happen after this workspace is persisted.
+  // The mandatory native engine already runs, including for an empty team.
   const workspaceId = await registerCoworkerWorkspace(coworker);
   const updated = await updateCoworker(coworkersDir, coworker.slug, {
     workspaceId,
     ...(input.model ? { model: input.model, modelVariant: input.modelVariant ?? "", modelChosenBy: input.modelChosenBy ?? "person" } : {}),
   });
-  if (!hadEngine) {
-    await restartPlatformServer();
-  }
   await warmCoworkerWorkspace(updated);
   prepareCoworker(updated);
   return updated;
@@ -2416,6 +2386,7 @@ function shortDate(at) {
 const installTemplates = createTemplateInstaller(coworkersDir, addCoworker);
 
 const commands = {
+  "reactions:read": (scope) => messageReactions.read(scope),
   "activity.list": () => activityInbox.list(),
   "activity.markRead": ({ ids, read = true }) => activityInbox.markRead(ids, read),
   "browser.bind": (input) => browserControl.bind(input),
@@ -2439,9 +2410,26 @@ const commands = {
   "turns.state": async ({ slug, threadId }) => { await getCoworker(coworkersDir, slug); return collaboration.threadState(slug, threadId); },
   "turns.activity": async ({ slug, threadId }) => readCollaborationActivity({ slug, threadId }),
   "turns.update": async ({ slug, threadId, previous, next }) => { const coworker = await getCoworker(coworkersDir, slug); return collaboration.updateThread(slug, threadId, previous, next, { coworkerCreatedAt: coworker.createdAt }); },
-  "turns.send": async ({ slug, threadId, prompt, messageId, model, retry, retryByPerson, retryLabel, kind }) => {
+  "turns.selectSkill": async ({ slug, uri, label, account }) => {
+    if (typeof uri !== "string" || !uri.startsWith("skill://")) throw new Error("Select a skill from Apps & tools.");
+    const session = denSession;
+    const identity = await currentSkillAccount(session);
+    if (account?.baseUrl?.replace(/\/+$/, "") !== identity.scope.baseUrl || account?.orgId !== identity.scope.orgId || typeof account?.email !== "string" || account.email.trim().toLowerCase() !== identity.email?.trim().toLowerCase()) throw new Error("The OpenWork account changed. Refresh Apps & tools and select the skill again.");
+    const coworker = await getCoworker(coworkersDir, slug);
+    const handle = await ensurePlatformServer();
+    const catalog = await createCoworkerThreads({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).listSkills(AbortSignal.timeout(30_000));
+    assertSkillSession(session);
+    return selectCatalogSkill(catalog, { uri, label }, coworker.workspaceId, identity.scope);
+  },
+  "turns.validateSkills": async ({ slug, ...fields }) => {
+    if (!fields.skills?.length && !fields.skillSelections?.length) { nativeV2SkillsSchema.parse(fields.skills ?? []); return; }
+    const coworker = await getCoworker(coworkersDir, slug);
+    const handle = await ensurePlatformServer();
+    await skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).validateSkills(fields, AbortSignal.timeout(30_000));
+  },
+  "turns.send": async ({ slug, threadId, prompt, messageId, skills, skillSelections, model, retry, retryByPerson, retryLabel, kind }) => {
     const owner = await privateOwner(slug, threadId, kind === "assignment" ? "assignment" : "private");
-    const entry = await collaboration.submit({ owner, prompt, messageId, model, retry, retryByPerson: retryByPerson === true, retryLabel, track: true });
+    const entry = await collaboration.submit({ owner, prompt, messageId, skills, skillSelections, model, retry, retryByPerson: retryByPerson === true, retryLabel, track: true });
     return { ...await collaboration.acceptance(entry.id), prompt: entry.prompt };
   },
   "turns.cancel": async ({ slug, threadId, messageId }) => {
@@ -2472,7 +2460,8 @@ const commands = {
     return { saved: true };
   },
   "runtime.info": async () => {
-    await ensurePlatformServer();
+    try { await ensurePlatformServer(); }
+    catch (error) { engineError = error instanceof Error ? error.message : "The native AI service is unavailable."; }
     return runtimeInfo();
   },
   "runtime.restart": async () => {
@@ -2525,23 +2514,38 @@ const commands = {
     await refreshTeamRosters(coworkersDir, await listCoworkers(coworkersDir));
     return { id: declined.id, state: declined.state, at: declined.stateAt };
   },
-  "team.referralResolved": async ({ slug, referralId, outcome }) => {
-    const resolved = await setReferralState(coworkersDir, slug, referralId, outcome);
-    return { id: resolved.id, state: resolved.state, at: resolved.stateAt };
-  },
+  "team.referralResolved": (() => {
+    const pending = new Map();
+    return async ({ slug, referralId, outcome, expectedAt }) => {
+      if (typeof slug !== "string" || !slug || typeof referralId !== "string" || !referralId) throw new Error("Choose the coworker and referral to resolve.");
+      if (!["asked", "continued", "offered"].includes(outcome)) throw new Error("Unknown referral outcome.");
+      if (outcome === "offered" ? !Number.isSafeInteger(expectedAt) || expectedAt < 0 : expectedAt !== undefined) throw new Error("Restoring an offer requires its exact asked receipt.");
+      const key = JSON.stringify([slug, referralId]);
+      const operation = (pending.get(key) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+        const current = (await teamStates(coworkersDir, slug)).referrals.find((entry) => entry.id === referralId);
+        if (!current) throw new Error("That hand-over is not on record.");
+        if (outcome === "offered" && (current.state !== "asked" || current.at !== expectedAt)) throw new Error("REFERRAL_CONFLICT: This referral has a newer answer. Its current state was kept.");
+        if (!Number.isSafeInteger(current.at) || current.at < 0 || current.at === Number.MAX_SAFE_INTEGER) throw new Error("This referral's state receipt is unreadable. Its current state was kept.");
+        const now = Math.max(Date.now(), current.at + 1);
+        const resolved = await setReferralState(coworkersDir, slug, referralId, outcome, { now });
+        return { id: resolved.id, state: resolved.state, at: resolved.stateAt };
+      });
+      pending.set(key, operation);
+      try { return await operation; }
+      finally { if (pending.get(key) === operation) pending.delete(key); }
+    };
+  })(),
   "coworkers.ensureWorkspace": async ({ slug }) => {
     await ensurePlatformServer();
     const coworker = await getCoworker(coworkersDir, slug);
     if (coworker.workspaceId) {
-      if (!serverHandle?.managedOpencode) await restartPlatformServer();
+      await warmCoworkerWorkspace(coworker);
       prepareCoworker(coworker);
       return coworker;
     }
     const workspaceId = await registerCoworkerWorkspace(coworker);
     const updated = await updateCoworker(coworkersDir, slug, { workspaceId });
-    if (!serverHandle?.managedOpencode) {
-      await restartPlatformServer();
-    }
+    await warmCoworkerWorkspace(updated);
     prepareCoworker(updated);
     return updated;
   },
@@ -2604,10 +2608,9 @@ const commands = {
     // same workspace id from that path, so registration is idempotent.
     const restored = await restoreCoworker(coworkersDir, archiveId);
     await ensurePlatformServer();
-    const hadEngine = Boolean(serverHandle?.managedOpencode);
     const workspaceId = await registerCoworkerWorkspace(restored);
     const updated = await updateCoworker(coworkersDir, restored.slug, { workspaceId });
-    if (!hadEngine) await restartPlatformServer();
+    await warmCoworkerWorkspace(updated);
     prepareCoworker(updated);
     return updated;
   },
@@ -2652,11 +2655,9 @@ const commands = {
   // engine's own sign-ins, keys, custom servers, and disconnect. Secrets go
   // from their source to the engine over loopback and are never returned.
   "localProviders.prepare": async () => {
-    const workspaceId = await providerWorkspaceId();
+    const { workspaceId } = await nativeProviderContext();
     const handle = await ensurePlatformServer();
-    const engineManaged = Boolean(handle.managedOpencode);
-    // Registering the first workspace restarts the platform, which may move it to another port:
-    // the renderer reads the live address from here rather than from an earlier runtime.info.
+    const engineManaged = Boolean(handle.managedOpencodeV2?.isAlive());
     const base = { workspaceId, engineManaged, serverUrl: handle.url, ownerToken };
     if (!engineManaged) return { ...base, providers: [], signIns: {} };
     // The first read is also the hidden workspace's cold start. Finish it
@@ -2666,13 +2667,13 @@ const commands = {
     const signIns = await readEngineSignIns();
     return { ...base, providers, signIns };
   },
-  "localProviders.detect": async () => detectLocalProviders({ log: debugLog }),
+  "localProviders.detect": async () => detectLocalProviders({ providers: await readConnectedProviders() }),
   "localProviders.connect": async ({ id }) => connectLocalProvider(String(id ?? "")),
   "localProviders.saveKey": async ({ providerId, key }) => saveProviderKey(providerId, key),
   "localProviders.disconnect": async ({ providerId, confirmed }) => disconnectProvider(providerId, confirmed === true),
   "localProviders.signIn.start": async ({ providerId, method }) => startProviderSignIn(providerId, Number.isInteger(method) ? method : undefined),
-  "localProviders.signIn.status": async ({ attemptId }) => signInStatus(attemptId),
-  "localProviders.signIn.cancel": async ({ attemptId }) => cancelSignIn(attemptId),
+  "localProviders.signIn.status": async ({ attemptId }) => await signInStatus(attemptId),
+  "localProviders.signIn.cancel": async ({ attemptId }) => await cancelSignIn(attemptId),
   "localProviders.custom.probe": async ({ address, key }) => listOpenAiCompatibleModels(address, key),
   "localProviders.custom.add": async ({ name, address, key, models }) => addCustomProvider({ name, address, key, models }),
   "coworkers.files.list": async ({ slug }) => listMemoryFiles(coworkersDir, slug),
@@ -2773,8 +2774,8 @@ const commands = {
   // steers, pauses, and stops them here; the coworker does the same through its tools.
   "workers.list": async ({ slug }) => (await listWorkers(coworkersDir, slug)).map((worker) => workerControls.summary(worker)),
   "workers.get": async ({ slug, id }) => workerControls.summary(await getWorker(coworkersDir, slug, id)),
-  "workers.spawn": async ({ slug, name, goal, purpose, lifespan, spawnedFromThreadId, control }) =>
-    spawnWorker(slug, { name, goal, purpose, lifespan, spawnedFromThreadId, control }, "person"),
+  "workers.spawn": async ({ slug, name, goal, purpose, lifespan, spawnedFromThreadId, control, skills, skillSelections }) =>
+    spawnWorker(slug, { name, goal, purpose, lifespan, spawnedFromThreadId, control, skills, skillSelections }, "person"),
   "workers.approveControl": async ({ slug, id, expectedRevision }) => {
     const updated = await workerControls.approve(await getWorker(coworkersDir, slug, id), expectedRevision);
     void admitWorkerTurn(slug, id);
@@ -2872,11 +2873,14 @@ function maintenanceScope() {
       devUserData: path.join(app.getPath("appData"), "com.differentai.opencoworker.dev"),
       coworkers: defaultCoworkersDir(), serverConfig: path.join(openworkConfigDir(), "coworker-server.json"),
     },
+    // Legacy paths are reset exclusions only, never native engine launch inputs.
     protectedPaths: [home, app.getPath("appData"), openworkConfigDir(), app.getAppPath(), process.execPath,
       path.join(app.getPath("appData"), "com.differentai.opencoworker.dev"),
       path.join(app.getPath("appData"), "com.differentai.openwork"),
       path.join(app.getPath("appData"), "com.differentai.openwork.dev"),
       path.join(data, "opencode"), path.join(home, ".config", "opencode"), globalOpencodeConfigDir(),
+      path.join(home, ".local", "share", "opencode"),
+      ...(process.env.OPENCODE_DB && process.env.OPENCODE_DB !== ":memory:" ? [path.resolve(process.env.OPENCODE_DB)] : []),
       ...(process.env.OPENCODE_CONFIG_DIR ? [path.resolve(process.env.OPENCODE_CONFIG_DIR)] : [])],
     allowedParents: [home, app.getPath("appData"), openworkConfigDir()],
   };
@@ -2901,7 +2905,10 @@ async function stopForMaintenance() {
   progressSummaries.stop();
   await conversationMemory.stop();
   voice.reset();
-  for (const attempt of signInAttempts.values()) attempt.controller.abort();
+  if (nativeProviderGeneration) {
+    const { providers } = await nativeProviderGeneration.pending;
+    for (const id of signInAttempts) { await providers.cancel(id); signInAttempts.delete(id); }
+  }
   responsibilityAbort.abort(new Error("Fresh start is stopping local work."));
   queuedLocalRuns.length = 0;
   for (const run of liveWorkerTurns.values()) run.controller.abort(new Error("Fresh start is stopping Workers."));
@@ -2916,12 +2923,13 @@ async function stopForMaintenance() {
   await withAbort(draining, AbortSignal.timeout(30_000));
   await maintenanceAdmission.drain();
   if (startingServer || startingToolsServer || activeLocalRuns.size || responsibilityCleanupError || [...liveWorkerTurns.values()].some((run) => run.cleanupError)) throw new Error("Local execution cleanup is unconfirmed. No reset was performed.");
-  if (!serverHandle?.managedOpencode) throw new Error("The managed AI service's ownership could not be confirmed. Restart it before Fresh start.");
+  if (!serverHandle?.managedOpencodeV2) throw new Error("The managed AI service's ownership could not be confirmed. Restart it before Fresh start.");
   if (toolsServer) await withAbort(toolsServer.stop(), AbortSignal.timeout(10_000));
   toolsServer = null;
   const previous = serverHandle;
-  await withAbort(previous.stop(), AbortSignal.timeout(30_000));
-  if (previous.managedOpencode.isAlive()) throw new Error("The AI service is still running. No reset was performed.");
+  try { await withAbort(previous.stop(), AbortSignal.timeout(30_000)); }
+  catch { throw new Error("The native AI service could not confirm shutdown. No reset was performed."); }
+  if (previous.managedOpencodeV2.isAlive()) throw new Error("The AI service is still running. No reset was performed.");
   serverHandle = null;
   ownerToken = "";
   denSession = null;
@@ -3178,9 +3186,11 @@ if (!singleInstanceLock) {
       progressSummaries.start();
       conversationMemory.start();
       // Ordinary initialization, never triggered by a progress note or activity read.
-      void maintenanceAdmission.run(ensureCoordinatorWorkspace).catch(() => {});
+      void maintenanceAdmission.run(ensureCoordinatorWorkspace).catch(() => {
+        console.warn("[open-coworker] native coordinator plugins are not ready; background inference is unavailable");
+      });
     }).catch((error) => {
-      engineError = error instanceof Error ? error.message : String(error);
+      engineError ||= "The native AI service could not finish preparing local work. Restart it before continuing.";
     });
     startLocalResponsibilitiesScheduler();
     await focusMainWindow();
@@ -3228,7 +3238,12 @@ if (!singleInstanceLock) {
       await collaboration.stop();
       if (toolsServer) await toolsServer.stop().catch(() => undefined);
       toolsServer = null;
-      if (serverHandle) await serverHandle.stop().catch(() => undefined);
+      if (serverHandle) {
+        try {
+          await serverHandle.stop();
+          if (serverHandle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service is still running.");
+        } catch { throw new Error("The native AI service could not confirm shutdown. Keep Open Coworker open and try quitting again."); }
+      }
       serverHandle = null;
       quitReady = true;
       app.quit();

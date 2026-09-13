@@ -1,14 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { isRunning, toTranscript } from "@openwork/headless-threads";
+import { isDeepStrictEqual } from "node:util";
+import { isRunning, toTranscript } from "@openwork/headless-threads/v2";
 import { hasPendingInteractions, stalledRetry } from "../src/lib/threads.ts";
 import { assertComputerToolContext, COMPUTER_DENY, COMPUTER_STOP_GUIDANCE } from "./computer-control.mjs";
+import { nativeTurnAgent, NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
+import { dispatchNativeTurn, drainNativeTurnContext, nativeTurnReceipt, verifyNativeTurnSkills } from "./native-recovery.mjs";
+import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { sameSkillFields, skillSelectionsSchema } from "../src/lib/skill-selection.ts";
 import { completedThinkingBrief, workerPurpose } from "./workers.mjs";
 import { groupReplyEvent } from "./groups.mjs";
 import { assertControlOrigin, workerControlRequest } from "./worker-controls.mjs";
 import { activityReadIds, recordActivity } from "./activity-inbox.mjs";
+import { hasCompletedReaction } from "./message-reactions-context.mjs";
+import { isNothingToAdd, NOTHING_TO_ADD } from "../src/lib/groups.ts";
 import { ALL_HANDS_BRIEF, assertEventReplyBudget, eventRunFor, reserveEventReply, EVENT_CONTEXT_LIMIT, EVENT_WRITE_DENY, EVENT_SCHEDULE_DENY, isEventDeactivation } from "./event-execution.mjs";
+
+function skillFields(input) {
+  return { ...(input.skills !== undefined ? { skills: nativeV2SkillsSchema.parse(input.skills) } : {}), ...(input.skillSelections !== undefined ? { skillSelections: skillSelectionsSchema.parse(input.skillSelections) } : {}) };
+}
 
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
 const text = (value, max = 4000) => typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -31,6 +42,27 @@ export async function withAbort(promise, signal) {
   try { return await Promise.race([promise, interrupted]); } finally { signal.removeEventListener("abort", abort); }
 }
 const emptyTurns = () => ({ pending: null, next: [] });
+// Old retries cleared sentAt/acceptance before dispatch. Without a phase, any
+// retry history is uncertainty, never evidence that this is a fresh input.
+const nativeAdmissionPhase = (entry, present) => present ? "attempted" : entry.nativeAdmission
+  ?? (entry.sentAt || entry.acceptance || entry.retry || entry.attempts > 0 || entry.previousAttempts?.length ? "attempted" : "prepared");
+
+/** A sibling native tool's witness never authorizes starting a consultation. */
+export function assertTeamConsultToolContext({ slug, context, name, args, entry, snapshot, workspaceId, active }) {
+  const message = snapshot.messages.find((item) => item.id === context.messageID && item.role === "assistant");
+  const part = message?.parts.find((item) => item.type === "tool" && item.callId === context.callID);
+  if (!active || name !== "coworker_team_consult" || entry?.state !== "running" || !entry.sentAt
+    || !["private", "group", "consultation", "assignment"].includes(entry.owner?.kind)
+    || entry.owner.slug !== slug || entry.owner.threadId !== context.sessionID
+    || !workspaceId || entry.workspaceId !== workspaceId || snapshot.threadId !== context.sessionID
+    || !context.directory || !snapshot.directory || path.resolve(context.directory) !== path.resolve(snapshot.directory)
+    || entry.tools?.coworker_team_consult === false
+    || !snapshot.messages.some((item) => item.id === entry.messageId && item.role === "user")
+    || message?.parentId !== entry.messageId || message.completedAt != null || message.error
+    || part?.tool !== name || part.toolStatus !== "running" || !isDeepStrictEqual(part.toolInput, args)) {
+    throw new Error("A consultation requires its exact running native tool call and original arguments.");
+  }
+}
 
 export function continuationPrompt(task, results = [], introduction = "Continue the original task using these requested results. This is an automatic follow-up, not a new request from the person.") {
   return [introduction, `Objective: ${text(task.objective)}`, `References: ${task.refs.slice(0, 8).map((ref) => text(ref, 300)).join("; ") || "this native conversation"}`,
@@ -43,7 +75,7 @@ export function continuationPrompt(task, results = [], introduction = "Continue 
 
 /** One commit contains the dependency outcome AND the obligation to continue.
  * Native messages remain in OpenCode; this file never stores reasoning or tool payloads. */
-export function createCollaboration({ directory, clientFor, consult, spawn, cancelWorker, validateOwner = async () => {}, invalidateWorker = () => {}, onExecutionEnd = async () => {}, onSuccess = async () => {}, memoryContext = async () => "", executionContext = async () => "", publish = async () => {}, publishExecution = async () => {}, now = Date.now, stepTimeoutMs = 15 * 60_000, dependencyTimeoutMs = 60 * 60_000, personTimeoutMs = 60 * 60_000, pollMs = 750, setupTimeoutMs = 30_000, acceptanceTimeoutMs = 60_000, maxActiveExecutions = 4 }) {
+export function createCollaboration({ directory, clientFor, consult, spawn, selectWorkerSkills = async (_slug, input) => { if (input.skills?.length) throw new Error("Worker skill selection is unavailable."); return skillFields(input); }, cancelWorker, validateOwner = async () => {}, invalidateWorker = () => {}, onExecutionEnd = async () => {}, onSuccess = async () => {}, memoryContext = async () => "", executionContext = async () => "", reactionContext = async () => null, publish = async () => {}, publishExecution = async () => {}, now = Date.now, stepTimeoutMs = 15 * 60_000, dependencyTimeoutMs = 60 * 60_000, personTimeoutMs = 60 * 60_000, pollMs = 750, setupTimeoutMs = 30_000, acceptanceTimeoutMs = 60_000, maxActiveExecutions = 4 }) {
   if (!Number.isInteger(maxActiveExecutions) || maxActiveExecutions < 1 || maxActiveExecutions > 16) throw new Error("The collaboration execution limit must be between 1 and 16.");
   for (const value of [stepTimeoutMs, dependencyTimeoutMs, personTimeoutMs, pollMs, setupTimeoutMs, acceptanceTimeoutMs]) if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new Error("Collaboration time limits must be finite positive milliseconds.");
   const file = path.join(directory, ".collaboration", "state.json");
@@ -166,6 +198,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
     const id = input.id ?? collaborationId(input.owner.slug, input.owner.threadId, input.messageId);
     if (state.executions[id]) {
       const entry = state.executions[id];
+      if (!sameSkillFields(entry, input)) throw new Error("This message ID already records different skill selections. Earlier work will not be replayed.");
       if (input.groupReply && !entry.groupReply) {
         entry.groupReply = { name: input.groupReply.name, published: false };
       }
@@ -180,13 +213,18 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
     if (event) entry.timeoutMs = Math.min(entry.timeoutMs, Math.max(1, event.deadlineAt - at));
     if (event?.event.template === "all-hands" && (input.continuation || owner.kind === "consultation")) entry.prompt = `${ALL_HANDS_BRIEF}\n\n${entry.prompt}`;
     entry.personRequest = input.track === true || input.personRequest === true;
+    Object.assign(entry, skillFields(input));
     entry.generatedMessageId = !input.messageId;
     if (typeof input.requestText === "string") entry.requestText = input.requestText;
     else if (owner.kind === "private" && entry.personRequest && !entry.continuation) entry.requestText = entry.prompt;
     if (input.groupReply) entry.groupReply = { name: input.groupReply.name, published: false };
+    if (Array.isArray(input.reactionTargetIds)) entry.reactionTargetIds = [...new Set(input.reactionTargetIds.filter((id) => typeof id === "string" && id.length <= 256))].slice(-24);
+    if (typeof input.reactionDefaultId === "string") entry.reactionDefaultId = input.reactionDefaultId;
+    if (!["private", "group", "consultation"].includes(owner.kind)) entry.tools = { ...entry.tools, coworker_react: false };
     if (owner.kind !== "private" || !entry.personRequest || entry.continuation) entry.tools = { ...entry.tools, ...COMPUTER_DENY };
     if (!entry.personRequest || entry.continuation || !["private", "group"].includes(owner.kind)) entry.tools = { ...entry.tools, ...EVENT_WRITE_DENY };
     if (event) entry.tools = { ...entry.tools, ...EVENT_SCHEDULE_DENY };
+    entry.agent = nativeTurnAgent({ tools: entry.tools, agent: input.agent ?? (owner.kind === "coordinator" ? NATIVE_COORDINATOR_AGENT : "build") });
     state.executions[id] = entry;
     state.tasks[entry.taskId] ??= { id: entry.taskId, owner, coworkerCreatedAt: input.owner.coworkerCreatedAt ?? null, state: "running", executionId: id, dependencies: [], parentId: null, depth: 0, lineage: [owner.slug], objective: text(input.prompt), refs: [], completedActions: [], resumeInstructions: "Use the requested results to finish the original task. Do not repeat completed actions.", continuationId: null, generation: 0, createdAt: at, deadline: at + dependencyTimeoutMs, error: "" };
     const task = state.tasks[entry.taskId];
@@ -206,7 +244,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
     const id = collaborationId(task.id, "continuation", task.generation);
     const prompt = continuationPrompt(task, children);
     try {
-      execution(state, { id, owner: task.owner, prompt, requestText: state.executions[task.executionId]?.requestText, taskId: task.id, continuation: true, priority: 1 });
+      execution(state, { id, owner: task.owner, prompt, requestText: state.executions[task.executionId]?.requestText, reactionTargetIds: state.executions[task.executionId]?.reactionTargetIds, reactionDefaultId: state.executions[task.executionId]?.reactionDefaultId, taskId: task.id, continuation: true, priority: 1 });
     } catch (error) {
       if (!task.owner.eventRunId) throw error;
       task.state = "failed"; task.error = error.message;
@@ -252,6 +290,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
   }
   function confirmNativeStop(entry, running, snapshot) {
     if (nativeStops.has(entry.id)) return nativeStops.get(entry.id);
+    if (entry.nativeStoppedAt && !entry.cleanupPending) return Promise.resolve();
     const stopping = (async () => {
       await change((state) => { state.executions[entry.id].cleanupPending = true; });
       const signal = AbortSignal.timeout(setupTimeoutMs);
@@ -260,15 +299,18 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
         (async () => {
           const client = running?.client ?? await withAbort(track(clientFor(entry.owner.slug, { model: entry.model, observationOnly: true, signal })), signal);
           if (entry.workspaceId && entry.workspaceId !== client.workspaceId) throw new Error("The original native workspace is unavailable; its stop was not confirmed.");
+          if (entry.coworkerCreatedAt && entry.coworkerCreatedAt !== client.coworkerCreatedAt) throw new Error("The original coworker is unavailable; its stop was not confirmed.");
           let observed = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal }), signal);
           if (observed.threadId !== entry.owner.threadId) throw new Error("Native stop returned another thread.");
-          if (running?.nativeAdmission || observed.status.type !== "idle") {
-            if (!running?.nativeAdmission && !observed.messages.some((message) => message.id === entry.messageId && message.role === "user")) throw new Error("The running native thread no longer contains this admission; no unrelated work was stopped.");
+          if (running?.nativeAdmission || observed.status.type !== "idle" || observed.native?.pendingInputIds?.includes(entry.messageId)) {
+            const present = observed.native?.engine === "v2" ? nativeTurnReceipt(observed, entry.messageId).present : observed.messages.some((message) => message.id === entry.messageId && message.role === "user");
+            if (!running?.nativeAdmission && !present) throw new Error("The running native thread no longer contains this admission; no unrelated work was stopped.");
             const result = await withAbort(track(client.abortThread(entry.owner.threadId, { signal })), signal);
             if (result?.accepted !== true) throw new Error("Native cancellation was not accepted.");
             // A late send acknowledgement must settle before idle is a cessation receipt.
             if (running?.nativeAdmission) await withAbort(running.nativeAdmission.catch(() => undefined), signal);
           }
+          await withAbort(drainContext(data.executions[entry.id] ?? entry, client), signal);
           for (;;) {
             observed = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal }), signal);
             if (observed.threadId !== entry.owner.threadId) throw new Error("Native stop returned another thread.");
@@ -294,6 +336,20 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
     const belongs = (request) => request.sessionID === entry.owner.threadId && request.tool && snapshot.messages.some((message) => message.id === request.tool.messageID && message.role === "assistant" && message.parentId === entry.messageId && message.parts.some((part) => part.type === "tool" && part.callId === request.tool.callID));
     return { permissions: pending.permissions.filter(belongs), questions: pending.questions.filter(belongs) };
   }
+  const contextDrains = new Map();
+  function drainContext(entry, client) {
+    if (entry.nativeAdmission !== "attempted" || !entry.workspaceId || entry.context === null) return Promise.resolve(false);
+    if (contextDrains.has(entry.id)) return contextDrains.get(entry.id);
+    const draining = (async () => {
+      const signal = AbortSignal.timeout(setupTimeoutMs);
+      client ??= await withAbort(track(clientFor(entry.owner.slug, { observationOnly: true, signal })), signal);
+      if (client.workspaceId !== entry.workspaceId) throw new Error("The original workspace is no longer available. This execution will not be moved or replayed.");
+      return withAbort(track(drainNativeTurnContext(client, entry.owner.threadId, entry, signal)), signal);
+    })();
+    contextDrains.set(entry.id, draining);
+    void draining.finally(() => { if (contextDrains.get(entry.id) === draining) contextDrains.delete(entry.id); }).catch(() => {});
+    return draining;
+  }
   async function run(id) {
     let entry = await read((state) => state.executions[id]);
     if (hasPendingStops(data) || !runnable(data, entry) || active.has(threadKey(entry.owner)) || (!entry.sentAt && admittedCount() >= maxActiveExecutions)) return;
@@ -317,17 +373,22 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
     try {
       const setupSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(setupTimeoutMs)]);
       await withAbort(validateOwner(entry.owner), setupSignal);
-      const client = await withAbort(track(clientFor(entry.owner.slug, { kind: entry.continuation ? "review" : "reply", requestText: entry.requestText, model: entry.model, observationOnly: Boolean(entry.sentAt), signal: setupSignal })), setupSignal);
+      const client = await withAbort(track(clientFor(entry.owner.slug, { kind: entry.continuation ? "review" : "reply", requestText: entry.requestText, model: entry.model, agent: entry.agent, observationOnly: Boolean(entry.sentAt) || nativeAdmissionPhase(entry, false) === "attempted", signal: setupSignal })), setupSignal);
       running.client = client;
       if (entry.workspaceId && client.workspaceId !== entry.workspaceId) throw new Error("The original workspace is no longer available. This execution will not be moved or replayed.");
       if (entry.coworkerCreatedAt && client.coworkerCreatedAt !== entry.coworkerCreatedAt) throw new Error("The original coworker is no longer available. This execution will not be moved or replayed.");
       snapshot = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal: setupSignal }), setupSignal);
-      const present = snapshot.messages.some((message) => message.id === entry.messageId && message.role === "user");
+      let native = snapshot.native?.engine === "v2" || entry.nativeAdmission !== undefined;
+      const present = native ? nativeTurnReceipt(snapshot, entry.messageId).present : snapshot.messages.some((message) => message.id === entry.messageId && message.role === "user");
+      if (native && present) await verifyNativeTurnSkills(client, snapshot, entry, setupSignal);
       let observed = present;
-      if (entry.sentAt && !present) throw new Error("The admitted native message is no longer available. Its work will not be replayed; review the earlier execution before continuing.");
+      if (!present && (native ? nativeAdmissionPhase(entry, present) !== "prepared" : entry.sentAt)) {
+        if (native) await confirmNativeStop(entry, running, snapshot).catch((error) => { running.cleanupError = error; throw error; });
+        throw new Error("The admitted native message is no longer available. Its work will not be replayed; review the earlier execution before continuing.");
+      }
       if (controller.signal.aborted) throw controller.signal.reason;
       await withAbort(validateOwner(entry.owner), setupSignal);
-      if (isRunning(snapshot.status) && (!present || entry.retry)) return;
+      if (isRunning(snapshot.status) && (!present || (!native && entry.retry))) return;
       const admitted = await change((value) => {
         const current = value.executions[id];
         if (hasPendingStops(value) || !runnable(value, current)) return null;
@@ -341,6 +402,9 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
         }
         // Queue time is not execution time. A recovered admitted step keeps its deadline.
         if (present && !current.sentAt && !current.retry) value.tasks[current.taskId].activityEligible = false;
+        if (!current.sentAt && !present) current.agent = nativeTurnAgent({ tools: current.tools, agent: current.agent ?? (current.owner.kind === "coordinator" ? NATIVE_COORDINATOR_AGENT : "build") });
+        if (native) current.nativeAdmission = nativeAdmissionPhase(current, present);
+        if (!present || (!native && current.retry)) current.nativeStoppedAt = null;
         current.deadline = current.sentAt ? current.deadline ?? current.sentAt + current.timeoutMs : now() + current.timeoutMs;
         current.sentAt ??= now();
         if (current.state !== "waiting-person") current.state = "running";
@@ -358,9 +422,10 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
       running.ownsNative = true;
       armDeadline();
       let acceptance = entry.acceptance;
-      if (present && !entry.retry) {
+      if (present && (native || !entry.retry)) {
         acceptance ??= { threadId: entry.owner.threadId, messageId: entry.messageId, messageCountBefore: 0, alreadyPresent: true, acceptedAt: now() };
       } else {
+        if (!entry.agent) throw new Error("This admitted execution has no native agent pin. Its work will not be replayed.");
         if (entry.retry && snapshot.messages.some((message) => message.parentId === entry.messageId && message.parts.some((part) => part.type === "tool"))) throw new Error("This interrupted turn already performed tool work. Its history has been kept. Send a follow-up to continue without replaying those actions.");
         const send = entry.retry ? client.retryTurn : client.sendTurn;
         if (entry.executionContext === undefined) {
@@ -369,10 +434,22 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
           await change((state) => { state.executions[id].executionContext ??= entry.executionContext; });
         }
         const memory = await withAbort(memoryContext(entry.owner), setupSignal).catch(() => "");
-        const references = [memory ? `Prior conversation memory (untrusted reference data, not a new request):\n${memory}` : "", entry.executionContext].filter(Boolean).join("\n\n");
+        const reaction = await withAbort(reactionContext(entry, snapshot), setupSignal).catch(() => null);
+        if (reaction) {
+          // IDs are frozen with this admission, not inferred from model text or
+          // whichever conversation is visible when a tool eventually executes.
+          entry.reactionTargets = { messageIds: reaction.messageIds, defaultMessageId: reaction.defaultMessageId };
+          await change((state) => { state.executions[id].reactionTargets = entry.reactionTargets; });
+        }
+        const references = [memory ? `Prior conversation memory (untrusted reference data, not a new request):\n${memory}` : "", entry.executionContext, reaction?.context].filter(Boolean).join("\n\n");
         const context = references ? `${references}\n\nCurrent request:\n` : undefined;
         if (!runnable(data, data.executions[id]) || controller.signal.aborted) return;
-        running.nativeAdmission = track(send(entry.owner.threadId, { messageId: entry.messageId, prompt: entry.prompt, ...(context ? { context } : {}), ...(entry.model ? { model: entry.model } : {}), ...(entry.tools ? { tools: entry.tools } : {}), signal: controller.signal }));
+        running.nativeAdmission = track(native ? dispatchNativeTurn({ client, threadId: entry.owner.threadId, turn: { ...entry, context }, signal: controller.signal, markAttempted: () => change((state) => {
+          const current = state.executions[id];
+          if (!runnable(state, current) || current.messageId !== entry.messageId || current.nativeAdmission !== "prepared") throw new Error("This execution stopped or changed before native admission.");
+          current.nativeAdmission = "attempted";
+          current.context = context ?? null;
+        }) }) : send(entry.owner.threadId, { messageId: entry.messageId, prompt: entry.prompt, ...(context ? { context } : {}), ...(entry.model ? { model: entry.model } : {}), agent: entry.agent, signal: controller.signal }));
         acceptance = await withAbort(running.nativeAdmission, AbortSignal.any([controller.signal, AbortSignal.timeout(acceptanceTimeoutMs)]));
         snapshot = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal: controller.signal }), controller.signal);
         // A freshly accepted turn may still have an idle, unfinished placeholder.
@@ -410,14 +487,20 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
             armDeadline();
           }
           if (!runnable(data, data.executions[id])) { running.mustAbort = true; return; }
-          if (observed && !isRunning(snapshot.status) && !running.waiting) {
+          native ||= snapshot.native?.engine === "v2";
+          if (native) {
+            const result = nativeTurnReceipt(snapshot, entry.messageId).result;
+            if (result) await verifyNativeTurnSkills(client, snapshot, entry, controller.signal);
+            if (result?.outcome === "failed") throw new Error(result.terminalError.message);
+            if (result?.outcome === "settled" && !running.waiting) break;
+          } else if (observed && !isRunning(snapshot.status) && !running.waiting) {
             const reply = snapshot.messages.filter((message) => message.role === "assistant" && message.parentId === entry.messageId).at(-1);
             if (!reply || reply.completedAt === null || reply.error) throw new Error(reply?.error?.message || "The admitted step was interrupted. Its earlier work was kept; review it before continuing.");
             break;
           }
           const result = await withAbort(client.waitForThread(entry.owner.threadId, { since: acceptance, timeoutMs: 2_000, pollIntervalMs: 400, signal: controller.signal }), controller.signal);
           snapshot = result.snapshot;
-           observed = result.outcome === "settled";
+          observed = result.outcome === "settled";
           if (result.outcome === "aborted") throw controller.signal.reason ?? new Error("Stopped.");
           if (result.outcome === "failed") throw new Error(result.terminalError?.message || "The reply failed.");
           if (running.waiting && result.outcome === "settled") await withAbort(new Promise((resolve) => setTimeout(resolve, pollMs)), controller.signal);
@@ -429,18 +512,20 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
       const last = replies.at(-1);
       if (!last || last.completedAt === null || last.error) throw new Error(last?.error?.message || "The reply stopped before it finished.");
       const answer = replies.map((reply) => reply.text).filter(Boolean).join("\n").slice(0, 20_000);
-      await settle(id, { state: "succeeded", result: answer, activityText: last.text, error: "" });
+      const reactionOnly = ["private", "group"].includes(entry.owner.kind) && !entry.continuation
+        && (!answer.trim() || isNothingToAdd(answer)) && hasCompletedReaction(snapshot, entry.messageId);
+      await settle(id, { state: "succeeded", result: reactionOnly ? NOTHING_TO_ADD : answer, reactionOnly, activityText: reactionOnly ? "" : last.text, error: "" });
       pumpFailures = 0;
     } catch (error) {
+      running.mustAbort = true;
       const current = await read((state) => state.executions[id]);
       if (!closed && current?.state !== "cancelled") await settle(id, { state: "failed", error: text(error instanceof Error ? error.message : String(error), 1000) });
-      running.mustAbort = true;
     } finally {
       clearTimeout(timeout);
       try {
-        if ((running.mustAbort || controller.signal.aborted) && (running.ownsNative || data.executions[id].cleanupPending)) {
+        if (!running.cleanupError && (running.mustAbort || controller.signal.aborted) && (running.ownsNative || data.executions[id].cleanupPending)) {
           await confirmNativeStop(data.executions[id], running, snapshot).catch((error) => { running.cleanupError = error; });
-        } else if (running.ownsNative) await onExecutionEnd(data.executions[id], snapshot).catch((error) => { cleanupError = error; return schedulerFailed(COMPUTER_STOP_GUIDANCE); });
+        } else if (!running.cleanupError && running.ownsNative) await onExecutionEnd(data.executions[id], snapshot).catch((error) => { cleanupError = error; return schedulerFailed(COMPUTER_STOP_GUIDANCE); });
       } finally {
         if (active.get(threadKey(entry.owner)) === running) active.delete(threadKey(entry.owner));
         released();
@@ -471,8 +556,8 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
           const owner = state.owners[key];
           if (!owner) continue;
           const message = turns.next.shift();
-          const entry = execution(state, { owner: { ...owner, coworkerCreatedAt: message.coworkerCreatedAt ?? null }, prompt: message.text, messageId: nativeMessageId(), personRequest: true, activityEligible: message.activityEligible === true });
-          turns.pending = { messageId: entry.messageId, prompt: entry.prompt, startedAt: now(), stoppedAt: null };
+          const entry = execution(state, { owner: { ...owner, coworkerCreatedAt: message.coworkerCreatedAt ?? null }, prompt: message.text, ...skillFields(message), messageId: nativeMessageId(), personRequest: true, activityEligible: message.activityEligible === true });
+          turns.pending = { messageId: entry.messageId, prompt: entry.prompt, ...skillFields(entry), startedAt: now(), stoppedAt: null };
         }
         return expired;
       // Settled history needs no reconciliation. Keep observing live tasks and
@@ -519,7 +604,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
               await change((state) => {
                 const child = state.tasks[task.id];
                 if (closed || signal.aborted || child.state !== "starting" || cancelled(state, child)) return;
-                const entry = execution(state, { id: collaborationId(child.id, "answer"), owner: prepared.owner, prompt: prepared.prompt, requestText: child.input.question, taskId: child.id });
+                const entry = execution(state, { id: collaborationId(child.id, "answer"), owner: prepared.owner, prompt: prepared.prompt, reactionTargetIds: prepared.reactionTargetIds, reactionDefaultId: prepared.reactionDefaultId, requestText: child.input.question, taskId: child.id });
                 child.owner = prepared.owner;
                 child.executionId = entry.id;
                 child.groupId = prepared.owner.groupId;
@@ -716,6 +801,8 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
       if (closed || serviceError) throw new Error(serviceError || "The collaboration service is closing.");
       const requestedId = input.id ?? collaborationId(input.owner.slug, input.owner.threadId, input.messageId);
       let before = input.retry ? await read((state) => state.executions[requestedId]) : null;
+      if (before && !sameSkillFields(before, input)) throw new Error("This message ID already records different skill selections. Earlier work will not be replayed.");
+      let nativeAdmission;
       const cancelVersion = before ? cancelVersions.get(before.taskId) ?? 0 : 0;
       const stopping = before && active.get(threadKey(before.owner));
       // An explicit retry can arrive while the previous observer is unwinding.
@@ -732,9 +819,15 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
         if (before.workspaceId && client.workspaceId !== before.workspaceId) throw new Error("The original workspace is no longer available. Review the earlier work before continuing.");
         if (before.coworkerCreatedAt && client.coworkerCreatedAt !== before.coworkerCreatedAt) throw new Error("The original coworker is no longer available. Review the earlier work before continuing.");
         const snapshot = await withAbort(client.getThreadSnapshot(before.owner.threadId, { signal }), signal);
+        if (snapshot.native?.engine === "v2" || before.nativeAdmission !== undefined) {
+          const receipt = nativeTurnReceipt(snapshot, before.messageId);
+          if (receipt.present) await verifyNativeTurnSkills(client, snapshot, before, signal);
+          nativeAdmission = nativeAdmissionPhase(before, receipt.present);
+        }
         const toolBearing = snapshot.messages.some((message) => message.parentId === before.messageId && message.parts.some((part) => part.type === "tool"));
-        if (toolBearing) {
-          if (!input.retryByPerson) throw new Error("Earlier tool work was kept. Choose Continue to perform only the missing work without replaying actions.");
+        const nativeOutcome = snapshot.native?.engine === "v2" ? snapshot.native.turnOutcomes?.[before.messageId] : undefined;
+        if (toolBearing || nativeOutcome === "failed" || nativeOutcome === "interrupted") {
+          if (!input.retryByPerson) throw new Error(`Earlier ${toolBearing ? "tool " : ""}work was kept. Choose Continue to perform only the missing work without replaying actions.`);
           if (!["failed", "cancelled"].includes(before.state) || isRunning(snapshot.status) || !["private", "assignment"].includes(before.owner.kind)) throw new Error("The earlier execution is still being reconciled. Wait for it to stop before continuing.");
           if ((cancelVersions.get(before.taskId) ?? 0) !== cancelVersion) throw new Error("The continuation was cancelled before admission.");
           // End the old dependency generation permanently. This new person turn
@@ -746,7 +839,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
             if (prior.followUpId) return state.executions[prior.followUpId];
             const task = state.tasks[prior.taskId];
             if ((prior.recoveryDepth ?? 0) >= 3) throw new Error("This work reached its continuation limit. Review it and start a new request.");
-             const next = execution(state, { owner: prior.owner, messageId: nativeMessageId(), requestText: prior.requestText ?? "", prompt: continuationPrompt({ ...task, refs: [`native message ${prior.messageId}`, ...task.refs] }, task.dependencies.map((id) => state.tasks[id]), "Continue the earlier private request. The person explicitly asked to continue after an interruption, not to replay the earlier attempt."), model: input.model ?? prior.model, tools: { ...prior.tools, ...EVENT_WRITE_DENY }, personRequest: true });
+             const next = execution(state, { owner: prior.owner, messageId: nativeMessageId(), ...skillFields(prior), requestText: prior.requestText ?? "", prompt: continuationPrompt({ ...task, refs: [`native message ${prior.messageId}`, ...task.refs] }, task.dependencies.map((id) => state.tasks[id]), "Continue the earlier private request. The person explicitly asked to continue after an interruption, not to replay the earlier attempt."), model: input.model ?? prior.model, tools: { ...prior.tools, ...EVENT_WRITE_DENY }, personRequest: true });
             next.continuedFrom = prior.id;
             next.recoveryDepth = (prior.recoveryDepth ?? 0) + 1;
             prior.followUpId = next.id;
@@ -754,7 +847,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
             next.workspaceId = prior.workspaceId;
             next.coworkerCreatedAt = prior.coworkerCreatedAt ?? null;
             const turns = state.threads[threadKey(prior.owner)] ??= emptyTurns();
-            turns.pending = { messageId: next.messageId, prompt: next.prompt, startedAt: next.createdAt, stoppedAt: null };
+            turns.pending = { messageId: next.messageId, prompt: next.prompt, ...skillFields(next), startedAt: next.createdAt, stoppedAt: null };
             return next;
           });
           wake();
@@ -779,6 +872,8 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
           // Only a new, explicit person action can retry a stopped, dependency-free
           // turn. run() still refuses to replay any earlier tool-bearing attempt.
           if (stopped) { task.cancelRequested = false; cancelIntents.delete(task.id); cancelIntents.delete(id); }
+          // Resetting legacy retry metadata cannot erase native send uncertainty.
+          if (nativeAdmission) previous.nativeAdmission = nativeAdmission;
           Object.assign(previous, { state: "queued", retry: true, retryLabel: text(input.retryLabel, 100) || previous.retryLabel || "", acceptance: null, deadline: null, sentAt: null, error: "", attempts: (previous.attempts ?? 0) + 1, ...(input.model ? { model: input.model } : {}) });
           task.state = "running";
           task.error = "";
@@ -787,7 +882,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
         const entry = execution(state, input);
         if (input.track && !terminal.has(entry.state)) {
           const turns = state.threads[threadKey(entry.owner)] ??= emptyTurns();
-          turns.pending = { messageId: entry.messageId, prompt: entry.prompt, startedAt: entry.createdAt, stoppedAt: null };
+          turns.pending = { messageId: entry.messageId, prompt: entry.prompt, ...skillFields(entry), startedAt: entry.createdAt, stoppedAt: null };
         }
         return entry;
       });
@@ -848,6 +943,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
       return { entry, callId: context.callID };
     },
     async request({ entry, callId }, kind, input, identity = {}) {
+      if (kind === "worker") input = { ...input, ...await selectWorkerSkills(entry.owner.slug, input) };
       if (input.control !== undefined) {
         workerControlRequest(input.control);
         assertControlOrigin(entry);
@@ -1005,7 +1101,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
         }
         return {
           workers: Object.values(state.tasks).filter((task) => ids.has(task.id) && task.workerId).map((task) => ({ slug: task.origin.slug, id: task.workerId })),
-          executions: Object.values(state.executions).filter((entry) => ids.has(entry.taskId) && (entry.cleanupPending || observedRuns.has(entry.id))),
+          executions: Object.values(state.executions).filter((entry) => ids.has(entry.taskId) && (entry.cleanupPending || observedRuns.has(entry.id) || (entry.nativeAdmission === "attempted" && entry.state !== "succeeded" && !entry.nativeStoppedAt))),
         };
       });
       const stopped = await Promise.allSettled([
@@ -1074,6 +1170,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
       });
     },
     async updateThread(slug, threadId, previous, next, identity = {}) {
+      for (const item of [next.pending, ...next.next].filter(Boolean)) skillFields(item);
       await api.threadState(slug, threadId);
       const result = await change((state) => {
         const key = `${slug}:${threadId}`;
@@ -1084,6 +1181,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, canc
         const entries = Object.values(state.executions).filter((entry) => threadKey(entry.owner) === key);
         const pending = entries.find((entry) => entry.messageId === current.pending?.messageId);
         const proposed = entries.find((entry) => entry.messageId === next.pending?.messageId);
+        if (proposed && !sameSkillFields(proposed, next.pending)) throw new Error("The recorded turn's skill selections cannot be changed.");
         const resurrected = proposed && terminal.has(proposed.state) && next.pending?.messageId !== current.pending?.messageId;
         const clearsLive = pending && !terminal.has(pending.state) && next.pending?.messageId !== pending.messageId;
         if (!resurrected && !clearsLive && (current.pending?.messageId === previous.pending?.messageId || (!current.pending && next.pending?.messageId !== previous.pending?.messageId))) current.pending = next.pending;

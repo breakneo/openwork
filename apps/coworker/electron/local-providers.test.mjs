@@ -11,12 +11,10 @@ import {
   copilotAuthFromFile,
   copilotSignedIn,
   detectLocalProviders,
-  jwtExpiryMs,
   listOpenAiCompatibleModels,
   localServerProviderPatch,
   normalizeOpenAiCompatibleAddress,
   openAiCompatibleProviderConfig,
-  opencodeAuthPath,
 } from "./local-providers.mjs";
 
 // Every fixture value is plainly fake; nothing here resembles a real credential.
@@ -80,7 +78,7 @@ test("a Codex ChatGPT sign-in is found by shape only and maps to the openai prov
     last_refresh: "2026-09-01T00:00:00.000Z",
   });
   const result = await detectLocalProviders({ env: quietEnv, homeDir: fixture.home, platform: "linux", fetchImpl: fetchStub({}), timeoutMs: 50, keychainProbe: noKeychain, log: (line) => logged.push(line) });
-  assert.deepEqual(result.found.map((finding) => [finding.id, finding.providerId, finding.how]), [["codex", "openai", "import"]]);
+  assert.deepEqual(result.found.map((finding) => [finding.id, finding.providerId, finding.how]), [["codex", "openai", "unavailable"]]);
   assert.equal(result.found[0].label, "ChatGPT (signed in with Codex)");
   assert.equal(result.found[0].credentialKind, "chatgpt-oauth");
   assert.doesNotMatch(result.found[0].detail, /subscription|Plus|Pro|valid/i);
@@ -96,7 +94,7 @@ test("CODEX_HOME moves the Codex sign-in, and a key-mode Codex is offered as an 
   assert.equal(codexAuthPath({ CODEX_HOME: codexHome }, fixture.home), path.join(codexHome, "auth.json"));
   const result = await detectLocalProviders({ env: { ...quietEnv, CODEX_HOME: codexHome }, homeDir: fixture.home, platform: "linux", fetchImpl: fetchStub({}), timeoutMs: 50, keychainProbe: noKeychain });
   assert.equal(result.found[0]?.label, "OpenAI key (saved by Codex)");
-  assert.equal(result.found[0]?.how, "import");
+  assert.equal(result.found[0]?.how, "unavailable");
   assert.equal(result.found[0]?.credentialKind, "api-key");
   assert.doesNotMatch(JSON.stringify(result), /ChatGPT|fixture-openai-key-not-real/);
 });
@@ -119,16 +117,12 @@ test("a malformed or signed-out Codex file counts as not found", async () => {
   }
 });
 
-test("codexAuthFromFile yields the engine's own credential shape and refuses a missing sign-in", () => {
-  const access = fakeJwt({ exp: 1_800_000_000 });
-  assert.deepEqual(
-    codexAuthFromFile({ tokens: { access_token: access, refresh_token: FAKE_REFRESH, account_id: FAKE_ACCOUNT } }),
-    { type: "oauth", refresh: FAKE_REFRESH, access, expires: 1_800_000_000_000, accountId: FAKE_ACCOUNT },
-  );
-  assert.deepEqual(codexAuthFromFile({ OPENAI_API_KEY: " fixture-openai-key-not-real " }), { type: "api", key: "fixture-openai-key-not-real" });
-  assert.throws(() => codexAuthFromFile({ tokens: {} }), (error) => error instanceof SignInImportError && error.code === "missing");
-  assert.equal(jwtExpiryMs("not-a-jwt"), 0);
-  assert.equal(jwtExpiryMs(`${Buffer.from("{}").toString("base64url")}.${Buffer.from("{}").toString("base64url")}.x`), 0);
+test("legacy import entry points fail closed without returning credential material", () => {
+  for (const convert of [codexAuthFromFile, copilotAuthFromFile]) {
+    for (const parsed of [{ tokens: { access_token: "fixture-access-not-real", refresh_token: FAKE_REFRESH } }, { OPENAI_API_KEY: "fixture-key-not-real" }, {}]) {
+      assert.throws(() => convert(parsed), (error) => error instanceof SignInImportError && error.code === "not-importable" && !error.message.includes("fixture-"));
+    }
+  }
 });
 
 test("Claude Code credentials are detected but not offered for import, from a file or the macOS keychain", async () => {
@@ -159,12 +153,12 @@ test("Claude Code credentials are detected but not offered for import, from a fi
   assert.deepEqual(emptyFile.found, viaKeychain.found, "presence never claims a validated sign-in, even for an empty object");
 });
 
-test("a Copilot hosts or apps file under XDG_CONFIG_HOME is found and imports as the engine's refresh token", async () => {
+test("a Copilot hosts or apps file is detected but cannot be imported into the native service", async () => {
   await using fixture = await tempHome();
   const configHome = path.join(fixture.home, "xdg-config");
   await writeJson(path.join(configHome, "github-copilot", "apps.json"), { "github.com:Iv1.fixture": { user: "octocat", oauth_token: FAKE_GITHUB_TOKEN, githubAppId: "Iv1.fixture" } });
   const result = await detectLocalProviders({ env: { ...quietEnv, XDG_CONFIG_HOME: configHome }, homeDir: fixture.home, platform: "linux", fetchImpl: fetchStub({}), timeoutMs: 50, keychainProbe: noKeychain });
-  assert.deepEqual(result.found.map((finding) => [finding.id, finding.providerId, finding.how]), [["copilot", "github-copilot", "import"]]);
+  assert.deepEqual(result.found.map((finding) => [finding.id, finding.providerId, finding.how]), [["copilot", "github-copilot", "unavailable"]]);
   assert.ok(!JSON.stringify(result).includes(FAKE_GITHUB_TOKEN));
   assert.equal(copilotSignedIn({ "github.com": { user: "octocat", oauth_token: FAKE_GITHUB_TOKEN } }), true);
   assert.equal(copilotSignedIn({ "ghe.example.com": { oauth_token: "x" } }), false);
@@ -173,57 +167,28 @@ test("a Copilot hosts or apps file under XDG_CONFIG_HOME is found and imports as
     assert.equal(copilotSignedIn(credentials), false);
     assert.throws(() => copilotAuthFromFile(credentials), SignInImportError);
   }
-  assert.deepEqual(copilotAuthFromFile({ "github.com": { oauth_token: FAKE_GITHUB_TOKEN } }), { type: "oauth", refresh: FAKE_GITHUB_TOKEN, access: "", expires: 0 });
+  assert.throws(() => copilotAuthFromFile({ "github.com": { oauth_token: FAKE_GITHUB_TOKEN } }), SignInImportError);
   assert.throws(() => copilotAuthFromFile({}), SignInImportError);
 });
 
-test("providers already in OpenCode's shared store are listed by id, without account-managed ones", async () => {
+test("v1 auth files are not native connection evidence; only current catalog summaries are listed", async () => {
   await using fixture = await tempHome();
   const dataHome = path.join(fixture.home, "xdg-data");
-  await writeJson(opencodeAuthPath({ XDG_DATA_HOME: dataHome }, fixture.home), {
+  await writeJson(path.join(dataHome, "opencode", "auth.json"), {
     openrouter: { type: "api", key: "fixture-openrouter-key-not-real" },
     lpr_01org: { type: "api", key: "fixture-org-key-not-real" },
     openwork: { type: "api", key: "fixture-openwork-key-not-real" },
     anthropic: { type: "api", key: "fixture-anthropic-key-not-real" },
   });
-  const result = await detectLocalProviders({ env: { ...quietEnv, XDG_DATA_HOME: dataHome }, homeDir: fixture.home, platform: "linux", fetchImpl: fetchStub({}), timeoutMs: 50, keychainProbe: noKeychain });
-  assert.deepEqual(result.found.map((finding) => [finding.id, finding.how]), [["opencode:anthropic", "in-use"], ["opencode:openrouter", "in-use"]]);
-  assert.ok(!JSON.stringify(result).includes("not-real"));
-  assert.ok(result.found.every((finding) => finding.credentialKind === "api-key"));
-});
-
-test("OpenCode ChatGPT detection requires a complete OpenAI OAuth shape, not a key or an unknown auth entry", async () => {
-  await using fixture = await tempHome();
-  const oauth = { type: "oauth", access: "fixture-access-not-real", refresh: FAKE_REFRESH, expires: 0, accountId: FAKE_ACCOUNT };
-  const cases = [
-    [oauth, "chatgpt-oauth"], // Expiry is not subscription validity; the engine must check availability.
-    [{ ...oauth, type: "api", key: "fixture-openai-key-not-real" }, "api-key"],
-    [{ ...oauth, type: "typeapi" }, "unknown"],
-    [{ ...oauth, type: "unknown" }, "unknown"],
-    [{ ...oauth, access: "" }, "unknown"],
-    [{ ...oauth, refresh: " " }, "unknown"],
-    [{ ...oauth, expires: "0" }, "unknown"],
-    [{ ...oauth, expires: -1 }, "unknown"],
-    [{ type: "oauth", access: oauth.access, refresh: oauth.refresh }, "unknown"],
-    [{ type: "api", key: "" }, "unknown"],
-    [{}, "unknown"],
-    [null, "unknown"],
-    [[oauth], "unknown"],
-  ];
-  const file = opencodeAuthPath(quietEnv, fixture.home);
-  const options = { env: quietEnv, homeDir: fixture.home, platform: "linux", fetchImpl: async () => { throw new Error("offline fixture"); }, keychainProbe: noKeychain };
-  for (const [auth, credentialKind] of cases) {
-    await writeJson(file, { openai: auth, anthropic: oauth });
-    const logged = [];
-    const result = await detectLocalProviders({ ...options, log: (line) => logged.push(line) });
-    const openai = result.found.find((finding) => finding.providerId === "openai");
-    assert.equal(openai?.credentialKind, credentialKind);
-    assert.equal(openai?.label.includes("ChatGPT"), credentialKind === "chatgpt-oauth");
-    assert.equal(result.found.find((finding) => finding.providerId === "anthropic")?.credentialKind, "unknown");
-    assert.doesNotMatch(JSON.stringify(result) + logged.join("\n"), /fixture-|subscription|\.json/);
-  }
-  await writeFile(file, "{ not json", "utf8");
+  const options = { env: { ...quietEnv, XDG_DATA_HOME: dataHome }, homeDir: fixture.home, platform: "linux", fetchImpl: async () => { throw new Error("offline fixture"); }, keychainProbe: noKeychain };
   assert.deepEqual((await detectLocalProviders(options)).found, []);
+  const result = await detectLocalProviders({ ...options, providers: [
+    { id: "fixture-connected", name: "Fixture", source: "credential", connected: true },
+    { id: "fixture-disconnected", name: "Disconnected", source: "credential", connected: false },
+    { id: "lpr_fixture", name: "Managed", source: "credential", connected: true },
+  ] });
+  assert.deepEqual(result.found.map((finding) => [finding.id, finding.how, finding.credentialKind]), [["opencode:fixture-connected", "in-use", "unknown"]]);
+  assert.ok(!JSON.stringify(result).includes("not-real"));
 });
 
 test("API keys are reported by name only, once per provider, and blanks do not count", async () => {
@@ -237,8 +202,8 @@ test("API keys are reported by name only, once per provider, and blanks do not c
     keychainProbe: noKeychain,
   });
   assert.deepEqual(result.found.map((finding) => [finding.id, finding.providerId, finding.how, finding.envName]), [
-    ["env:OPENAI_API_KEY", "openai", "in-use", "OPENAI_API_KEY"],
-    ["env:GEMINI_API_KEY", "google", "in-use", "GEMINI_API_KEY"],
+    ["env:OPENAI_API_KEY", "openai", "unavailable", "OPENAI_API_KEY"],
+    ["env:GEMINI_API_KEY", "google", "unavailable", "GEMINI_API_KEY"],
   ]);
   assert.ok(!JSON.stringify(result).includes("not-real"), "key values never appear");
   assert.ok(result.found.every((finding) => finding.credentialKind === "api-key"));
@@ -258,6 +223,7 @@ test("a typed address is normalised to an origin plus /v1, and its models are li
   assert.equal(normalizeOpenAiCompatibleAddress("https://ai.example.com/openai/v1?x=1"), "https://ai.example.com/openai/v1");
   assert.throws(() => normalizeOpenAiCompatibleAddress(""), /Enter the server address/);
   assert.throws(() => normalizeOpenAiCompatibleAddress("ftp://x"), /http/);
+  assert.throws(() => normalizeOpenAiCompatibleAddress("https://fixture-user:fixture-value-not-real@models.example.test/v1"), (error) => /Enter the key separately/.test(error.message) && !error.message.includes("fixture-value-not-real"));
   const seen = [];
   const listed = await listOpenAiCompatibleModels("127.0.0.1:1234", " fixture-key ", {
     fetchImpl: (url, init) => {

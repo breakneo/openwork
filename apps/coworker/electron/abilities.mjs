@@ -1,4 +1,6 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import {
   abilitySelected, cloudSkillAbilityId, localSkillAbilityId, mcpAbilityId,
   mcpServerForTool, readCoworkerAbilities,
@@ -26,7 +28,8 @@ function catalogMetadata(value) {
   let incomplete = value.errors.length > 0;
   const skills = value.skills.flatMap((skill) => {
     if (!skill || !nonempty(skill.name)) { incomplete = true; return []; }
-    const metadata = { name: skill.name, description: publicText(skill.description), source: skill.source };
+    const metadata = { name: skill.name, description: publicText(skill.description), source: skill.source,
+      ...(nonempty(skill.nativeId) ? { nativeId: skill.nativeId } : {}) };
     if (skill.source === "local" && nonempty(skill.location)) {
       return [{ ...metadata, id: localSkillAbilityId(skill.location), location: skill.location }];
     }
@@ -98,28 +101,43 @@ function guidance(abilities, catalog) {
 }
 
 /** Read existing platform catalogs without returning MCP config, headers, or skill bodies. */
-export async function readAbilitiesCatalog(coworker, request) {
+export async function readAbilitiesCatalog(coworker, request, nativeSkills) {
   const workspace = `/workspace/${encodeURIComponent(coworker.workspaceId)}`;
   const results = await Promise.allSettled([
-    request(`${workspace}/opencode/skill`),
+    nativeSkills === undefined ? request(`${workspace}/opencode2/api/skill`) : Promise.resolve({ data: nativeSkills }),
     request("/experimental/connect/skills"),
     request(`${workspace}/mcp`),
   ]);
-  const [local, cloud, mcp] = results.map((result) => result.status === "fulfilled" ? result.value : null);
+  const [native, cloud, mcp] = results.map((result) => result.status === "fulfilled" ? result.value : null);
   const errors = [];
-  if (!Array.isArray(local)) errors.push("Local skills are unavailable.");
+  if (!Array.isArray(native?.data)) errors.push("Native skills are unavailable.");
   if (!Array.isArray(cloud?.skills)) errors.push("Cloud skills are unavailable.");
   if (!Array.isArray(mcp?.items)) errors.push("MCP inventory is unavailable.");
+  const skills = (Array.isArray(native?.data) ? native.data : []).flatMap((skill) => {
+    if (!nonempty(skill?.id) || !nonempty(skill.location) || !nonempty(skill.name)) { errors.push(CATALOG_ERROR); return []; }
+    const metadata = { nativeId: skill.id, name: skill.name, description: skill.description };
+    if (!skill.id.startsWith("openwork-cloud-")) return [{ ...metadata, source: "local", location: skill.location }];
+    const matches = (Array.isArray(cloud?.skills) ? cloud.skills : []).filter((entry) => typeof entry.url === "string" && entry.url.startsWith("skill://")
+      && `openwork-cloud-${createHash("sha256").update(entry.url).digest("hex").slice(0, 16)}` === skill.id
+      && (!skill.source || (skill.source.type === "openwork-cloud" && skill.source.uri === entry.url)));
+    if (matches.length !== 1) { errors.push(CATALOG_ERROR); return []; }
+    return [{ ...metadata, source: "cloud", capability: matches[0].capability }];
+  });
+  const savedLocations = readCoworkerAbilities(coworker.abilities).skills.ids.filter((id) => id.startsWith("local:")).map((id) => id.slice(6));
+  const canonicalSaved = await Promise.all(savedLocations.map(async (location) => ({ location, path: await realpath(location).catch(() => null) })));
+  for (const skill of skills) {
+    if (skill.source !== "local" || savedLocations.includes(skill.location)) continue;
+    const actual = await realpath(skill.location).catch(() => null);
+    const saved = actual && canonicalSaved.find((item) => item.path === actual);
+    if (saved) skill.location = saved.location;
+  }
   return catalogMetadata({
-    skills: [
-      ...(Array.isArray(local) ? local.map((skill) => ({ name: skill.name, description: skill.description, source: "local", location: skill.location })) : []),
-      ...(Array.isArray(cloud?.skills) ? cloud.skills.map((skill) => ({ name: skill.name, description: skill.description, source: "cloud", capability: skill.capability })) : []),
-    ],
+    skills,
     mcpServers: (Array.isArray(mcp?.items) ? mcp.items : []).filter((item) => item?.name !== "coworker").map((item) => ({
       name: item.name,
       description: item.name === CLOUD ? "Shared OpenWork Connect gateway, including connected apps and generic tools." : "Configured MCP server",
       source: item.source === "config.project" ? "This coworker" : item.source === "config.global" ? "This Mac" : "Remote",
-      available: item.config?.enabled !== false && item.disabledByTools !== true,
+      available: item.config?.enabled !== false && item.config?.disabled !== true && item.disabledByTools !== true,
       gateway: item.name === CLOUD,
     })),
     errors,
@@ -133,8 +151,12 @@ export function createAbilitiesRuntime({ coworkerFor, readCatalog }) {
     let coworker;
     try { coworker = await coworkerFor(slug); } catch { throw new Error(IDENTITY_ERROR); }
     if (!coworker || coworker.slug !== slug || !nonempty(input?.createdAt) || input.createdAt !== coworker.createdAt || !nonempty(coworker.path)
-      || (!editor && (typeof input.workspaceId !== "string" || input.workspaceId !== coworker.workspaceId
-        || !nonempty(input.directory) || path.resolve(input.directory) !== path.resolve(coworker.path)))) throw new Error(IDENTITY_ERROR);
+      || (!editor && (typeof input.workspaceId !== "string" || input.workspaceId !== coworker.workspaceId || !nonempty(input.directory)))) throw new Error(IDENTITY_ERROR);
+    if (!editor) {
+      const canonical = (directory) => realpath(directory).catch(() => path.resolve(directory));
+      const [expected, actual] = await Promise.all([canonical(coworker.path), canonical(input.directory)]);
+      if (expected !== actual) throw new Error(IDENTITY_ERROR);
+    }
     return coworker;
   }
 
@@ -147,8 +169,8 @@ export function createAbilitiesRuntime({ coworkerFor, readCatalog }) {
     return entry.capabilities;
   }
 
-  async function read(coworker) {
-    try { return catalogMetadata(await readCatalog(coworker)); }
+  async function read(coworker, nativeSkills) {
+    try { return catalogMetadata(await readCatalog(coworker, nativeSkills)); }
     catch { return { skills: [], mcpServers: [], errors: [CATALOG_ERROR] }; }
   }
 
@@ -166,20 +188,25 @@ export function createAbilitiesRuntime({ coworkerFor, readCatalog }) {
       let abilities = readCoworkerAbilities(coworker.abilities);
       remember(coworker);
       const tool = input.tool;
-      if (all(abilities) || (tool === "skill" ? abilities.skills.mode === "all"
-        : ordinaryTool(tool) || (abilities.mcpServers.mode === "all" && tool !== CLOUD_EXECUTE))) return { ok: true };
-      const catalog = await read(coworker);
+      if (nonempty(input.server) && input.server !== CLOUD && input.server !== "coworker") {
+        if (!abilitySelected(abilities.mcpServers, mcpAbilityId(input.server))) throw new Error(MCP_ERROR);
+        return { ok: true };
+      }
+      if (all(abilities) || input.server === "coworker" || (tool === "skill" ? abilities.skills.mode === "all"
+        : (!input.server && ordinaryTool(tool)) || (abilities.mcpServers.mode === "all" && tool !== CLOUD_EXECUTE))) return { ok: true };
+      const catalog = await read(coworker, input.nativeSkills);
       coworker = await current(slug, input);
       abilities = readCoworkerAbilities(coworker.abilities);
       const known = remember(coworker, catalog);
       if (all(abilities)) return { ok: true };
       if (tool === "skill") {
         if (abilities.skills.mode === "all") return { ok: true };
-        const matches = catalog.skills.filter((skill) => skill.source === "local" && skill.name === input.args.name);
-        if (matches.length !== 1 || !abilitySelected(abilities.skills, localSkillAbilityId(matches[0].location))) throw new Error(SKILL_ERROR);
+        const id = input.args.id;
+        const matches = catalog.skills.filter((skill) => nonempty(id) && skill.nativeId === id);
+        if (matches.length !== 1 || !abilitySelected(abilities.skills, matches[0].id)) throw new Error(SKILL_ERROR);
         return { ok: true };
       }
-      const server = mcpServerForTool(tool, catalog.mcpServers.map((item) => item.name));
+      const server = nonempty(input.server) ? input.server : mcpServerForTool(tool, catalog.mcpServers.map((item) => item.name));
       if (tool === CLOUD_EXECUTE && (!server || server === CLOUD)) {
         const capability = input.args.name;
         const skill = catalog.skills.find((item) => item.source === "cloud" && item.capability === capability);
@@ -202,7 +229,7 @@ export function createAbilitiesRuntime({ coworkerFor, readCatalog }) {
       let abilities = readCoworkerAbilities(coworker.abilities);
       if (all(abilities)) return { system: input.system };
       remember(coworker);
-      const catalog = await read(coworker);
+      const catalog = await read(coworker, input.nativeSkills);
       coworker = await current(slug, input);
       abilities = readCoworkerAbilities(coworker.abilities);
       remember(coworker, catalog);

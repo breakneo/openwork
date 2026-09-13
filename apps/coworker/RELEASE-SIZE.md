@@ -3,8 +3,8 @@
 Keep production dependencies limited to **unbundled runtime imports**. Renderer
 libraries and other inputs already bundled into main, server, or plugins belong
 in development dependencies. Preserve runtime externals and their transitive
-dependencies. This is packaging hygiene, not a feature cut: retain the engine,
-plugins, PDFium, native modules, preloads, and Computer Use helper resources.
+dependencies. Retain the native v2 engine, self-contained native plugin bundles,
+native modules, preloads, and Computer Use helper resources.
 
 Before adding a dependency, prefer an existing package or Node/Electron API.
 Record whether it is bundled or loaded at runtime, its incremental **packaged**
@@ -12,7 +12,70 @@ bytes including peers/native assets, and the feature that needs it. Lazy imports
 can improve startup but do not remove downloaded bytes. Do not weaken runtime
 checks or raise a size budget just to accommodate unexplained growth.
 
-## Measured First Pass — September 10, 2026
+## Native V2 Contract — updated September 12, 2026
+
+`beforePack` reads sidecars and `native-runtime.json` from the builder's
+`context.packager.projectDir`. It requires nonempty regular `opencode2` (Windows:
+`opencode2.exe`) and `versions.json` files, with exact native version/platform/CPU
+metadata. Only that executable and metadata are selected; shared staging remains
+intact. Directory copying preserves Windows signing transformations. Native
+plugin resources remain selected; legacy `opencode-plugins` resources do not.
+
+The release gate requires the source `native-runtime.json` and packaged
+`electron-dist/native-runtime.json` pins to match native sidecar metadata and the
+native plugin runtime version. Shared server constants retain Desktop's separate
+optional-v2 pin; they do not select Coworker's release. The manifest
+must contain exactly the generator's nine source entries and the runtime's full
+dependency set, with exact plugin/schema, Effect and Zod pins. Every bundle must
+have its declared filename, byte count and SHA-256; omitted declarations and
+missing, corrupt, undeclared or duplicated bundles fail. Native bundles
+are built self-contained by `prepare-native-plugins.mjs`, which rejects external
+package imports. Dependency staging must never be packaged.
+
+The source runtime closure now excludes `@opencode-ai/sdk`,
+`opencode-chrome-devtools`, external `@opencode-ai/plugin`, `better-sqlite3` and
+`drizzle-orm`. The generic server still retains its legacy/Bun dependencies for
+other hosts. `stageNativeServer` creates a separate Node/native-v2 manifest and
+relocates constants in that copy only. Its entry rejects other engines/runtimes;
+Node uses built-in SQLite and the browser uses the engine-neutral shared executor.
+The gate rejects the excluded packages and declarations even in nested/unpacked
+copies, and requires the native entry and redistributed browser notice. Native
+plugin manifest dependencies describe bundled build inputs, not runtime packages.
+
+Source checks cover real staged imports with those dependencies blocked, independent
+Node SQLite readback, a no-engine generic-v1 host control, and current main-process
+bundling. The production dependency graph contains none of the excluded packages.
+An earlier separate-migration artifact measured **528.62 MiB** and failed the
+legacy-closure gate. It is historical, not the integrated main build below.
+The **512 MiB macOS ARM64 budget is unchanged**. Staged imports and synthetic
+ASAR checks are not native execution, signing or packaged-startup proof.
+
+### Integrated main build — September 12, 2026
+
+The native migration was reconciled on the Coworker feature branch over
+`9761894a8`, preserving its current Events, Activity, Abilities, Computer Use and
+Electron 44/Vite 8/TypeScript 7 toolchain. The final local macOS ARM64 package
+contains the native MCP inventory/deny-projection correction and nine plugins.
+
+| Metric | Measured result |
+|---|---:|
+| Regular-file bytes | 515,960,877 |
+| Package size | **492.06 MiB** |
+| Electron framework | 286.91 MiB |
+| ASAR | 18.56 MiB |
+| Native sidecar | 174.76 MiB |
+| Nine native plugin bundles and manifest | 8.91 MiB |
+| Unpacked dependencies | 0 |
+| Payload invariants / 512 MiB budget | Passed / Passed |
+
+Output: `dist-electron/native-v2-main-20260912/mac-arm64/Open Coworker.app` within
+this app directory. Electron is the installed **44.2.0**, not a guessed version.
+Application signing and notarization were disabled; the helper is ad-hoc signed.
+Nothing was installed or launched. Full `build:electron`, Coworker typecheck,
+focused source/SDK tests and the final package guard passed. App/engine journeys,
+signed distribution and non-macOS packages remain unverified.
+
+## Historical V1 Measured First Pass — September 10, 2026
 
 Local macOS ARM64 comparison from `feature/open-coworker` at `5ea6b0756` to the
 then-uncommitted `perf/coworker-release-size` candidate. Same application build inputs,
@@ -167,16 +230,18 @@ The build-only script uses Node builtins and electron-builder's existing
 run it with the filtered/isolated build dependencies installed.
 
 - Default mode reports size without enforcing cleanup invariants or a budget.
-- `--check` rejects duplicate/generic or missing target-qualified engines,
+- `--check` requires exactly one native `opencode2` (`opencode2.exe` on Windows),
+  rejects legacy executables/plugin resources and packaged legacy dependencies,
   renderer maps and server test artifacts in ASAR, dependency source maps and
   `.d.ts` / `.d.mts` / `.d.cts` declarations in ASAR, packaging-only icon files
   (anything under `resources/icons/` other than the two runtime PNGs), packaged
   `@openwork/computer-use` / `@openwork/ui`, and native `.build` / `.dSYM` debris
   in unpacked dependencies. It also requires nonempty main/server/preload/reset
-  entries, renderer HTML, sidecar metadata, declared plugin bundles, PDFium, and
-  the macOS helper. Plugins must not also be duplicated inside ASAR.
+  entries, renderer HTML, matching native sidecar metadata, the native plugin
+  manifest and its integrity-checked bundles, and the macOS helper. Plugins must
+  not also be duplicated inside ASAR; legacy PDFium/plugin resources are not required.
 - Platform comes from the package layout; engine architecture comes from its
-  target-qualified filename, never the host CPU. Optional `--platform` asserts
+  native sidecar metadata, never the host CPU. Optional `--platform` asserts
   the layout and `--arch` asserts the engine target with `--check`. These are not
   native binary/signature checks; existing afterPack checks remain authoritative
   and unchanged.
@@ -224,13 +289,15 @@ Retain existing native CPU/signature checks and packaged runtime verification;
 metadata presence alone does not prove imports, startup, or feature behavior.
 Remaining opportunities are measured, not assumed safe to remove:
 
-- `better-sqlite3` **26.08 MiB**: unused by Coworker's current Node SQLite path,
-  but still retained by the shared server manifest and Drizzle's optional peers.
-  Remove that runtime edge deliberately; do not blindly prune transitive imports.
-- `drizzle-orm` **8.88 MiB**: eagerly imported by the unbundled server's KV store,
-  even though this Electron path uses Node SQLite. Isolating its Bun-only path is
-  shared-server work and needs storage/restart proof.
-- Electron/framework **274.87 MiB** plus the required engine **135.77 MiB** dominate
+- The earlier artifact attributed **26.08 MiB** to `better-sqlite3` and
+  **8.88 MiB** to `drizzle-orm`. Their runtime edges are removed in source by the
+  native-Node manifest and Bun-only imports. Node read/write/independent-readback
+  and the existing Bun KV checks pass. The integrated package above verifies the
+  resulting payload; do not treat subtraction of historical totals as a benchmark.
+- Integration retains the current Electron/toolchain pins, map/declaration/icon
+  exclusions, and native Events/Abilities ports in the complete nine-plugin
+  manifest. Their packaged user journeys still need runtime proof.
+- Electron/framework **286.91 MiB** plus the native sidecar **174.76 MiB** dominate
   the remainder. Replacing either is a product/runtime change, not a dependency
   cleanup. Do not strip locales, architectures, permissions or browser capability
   without an explicit supported-feature decision and target-specific validation.

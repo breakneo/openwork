@@ -132,6 +132,8 @@ export type ConnectSkill = {
   marketplaceName: string;
   /** The exact capability to execute, e.g. "skill:create-skill" or "plugin:plg_…:cob_…". */
   capability: string;
+  /** Exact Cloud source URI, resolved against this workspace's native catalog. */
+  url: string;
   builtIn: boolean;
 };
 
@@ -153,6 +155,7 @@ export function parseSkillIndex(payload: unknown): ConnectSkill[] {
       pluginName: text(skill.pluginName),
       marketplaceName: text(skill.marketplaceName),
       capability,
+      url: text(skill.url),
       builtIn: capability.startsWith("skill:"),
     });
   }

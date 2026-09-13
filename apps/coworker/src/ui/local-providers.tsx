@@ -133,15 +133,15 @@ function FlatRow({ icon, title, line, tone, children, testId, extra }: { icon: R
 }
 
 /** The sign-in card style row: the code when there is one, Open browser, I've finished, Cancel. */
-function SignInWait({ state, onOpen, onCheck, onCancel }: { state: Extract<ConnectState, { phase: "waiting" }>; onOpen: () => void; onCheck: () => void; onCancel: () => void }) {
+function SignInWait({ state, cancelling, onOpen, onCheck, onCancel }: { state: Extract<ConnectState, { phase: "waiting" }>; cancelling: boolean; onOpen: () => void; onCheck: () => void; onCancel: () => void }) {
   return (
     <div className="mt-3 ml-11 overflow-hidden rounded-xl border border-line bg-ink/60" role="listbox" aria-label="Finish signing in" data-testid="sign-in-wait">
       {state.code ? (
         <p className="border-b border-line px-3 py-2.5 text-center font-mono text-lg tracking-[0.2em] text-snow" data-testid="sign-in-code">{state.code}</p>
       ) : null}
-      <OptionRow letter="A" label={COPY.openBrowser} description={state.line} onChoose={onOpen} />
-      <OptionRow letter="B" label={COPY.finished} onChoose={onCheck} />
-      <OptionRow letter="C" label={COPY.cancel} tone="danger" onChoose={onCancel} />
+      <OptionRow letter="A" label={COPY.openBrowser} description={state.line} disabled={cancelling} onChoose={onOpen} />
+      <OptionRow letter="B" label={COPY.finished} disabled={cancelling} onChoose={onCheck} />
+      <OptionRow letter="C" label={COPY.cancel} tone="danger" disabled={cancelling} onChoose={onCancel} />
     </div>
   );
 }
@@ -308,9 +308,12 @@ export function LocalProviders({
   const revealSetupRef = useRef(false);
   const statesRef = useRef(states);
   statesRef.current = states;
+  const signInRequests = useRef(new Map<string, { action: "status" | "cancel" }>());
+  useEffect(() => () => { signInRequests.current.clear(); }, []);
 
   const setRowState = useCallback((id: string, next: ConnectState) => {
-    setStates((current) => ({ ...current, [id]: next }));
+    statesRef.current = { ...statesRef.current, [id]: next };
+    setStates(statesRef.current);
   }, []);
 
   const refresh = useCallback(async (options: { clearRows?: boolean } = {}) => {
@@ -344,7 +347,8 @@ export function LocalProviders({
       // The Refresh control starts finished rows clean; a sign-in in progress is never wiped.
       if (options.clearRows) {
         const busy = new Set(busyProviderIds(statesRef.current));
-        setStates((current) => Object.fromEntries(Object.entries(current).filter(([id]) => busy.has(id))));
+        statesRef.current = Object.fromEntries(Object.entries(statesRef.current).filter(([id]) => busy.has(id)));
+        setStates(statesRef.current);
       }
     } catch (cause) {
       setReadiness(EMPTY_READINESS);
@@ -444,47 +448,51 @@ export function LocalProviders({
     }
   }
 
-  // Sign-ins in progress: ask the AI service how they are going.
+  const updateSignIn = useCallback(async (rowId: string, state: Extract<ConnectState, { phase: "waiting" }>, action: "status" | "cancel") => {
+    const pending = signInRequests.current.get(state.attemptId);
+    if (pending && (action === "status" || pending.action === "cancel")) return;
+    const current = statesRef.current[rowId];
+    if (current?.phase !== "waiting" || current.attemptId !== state.attemptId) return;
+    const request = { action };
+    // A cancellation supersedes an in-flight status read, never another cancellation.
+    signInRequests.current.set(state.attemptId, request);
+    const ownsRequest = () => {
+      const row = statesRef.current[rowId];
+      return signInRequests.current.get(state.attemptId) === request && row?.phase === "waiting" && row.attemptId === state.attemptId;
+    };
+    if (action === "cancel") setRowState(rowId, { ...current, line: "Cancelling sign-in..." });
+    try {
+      if (action === "cancel") {
+        const result = await coworkerBridge.localProviders.signIn.cancel(state.attemptId);
+        if (result.ok !== true) throw new Error("Cancellation could not be confirmed. Check the sign-in status.");
+        if (ownsRequest()) setRowState(rowId, IDLE);
+      } else {
+        const status = await coworkerBridge.localProviders.signIn.status(state.attemptId);
+        if (!ownsRequest()) return;
+        const next = connectReducer(statesRef.current[rowId] ?? state, { type: "sign-in-status", status });
+        if (next !== statesRef.current[rowId]) {
+          setRowState(rowId, next);
+          if (next.phase === "connected") void changed();
+        }
+      }
+    } catch (cause) {
+      if (ownsRequest()) setRowState(rowId, { ...current, line: messageOf(cause) });
+    } finally {
+      if (signInRequests.current.get(state.attemptId) === request) signInRequests.current.delete(state.attemptId);
+    }
+  }, [changed, setRowState]);
+
+  // Sign-ins in progress: ask the AI service without overlapping reads or cancellation.
   useEffect(() => {
     const waiting = Object.entries(states).filter((entry): entry is [string, Extract<ConnectState, { phase: "waiting" }>] => entry[1].phase === "waiting");
     if (waiting.length === 0) return;
-    let cancelled = false;
-    const timer = window.setInterval(async () => {
+    const timer = window.setInterval(() => {
       for (const [rowId, state] of waiting) {
-        try {
-          const status = await coworkerBridge.localProviders.signIn.status(state.attemptId);
-          if (cancelled) return;
-          const next = connectReducer(state, { type: "sign-in-status", status });
-          if (next !== state) {
-            setRowState(rowId, next);
-            if (next.phase === "connected") void changed();
-          }
-        } catch {
-          // The next tick asks again.
-        }
+        void updateSignIn(rowId, state, "status");
       }
     }, SIGN_IN_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [changed, setRowState, states]);
-
-  async function checkSignIn(rowId: string, state: Extract<ConnectState, { phase: "waiting" }>) {
-    try {
-      const status = await coworkerBridge.localProviders.signIn.status(state.attemptId);
-      const next = connectReducer(state, { type: "sign-in-status", status });
-      setRowState(rowId, next);
-      if (next.phase === "connected") await changed();
-    } catch (cause) {
-      setRowState(rowId, connectReducer(IDLE, { type: "error", error: messageOf(cause) }));
-    }
-  }
-
-  async function cancelSignIn(rowId: string, attemptId: string) {
-    await coworkerBridge.localProviders.signIn.cancel(attemptId).catch(() => undefined);
-    setRowState(rowId, IDLE);
-  }
+    return () => { window.clearInterval(timer); };
+  }, [states, updateSignIn]);
 
   async function disconnect(row: Pick<ConnectedRow, "providerId">, confirmed: boolean) {
     setError("");
@@ -600,9 +608,10 @@ export function LocalProviders({
                   extra={state.phase === "waiting" ? (
                     <SignInWait
                       state={state}
+                      cancelling={signInRequests.current.get(state.attemptId)?.action === "cancel"}
                       onOpen={() => void coworkerBridge.openExternal(state.url)}
-                      onCheck={() => void checkSignIn(finding.id, state)}
-                      onCancel={() => void cancelSignIn(finding.id, state.attemptId)}
+                      onCheck={() => void updateSignIn(finding.id, state, "status")}
+                      onCancel={() => void updateSignIn(finding.id, state, "cancel")}
                     />
                   ) : null}
                 >
@@ -730,9 +739,10 @@ export function LocalProviders({
                       return (
                         <SignInWait
                           state={state}
+                          cancelling={signInRequests.current.get(state.attemptId)?.action === "cancel"}
                           onOpen={() => void coworkerBridge.openExternal(state.url)}
-                          onCheck={() => void checkSignIn(`add:${addableChosen.id}`, state)}
-                          onCancel={() => void cancelSignIn(`add:${addableChosen.id}`, state.attemptId)}
+                          onCheck={() => void updateSignIn(`add:${addableChosen.id}`, state, "status")}
+                          onCancel={() => void updateSignIn(`add:${addableChosen.id}`, state, "cancel")}
                         />
                       );
                     }

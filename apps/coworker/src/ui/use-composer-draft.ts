@@ -1,36 +1,37 @@
-import { useCallback, useLayoutEffect, useRef, useState, type SetStateAction } from "react";
+import { useCallback, useSyncExternalStore, type SetStateAction } from "react";
+import { createComposerDraftStore, parseComposerDraft, type ComposerDraft } from "../lib/skill-selection.ts";
 
-const PREFIX = "coworker.composer-draft.v1:";
-const drafts = new Map<string, string>();
-
-function readDraft(key: string): string {
-  const cached = drafts.get(key);
-  if (cached !== undefined) return cached;
-  try { return window.localStorage.getItem(PREFIX + key) ?? ""; }
-  catch { return ""; }
-}
+const PREFIX = "coworker.composer-draft.v2:";
+const LEGACY_PREFIX = "coworker.composer-draft.v1:";
+export const composerDraftStore = createComposerDraftStore({
+  read(key) {
+    let value: string | null = null;
+    let legacy = "";
+    try { value = window.localStorage.getItem(PREFIX + key); legacy = window.localStorage.getItem(LEGACY_PREFIX + key) ?? ""; }
+    catch { return { text: "", skills: [] }; }
+    return parseComposerDraft(value, legacy);
+  },
+  write(key, draft) {
+    if (draft.text || draft.skills.length) window.localStorage.setItem(PREFIX + key, JSON.stringify(draft));
+    else window.localStorage.removeItem(PREFIX + key);
+    window.localStorage.removeItem(LEGACY_PREFIX + key);
+  },
+});
 
 /** Unsent words belong to one coworker and conversation, including across reloads. */
-export function useComposerDraft(key: string, initialValue?: string): [string, (next: SetStateAction<string>) => void] {
-  const [entry, setEntry] = useState(() => ({ key, value: initialValue ?? readDraft(key) }));
-  // A reused view must not show or save the previous conversation's draft.
-  const value = entry.key === key ? entry.value : readDraft(key);
-  const current = useRef({ key, value });
-  if (current.current.key !== key) current.current = { key, value };
-  const setValue = useCallback((next: SetStateAction<string>) => {
-    const previous = current.current.key === key ? current.current.value : readDraft(key);
-    const updated = typeof next === "function" ? next(previous) : next;
-    drafts.set(key, updated);
-    if (current.current.key === key) current.current = { key, value: updated };
-    try {
-      if (updated) window.localStorage.setItem(PREFIX + key, updated);
-      else window.localStorage.removeItem(PREFIX + key);
-    } catch {
-      // A full or unavailable browser store must not prevent writing or sending.
-    }
-    setEntry((entry) => entry.key === key && entry.value === updated ? entry : { key, value: updated });
+export function useSelectedComposerDraft(key: string): [ComposerDraft, (next: SetStateAction<ComposerDraft>) => void] {
+  const subscribe = useCallback((listener: () => void) => composerDraftStore.subscribe(key, listener), [key]);
+  const read = useCallback(() => composerDraftStore.read(key), [key]);
+  const snapshot = useSyncExternalStore(subscribe, read, read);
+  const setValue = useCallback((next: SetStateAction<ComposerDraft>) => {
+    composerDraftStore.update(key, next);
   }, [key]);
-  // A transferred voice draft is recoverable before the person types again.
-  useLayoutEffect(() => { if (initialValue !== undefined) setValue((value) => value); }, [initialValue, setValue]);
-  return [value, setValue];
+  return [snapshot.value, setValue];
+}
+
+/** Text-only callers keep their existing API, sharing the same durable record. */
+export function useComposerDraft(key: string): [string, (next: SetStateAction<string>) => void] {
+  const [draft, setDraft] = useSelectedComposerDraft(key);
+  const setText = useCallback((next: SetStateAction<string>) => setDraft((draft) => ({ ...draft, text: typeof next === "function" ? next(draft.text) : next })), [setDraft]);
+  return [draft.text, setText];
 }

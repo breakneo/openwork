@@ -26,12 +26,18 @@ import {
   type CalendarMode,
 } from "@/ui/calendar-grid";
 
+export type CalendarEventTarget = import("@/lib/events").EventTarget;
+
 export type CalendarRequest = {
   id: number;
+  intent?: "open" | "create";
   coworkerSlug?: string;
   eventId?: string;
   runId?: string;
   at?: number;
+  fromActivity?: boolean;
+  reminderId?: string;
+  notice?: string;
 };
 const modes: { value: CalendarMode; label: string }[] = [
   { value: "day", label: "Day" },
@@ -49,6 +55,9 @@ export function CalendarView({
   onOpenConversation,
   onOpenArtifact,
   onOpenResponsibility,
+  onEventSelectionChange,
+  onExitActivity,
+  activityReminder,
 }: {
   active: boolean;
   coworkers: CoworkerSummary[];
@@ -56,9 +65,12 @@ export function CalendarView({
   preferences: CalendarPreferences;
   onPreferencesChange: CalendarPreferencesChange;
   request: CalendarRequest | null;
-  onOpenConversation: (groupId: string) => Promise<void>;
+  onOpenConversation: (groupId: string, target: CalendarEventTarget) => Promise<void>;
   onOpenArtifact: (artifact: EventArtifact) => Promise<void>;
   onOpenResponsibility: (slug: string, threadId?: string) => void;
+  onEventSelectionChange?: (eventId: string | null) => void;
+  onExitActivity?: () => void;
+  activityReminder?: { id: string; read: boolean; busy: boolean; onMarkRead: () => Promise<void> };
 }) {
   const [date, setDate] = useState(Date.now);
   const [query, setQuery] = useState("");
@@ -72,6 +84,13 @@ export function CalendarView({
     initialStartsAt?: number;
   } | null>(null);
   const [notice, setNotice] = useState("");
+  const [pendingRequest, setPendingRequest] = useState<CalendarRequest | null>(null);
+  const [openedRequest, setOpenedRequest] = useState<CalendarRequest | null>(null);
+  const [reminderError, setReminderError] = useState("");
+  const markingReminder = useRef(false);
+  const openedRequestRef = useRef(openedRequest);
+  openedRequestRef.current = openedRequest;
+  const handledRequest = useRef<number | null>(null);
   const dock = useRef<HTMLElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const focusRequested = useRef(false);
@@ -84,41 +103,75 @@ export function CalendarView({
       ?.focus({ preventScroll: true });
     focusRequested.current = false;
   }, [active, selection, responsibility, editor]);
-  useEffect(() => {
-    if (!request) return;
-    if (request.coworkerSlug) {
+  useEffect(() => () => onEventSelectionChange?.(null), [onEventSelectionChange]);
+
+  function selectEvent(next: EventSelection | null) {
+    onEventSelectionChange?.(next?.eventId ?? null);
+    setSelection(next);
+  }
+
+  function applyRequest(next: CalendarRequest) {
+    if (next.coworkerSlug) {
       setPreferences((value) => ({
         ...value,
-        coworkerSlugs: [request.coworkerSlug ?? ""],
+        coworkerSlugs: [next.coworkerSlug ?? ""],
       }));
     }
     if (editor) {
+      if (next.eventId || next.intent === "create") setPendingRequest(next);
       setNotice(
-        request.coworkerSlug
+        next.coworkerSlug
           ? "Calendar visibility updated. Your event draft is kept."
-          : "Your event draft is still open. Save or cancel it before opening another entry.",
+          : "Your event draft is still open. Save or cancel it before opening the requested event.",
       );
       return;
     }
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && !dock.current?.contains(focused))
       opener.current = focused;
-    focusRequested.current = Boolean(request.eventId);
-    if (request.coworkerSlug) {
-      setSelection(null);
+    focusRequested.current = Boolean(next.eventId || next.intent === "create");
+    setPendingRequest(null);
+    setOpenedRequest(next);
+    setReminderError("");
+    setNotice(next.notice ?? "");
+    const run = next.runId ? data.eventRuns.find((entry) => entry.id === next.runId && entry.eventId === next.eventId) : undefined;
+    const event = data.events.find((entry) => entry.id === next.eventId);
+    const at = next.at ?? (next.runId ? run?.scheduledFor : event?.nextDueAt ?? event?.startsAt);
+    if (next.intent === "create") {
+      selectEvent(null);
       setResponsibility(null);
-    }
-    if (request.eventId) {
-      setSelection({
-        eventId: request.eventId,
-        runId: request.runId,
-        at: request.at,
-        requestId: request.id,
+      setEditor({ event: null, initialStartsAt: at });
+    } else if (next.eventId) {
+      selectEvent({
+        eventId: next.eventId,
+        runId: next.runId,
+        at,
+        requestId: next.id,
       });
       setResponsibility(null);
+    } else if (next.coworkerSlug) {
+      selectEvent(null);
+      setResponsibility(null);
     }
-    if (request.at !== undefined) setDate(request.at);
-  }, [request]);
+    if (at !== undefined) setDate(at);
+  }
+
+  useEffect(() => {
+    if (!active || !request || handledRequest.current === request.id) return;
+    handledRequest.current = request.id;
+    applyRequest(request);
+  }, [active, request]);
+
+  async function markReminderRead() {
+    if (!activityReminder || activityReminder.busy || markingReminder.current || openedRequest?.reminderId !== activityReminder.id) return;
+    const origin = openedRequest;
+    markingReminder.current = true;
+    setReminderError("");
+    try { await activityReminder.onMarkRead(); }
+    catch (cause) {
+      if (openedRequestRef.current === origin) setReminderError(cause instanceof Error ? cause.message : "Read status could not be saved. Try again.");
+    } finally { markingReminder.current = false; }
+  }
   const { start, end, days } = useMemo(
     () => calendarRange(date, preferences.view),
     [date, preferences.view],
@@ -200,6 +253,16 @@ export function CalendarView({
         : item.eventId === selection?.eventId &&
           item.startsAt === selection?.at,
     )?.id;
+  const selectedEntry = projectedItems.find((item) => item.id === selectedItemId);
+  const selectedEvent = selection?.runId
+    ? data.eventRuns.find((run) => run.id === selection.runId && run.eventId === selection.eventId)?.event
+    : data.events.find((event) => event.id === selection?.eventId);
+  const selectedSlugs = selectedEntry?.coworkerSlugs ?? selectedEvent?.participantSlugs;
+  const hiddenBy = selection && !editor ? [
+    ...(!preferences.events ? ["the Events source filter"] : []),
+    ...(selectedSlugs && preferences.coworkerSlugs !== null && !selectedSlugs.some((slug) => preferences.coworkerSlugs?.includes(slug)) ? ["coworker filters"] : []),
+    ...(selectedEvent && search && !`${selectedEntry?.title ?? selectedEvent.title} ${selectedEntry?.summary ?? selectedEvent.objective}`.toLowerCase().includes(search) ? ["Calendar search"] : []),
+  ] : [];
   const rangeTitle =
     preferences.view === "month"
       ? new Date(date).toLocaleDateString(undefined, {
@@ -238,9 +301,11 @@ export function CalendarView({
     const restore = panel?.contains(document.activeElement);
     const target = opener.current;
     focusRequested.current = false;
-    setSelection(null);
+    selectEvent(null);
     setResponsibility(null);
     setEditor(null);
+    setOpenedRequest(null);
+    setReminderError("");
     setNotice("");
     if (restore)
       window.requestAnimationFrame(() => {
@@ -255,6 +320,7 @@ export function CalendarView({
   }
   function create(initialStartsAt: number | undefined, target: HTMLElement) {
     if (editor) {
+      setPendingRequest({ id: Date.now(), intent: "create", at: initialStartsAt });
       setNotice(
         "Your event draft is still open. Save or cancel it before choosing another time.",
       );
@@ -262,13 +328,17 @@ export function CalendarView({
     }
     opener.current = target;
     focusRequested.current = true;
+    setPendingRequest(null);
+    setOpenedRequest(null);
+    setReminderError("");
     setNotice("");
-    setSelection(null);
+    selectEvent(null);
     setResponsibility(null);
     setEditor({ event: null, initialStartsAt });
   }
   function open(item: CalendarItem, target: HTMLElement) {
     if (editor) {
+      if (item.kind === "event" && item.eventId) setPendingRequest({ id: Date.now(), eventId: item.eventId, runId: item.eventRunId, at: item.startsAt });
       setNotice(
         "Your event draft is still open. Save or cancel it before opening another entry.",
       );
@@ -276,9 +346,12 @@ export function CalendarView({
     }
     opener.current = target;
     focusRequested.current = true;
+    setPendingRequest(null);
+    setOpenedRequest(null);
+    setReminderError("");
     setNotice("");
     if (item.kind === "event" && item.eventId) {
-      setSelection({
+      selectEvent({
         eventId: item.eventId,
         runId: item.eventRunId,
         at: item.startsAt,
@@ -287,7 +360,7 @@ export function CalendarView({
       setResponsibility(null);
     } else {
       setResponsibility(item);
-      setSelection(null);
+      selectEvent(null);
     }
   }
 
@@ -298,6 +371,11 @@ export function CalendarView({
       data-active={active}
     >
       <header className="glass-header window-drag flex h-[78px] shrink-0 items-center gap-3 border-b border-line px-4 py-3">
+        {onExitActivity ? (
+          <Button variant="ghost" className="window-no-drag shrink-0 text-xs" onClick={onExitActivity}>
+            Go to calendar
+          </Button>
+        ) : null}
         <div className="min-w-0 flex-1">
           <h1
             className="truncate text-sm font-semibold text-snow"
@@ -409,8 +487,27 @@ export function CalendarView({
               </svg>
             </IconButton>
           </div>
-          {data.errors.length || data.loading || notice ? (
+          {data.errors.length || data.loading || notice || pendingRequest || openedRequest?.fromActivity || hiddenBy.length || reminderError ? (
             <div className="shrink-0 space-y-1 border-b border-line px-3 py-2">
+              {openedRequest?.fromActivity ? (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-mist">
+                  <p role="status">Opened from Activity</p>
+                  {activityReminder && openedRequest.reminderId === activityReminder.id ? (
+                    activityReminder.read ? <span>Reminder marked as read.</span> : (
+                      <Button variant="ghost" className="text-xs" disabled={activityReminder.busy} onClick={() => void markReminderRead()}>Mark reminder as read</Button>
+                    )
+                  ) : null}
+                </div>
+              ) : null}
+              {reminderError ? <p role="alert" className="text-xs text-amber">{reminderError}</p> : null}
+              {hiddenBy.length ? <p role="status" className="text-xs text-mist">This event is hidden by {hiddenBy.join(" and ")}. Your filters are unchanged.</p> : null}
+              {pendingRequest ? (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-mist">
+                  <p>{editor ? "Your requested destination is kept until you save or cancel this draft." : "Your requested destination is ready to open."}</p>
+                  <Button variant="ghost" className="text-xs" disabled={Boolean(editor)} onClick={() => applyRequest(pendingRequest)}>{pendingRequest.intent === "create" ? "Create requested event" : "Open requested event"}</Button>
+                  <Button variant="ghost" className="text-xs" onClick={() => { setPendingRequest(null); setNotice(""); }}>Dismiss request</Button>
+                </div>
+              ) : null}
               {data.errors.length ? (
                 <div
                   role="status"
@@ -479,6 +576,7 @@ export function CalendarView({
                       className="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-2 text-left text-xs hover:bg-white/5"
                       onClick={(click) => {
                         if (editor) {
+                          setPendingRequest({ id: Date.now(), eventId: event.id });
                           setNotice(
                             "Save or cancel your open draft before opening another event.",
                           );
@@ -486,9 +584,12 @@ export function CalendarView({
                         }
                         opener.current = click.currentTarget;
                         focusRequested.current = true;
+                        setPendingRequest(null);
+                        setOpenedRequest(null);
+                        setReminderError("");
                         setNotice("");
                         setResponsibility(null);
-                        setSelection({
+                        selectEvent({
                           eventId: event.id,
                           requestId: Date.now(),
                         });
@@ -530,7 +631,7 @@ export function CalendarView({
                   focusRequested.current = true;
                   setEditor({ event });
                 }}
-                onOpenConversation={onOpenConversation}
+                onOpenConversation={(groupId) => onOpenConversation(groupId, { eventId: selection.eventId, runId: selection.runId, at: selection.at })}
                 onOpenArtifact={onOpenArtifact}
                 onChanged={data.refresh}
               />
@@ -563,7 +664,8 @@ export function CalendarView({
                   setEditor(null);
                   setNotice("");
                   setResponsibility(null);
-                  setSelection({
+                  setDate(event.nextDueAt ?? event.startsAt);
+                  selectEvent({
                     eventId: event.id,
                     at: event.nextDueAt ?? event.startsAt,
                     requestId: Date.now(),

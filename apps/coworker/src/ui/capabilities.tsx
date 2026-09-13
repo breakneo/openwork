@@ -15,7 +15,6 @@ import {
   searchItems,
   searchScope,
   skillPath,
-  toolIdsForServer,
   toolPath,
   type CatalogApp,
   type SearchableItem,
@@ -45,6 +44,8 @@ import { buildDenAccountUrl, type DenSession } from "@/lib/den";
 import {
   createCoworkerMcpClient,
   createCoworkerMcpAppActions,
+  isRecord,
+  mcpFailureMessage,
   type CoworkerMcpAppCatalogServer,
   type CoworkerMcpAppResource,
   type CoworkerMcpClient,
@@ -77,23 +78,6 @@ const CONNECT_VALUE = [
   { title: "Just describe the result", text: "Your coworker finds the right available app and handles the steps. No tool configuration to learn." },
   { title: "Keep your team's ways of working", text: "Use the skills and tools your team shares, with your existing access and approval controls." },
 ];
-
-function appFailureMessage(result: PreservedMcpAppResult): string {
-  for (const item of result.content) {
-    if (item.type !== "text" || typeof item.text !== "string" || !item.text.trim()) continue;
-    try {
-      const parsed: unknown = JSON.parse(item.text);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        const message = Object.fromEntries(Object.entries(parsed)).message;
-        if (typeof message === "string" && message.trim()) return message;
-      }
-    } catch {
-      // Plain-text provider errors are already suitable for the compact UI.
-    }
-    return item.text;
-  }
-  return "This App could not start with the supplied input.";
-}
 
 function configured(item: CoworkerMcpItem): boolean {
   return item.config.enabled !== false && item.disabledByTools !== true;
@@ -149,31 +133,20 @@ type LocalData = {
   inventory: CoworkerMcpItem[];
   servers: CoworkerMcpAppCatalogServer[];
   engine: Record<string, EngineToolStatus>;
-  toolIds: string[];
 };
 
-const emptyLocal: LocalData = { inventory: [], servers: [], engine: {}, toolIds: [] };
-
-/** The Connect catalog, read once per session and coworker; Refresh re-reads it. */
+const emptyLocal: LocalData = { inventory: [], servers: [], engine: {} };
 const connectCatalogCache = new Map<string, ConnectCatalog>();
-
-function connectCacheKey(workspaceId: string, session: DenSession): string {
-  return `${workspaceId}\u0000${session.baseUrl}\u0000${session.orgId}`;
-}
 
 async function readSkillIndex(runtime: RuntimeInfo): Promise<ConnectSkill[]> {
   const response = await fetch(`${runtime.serverUrl.replace(/\/+$/, "")}/experimental/connect/skills`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${runtime.ownerToken}` },
     signal: AbortSignal.timeout(30_000),
+    redirect: "error",
   });
-  if (!response.ok) return [];
-  return parseSkillIndex(await response.json());
-}
-
-async function searchGateway(client: CoworkerMcpClient, query: string) {
-  const result = await client.searchCapabilities(query);
-  if (result.isError) throw new Error("Connected app search is temporarily unavailable.");
-  return parseSearchMatches(result);
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error(isRecord(payload) && typeof payload.message === "string" ? payload.message : "Connected skills could not be loaded.");
+  return parseSkillIndex(payload);
 }
 
 function useAppsToolsData(input: {
@@ -188,6 +161,8 @@ function useAppsToolsData(input: {
   const [local, setLocal] = useState<LocalData>(emptyLocal);
   const [localLoaded, setLocalLoaded] = useState(false);
   const [connect, setConnect] = useState<ConnectCatalog>(emptyConnectCatalog);
+  const sessionScope = session ? JSON.stringify([workspaceId, session.baseUrl, session.orgId, session.userEmail.trim().toLowerCase()]) : "";
+  const [catalogScope, setCatalogScope] = useState("");
   const [connectLoaded, setConnectLoaded] = useState(false);
   const [connectError, setConnectError] = useState("");
   const connectRequestRef = useRef(0);
@@ -203,18 +178,17 @@ function useAppsToolsData(input: {
     if (!client) return;
     setLoading((count) => count + 1);
     try {
-      const [inventory, apps, engine, toolIds] = await Promise.all([
+      const [inventory, apps, engine] = await Promise.all([
         client.listInventory(),
         client.listApps(),
         client.engineStatus().catch((): Record<string, unknown> => ({})),
-        client.toolIds().catch((): string[] => []),
       ]);
       const parsedEngine: Record<string, EngineToolStatus> = {};
       for (const [name, value] of Object.entries(engine)) {
         const status = parseEngineToolStatus(value);
         if (status) parsedEngine[name] = status;
       }
-      setLocal({ inventory: inventory.items, servers: apps.servers, engine: parsedEngine, toolIds });
+      setLocal({ inventory: inventory.items, servers: apps.servers, engine: parsedEngine });
       askedServersRef.current.clear();
       setServerTools({});
       setError("");
@@ -234,32 +208,40 @@ function useAppsToolsData(input: {
       setConnectLoaded(false);
       return;
     }
-    const key = connectCacheKey(workspaceId, session);
-    const cached = force ? undefined : connectCatalogCache.get(key);
+    const cached = force ? undefined : connectCatalogCache.get(sessionScope);
     if (cached) {
       setConnect(cached);
+      setCatalogScope(sessionScope);
       setConnectLoaded(true);
       return;
     }
     setLoading((count) => count + 1);
     try {
-      let failures = 0;
+      const failures: string[] = [];
+      const failed = (cause: unknown) => { failures.push(cause instanceof Error ? cause.message : String(cause)); return []; };
       const [skills, ...searches] = await Promise.all([
-        readSkillIndex(runtime).catch((): ConnectSkill[] => { failures += 1; return []; }),
-        ...CONNECT_SEARCH_VARIANTS.map((query) => searchGateway(client, query).catch(() => { failures += 1; return []; })),
+        readSkillIndex(runtime).catch(failed),
+        ...CONNECT_SEARCH_VARIANTS.map(async (query) => {
+          try {
+            const result = await client.searchCapabilities(query);
+            if (result.isError) throw new Error(mcpFailureMessage(result, "Connected capability search failed."));
+            return parseSearchMatches(result);
+          } catch (cause) { return failed(cause); }
+        }),
       ]);
       if (connectRequestRef.current !== requestId) return;
-      if (failures > 0) setConnectError("Some connected apps and skills couldn't be loaded. Try again in a moment.");
-      if (failures === CONNECT_SEARCH_VARIANTS.length + 1) return;
       const catalog = buildConnectCatalog({ skills, matches: mergeSearchMatches(searches), servers: serversRef.current });
-      // Never remember a partial outage as the member's complete catalog.
-      if (failures === 0) connectCatalogCache.set(key, catalog);
+      if (failures.length === 0) connectCatalogCache.set(sessionScope, catalog);
+      setConnectError([...new Set(failures)].join("\n"));
       setConnect(catalog);
+      setCatalogScope(sessionScope);
+    } catch (cause) {
+      if (connectRequestRef.current === requestId) setConnectError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (connectRequestRef.current === requestId) setConnectLoaded(true);
       setLoading((count) => count - 1);
     }
-  }, [client, connected, runtime, session, workspaceId]);
+  }, [client, connected, runtime, session, sessionScope]);
 
   useEffect(() => {
     void refreshLocal();
@@ -303,7 +285,7 @@ function useAppsToolsData(input: {
     }
   }, [client]);
 
-  return { local, localLoaded, connect, connectLoaded, connectError, serverTools, ensureServerTools, loading: loading > 0, error, refresh };
+  return { local, localLoaded, connect: catalogScope === sessionScope ? connect : emptyConnectCatalog, connectLoaded: catalogScope === sessionScope && connectLoaded, connectError, serverTools, ensureServerTools, loading: loading > 0, error, refresh };
 }
 
 export type BesideControl = {
@@ -337,7 +319,7 @@ export function CapabilitiesPanel({
   onRepairConnect: () => void;
   onConnectAccount: () => void;
   /** Seed the discussion composer with a message the person still sends. */
-  onDiscuss: (message: string) => void;
+  onDiscuss: (message: string, skill?: import("@/lib/skill-selection").SelectedSkill) => void;
   /** The levels below Apps & tools this panel is showing. */
   path: PanelCrumb[];
   /** The panel's current width, for what fits on a row. */
@@ -429,12 +411,11 @@ export function CapabilitiesPanel({
     onSetPath(resolved ?? []);
   }, [apps, data.localLoaded, localServerKey, onSetPath, pendingTool]);
 
-  /** Tool names for one server: what it says it offers, else what the AI service projects for it. */
+  /** Only the host's server inventory can describe tools; native v2 has no tool-ID endpoint. */
   const toolNamesFor = useCallback((name: string): string[] => {
     const listed = data.serverTools[name];
-    if (listed && listed.length > 0) return listed.map((tool) => tool.name);
-    return toolIdsForServer(data.local.toolIds, name);
-  }, [data.local.toolIds, data.serverTools]);
+    return listed?.map((tool) => tool.name) ?? [];
+  }, [data.serverTools]);
 
   const searchIndex = useMemo((): SearchableItem[] => [
     ...apps.map((app): SearchableItem => ({
@@ -773,7 +754,7 @@ export function CapabilitiesPanel({
             <ToolDetail
               item={item}
               status={localStatusFor(item)}
-              tools={data.serverTools[item.name] ?? toolIdsForServer(data.local.toolIds, item.name).map((name): CoworkerMcpServerTool => ({ name, title: null, description: null, resourceUri: null }))}
+              tools={data.serverTools[item.name] ?? []}
               toolsRead={item.name in data.serverTools}
               apps={appsForServer(apps, item.name)}
               coworkerName={coworker.name}
@@ -789,7 +770,7 @@ export function CapabilitiesPanel({
         if (!skill) return <QuietLine testId="apps-tools-missing">{data.connectLoaded ? "This skill is no longer shared with you." : "Reading…"}</QuietLine>;
         return (
           <div data-testid="coworker-capabilities" data-screen="skill">
-            <SkillDetail skill={skill} coworkerName={coworker.name} onDiscuss={onDiscuss} beside={mode === "panel" && beside?.available ? () => beside.open(path) : null} />
+            <SkillDetail skill={skill} coworker={coworker} session={session} onDiscuss={onDiscuss} beside={mode === "panel" && beside?.available ? () => beside.open(path) : null} />
           </div>
         );
       }
@@ -1204,7 +1185,7 @@ function AppDetail({
       };
       // A catalog launch is sessionless, not attached to whichever discussion is selected.
       // "Read only" in the catalog describes the launch tool, not a disabled host.
-      const resolved = await client.resolveApp(catalog.projectedToolName, { sessionId: null, engine: "v1", readOnly: false }, launch);
+      const resolved = await client.resolveApp(catalog.projectedToolName, { sessionId: null, engine: "v2", readOnly: false }, launch);
       if (requestGeneration !== generation.current) {
         if (resolved.app?.launchId) void client.releaseApp(resolved.app.launchId).catch(() => undefined);
         return;
@@ -1218,7 +1199,7 @@ function AppDetail({
       };
       const called = await actions.callTool(resource.toolName, args, approved);
       if (requestGeneration !== generation.current) return;
-      if (called.isError) throw new Error(appFailureMessage(called));
+      if (called.isError) throw new Error(mcpFailureMessage(called));
       setArgumentsValue(args);
       setResource(resolved.app);
       setResult(called);
@@ -1424,7 +1405,26 @@ function ToolDetail({
   );
 }
 
-function SkillDetail({ skill, coworkerName, onDiscuss, beside }: { skill: ConnectSkill; coworkerName: string; onDiscuss: (message: string) => void; beside: (() => void) | null }) {
+function SkillDetail({ skill, coworker, session, onDiscuss, beside }: { skill: ConnectSkill; coworker: CoworkerSummary; session: DenSession | null; onDiscuss: (message: string, skill?: import("@/lib/skill-selection").SelectedSkill) => void; beside: (() => void) | null }) {
+  const [error, setError] = useState("");
+  const [selecting, setSelecting] = useState(false);
+  const current = useRef({ session, skill, workspaceId: coworker.workspaceId });
+  const mounted = useRef(true);
+  current.current = { session, skill, workspaceId: coworker.workspaceId };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  async function select() {
+    if (selecting) return;
+    const request = current.current;
+    setSelecting(true);
+    setError("");
+    try {
+      if (!session || !skill.url) throw new Error("Refresh Apps & tools to select this skill from your current OpenWork account.");
+      const selected = await coworkerBridge.turns.selectSkill({ slug: coworker.slug, uri: skill.url, label: skill.title, account: { baseUrl: session.baseUrl, orgId: session.orgId, email: session.userEmail } });
+      if (!mounted.current || current.current.session !== request.session || current.current.skill !== request.skill || current.current.workspaceId !== request.workspaceId) return;
+      onDiscuss("", selected);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setSelecting(false); }
+  }
   return (
     <div className="space-y-3" data-testid="coworker-skill-detail">
       <DetailHeader icon={<SkillIcon />} title={skill.title} line={skill.builtIn ? "Built into OpenWork Connect" : [skill.pluginName, skill.marketplaceName].filter(Boolean).join(" · ")} />
@@ -1434,12 +1434,14 @@ function SkillDetail({ skill, coworkerName, onDiscuss, beside }: { skill: Connec
           variant="primary"
           className="text-xs"
           data-testid="apps-tools-ask"
-          onClick={() => onDiscuss(`Use the "${skill.title}" skill to help me with: `)}
+          disabled={selecting}
+          onClick={() => void select()}
         >
-          Ask {coworkerName} to use it
+          Ask {coworker.name} to use it
         </Button>
         {beside ? <Button variant="ghost" className="text-xs" onClick={beside} data-testid="apps-tools-open-beside">Open beside</Button> : null}
       </ActionRow>
+      <ReadProblem error={error} />
       <div className="px-1">
         <TechnicalDetails entries={[
           { label: "Skill", value: skill.name },

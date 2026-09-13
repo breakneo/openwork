@@ -85,17 +85,17 @@ export async function mcpPost(fetcher: McpFetch, url: string, headers: Record<st
   return { response, payload: await readMcpPayload(response, requestId) };
 }
 
-/**
- * Reads one JSON resource from an openwork-cloud config. Returns the resource
- * text, or null when the config is unusable (invalid URL, disabled, auth
- * rejected, transport or protocol error) so callers can try another candidate.
- */
-export async function readMcpResourceText(input: {
+export type McpResourceReader = {
+  /** Resource text, or null when the read failed or returned no matching text. */
+  read(uri: string): Promise<string | null>;
+};
+
+/** One initialized, authenticated session for the index and its resource bodies. */
+export async function openMcpResourceReader(input: {
   config: Record<string, unknown>;
-  uri: string;
   fetcher: McpFetch;
   clientName: string;
-}): Promise<string | null> {
+}): Promise<McpResourceReader | null> {
   const url = typeof input.config.url === "string" ? input.config.url : "";
   if (!/^https?:\/\//.test(url) || input.config.enabled === false) return null;
   const baseHeaders = stringHeaders(input.config.headers);
@@ -122,17 +122,30 @@ export async function readMcpResourceText(input: {
   };
   const notification = await mcpPost(input.fetcher, url, sessionHeaders, { jsonrpc: "2.0", method: "notifications/initialized", params: {} });
   if (notification.response.status !== 202 || notification.payload !== null) return null;
-  const resource = await mcpPost(input.fetcher, url, sessionHeaders, {
-    id: 2,
-    jsonrpc: "2.0",
-    method: "resources/read",
-    params: { uri: input.uri },
-  });
-  if (!resource.response.ok) return null;
-  const contents = jsonRpcResult(resource.payload)?.contents;
-  if (!Array.isArray(contents)) return null;
-  const text = contents.find((item) => isRecord(item) && item.uri === input.uri && typeof item.text === "string")?.text;
-  return typeof text === "string" ? text : null;
+  let nextId = 2;
+  return {
+    async read(uri) {
+      const resource = await mcpPost(input.fetcher, url, sessionHeaders, {
+        id: nextId++, jsonrpc: "2.0", method: "resources/read", params: { uri },
+      });
+      if (!resource.response.ok) return null;
+      const contents = jsonRpcResult(resource.payload)?.contents;
+      if (!Array.isArray(contents)) return null;
+      const text = contents.find((item) => isRecord(item) && item.uri === uri && typeof item.text === "string")?.text;
+      return typeof text === "string" ? text : null;
+    },
+  };
+}
+
+/** Read a single resource using the same session protocol as multi-resource discovery. */
+export async function readMcpResourceText(input: {
+  config: Record<string, unknown>;
+  uri: string;
+  fetcher: McpFetch;
+  clientName: string;
+}): Promise<string | null> {
+  const reader = await openMcpResourceReader(input);
+  return reader ? reader.read(input.uri) : null;
 }
 
 export function escapeXml(value: string): string {

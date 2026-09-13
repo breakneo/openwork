@@ -443,6 +443,8 @@ export async function createCoworkerToolsServer({ resolveSlug, handlers, onConte
     mcpConfig: (token) => ({
       type: "remote",
       enabled: true,
+      // Native turn policy admits only ordinary reads; rich receipts stay direct.
+      codemode: true,
       url: `${baseUrl}/mcp`,
       headers: { Authorization: `Bearer ${token}` },
       oauth: false,

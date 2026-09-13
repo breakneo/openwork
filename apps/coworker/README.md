@@ -2,19 +2,52 @@
 
 A standalone desktop app for persistent AI coworkers, powered by the OpenWork
 platform. Open Coworker is a second product client, not a second platform: it
-assembles existing OpenWork primitives into a coworker-centric experience and
-adds no new database concepts.
+reuses OpenWork services around a native OpenCode v2 execution foundation.
+
+## Native-first foundation
+
+This branch is a greenfield native-v2 candidate. Coworker may replace legacy
+patterns rather than preserve v1 behavior. OpenWork Desktop is a separate
+compatibility boundary: its engine pins, defaults, v1 client API and optional
+v2 skill path remain unchanged. Shared native additions are host-selected.
+
+- `native-runtime.json` pins Coworker's engine independently. No v1 fallback.
+- Workspace and authorized Cloud skills use the native skill catalog/tool.
+  Explicit selection uses native `skills: [{ id }]` prompt attachments, never
+  copied skill bodies or a synthetic instruction to fetch a capability.
+- **Ask a coworker to use a skill** adds a removable composer chip. Its exact
+  selection survives drafts, Next, explicit Continue and Worker admission.
+  Stale account/source selections fail before sending; words remain recoverable.
+- Coworkers and Workers use native `execute` for eligible Code Mode operations.
+  The app-owned loopback read tools support combining/filtering results.
+  Exact-context controls, delegation and mutations with document receipts remain
+  direct. Native permission decisions and Worker restrictions still apply.
+- Native plugins supply tools and role readiness; the host awaits role setup
+  before a cold Worker's skill permission preflight. No temporary permission
+  grant or warmup inference is used.
+
+See [native contracts](electron/NATIVE-PLUGINS.md) and
+[release validation](RELEASE-SIZE.md). The Coworker feature branch now combines
+native v2 with Events, Activity, Abilities and current Computer Use. The package
+excludes the legacy SDK/browser/ORM runtime dependencies. Source and package
+checks do not certify packaged user journeys; signing and runtime evidence belong
+to the exact delivered build. Legacy history import is optional separate work;
+existing profiles are not reset or imported.
 
 ## Activity and mentions
 
-The **Activity bell** at the top-right of the team sidebar opens a shared inbox
-for completed private, group and Event replies. It sits above Chat / Calendar
-without shifting those tabs or search. In the folded rail, the bell shares the
-utility row below the tabs to stay clear of native window controls.
-Filter **All**, **Mentions**, or **Unread**; each row identifies
-the coworker, conversation, time, and a short visible-reply preview. The rail
-shows the real unread count. **Happening now** separately projects current work
-and requests for the person, not notification history or inferred progress.
+The **Activity bell** opens a retained sidebar beside the current conversation
+or Calendar. A folded team rail expands temporarily for the feed without saving
+a different Chat/Calendar width. The bell's existing size and styling stay the
+same; the feed replaces the normal team lists while Activity is open.
+
+Search or filter Events, Chats and Documents, with Unread as an independent
+filter. Rows identify their source and show compact previews; document rows
+browse saved metadata rather than inventing unread state. Live Events and a
+collapsed Up next section show current sessions and upcoming occurrences.
+The existing Event tick records a reminder ten minutes before an eligible
+occurrence, without another scheduler or inference request. Reminder read status
+changes only through its explicit action, not merely by opening Calendar.
 
 Coworkers can write **@you** sparingly when they need a question answered, a
 decision, or help with a blocker. Only standalone mentions in delivered prose
@@ -22,9 +55,12 @@ count; code, quotations, email addresses and source URLs do not. A mention is
 attention, never permission to act or an answer to a pending native request.
 
 Opening Activity keeps the current chat mounted and does not mark anything read.
-Opening a notification returns to its private discussion or group. Read status
-changes only after the private transcript loads or the exact group reply is
-revealed. Older group targets show an explicit history-limit notice and stay
+Opening a reply returns to its exact private discussion, group, Event or session.
+Read status changes only after the private transcript loads or the exact group
+reply is revealed. Document drafts and busy readers block source navigation with
+a message rather than losing their state; a Calendar draft keeps its requested
+destination until the person explicitly opens it after Save/Cancel. A blocked
+teammate handoff retains retryable choices instead of claiming it was passed. Older group targets show an explicit history-limit notice and stay
 unread instead of claiming an exact jump. Individual read/unread controls and **Mark all read** persist
 across restarts; the latter acknowledges only the IDs already loaded in the inbox,
 not notifications arriving during the action. Read state is local to this profile.
@@ -350,15 +386,70 @@ The coworker directory is registered as an ordinary OpenWork workspace, so:
   armed permanent delete. Retirement is refused while one of the coworker's
   scheduled assignments or Workers is still running.
 
+## Message reactions
+
+Coworkers can add one attributed emoji to a visible message from the person or
+another coworker in the same conversation. In private discussions and group
+chats, reactions sit beneath the original bubble; hover or keyboard-focus a
+chip to read who reacted. A new emoji replaces that coworker's previous one;
+removing it leaves everyone else's reactions alone. Reactions persist across
+reopening, without changing the message text or generating Activity notifications.
+
+The native tool is `coworker_react({ emoji, messageId? })`. `emoji` is one Unicode
+emoji (including skin tones, flags and joined emoji), or `null` to remove it.
+Omit `messageId` for the current request; otherwise use an exact ID from the
+host's bounded reaction context. For example:
+
+```json
+{ "emoji": "👀" }
+{ "emoji": "🔎" }
+{ "emoji": "✅" }
+{ "emoji": "💯", "messageId": "<supplied peer message ID>" }
+{ "emoji": null, "messageId": "<supplied message ID>" }
+```
+
+These are conversational expressions, **not** read receipts, task state,
+completion evidence or approval. The coworker's instructions encourage sparse,
+relevant acknowledgment, considered agreement and honest progress—not an emoji
+on every message, empty praise or a replacement for a requested answer. A quiet
+reaction-only group contribution finishes without an extra narration bubble;
+failures and unfinished work retain their ordinary recovery behavior. There is
+no human reaction picker in this slice and no background model run merely to
+react: coworkers use the tool during already-admitted turns.
+
+`electron/message-reactions-context.mjs` binds the raw tool arguments to the
+exact live native call, workspace and admitted conversation. Private targets are
+actual human messages; group targets are published timeline event IDs supplied
+to that speaker, not unseen parallel replies. No actor, conversation, role or
+path can be supplied by the model. Workers, assignments and hidden coordinators
+cannot mutate reactions. Receipts plus native-projection ordering fence duplicate
+or delayed callbacks, including a newer write whose response was lost.
+
+`electron/message-reactions.mjs` keeps private sidecars inside the coworker home
+and group metadata beside its timeline. Atomic writes share identity/group locks,
+verify creation identity and refuse replaced, linked, archived or corrupt stores.
+The limits are 2,000 reaction slots and 2 MiB per conversation, 32 tool commands
+per admission and 512 retained receipts; advancing an authenticated admission
+prunes only its lane's old receipts, never reactions. A limit fails visibly
+instead of erasing history. `reactions:read` and persisted-change notifications
+feed the shared read-only UI, with no new idle polling loop.
+
 ## Documents and how coworkers talk
 
-A coworker answers like a colleague in a chat, not like a report: the point
-first, two to four sentences, at most three highlights, rarely more than about
-120 words. When the answer needs more than that — a plan, a comparison,
-research, a draft, a summary of many things — the coworker writes or updates a
-**document** in the same turn and answers with the short version, naming the
-document. The person is never buried in text and always has one clean place to
-read more.
+A coworker answers like a colleague in a chat, not like a report: the answer
+first, usually 40–80 words in one to three short paragraphs, with one thought
+and one or two sentences per paragraph. Deliberate prose paragraph breaks can
+become separate bubbles; code, lists, tables and quotations stay intact. This
+is presentation of one native message, not extra messages or simulated typing
+delays. Streaming and completed text use the same segmentation, capped at three
+bubbles without discarding any text, and reactions stay on the original message.
+
+Plans, comparisons, research and drafts belong in a **document attachment**.
+The coworker saves it and writes a short handoff, rather than pasting the contents
+into chat. Each attachment has a title, a short preview and the existing Open
+and Open beside actions. Full summaries, highlights, body and History remain
+in the document reader; opening a chat attachment still opens the current
+document, not an implied historical revision.
 
 - **The coworker's document tools** are served by the app itself: the Electron
   main process answers MCP over loopback HTTP (`electron/coworker-tools.mjs`)
@@ -395,15 +486,17 @@ read more.
   Export to a chosen `.md`, History (revisions with a side-by-side line diff
   and Restore), Archive, and — when the window is wide enough — Open beside, a
   reading pane in a second column next to the conversation.
-- **The card in a bubble.** When a reply's turn created or updated a document,
-  the bubble ends with a compact card — title, summary, up to three
-  highlights, Open — built from the tool calls (`lib/documents.ts`), so no
-  Markdown from the model is needed; an update reads *Updated · Timeline
-  section*. Receipts say *Wrote a document · Launch plan*, *Updated Launch plan
-  · Timeline section*, *Put aside · Old vendor notes*.
+- **The document attachment.** A turn that saves a document gets a separate
+  compact tile: title, a bounded two-line preview and Open, plus Open beside
+  where supported. It follows the turn's last assistant message, even for a
+  tool-only result. Saved receipts across that native parent are coalesced once
+  per document, retaining the latest revision; separate turns keep their own
+  attachments. Native structured receipts—not guessed titles—choose the ID.
+  Shared group documents use their own group-scoped receipt and reader. No
+  Markdown from the model is needed to manufacture the card.
 - **Soft enforcement.** A finished reply longer than about 1,200 characters
-  with no document call in its turn renders as its first paragraph behind a
-  quiet **Show the rest**; nothing is cut. The app records it in
+  with no document call in its turn can fold at a safe prose boundary behind
+  **Show the rest**; structured blocks and a single long paragraph stay intact. The app records it in
   `memory/style.jsonl` and the index carries a one-line reminder of the
   contract until the coworker next writes a document.
 - **The contract** lives in the coworker's `AGENTS.md` (`## How I talk`, whose
@@ -411,7 +504,7 @@ read more.
   the reply, an assignment, and a Worker — see *Automatic choices* below — with
   five before/after examples: a research question, a plan request, a quick
   question that needs no document, work on a clock, and a goal for a Worker).
-  It is versioned (13) and regenerated on launch for existing coworkers without
+  It is versioned (15) and regenerated on launch for existing coworkers without
   touching `soul.md` or anything under `memory/`; the repair also adds
   `documents/index.md` to `opencode.json`'s instructions and creates the index
   when it is missing.
@@ -1095,18 +1188,21 @@ responsibility run, a Worker turn, and a review (`localRunModel` reads the
 model's offered efforts from the engine once per model per launch), while the
 facilitator always runs at the lowest effort its model offers.
 
-Sign-ins and keys go through the AI service's own credential store
-(`~/.local/share/opencode/auth.json`, shared with OpenWork Desktop and the
-OpenCode CLI on this Mac); servers added here live in Open Coworker's own
-runtime provider config. The renderer never sees a stored secret: the main
-process reads a sign-in file only to hand it to the AI service over loopback
-with the owner token, keeps nothing, and logs ids only. A key the person types
-travels once. The packaged journey uses fixtures with plainly fake values and
-asserts none of them reaches the screen or the app log.
+Native sign-ins use the engine's integration and credential APIs. External
+sign-in files are detection hints, not imported credentials or proof of connection.
+Custom keys use the host environment store and runtime provider configuration;
+stored secrets are not returned to the renderer. `electron/native-providers.mjs`
+owns native method/credential identity. See the native contracts above for current
+startup and source-only proof limits.
 
-### Technical notes
+### Historical v1 technical notes
 
-Verified against the bundled engine (OpenCode 1.18.18) before building:
+The following observations belong to OpenCode 1.18.18 before the native migration.
+They are not current v2 endpoints, credential-storage instructions, SDK-install
+requirements, or native performance evidence. The native host uses prebuilt plugin
+bundles and does not seed per-profile SDK directories.
+
+Previously verified against the bundled v1 engine:
 
 - `GET /provider/auth` lists sign-in methods per provider. `openai` offers
   *ChatGPT Pro/Plus (browser)* and *(headless)* (both `method: "auto"`; the

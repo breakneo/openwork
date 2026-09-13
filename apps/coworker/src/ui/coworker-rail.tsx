@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { CoworkerGroupSummary, CoworkerSummary, RuntimeInfo } from "@/lib/bridge";
 import { describeRailLine } from "@/lib/rail-status";
@@ -77,7 +77,9 @@ export function CoworkerRail({
   calendarData,
   calendarPreferences,
   onCalendarPreferencesChange,
+  activityContent,
 }: {
+  activityContent?: ReactNode;
   calendarData: CalendarData;
   calendarPreferences: CalendarPreferences;
   onCalendarPreferencesChange: CalendarPreferencesChange;
@@ -138,7 +140,9 @@ export function CoworkerRail({
   const visibleCoworkers = coworkers.filter((coworker) =>
     `${coworker.name} ${coworker.role}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
-  const collapsed = panel.collapsed;
+  const activityMode = mainContent === "activity";
+  const collapsed = panel.collapsed && !activityMode;
+  const width = activityMode ? Math.max(panel.bounds.min, panel.width) : panel.width;
   const calendarMode = mainContent === "calendar";
 
   function closeGroupFilters(restoreFocus = false) {
@@ -159,10 +163,10 @@ export function CoworkerRail({
   }
 
   useLayoutEffect(() => {
-    if (!calendarMode) return;
+    if (!calendarMode && !activityMode) return;
     closeGroupFilters();
     setPeek(null);
-  }, [calendarMode]);
+  }, [calendarMode, activityMode]);
 
   useLayoutEffect(() => {
     if (!showGroupFilters || calendarMode) return;
@@ -231,7 +235,7 @@ export function CoworkerRail({
   return (
     <aside
       className={`glass-rail relative z-20 flex h-full shrink-0 flex-col border-r border-line ${panel.resizing ? "" : "transition-[width] duration-200"}`}
-      style={{ width: panel.width }}
+      style={{ width }}
       data-testid="coworker-rail"
       data-collapsed={collapsed ? "true" : "false"}
     >
@@ -241,7 +245,7 @@ export function CoworkerRail({
             In the folded rail the native traffic lights own that space. */}
         {!collapsed ? <div className="absolute right-3 top-2">{activityBell}</div> : null}
         <MainContentSwitch value={mainContent} onChange={onMainContentChange} chatAvailable={chatAvailable} compact={collapsed} />
-        <div className={`flex items-center ${collapsed ? "justify-center gap-0" : "gap-2"}`}>
+        <div className={`${activityMode ? "hidden" : "flex"} items-center ${collapsed ? "justify-center gap-0" : "gap-2"}`}>
           {collapsed ? <>
             {!calendarMode ? <IconButton label="Search coworkers" className="window-no-drag size-6" data-testid="coworker-rail-search" onClick={() => { setFocusSearchOnExpand(true); panel.expand(); }}><SearchIcon /></IconButton> : null}
             <IconButton label="New coworker" className="window-no-drag size-6" onClick={onNewCoworker}><PlusIcon /></IconButton>
@@ -252,8 +256,8 @@ export function CoworkerRail({
           </>}
         </div>
       </div>
-      <div className={calendarMode ? "hidden" : "flex min-h-0 flex-1 flex-col"} data-testid="chat-rail-content">
-      {collapsed ? (
+      <div className={calendarMode || activityMode ? "hidden" : "flex min-h-0 flex-1 flex-col"} data-testid="chat-rail-content">
+      {panel.collapsed ? (
         <>
           <nav aria-label="Coworkers" className="flex flex-1 flex-col items-center gap-1 overflow-y-auto px-1 pb-4 pt-3">
             {coworkers.map((coworker) => {
@@ -465,11 +469,12 @@ export function CoworkerRail({
       )}
       </div>
       <div className={calendarMode ? "flex min-h-0 flex-1 flex-col" : "hidden"} data-testid="calendar-rail-content">
-        {collapsed ? <div className="flex flex-1 flex-col items-center gap-2 px-1 pt-3">
+        {panel.collapsed ? <div className="flex flex-1 flex-col items-center gap-2 px-1 pt-3">
           <IconButton label="Expand calendars" tooltipSide="right" onClick={() => { setFocusSearchOnExpand(true); panel.expand(); }} data-testid="calendar-rail-expand"><CalendarIcon /></IconButton>
           <p className="text-center text-[10px] leading-snug text-mist">Your team's calendar</p>
         </div> : <CalendarSidebar coworkers={coworkers} data={calendarData} preferences={calendarPreferences} onPreferencesChange={onCalendarPreferencesChange} query={calendarQuery} />}
       </div>
+      <div className={activityMode ? "flex min-h-0 flex-1 flex-col" : "hidden"} data-testid="activity-rail-content">{activityContent}</div>
       <div className="window-no-drag shrink-0 border-t border-line/60 p-2">
         <Tooltip content={collapsed ? accountDescription : ""} side="right">
           <button
@@ -497,7 +502,7 @@ export function CoworkerRail({
           </button>
         </Tooltip>
       </div>
-      <div
+      {!activityMode ? <div
         {...panel.separatorProps}
         aria-label="Resize team rail"
         className="window-no-drag group absolute inset-y-0 -right-[5px] z-30 w-[10px] cursor-col-resize outline-none"
@@ -505,7 +510,7 @@ export function CoworkerRail({
         data-testid="coworker-rail-resizer"
       >
         <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-spark/45 group-focus-visible:bg-spark/70" />
-      </div>
+      </div> : null}
       {showGroupFilters && !calendarMode ? createPortal(<div ref={filterMenuRef} id={filterMenuId} role="menu" aria-label="Conversation types" data-testid="group-filter-menu" className="window-no-drag fixed z-50 max-h-[calc(100vh-16px)] w-44 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border border-line bg-ink p-1 shadow-[0_8px_24px_rgb(0_0_0/0.45)]" style={filterPosition ?? { top: 0, left: 0, visibility: "hidden" }} onKeyDown={(event) => {
         if (event.key === "Tab") { closeGroupFilters(true); return; }
         if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;

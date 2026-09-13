@@ -177,7 +177,21 @@ export function groupMessageKey(event: GroupTimelineEvent): string {
 
 export function groupConversationRows(events: readonly GroupTimelineEvent[], executions: readonly ExecutionActivity[], sends: readonly GroupSend[]) {
   const provisional = sends.filter((item) => !item.turnId && !events.some((event) => event.kind === "user" && event.clientMessageId === item.clientMessageId)).map((item): { event: GroupTimelineEvent; delivery: GroupSend } => ({ event: { id: `user:${item.clientMessageId}`, kind: "user", text: item.text, at: item.at, clientMessageId: item.clientMessageId }, delivery: item }));
-  const rows: Array<{ event: GroupTimelineEvent; delivery?: GroupSend } | { execution: ExecutionActivity }> = [...events.map((event) => ({ event })), ...executions.map((execution) => ({ execution })), ...provisional];
+  const documentKey = (event: GroupTimelineEvent) => event.kind === "status" && event.status === "document" && event.executionId && event.documentId && event.revision != null
+    ? JSON.stringify([event.executionId, event.documentId]) : null;
+  const latestDocuments = new Map<string, GroupTimelineEvent>();
+  for (const event of events) {
+    const key = documentKey(event);
+    if (key === null) continue;
+    const previous = latestDocuments.get(key);
+    if (!previous || (event.revision ?? 0) >= (previous.revision ?? 0)) latestDocuments.set(key, event);
+  }
+  const visibleEvents = events.filter((event) => {
+    if (event.kind === "status" && event.status === "reacted") return false;
+    const key = documentKey(event);
+    return key === null || latestDocuments.get(key) === event;
+  });
+  const rows: Array<{ event: GroupTimelineEvent; delivery?: GroupSend } | { execution: ExecutionActivity }> = [...visibleEvents.map((event) => ({ event })), ...executions.map((execution) => ({ execution })), ...provisional];
   // Move only provisional rows. Native event and speaker order remain authoritative.
   for (const row of [...provisional].reverse()) {
     const before = row.delivery.beforeClientMessageId ?? events.find((event) => event.kind === "user" && event.at > row.delivery.at)?.clientMessageId;

@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { EVAL_COWORKER_MODEL, clickButton, coworker, evalIn, fill, needs, test, waitFor, waitForText } from "@openwork/testkit";
+import { EVAL_COWORKER_MODEL, clickButton, coworker, evalIn, fill, needs, spec, test, waitFor, waitForText, type Target } from "@openwork/testkit";
 import { expect, onTestFinished } from "vitest";
+import { nativePackagedDiscussion } from "../worlds/coworker.ts";
 
 const enabled = process.env.OPENWORK_EVAL_E2E_TESTS === "1";
 const title = enabled
@@ -289,4 +290,171 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
     "The failed turn kept the user's prompt and native discussion id, named the unavailable model, and reported failure rather than Ready. Choose AI model opened Coworker settings at the unavailable saved model.",
     true,
   );
+});
+
+const nativeDiscussionTest = spec.world(nativePackagedDiscussion, {
+  resources: {
+    surfaces: ["desktop"], services: ["mock"],
+    nativeReason: "Exercise packaged Coworker main/preload, its embedded server and pinned native engine, not a renderer substitute.",
+  },
+  needs: { placement: "local", env: ["OPENWORK_EVAL_ELECTRON_BINARY"] },
+  timeout: 240_000,
+});
+
+nativeDiscussionTest("native-v2 packaged discussion preserves streaming, drafts, Next, Stop, and reload", { timeout: 240_000 }, async ({ world, user, probe, step, evidence }) => {
+  await using nativeEvidence = {
+    async [Symbol.asyncDispose]() {
+      const capture = async (read: () => Promise<unknown>) => {
+        try { return await read(); }
+        catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
+      };
+      const [ui, native] = await Promise.all([
+        capture(world.uiState),
+        capture(async () => Promise.all((await world.sessionIds()).map((id) => world.state(id)))),
+      ]);
+      evidence.recordJsonArtifact("Native discussion before cleanup", { engine: world.engine, requests: world.model.requests(), fixtureErrors: world.model.errors(), ui, native });
+    },
+  };
+  const composer = { role: "textbox", label: "Message Editor" } satisfies Target;
+  const prompt = "Help me turn a rough launch idea into a short plan.";
+  const original = "Suggest a next step for that plan.";
+  const edited = "Suggest a smaller next step for that plan.";
+  const removed = "Also draft a launch announcement.";
+  const draft = "Keep this thought for my next message.";
+  const texts = async (selector: string) => (await probe.dom(selector)).elements.map((element) => element.text);
+  const seeStream = async (prefix: string) => {
+    await user.see({ text: prefix.trim() }, { text: prefix.trim(), timeoutMs: 30_000 });
+    expect((await texts('[data-message-role="assistant"]')).join("\n").split(prefix.trim()).length - 1).toBe(1);
+  };
+  const next = () => texts('[data-testid="coworker-next-row"] > span[title]');
+  const expectNext = async (expected: string[]) => expect(await probe.eventually(next, {
+    within: 15_000, label: "Next reflects only the saved queue", until: (items) => JSON.stringify(items) === JSON.stringify(expected),
+  })).toEqual(expected);
+  const expectWorking = async () => {
+    expect(await texts('[data-testid="coworker-composer"][data-working="true"]')).toHaveLength(1);
+    expect(await texts('[data-testid="coworker-thread-status"][data-state="working"]')).toHaveLength(1);
+    expect(await texts('[data-testid="coworker-top-status"]')).not.toEqual(["Ready"]);
+    expect(await texts('[data-testid="coworker-turn-failed"], [data-outcome="failed"]')).toEqual([]);
+    expect(world.model.errors()).toEqual([]);
+  };
+
+  await step("cold packaged native runtime is ready without an account or inference", async () => {
+    expect(world.cold).toEqual({ packaged: true, electron: true, welcome: true });
+    expect(world.engine).toMatchObject({ enabled: true, chatRouting: true, running: true, version: "0.0.0-beta-19271", binSource: "explicit" });
+    expect(world.engine.pid).toEqual(expect.any(Number));
+    expect(world.engine.pid).not.toBe(world.app.handle.pid);
+    expect(world.app.handle).toMatchObject({ kind: "electron", hostKind: "local" });
+    await user.see(composer, { editable: true, value: "", timeoutMs: 90_000 });
+    expect(await world.sessionIds()).toEqual([]);
+    expect(world.model.requests()).toEqual([]);
+  });
+
+  await user.type(composer, prompt);
+  await probe.eventually(() => texts('[data-testid="coworker-send"]:not(:disabled)'), { within: 30_000, label: "native composer can send", until: (items) => items.length === 1 });
+  await user.click({ testId: "coworker-send" });
+  const requests = await probe.eventually(() => world.model.requests(), { within: 60_000, label: "real native model request", until: (items) => items.length > 0 });
+  expect(requests).toHaveLength(1);
+  const first = requests[0]!;
+  expect(first).toMatchObject({ id: 1, model: "reply", stream: true, released: 0, finished: false, aborted: false, expired: false });
+  expect(first.userTexts.at(-1)).toBe(prompt);
+  const sessionIds = await world.sessionIds();
+  expect(sessionIds).toHaveLength(1);
+  const sessionId = sessionIds[0]!;
+  await user.see(composer, { editable: true, value: "" });
+  await user.see({ testId: "coworker-send", label: "Stop" });
+  world.model.release(1);
+  await seeStream(first.chunks[0]!);
+  await expectWorking();
+
+  await step("Next can be edited and removed without admitting another turn", async () => {
+    await user.type(composer, original);
+    await user.click({ testId: "coworker-send", label: "Next" });
+    await expectNext([original]);
+    await user.click({ role: "button", label: "Actions for queued message 1" });
+    await user.click({ testId: "coworker-next-edit" });
+    await user.see(composer, { value: original });
+    await expectNext([]);
+    await user.type(composer, edited, { replace: true });
+    await user.click({ testId: "coworker-send", label: "Next" });
+    await expectNext([edited]);
+    await user.see(composer, { value: "" });
+    await user.type(composer, removed);
+    await user.click({ testId: "coworker-send", label: "Next" });
+    await expectNext([edited, removed]);
+    await user.click({ role: "button", label: "Actions for queued message 2" });
+    await user.click({ testId: "coworker-next-remove" });
+    await expectNext([edited]);
+    await user.see(composer, { value: "" });
+    expect(world.model.requests()).toHaveLength(1);
+    expect(await texts('[data-message-role="user"]')).toEqual([prompt]);
+  });
+
+  await step("progressive text is not completion and a newer draft stays untouched", async () => {
+    await user.type(composer, draft);
+    for (let count = 2; count <= first.chunks.length; count++) {
+      world.model.release(1);
+      await seeStream(first.chunks.slice(0, count).join(""));
+      await expectWorking();
+      await user.see(composer, { value: draft });
+      const state = await world.state(sessionId);
+      expect(state.running).toBe(true);
+      expect(state.messages.filter((message) => message.type === "assistant" && message.completed)).toEqual([]);
+      expect(world.model.requests()).toHaveLength(1);
+    }
+    expect(world.model.requests()[0]).toMatchObject({ released: 3, finished: false, aborted: false, expired: false });
+  });
+
+  await step("only a final stream receipt completes the first turn and drains the edited Next once", async () => {
+    world.model.finish(1);
+    const calls = await probe.eventually(() => world.model.requests(), { within: 60_000, label: "edited Next admitted after completion", until: (items) => items.length >= 2 });
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.userTexts.at(-1))).toEqual([prompt, edited]);
+    expect(calls[1]).toMatchObject({ id: 2, model: "reply", stream: true, released: 0, finished: false });
+    await user.see({ testId: "coworker-reply-bubble" }, { text: first.chunks.join(""), timeoutMs: 30_000 });
+    await user.see(composer, { value: draft });
+    await expectNext([]);
+    expect(await texts('[data-message-role="user"]')).toEqual([prompt, edited]);
+    const state = await world.state(sessionId);
+    expect(state.messages.filter((message) => message.type === "user").map((message) => message.text)).toEqual([prompt, edited]);
+    expect(state.messages.filter((message) => message.type === "assistant" && message.completed)).toEqual([
+      expect.objectContaining({ text: first.chunks.join(""), finish: "stop", error: null }),
+    ]);
+    world.model.release(2);
+    await seeStream(calls[1]!.chunks[0]!);
+    await expectWorking();
+  });
+
+  await step("Stop cancels the pending native stream, not the draft, and never starts another turn", async () => {
+    await user.click({ testId: "coworker-stop" });
+    await probe.eventually(() => world.model.requests()[1]?.aborted, { within: 30_000, label: "native Stop closes the provider stream" });
+    const stopped = await probe.eventually(() => world.state(sessionId), { within: 30_000, label: "native Stop confirms idle", until: (state) => !state.running && state.session.outcome === "interrupted" });
+    expect(stopped.inbox).toEqual([]);
+    expect(stopped.messages.filter((message) => message.type === "user").map((message) => message.text)).toEqual([prompt, edited]);
+    expect(new Set(stopped.messages.map((message) => message.id)).size).toBe(stopped.messages.length);
+    await user.see({ testId: "coworker-turn-line" }, { text: /^Stopped\./ });
+    await user.see(composer, { editable: true, value: draft });
+    expect(world.model.requests()[1]).toMatchObject({ finished: false, aborted: true, expired: false });
+    expect((await texts('[data-message-role="assistant"]')).join("\n")).not.toContain(world.model.requests()[1]!.chunks[2]!.trim());
+  });
+
+  await step("one reload restores the same history and draft without replaying either user message", async () => {
+    const before = await world.state(sessionId);
+    await user.reload();
+    await user.see(composer, { editable: true, value: draft, timeoutMs: 60_000 });
+    await user.see({ testId: "coworker-reply-bubble", nth: 0 }, { text: first.chunks.join(""), timeoutMs: 30_000 });
+    expect(await texts('[data-message-role="user"]')).toEqual([prompt, edited]);
+    const replies = (await texts('[data-message-role="assistant"]')).join("\n");
+    for (const text of first.chunks) expect(replies.split(text.trim()).length - 1).toBe(1);
+    await expectNext([]);
+    expect(await world.sessionIds()).toEqual([sessionId]);
+    const after = await world.state(sessionId);
+    expect(after.messages).toEqual(before.messages);
+    expect(after).toMatchObject({ running: false, inbox: [], session: { id: sessionId, outcome: "interrupted" } });
+    const quietUntil = Date.now() + 1_500;
+    await probe.eventually(() => {
+      expect(world.model.requests()).toHaveLength(2);
+      expect(world.model.errors()).toEqual([]);
+      return Date.now() >= quietUntil;
+    }, { within: 5_000, intervalMs: 150, label: "no post-reload duplicate admission" });
+  });
 });

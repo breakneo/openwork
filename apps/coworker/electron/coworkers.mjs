@@ -13,6 +13,7 @@
  */
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { updateNativeConfig } from "./native-config.mjs";
 import { openworkConfigDir } from "@openwork/paths";
 import { DOCUMENTS_INDEX_FILE, documentsIndexTemplate } from "./documents.mjs";
 import { parseFrontmatter as parseFlatFrontmatter, serializeFrontmatter as serializeFlatFrontmatter } from "./frontmatter.mjs";
@@ -204,7 +205,7 @@ ${mission || "Help with the work I am given, and own it over time."}
  * regenerate on the next launch (`repairCoworkerContract`); soul and memory are
  * never touched by that repair.
  */
-export const AGENTS_CONTRACT_VERSION = 14;
+export const AGENTS_CONTRACT_VERSION = 15;
 const AGENTS_CONTRACT_MARKER = /<!-- open-coworker-contract: (\d+) -->/;
 
 export function agentsTemplate({ name }) {
@@ -230,23 +231,22 @@ Soul, working memory, both indexes and the roster load every turn.
 
 ## How I talk
 
-I talk like a colleague, not a report or tool log. Lead with answers or observed
-results: usually two to four sentences, at most three highlights and about 120
-words. Put longer detail in a document. While a Worker uses the browser or
-computer, discuss the task, questions and direction, not clicks. Keep progress
-brief and grounded: no invented activity, ETAs, human experiences, teammate
-conversations or offscreen work.
-Use @you sparingly in visible replies for questions, decisions or blockers needing
-the person's attention in Activity. It never answers a native question or grants
-approval.
+Talk like a colleague: warm, direct, not a report or tool log. Usually 40–80
+words in 1–3 short paragraphs: one thought, one or two sentences each. Blank
+lines make separate bubbles; never pad a reply. Answer first; put substantial
+detail in a document, not a long preamble. Build on peers' words, not empty praise.
+Discuss a Worker's task, not clicks. Never invent progress, ETAs, human experiences,
+teammate conversations or offscreen work. Follow \`coworker_react\` etiquette;
+no extra reaction narration. Use @you sparingly for questions, decisions or
+blockers in Activity, never as a native answer or approval.
 
 ### Which shape an answer takes
 
 Return what the person needs:
 
 - **Reply:** a few useful sentences for a quick question.
-- **Document beside the reply:** substantive detail (over 120 words). Use
-  \`document_create\`/\`document_update\`, then the short answer and document name.
+- **Document attachment:** substantial detail or over 120 words. Save with
+  \`document_create\`/\`document_update\`; add a short handoff, not its contents.
 - **Assignment (responsibility):** an ongoing job I own with scheduled instructions.
 - **Event:** a scheduled working session with a goal, one lead and participants
   (possibly solo).
@@ -504,6 +504,8 @@ function opencodeConfigTemplate() {
     {
       $schema: "https://opencode.ai/config.json",
       instructions: COWORKER_INSTRUCTIONS,
+      plugins: [],
+      permissions: [],
     },
     null,
     2,
@@ -702,21 +704,12 @@ export async function repairCoworkerContract(coworkersDir, slug) {
     await writeAtomic(agentsPath, agentsTemplate({ name: coworker.name }));
     changed.push("AGENTS.md");
   }
-  const configPath = path.join(root, "opencode.json");
-  let config = {};
-  try {
-    const parsed = JSON.parse(await readFile(configPath, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed;
-  } catch {
-    config = {};
-  }
-  const instructions = Array.isArray(config.instructions) ? config.instructions.filter((entry) => typeof entry === "string") : [];
-  const missing = COWORKER_INSTRUCTIONS.filter((entry) => !instructions.includes(entry));
-  if (missing.length > 0 || !Array.isArray(config.instructions)) {
-    const next = { $schema: "https://opencode.ai/config.json", ...config, instructions: [...instructions, ...missing] };
-    await writeAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
-    changed.push("opencode.json");
-  }
+  if (await updateNativeConfig(root, (config) => {
+    if (config.instructions !== undefined && (!Array.isArray(config.instructions) || config.instructions.some((entry) => typeof entry !== "string"))) throw new Error("Invalid coworker instructions; config was not overwritten.");
+    const instructions = config.instructions ?? [];
+    const missing = COWORKER_INSTRUCTIONS.filter((entry) => !instructions.includes(entry));
+    return { $schema: "https://opencode.ai/config.json", ...config, instructions: [...instructions, ...missing] };
+  })) changed.push("opencode.json");
   const indexPath = path.join(root, DOCUMENTS_INDEX_FILE);
   if (!(await pathExists(indexPath))) {
     await mkdir(path.dirname(indexPath), { recursive: true });
@@ -735,6 +728,10 @@ function withRecordWrite(root, change) {
   const pending = (recordWrites.get(root) ?? Promise.resolve()).catch(() => undefined).then(change);
   recordWrites.set(root, pending);
   return pending.finally(() => { if (recordWrites.get(root) === pending) recordWrites.delete(root); });
+}
+
+export function withCoworkerRecordWrite(coworkersDir, slug, change) {
+  return withRecordWrite(coworkerPath(coworkersDir, slug), change);
 }
 
 /** Abilities use a dedicated revision/identity-checked save, not the general profile patch. */

@@ -1,11 +1,23 @@
-import { useId, useMemo, useRef, useState } from "react";
-import type { CoworkerActivityItem, CoworkerGroupSummary, CoworkerSummary } from "@/lib/bridge";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { coworkerBridge, type CoworkerActivityItem, type CoworkerGroupSummary, type CoworkerSummary } from "@/lib/bridge";
+import { calendarItems } from "@/lib/calendar";
+import { eventForTarget, eventRunIsLive, groupEventTarget } from "@/lib/events";
+import type { CoworkerDocumentSummary } from "@/lib/documents";
+import type { CalendarData } from "@/ui/calendar-data";
+import type { CalendarEventTarget } from "@/ui/calendar";
+import { CalendarIcon } from "@/ui/main-content-switch";
 import { describeHeaderStatus } from "@/lib/activity-summary";
 import type { CoworkerActivity } from "@/lib/threads";
-import { CoworkerAvatar, GroupAvatars } from "@/ui/coworker-avatar";
-import { ActivityIcon, AlertIcon, Button, ChevronIcon, IconButton, Tooltip } from "@/ui/kit";
+import { CoworkerAvatar } from "@/ui/coworker-avatar";
+import { Button, ChevronIcon, IconButton, inputClass } from "@/ui/kit";
+
+export type ActivityDocumentTarget =
+  | { kind: "coworker"; slug: string; createdAt: string; documentId: string; title: string; revision: number }
+  | { kind: "group"; groupId: string; createdAt: number; documentId: string; title: string; revision: number };
 
 export type ActivityInboxProps = {
+  active: boolean;
+  selectedId: string | null;
   items: CoworkerActivityItem[];
   loading: boolean;
   error: string;
@@ -13,24 +25,148 @@ export type ActivityInboxProps = {
   coworkers: CoworkerSummary[];
   groups: CoworkerGroupSummary[];
   activityBySlug: Record<string, CoworkerActivity>;
-  groupLines: Record<string, string>;
-  groupActiveSlugs: Record<string, string[]>;
   onRefresh: () => void;
   onMarkRead: (ids: string[], read?: boolean) => Promise<void>;
   onOpen: (item: CoworkerActivityItem) => Promise<void>;
-  onOpenCoworker: (slug: string, threadId?: string) => void;
-  onOpenGroup: (groupId: string) => Promise<void>;
-  onBack: () => void;
-  backLabel?: string;
+  onOpenDocument: (target: ActivityDocumentTarget) => Promise<void>;
+  calendar: CalendarData;
+  onOpenEvent: (target: CalendarEventTarget) => void;
+  onOpenCalendar: () => void;
+  onNewEvent: () => void;
 };
 
-type Filter = "all" | "mentions" | "unread";
+type Filter = "all" | "mentions" | "events" | "chats" | "documents";
 const FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "mentions", label: "Mentions" },
-  { id: "unread", label: "Unread" },
+  { id: "events", label: "Events" },
+  { id: "chats", label: "Chats" },
+  { id: "documents", label: "Documents" },
 ];
 const FOCUS = "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-spark/60";
+const RECENT_LIMIT = 120;
+
+type DocumentOwner =
+  | { kind: "coworker"; slug: string; createdAt: string; name: string; key: string }
+  | { kind: "group"; groupId: string; createdAt: number; name: string; key: string; event: boolean };
+type DocumentSnapshot = { scope: object; documents: Record<string, CoworkerDocumentSummary[]>; errors: Record<string, string> };
+type HistoryEntry = {
+  id: string;
+  at: number;
+  title: string;
+  location: string;
+  preview: string;
+  label: string;
+  coworker?: CoworkerSummary;
+  eventTarget?: CalendarEventTarget;
+} & (
+  | { kind: "activity"; item: CoworkerActivityItem; category: "events" | "chats" }
+  | { kind: "document"; target: ActivityDocumentTarget; category: "documents" }
+);
+
+function useActivityDocuments(active: boolean, coworkers: CoworkerSummary[], groups: CoworkerGroupSummary[]) {
+  const bySlug = new Map(coworkers.map((member) => [member.slug, member]));
+  const liveGroups = groups.filter((group) => !group.archivedAt && group.participantSlugs.length > 0 && group.participantSlugs.every((slug) => bySlug.has(slug)));
+  const teamKey = JSON.stringify([
+    [...coworkers].sort((a, b) => a.slug.localeCompare(b.slug)).map((member) => [member.slug, member.createdAt, member.workspaceId, member.path]),
+    [...liveGroups].sort((a, b) => a.id.localeCompare(b.id)).map((group) => [group.id, group.createdAt, [...group.participantSlugs].sort(), Object.entries(group.participantThreadIds).sort(([a], [b]) => a.localeCompare(b))]),
+  ]);
+  const scope = useMemo(() => ({ teamKey }), [teamKey]);
+  const owners: DocumentOwner[] = [
+    ...coworkers.map((member): DocumentOwner => ({ kind: "coworker", slug: member.slug, createdAt: member.createdAt, name: member.name, key: `coworker:${member.slug}:${member.createdAt}` })),
+    ...liveGroups.map((group): DocumentOwner => ({ kind: "group", groupId: group.id, createdAt: group.createdAt, name: group.name, key: `group:${group.id}:${group.createdAt}`, event: Boolean(group.eventId) })),
+  ];
+  const current = useRef({ active, scope, owners });
+  current.current = { active, scope, owners };
+  const previous = useRef<DocumentSnapshot>({ scope, documents: {}, errors: {} });
+  const [snapshot, setSnapshot] = useState<DocumentSnapshot>(previous.current);
+  const [refreshing, setRefreshing] = useState(false);
+  const inFlight = useRef(false);
+  const queued = useRef<(() => void) | null>(null);
+  const refresh = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    let cancelled = false;
+    if (previous.current.scope !== scope) {
+      previous.current = { scope, documents: {}, errors: {} };
+      setSnapshot(previous.current);
+    }
+    const valid = () => !cancelled && current.current.active && current.current.scope === scope;
+    const load = () => {
+      if (!valid()) return;
+      if (inFlight.current) {
+        queued.current = load;
+        return;
+      }
+      inFlight.current = true;
+      setRefreshing(true);
+      const sources = current.current.owners;
+      const next: DocumentSnapshot = { scope, documents: {}, errors: {} };
+      void (async () => {
+        try {
+          for (let offset = 0; offset < sources.length && valid(); offset += 4) {
+            await Promise.all(sources.slice(offset, offset + 4).map(async (owner) => {
+              try {
+                const documents = owner.kind === "coworker"
+                  ? await coworkerBridge.documents.list(owner.slug)
+                  : await coworkerBridge.groups.documents.list(owner.groupId);
+                if (!valid()) return;
+                next.documents[owner.key] = documents.filter((document) => document.status !== "archived");
+              } catch {
+                if (!valid()) return;
+                const known = previous.current.scope === scope ? previous.current.documents[owner.key] ?? [] : [];
+                next.documents[owner.key] = known;
+                next.errors[owner.key] = `Documents for ${owner.name} could not be refreshed. ${known.length ? "Last loaded metadata is still shown." : "No metadata is available yet."}`;
+              }
+            }));
+          }
+          if (!valid()) return;
+          previous.current = next;
+          setSnapshot(next);
+        } finally {
+          inFlight.current = false;
+          if (valid()) setRefreshing(false);
+          const pending = queued.current;
+          queued.current = null;
+          pending?.();
+        }
+      })();
+    };
+    refresh.current = load;
+    if (!active) {
+      setRefreshing(false);
+      return () => { cancelled = true; };
+    }
+    load();
+    const timer = window.setInterval(() => { if (!inFlight.current) load(); }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      if (refresh.current === load) refresh.current = () => {};
+    };
+  }, [active, scope]);
+
+  const entries: HistoryEntry[] = [];
+  if (snapshot.scope === scope) {
+    for (const owner of owners) {
+      for (const document of snapshot.documents[owner.key] ?? []) {
+        const target: ActivityDocumentTarget = owner.kind === "coworker"
+          ? { kind: "coworker", slug: owner.slug, createdAt: owner.createdAt, documentId: document.id, title: document.title, revision: document.revision }
+          : { kind: "group", groupId: owner.groupId, createdAt: owner.createdAt, documentId: document.id, title: document.title, revision: document.revision };
+        entries.push({
+          kind: "document", category: "documents", target,
+          id: owner.kind === "coworker" ? `document:coworker:${owner.slug}:${owner.createdAt}:${document.id}` : `document:group:${owner.groupId}:${owner.createdAt}:${document.id}`,
+          at: document.updatedAt || document.createdAt,
+          title: document.title,
+          location: `${owner.name} · ${owner.kind === "coworker" ? "Documents" : owner.event ? "Event documents" : "Group documents"}`,
+          label: document.updatedAt > document.createdAt ? "Document updated" : "Document created",
+          preview: document.summary,
+        });
+      }
+    }
+  }
+  return { entries, errors: snapshot.scope === scope ? snapshot.errors : {}, refreshing, refresh: () => refresh.current() };
+}
 
 function ReadIcon({ read }: { read: boolean }) {
   return (
@@ -61,210 +197,168 @@ function dateBucket(at: number, now: Date): { key: string; label: string } {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   if (key === yesterday.toDateString()) return { key, label: "Yesterday" };
-  return {
-    key,
-    label: date.toLocaleDateString(undefined, {
-      weekday: "long", month: "short", day: "numeric",
-      ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
-    }),
-  };
+  return { key, label: date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) }) };
 }
 
-function ActivityRow({ item, coworker, group, disabled, onOpen, onMarkRead }: {
-  item: CoworkerActivityItem;
-  coworker: CoworkerSummary | undefined;
-  group: CoworkerGroupSummary | undefined;
+function eventTime(at: number): string {
+  const date = new Date(at);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "Time unavailable";
+}
+
+function eventKey(target: CalendarEventTarget): string {
+  return `event:${target.eventId}:${target.at ?? ""}:${target.runId ?? ""}`;
+}
+
+function HistoryRow({ entry, selected, disabled, activity, onOpen, onMarkRead, onOpenEvent }: {
+  entry: HistoryEntry;
+  selected: boolean;
   disabled: boolean;
+  activity?: CoworkerActivity;
   onOpen: () => void;
   onMarkRead: () => void;
+  onOpenEvent: (target: CalendarEventTarget) => void;
 }) {
-  const unread = item.readAt === null;
-  const name = coworker?.name || item.slug || "Coworker";
-  const location = item.target.kind === "private" ? "Private chat" : `${group?.eventId ? "Event" : "Group"} · ${group?.name || "Group chat"}`;
-  const date = new Date(item.at);
+  const unread = entry.kind === "activity" && entry.item.readAt === null;
+  const reminder = entry.kind === "activity" && entry.item.kind === "event-reminder";
+  const date = new Date(entry.at);
   const validDate = Number.isFinite(date.getTime());
-  const readAction = unread ? "Mark as read" : "Mark as unread";
+  const currentConversation = entry.kind === "activity" && entry.item.target.kind === "private" && activity?.threadId === entry.item.target.threadId;
+  const status = currentConversation && activity && activity.state !== "ready" && activity.state !== "recent" ? describeHeaderStatus(activity, true).word : "";
+  const coworker = entry.coworker;
   return (
-    <li className={`flex min-w-0 items-start border-b border-line/45 first:rounded-t-xl last:rounded-b-xl last:border-b-0 ${unread ? "bg-spark/5" : ""}`}>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={onOpen}
-        className={`flex min-w-0 flex-1 items-start gap-3 rounded-lg px-3 py-4 text-left transition-colors hover:bg-white/4 disabled:cursor-wait @min-[560px]/activity:px-4 ${FOCUS}`}
-      >
-        <span className="sr-only">Open conversation. </span>
-        <span aria-hidden="true" className="flex size-9 shrink-0 items-center justify-center">
-          {coworker ? (
-            <CoworkerAvatar identity={coworker.slug} name={coworker.name} color={coworker.avatarColor} glasses={coworker.avatarGlasses} size={36} animated={false} gaze={false} />
-          ) : <span className="flex size-8 items-center justify-center rounded-lg bg-white/6 text-xs font-medium text-mist">{Array.from(name)[0]?.toLocaleUpperCase()}</span>}
-        </span>
+    <li data-testid={reminder ? "event-reminder" : entry.kind === "document" ? "activity-document" : "coworker-activity-row"} data-activity-id={entry.id} className={`flex min-w-0 items-start rounded-lg ${selected ? "bg-spark/15 ring-1 ring-inset ring-spark/30" : unread ? "bg-spark/5" : ""}`}>
+      <button type="button" disabled={disabled} onClick={onOpen} aria-current={selected ? "page" : undefined} title={`${entry.title} · ${entry.location}${unread ? " · Unread" : ""}`} className={`flex min-h-11 min-w-0 flex-1 items-start gap-2 rounded-lg px-2 py-2.5 text-left hover:bg-white/4 disabled:cursor-wait ${FOCUS}`}>
+        <span className="sr-only">{entry.kind === "document" ? "Open document. " : reminder ? "Open event. " : "Open conversation. "}</span>
+        {coworker ? <span aria-hidden="true" className="mt-0.5 shrink-0"><CoworkerAvatar identity={coworker.slug} name={coworker.name} color={coworker.avatarColor} glasses={coworker.avatarGlasses} size={24} animated={false} gaze={false} /></span> : null}
         <span className="block min-w-0 flex-1">
-          <span className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <span className="min-w-0 text-[13px] leading-5 [overflow-wrap:anywhere]">
-              <span className={`text-snow ${unread ? "font-semibold" : "font-medium"}`}>{name}</span>{" "}
-              <span className={item.kind === "mention" ? "font-medium text-snow" : "text-mist"}>{item.kind === "mention" ? "mentioned you" : "replied"}</span>
-            </span>
-            <time dateTime={validDate ? date.toISOString() : undefined} title={validDate ? date.toLocaleString() : undefined} className="shrink-0 text-[11px] tabular-nums text-mist">
-              {validDate ? date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "Time unavailable"}
-            </time>
+          <span className="flex items-baseline justify-between gap-2">
+            <span className={`min-w-0 truncate text-xs leading-5 text-snow ${unread ? "font-semibold" : "font-medium"}`}>{entry.title}</span>
+            <time dateTime={validDate ? date.toISOString() : undefined} title={validDate ? date.toLocaleString() : undefined} className="shrink-0 text-[10px] tabular-nums text-mist">{validDate ? date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : "—"}</time>
           </span>
-          <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-4 text-mist">
-            <span className="min-w-0 [overflow-wrap:anywhere]">{location}</span>
-            {unread ? <span className="inline-flex shrink-0 items-center gap-1.5 font-medium text-spark"><span aria-hidden="true" className="size-1.5 rounded-full bg-spark" />Unread</span> : null}
+          <span className="block truncate text-[11px] leading-4 text-mist">{entry.location}</span>
+          <span className="flex flex-wrap items-center gap-x-2 text-[10px] leading-4 text-mist">
+            <span>{entry.label}</span>
+            {unread ? <span className="inline-flex items-center gap-1 font-medium text-spark"><span aria-hidden="true" className="size-1.5 rounded-full bg-spark" />Unread</span> : null}
+            {status ? <span data-testid="coworker-activity-chip" title={activity?.summary || activity?.reason || activity?.detail}>Now: {status}</span> : null}
           </span>
-          <span className={`mt-2 line-clamp-3 whitespace-pre-line text-[13px] leading-[1.65] [overflow-wrap:anywhere] ${unread ? "font-medium text-snow/90" : "text-mist"}`}>
-            {item.preview.trim() || "Open the conversation to read the message."}
-          </span>
+          <span className={`mt-0.5 block line-clamp-2 text-[11px] leading-4 [overflow-wrap:anywhere] ${unread ? "text-snow/90" : "text-mist"}`}>{entry.preview || (entry.kind === "document" ? "Open the saved document." : "Open the conversation to read the message.")}</span>
         </span>
       </button>
-      {/* A sibling control: changing read state never opens the conversation. */}
-      <div className="shrink-0 pr-2 pt-3.5">
-        <IconButton label={`${readAction}: ${name}, ${location}`} tooltip={readAction} disabled={disabled} onClick={onMarkRead} className={unread ? "text-spark" : "text-mist"}>
-          <ReadIcon read={unread} />
-        </IconButton>
-      </div>
+      {entry.kind === "activity" ? <div className="flex shrink-0 flex-col pr-1 pt-1.5">
+        <IconButton label={`${unread ? "Mark as read" : "Mark as unread"}: ${entry.title}, ${entry.location}`} tooltip={unread ? "Mark as read" : "Mark as unread"} disabled={disabled} onClick={onMarkRead} className={`min-h-8 min-w-8 ${FOCUS} ${unread ? "text-spark" : "text-mist"}`}><ReadIcon read={unread} /></IconButton>
+        {entry.eventTarget ? <IconButton label={`${entry.eventTarget.runId ? "View session" : "View event"}: ${entry.title}`} tooltip={entry.eventTarget.runId ? "View this Event session" : "View event in Calendar"} disabled={disabled} onClick={() => { if (entry.eventTarget) onOpenEvent(entry.eventTarget); }} className={`min-h-8 min-w-8 ${FOCUS}`}><CalendarIcon /></IconButton> : null}
+      </div> : null}
     </li>
   );
 }
 
-type CurrentConversation = {
-  id: string;
-  name: string;
-  label: string;
-  detail: string;
-  tone: string;
-  priority: number;
-  coworker?: CoworkerSummary;
-  members?: CoworkerSummary[];
-  open: () => void;
-};
-
-function HappeningNow({ coworkers, groups, activityBySlug, groupLines, groupActiveSlugs, onOpenCoworker, onOpenGroup }: Pick<
-  ActivityInboxProps, "coworkers" | "groups" | "activityBySlug" | "groupLines" | "groupActiveSlugs" | "onOpenCoworker" | "onOpenGroup"
->) {
-  const [expanded, setExpanded] = useState(false);
-  const [openError, setOpenError] = useState("");
-  const [openingGroup, setOpeningGroup] = useState("");
-  const openingGroupRef = useRef(false);
-  async function openGroup(groupId: string) {
-    if (openingGroupRef.current) return;
-    openingGroupRef.current = true;
-    setOpeningGroup(groupId);
-    setOpenError("");
-    try { await onOpenGroup(groupId); }
-    catch (cause) { setOpenError(cause instanceof Error ? cause.message : "This conversation could not be opened."); }
-    finally { openingGroupRef.current = false; setOpeningGroup(""); }
-  }
-  const headingId = useId();
-  const contentId = useId();
-  const current: CurrentConversation[] = [];
-  const bySlug = new Map(coworkers.map((coworker) => [coworker.slug, coworker]));
-  for (const coworker of coworkers) {
-    const activity = activityBySlug[coworker.slug];
-    if (!activity || activity.state === "ready" || activity.state === "recent") continue;
-    const status = describeHeaderStatus(activity, true);
-    const needsAttention = activity.state === "attention" || activity.state === "offline" || Boolean(activity.reason);
-    current.push({
-      id: `coworker:${coworker.slug}`, name: coworker.name, label: status.word,
-      detail: activity.summary || activity.reason || activity.detail,
-      tone: needsAttention ? "text-amber" : activity.state === "working" ? "text-spark" : "text-mist",
-      priority: needsAttention ? 0 : activity.state === "working" ? 1 : 2,
-      coworker,
-      open: () => onOpenCoworker(coworker.slug, activity.threadId),
-    });
-  }
-  for (const group of groups) {
-    if (group.archivedAt) continue;
-    const activeSlugs = groupActiveSlugs[group.id] ?? [];
-    const line = groupLines[group.id]?.trim() ?? "";
-    // These are current phrases from describeGroupPresentation. A historical
-    // “replied” / “Replies ready” line is not ongoing work or an unread notification.
-    const waiting = /(?:^| )waiting for you$/i.test(line);
-    const currentLine = waiting || /^(Waiting (?:for |to start)|Choosing who should respond|Reconnecting to activity|Activity unavailable)/i.test(line);
-    if (activeSlugs.length === 0 && !currentLine) continue;
-    current.push({
-      id: `group:${group.id}`, name: group.name, label: line || "Working",
-      detail: group.eventId ? "Event conversation" : "Group chat",
-      tone: waiting || line === "Activity unavailable" ? "text-amber" : activeSlugs.length ? "text-spark" : "text-mist",
-      priority: waiting ? 0 : activeSlugs.length ? 1 : 2,
-      members: group.participantSlugs.flatMap((slug) => { const member = bySlug.get(slug); return member ? [member] : []; }),
-      open: () => void openGroup(group.id),
-    });
-  }
-  current.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
-  const visible = expanded ? current : current.slice(0, 4);
-
+function EventSections({ calendar, coworkers, selectedId, onOpenEvent, onOpenCalendar, onNewEvent }: Pick<ActivityInboxProps, "calendar" | "coworkers" | "selectedId" | "onOpenEvent" | "onOpenCalendar" | "onNewEvent">) {
+  const [upcomingExpanded, setUpcomingExpanded] = useState(false);
+  const [liveExpanded, setLiveExpanded] = useState(true);
+  const upcomingId = useId();
+  const liveId = useId();
+  const now = Date.now();
+  const live = [...new Map(calendar.eventRuns.filter(eventRunIsLive).map((run) => [run.id, run])).values()].sort((a, b) => b.scheduledFor - a.scheduledFor);
+  const liveOccurrences = new Set(live.map((run) => `${run.eventId}:${run.scheduledFor}`));
+  const upcoming = calendarItems({ events: calendar.events, eventRuns: calendar.eventRuns, responsibilities: [], start: now - 86400000, end: now + 7 * 86400000, now })
+    .filter((item) => item.planned && !liveOccurrences.has(`${item.eventId}:${item.startsAt}`)).slice(0, 3);
+  const bySlug = new Map(coworkers.map((member) => [member.slug, member]));
+  const rowClass = (target: CalendarEventTarget) => `block min-h-11 w-full min-w-0 rounded-lg px-2 py-2 text-left hover:bg-white/5 ${FOCUS} ${selectedId === eventKey(target) ? "bg-spark/15 ring-1 ring-inset ring-spark/30" : ""}`;
   return (
-    <aside aria-labelledby={headingId} className="order-first min-w-0 rounded-xl border border-line/70 bg-white/2 @min-[960px]/activity:order-last @min-[960px]/activity:w-[272px] @min-[960px]/activity:shrink-0">
-      <div className="px-4 pb-3 pt-4">
-        <div className="flex items-center justify-between gap-2">
-          <h2 id={headingId} className="flex flex-wrap items-center gap-2 text-xs font-semibold text-snow"><ActivityIcon className="size-3.5 text-mist" />Happening now<span className="text-[10px] font-normal tabular-nums text-mist">{current.length}</span></h2>
-          <IconButton label={expanded ? "Hide current conversations" : "Show current conversations"} className="size-6 @min-[960px]/activity:hidden" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}>
-            <ChevronIcon direction="right" className={`size-3.5 ${expanded ? "-rotate-90" : "rotate-90"}`} />
-          </IconButton>
+    <div className="border-b border-line/60 px-2 py-1">
+      {calendar.errors.length ? <p role="status" className="px-1 py-2 text-[11px] leading-4 text-amber">Calendar updates are incomplete. Events may be a previous snapshot. <button type="button" className={`min-h-8 rounded px-1 underline ${FOCUS}`} onClick={() => void calendar.refresh()}>Refresh Calendar</button></p> : null}
+      {live.length ? <section aria-label="Live Events" data-testid="activity-live-events">
+        <button type="button" aria-expanded={liveExpanded} aria-controls={liveId} onClick={() => setLiveExpanded(!liveExpanded)} className={`flex min-h-8 w-full items-center gap-1.5 rounded px-1 text-xs font-medium text-snow ${FOCUS}`}><ChevronIcon direction="right" className={`size-3 ${liveExpanded ? "rotate-90" : ""}`} />Live Events <span className="text-[10px] text-mist">{live.length}</span></button>
+        <div id={liveId} hidden={!liveExpanded} className="max-h-40 overflow-y-auto overscroll-contain">
+          <ul>{live.map((run) => {
+            const target = { eventId: run.eventId, runId: run.id, at: run.scheduledFor };
+            const state = run.stopping ? "Stopping · awaiting confirmation" : run.status === "queued" ? "Queued" : run.status === "waiting" ? "Waiting on work or input" : run.phase === "conclusion" ? "Preparing the session recap" : "In progress";
+            return <li key={run.id}><button type="button" onClick={() => onOpenEvent(target)} aria-current={selectedId === eventKey(target) ? "page" : undefined} className={rowClass(target)}>
+              <span className="sr-only">View Event session. </span><span className="block truncate text-xs font-medium text-snow">{run.event.title}</span>
+              <span className={`block text-[11px] ${run.status === "waiting" ? "text-amber" : "text-spark"}`}>{calendar.errors.length ? "Last known: " : ""}{state}</span>
+              <span className="block truncate text-[11px] text-mist">Owner: {bySlug.get(run.event.leadSlug)?.name ?? run.event.leadSlug}</span>
+              <span className="block text-[10px] text-mist">{eventTime(run.scheduledFor)}</span>
+            </button></li>;
+          })}</ul>
         </div>
-        <p className="mt-1.5 text-[11px] leading-4 text-mist">Current status, separate from notifications.</p>
-      </div>
-      {openError ? <p role="alert" className="px-4 pb-3 text-xs text-amber">{openError}</p> : null}
-      <div id={contentId} className={expanded ? "" : "hidden @min-[960px]/activity:block"}>
-      {visible.length ? (
-        <ul className="px-1.5 pb-1.5">
-          {visible.map((entry) => (
-            <li key={entry.id}>
-              <button type="button" onClick={entry.open} disabled={Boolean(openingGroup)} aria-busy={entry.id === `group:${openingGroup}`} className={`flex w-full min-w-0 items-start gap-2.5 rounded-lg px-2.5 py-3 text-left transition-colors hover:bg-white/5 disabled:cursor-wait ${FOCUS}`}>
-                <span aria-hidden="true" className="flex h-8 w-11 shrink-0 items-center justify-center">
-                  {entry.coworker ? <CoworkerAvatar identity={entry.coworker.slug} name={entry.coworker.name} color={entry.coworker.avatarColor} glasses={entry.coworker.avatarGlasses} size={30} animated={false} gaze={false} /> : <GroupAvatars members={(entry.members ?? []).slice(0, 2)} size={20} animated={false} />}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-xs font-medium leading-5 text-snow [overflow-wrap:anywhere]">{entry.name}</span>
-                  <span className={`block text-[11px] font-medium leading-5 [overflow-wrap:anywhere] ${entry.tone}`}>{entry.label}</span>
-                  {entry.detail && entry.detail !== entry.label ? <span className="mt-0.5 block line-clamp-2 text-[11px] leading-4 text-mist [overflow-wrap:anywhere]">{entry.detail}</span> : null}
-                </span>
-                <ChevronIcon direction="right" className="mt-1 size-3 shrink-0 text-mist" />
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <div className="px-4 pb-4 text-xs leading-5 text-mist">
-          <p className="text-snow/80">No live work to show.</p>
-          <p className="mt-1">Working conversations and requests for you appear here.</p>
+      </section> : null}
+      <section aria-label="Upcoming Events" data-testid="activity-upcoming-events">
+        <div className="flex items-center justify-between gap-1">
+          <button type="button" aria-expanded={upcomingExpanded} aria-controls={upcomingId} onClick={() => setUpcomingExpanded(!upcomingExpanded)} className={`flex min-h-8 min-w-0 flex-1 items-center gap-1.5 rounded px-1 text-xs font-medium text-snow ${FOCUS}`}><ChevronIcon direction="right" className={`size-3 ${upcomingExpanded ? "rotate-90" : ""}`} />Up next<span className="text-[10px] font-normal text-mist">Next 7 days</span></button>
+          <Button variant="ghost" className={`min-h-8 px-1.5 text-[11px] ${FOCUS}`} onClick={onOpenCalendar}>Calendar</Button>
         </div>
-      )}
-      {current.length > 4 ? <div className="hidden border-t border-line/60 px-3 py-2 @min-[960px]/activity:block"><Button variant="ghost" className={`w-full text-xs ${FOCUS}`} aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : `Show all ${current.length} conversations`}</Button></div> : null}
-      </div>
-    </aside>
+        <div id={upcomingId} hidden={!upcomingExpanded} className="max-h-48 overflow-y-auto overscroll-contain">
+          {calendar.loading && !upcoming.length ? <p role="status" className="px-2 py-2 text-xs text-mist">Loading upcoming Events…</p> : upcoming.length ? <ul>
+            {upcoming.map((item) => {
+              if (!item.eventId) return null;
+              const target = { eventId: item.eventId, at: item.startsAt };
+              return <li key={item.id}><button type="button" onClick={() => onOpenEvent(target)} aria-current={selectedId === eventKey(target) ? "page" : undefined} className={rowClass(target)}>
+                <span className="sr-only">View event in Calendar. </span><span className="block truncate text-xs font-medium text-snow">{item.title}</span>
+                <time dateTime={new Date(item.startsAt).toISOString()} className="block text-[10px] leading-4 text-mist">{eventTime(item.startsAt)}</time>
+                {item.status === "due" ? <span className="block text-[11px] text-amber">Due · waiting to start</span> : null}
+                <span className="block truncate text-[11px] leading-4 text-mist">Owner: {bySlug.get(item.ownerSlug ?? "")?.name ?? item.ownerSlug}</span>
+              </button></li>;
+            })}
+          </ul> : <p className="px-2 py-2 text-xs text-mist">No Events scheduled in the next week.</p>}
+          <Button variant="ghost" className={`mb-1 min-h-8 text-[11px] ${FOCUS}`} onClick={onNewEvent}>New event</Button>
+        </div>
+      </section>
+    </div>
   );
 }
 
-/** Standalone view. Navigation/acknowledgement of an opened item belongs to onOpen. */
-export function ActivityInbox({ items, loading, error, busy, coworkers, groups, activityBySlug, groupLines, groupActiveSlugs, onRefresh, onMarkRead, onOpen, onOpenCoworker, onOpenGroup, onBack, backLabel = "Back to chat" }: ActivityInboxProps) {
+export function ActivityInbox({ active, selectedId, items, loading, error, busy, coworkers, groups, activityBySlug, onRefresh, onMarkRead, onOpen, onOpenDocument, calendar, onOpenEvent, onOpenCalendar, onNewEvent }: ActivityInboxProps) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  const [query, setQuery] = useState("");
   const [actionError, setActionError] = useState("");
   const [pending, setPending] = useState(false);
   const actionInFlight = useRef(false);
   const titleId = useId();
   const feedId = useId();
-  const bySlug = useMemo(() => new Map(coworkers.map((coworker) => [coworker.slug, coworker])), [coworkers]);
-  const byGroup = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+  const documents = useActivityDocuments(active, coworkers, groups);
+  const bySlug = new Map(coworkers.map((coworker) => [coworker.slug, coworker]));
+  const byGroup = new Map(groups.filter((group) => !group.archivedAt).map((group) => [group.id, group]));
   const unreadIds = items.filter((item) => item.readAt === null).map((item) => item.id);
-  const counts: Record<Filter, number> = { all: items.length, mentions: items.filter((item) => item.kind === "mention").length, unread: unreadIds.length };
-  const sections = useMemo(() => {
-    const visible = items.filter((item) => filter === "mentions" ? item.kind === "mention" : filter === "unread" ? item.readAt === null : true)
-      .sort((a, b) => b.at - a.at || a.id.localeCompare(b.id));
-    const dates = new Map<string, { key: string; label: string; items: CoworkerActivityItem[] }>();
-    const now = new Date();
-    for (const item of visible) {
-      const bucket = dateBucket(item.at, now);
-      const section = dates.get(bucket.key);
-      if (section) section.items.push(item);
-      else dates.set(bucket.key, { ...bucket, items: [item] });
+  const histories: HistoryEntry[] = [...documents.entries];
+  for (const item of items) {
+    if (item.kind === "event-reminder") {
+      histories.push({ kind: "activity", category: "events", item, id: item.id, at: item.at, title: item.title, location: `Event · ${eventTime(item.target.scheduledFor)}`, label: "Event reminder", preview: item.preview });
+      continue;
     }
-    return [...dates.values()];
-  }, [filter, items]);
+    const coworker = bySlug.get(item.slug);
+    if (!coworker || coworker.createdAt !== item.coworkerCreatedAt || coworker.workspaceId !== item.workspaceId) continue;
+    const group = item.target.kind === "group" ? byGroup.get(item.target.groupId) : undefined;
+    if (item.target.kind === "group" && (!group || !group.participantSlugs.includes(item.slug))) continue;
+    const eventTarget = group && item.target.kind === "group" ? groupEventTarget(group, calendar.events, item.target.workplaceEventId ? {
+      groupId: group.id, eventId: item.target.workplaceEventId, runId: item.target.runId, at: item.target.scheduledFor,
+    } : undefined) : undefined;
+    const event = eventTarget ? eventForTarget(calendar.events, calendar.eventRuns, eventTarget) : undefined;
+    const workplaceEventId = eventTarget?.eventId;
+    histories.push({
+      kind: "activity", category: workplaceEventId ? "events" : "chats", item, id: item.id, at: item.at,
+      title: workplaceEventId ? event?.title || group?.name || coworker.name : coworker.name,
+      location: item.target.kind === "private" ? "Private chat" : `${workplaceEventId ? "Event" : "Group"} · ${group?.name || "Group chat"}`,
+      label: `${coworker.name} ${item.kind === "mention" ? "mentioned you" : "replied"}`,
+      preview: item.preview.trim(), coworker, eventTarget,
+    });
+  }
+  const search = query.trim().toLocaleLowerCase();
+  const matching = histories.filter((entry) => {
+    if (unreadOnly && (entry.kind !== "activity" || entry.item.readAt !== null)) return false;
+    if (filter === "mentions" ? entry.kind !== "activity" || entry.item.kind !== "mention" : filter !== "all" && entry.category !== filter) return false;
+    return !search || `${entry.title} ${entry.location} ${entry.label} ${entry.preview}`.toLocaleLowerCase().includes(search);
+  }).sort((a, b) => b.at - a.at || a.id.localeCompare(b.id));
+  const visible = filter === "all" || filter === "documents" ? matching.slice(0, RECENT_LIMIT) : matching;
+  const sections = new Map<string, { label: string; entries: HistoryEntry[] }>();
+  const now = new Date();
+  for (const entry of visible) {
+    const bucket = dateBucket(entry.at, now);
+    const section = sections.get(bucket.key);
+    if (section) section.entries.push(entry);
+    else sections.set(bucket.key, { label: bucket.label, entries: [entry] });
+  }
   const disabled = busy || pending;
-  const problem = actionError || error;
-
   async function act(action: () => Promise<void>, fallback: string) {
     if (actionInFlight.current || busy) return;
     actionInFlight.current = true;
@@ -274,74 +368,48 @@ export function ActivityInbox({ items, loading, error, busy, coworkers, groups, 
     catch (cause) { setActionError(cause instanceof Error && cause.message ? `${fallback} ${cause.message}` : fallback); }
     finally { actionInFlight.current = false; setPending(false); }
   }
+  const refresh = () => {
+    setActionError("");
+    onRefresh();
+    documents.refresh();
+    void calendar.refresh();
+  };
 
   return (
-    <section aria-labelledby={titleId} className="@container/activity glass-main flex h-full min-h-0 min-w-0 flex-1 flex-col text-snow" data-testid="activity-inbox">
-      <header className="glass-header window-drag flex min-h-[78px] shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3 @min-[560px]/activity:px-6">
-        <div className="min-w-0">
-          <h1 id={titleId} className="text-lg font-semibold tracking-tight">Activity</h1>
-          <p className="mt-1 text-xs leading-4 text-mist">Replies, mentions, and a pulse on your team.</p>
-        </div>
-        <Button variant="ghost" onClick={onBack} className={`window-no-drag flex shrink-0 items-center gap-1.5 rounded-lg text-xs ${FOCUS}`}><ChevronIcon direction="left" className="size-3.5" />{backLabel}</Button>
-      </header>
-
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-line/70 px-3 py-3 @min-[560px]/activity:px-6">
-        <div role="group" aria-label="Filter activity" className="flex flex-wrap items-center gap-1">
-          {FILTERS.map(({ id, label }) => (
-            <button key={id} type="button" aria-pressed={filter === id} aria-controls={feedId} onClick={() => setFilter(id)} className={`inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${FOCUS} ${filter === id ? "bg-white/8 font-semibold text-snow ring-1 ring-inset ring-white/10" : "text-mist hover:bg-white/4 hover:text-snow"}`}>
-              {label}<span className={`rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${filter === id ? "bg-white/8 text-snow" : "text-mist"}`}>{counts[id]}</span>
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <IconButton label={loading ? "Refreshing activity" : "Refresh activity"} disabled={loading || disabled} onClick={() => { setActionError(""); onRefresh(); }} aria-busy={loading}><RefreshIcon /></IconButton>
-          <Tooltip content="Mark every currently unread notification as read, across all filters.">
-            <Button type="button" variant="ghost" className={`inline-flex items-center gap-1.5 rounded-lg text-xs ${FOCUS}`} disabled={unreadIds.length === 0 || disabled} aria-busy={busy} onClick={() => void act(() => onMarkRead([...unreadIds], true), "Could not mark all as read.")}>
-              <ReadIcon read />Mark all read
-            </Button>
-          </Tooltip>
-        </div>
-      </div>
-
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
-        <div className="mx-auto flex w-full max-w-[1160px] flex-col gap-5 px-3 py-5 @min-[560px]/activity:px-6 @min-[960px]/activity:flex-row @min-[960px]/activity:items-start">
-          <div id={feedId} className="min-w-0 flex-1">
-            <h2 className="sr-only">{filter === "mentions" ? "Mentions" : filter === "unread" ? "Unread notifications" : "All notifications"}</h2>
-            <p role="status" aria-live="polite" className="sr-only">{loading && items.length === 0 ? "Loading activity." : `${counts[filter]} notifications in this view. ${counts.unread} unread in total.`}</p>
-            {problem ? (
-              <div role="alert" className="mb-4 rounded-xl border border-amber/25 bg-amber/5 p-3">
-                <div className="flex items-start gap-2"><AlertIcon className="mt-0.5 size-4 shrink-0 text-amber" /><p className="min-w-0 flex-1 text-xs leading-5 text-snow [overflow-wrap:anywhere]">{problem}</p></div>
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                  {items.length > 0 ? <p className="text-[11px] leading-4 text-mist">Your last loaded activity is still shown.</p> : null}
-                  <Button variant="ghost" disabled={loading || disabled} className={`text-xs ${FOCUS}`} onClick={() => { setActionError(""); onRefresh(); }}>Refresh activity</Button>
-                </div>
-              </div>
-            ) : null}
-            {loading && items.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 rounded-xl border border-line/60 px-6 py-14 text-center text-mist"><ActivityIcon className="size-6 motion-safe:animate-pulse" /><p className="text-sm">Loading activity…</p></div>
-            ) : sections.length === 0 && !problem ? (
-              <div className="rounded-xl border border-line/60 px-6 py-14 text-center">
-                <span aria-hidden="true" className="mx-auto mb-4 flex size-11 items-center justify-center rounded-xl border border-line/70 bg-white/3 text-mist">{filter === "mentions" ? <span className="text-xl">@</span> : <ReadIcon read={filter === "unread"} />}</span>
-                <h3 className="text-sm font-medium text-snow">{filter === "unread" ? "You're all caught up" : filter === "mentions" ? "No mentions yet" : "Nothing here yet"}</h3>
-                <p className="mx-auto mt-2 max-w-xs text-xs leading-5 text-mist">{filter === "unread" ? "New replies and mentions will be waiting here." : filter === "mentions" ? "When a coworker mentions you, you'll find it here." : "Replies and mentions from your conversations will appear here."}</p>
-                {filter !== "all" && items.length > 0 ? <Button variant="ghost" className={`mt-4 text-xs ${FOCUS}`} onClick={() => setFilter("all")}>View all activity</Button> : null}
-              </div>
-            ) : sections.map((section, index) => (
-              <section key={section.key} aria-labelledby={`${feedId}-${index}`} className="mb-5 last:mb-0">
-                <div className="mb-2 flex items-center gap-3 px-1"><h3 id={`${feedId}-${index}`} className="min-w-0 text-[11px] font-medium text-mist [overflow-wrap:anywhere]">{section.label}</h3><span aria-hidden="true" className="h-px min-w-0 flex-1 bg-line/60" /></div>
-                <ul className="rounded-xl border border-line/70">
-                  {section.items.map((item) => (
-                    <ActivityRow key={item.id} item={item} coworker={bySlug.get(item.slug)} group={item.target.kind === "group" ? byGroup.get(item.target.groupId) : undefined} disabled={disabled}
-                      onOpen={() => void act(() => onOpen(item), "Could not open this conversation.")}
-                      onMarkRead={() => void act(() => onMarkRead([item.id], item.readAt === null), "Could not update read status.")} />
-                  ))}
-                </ul>
-              </section>
-            ))}
+    <aside aria-labelledby={titleId} hidden={!active} className={`glass-main h-full min-h-0 w-full min-w-0 max-w-[380px] flex-1 flex-col text-snow ${active ? "flex" : "hidden"}`} data-testid="activity-inbox">
+      <header className="shrink-0 border-b border-line/70 px-3 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <h1 id={titleId} className="text-sm font-semibold">Activity</h1>
+          <div className="flex items-center gap-1">
+            <button type="button" data-testid="activity-unread-filter" aria-pressed={unreadOnly} aria-controls={feedId} onClick={() => setUnreadOnly(!unreadOnly)} title="Show only unread notifications. Documents have no unread state." className={`min-h-8 rounded-lg px-2 text-[11px] ${FOCUS} ${unreadOnly ? "bg-spark/15 text-spark" : "text-mist hover:bg-white/5"}`}>Unread <span className="tabular-nums">{unreadIds.length}</span></button>
+            <IconButton label={loading || documents.refreshing ? "Refreshing activity" : "Refresh activity"} disabled={loading || documents.refreshing || disabled} onClick={refresh} aria-busy={loading || documents.refreshing} className={`min-h-8 min-w-8 ${FOCUS}`}><RefreshIcon /></IconButton>
           </div>
-          <HappeningNow coworkers={coworkers} groups={groups} activityBySlug={activityBySlug} groupLines={groupLines} groupActiveSlugs={groupActiveSlugs} onOpenCoworker={onOpenCoworker} onOpenGroup={onOpenGroup} />
+        </div>
+        <input type="search" aria-label="Search activity" placeholder="Search activity" value={query} onChange={(event) => setQuery(event.target.value)} className={`${inputClass} mt-2 min-h-8 rounded-lg px-2 py-1.5 text-xs`} />
+        <div role="group" aria-label="Filter activity" className="mt-1.5 flex flex-wrap gap-0.5">
+          {FILTERS.map(({ id, label }) => <button key={id} type="button" aria-pressed={filter === id} aria-controls={feedId} onClick={() => setFilter(id)} className={`min-h-8 rounded-md px-1.5 text-[11px] ${FOCUS} ${filter === id ? "bg-white/8 font-semibold text-snow" : "text-mist hover:bg-white/4 hover:text-snow"}`}>{label}</button>)}
+        </div>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <EventSections calendar={calendar} coworkers={coworkers} selectedId={selectedId} onOpenEvent={onOpenEvent} onOpenCalendar={onOpenCalendar} onNewEvent={onNewEvent} />
+        <div id={feedId} className="px-2 pb-3">
+          <div className="flex items-center justify-between gap-1 py-1">
+            <h2 className="px-1 text-[11px] font-medium text-mist">Recent activity</h2>
+            <Button type="button" variant="ghost" className={`min-h-8 px-1.5 text-[11px] ${FOCUS}`} title="Mark all native notifications as read, across every filter" disabled={!unreadIds.length || disabled} aria-busy={busy} onClick={() => void act(() => onMarkRead([...unreadIds], true), "Could not mark all as read.")}>Mark all read</Button>
+          </div>
+          <p role="status" aria-live="polite" className="sr-only">{loading && !items.length ? "Loading activity." : `${visible.length} entries in this view. ${unreadIds.length} unread notifications in total.`}</p>
+          {actionError || error ? <p role="alert" className="mb-2 rounded-lg border border-amber/25 bg-amber/5 px-2 py-2 text-[11px] leading-4 text-amber [overflow-wrap:anywhere]">{actionError || error}{error && items.length ? " Last loaded activity is still shown." : ""}</p> : null}
+          {Object.entries(documents.errors).map(([key, warning]) => <p key={key} role="status" data-document-scope={key} className="mb-2 rounded-lg border border-amber/20 px-2 py-2 text-[11px] leading-4 text-amber">{warning}</p>)}
+          {(loading || documents.refreshing) && !visible.length ? <p role="status" className="px-2 py-4 text-xs text-mist">Loading activity…</p> : !visible.length ? <p className="px-2 py-4 text-xs leading-5 text-mist">{unreadOnly && filter === "documents" ? "Documents have no unread state. Turn off Unread to browse saved documents." : search ? "No activity matches your search." : unreadOnly ? "No unread notifications in this view." : filter === "documents" ? "No saved documents to show." : "No activity in this view yet."}</p> : null}
+          {[...sections.entries()].map(([key, section], index) => <section key={key} aria-labelledby={`${feedId}-${index}`}>
+            <h3 id={`${feedId}-${index}`} className="px-2 pb-1 pt-2 text-[10px] font-medium text-mist">{section.label}</h3>
+            <ul className="space-y-0.5">{section.entries.map((entry) => <HistoryRow key={entry.id} entry={entry} selected={selectedId === entry.id} disabled={disabled} activity={entry.coworker ? activityBySlug[entry.coworker.slug] : undefined}
+              onOpen={() => void act(() => entry.kind === "document" ? onOpenDocument(entry.target) : onOpen(entry.item), entry.kind === "document" ? "Could not open this document." : "Could not open this conversation.")}
+              onMarkRead={() => { if (entry.kind === "activity") void act(() => onMarkRead([entry.item.id], entry.item.readAt === null), "Could not update read status."); }} onOpenEvent={onOpenEvent} />)}</ul>
+          </section>)}
+          {matching.length > visible.length ? <p className="px-2 pt-3 text-[11px] text-mist">Showing the most recent {RECENT_LIMIT} matches. Search to narrow the history.</p> : null}
         </div>
       </div>
-    </section>
+    </aside>
   );
 }

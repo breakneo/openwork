@@ -1,10 +1,11 @@
 import { PROGRESS_AGENT, PROGRESS_LIMITS, PROGRESS_TITLE } from "../src/lib/progress-config.ts";
 import { createProgressBudget, createProgressService, progressFingerprint } from "../src/lib/progress-service.ts";
 import { executionProgress } from "../src/lib/progress-activity.ts";
+import { setTimeout as delay } from "node:timers/promises";
 
 /** Fresh native session, explicit agent/model, no structured-output tool or history. */
 export async function summarizeProgress(client, model, { prompt, signal }) {
-  signal = AbortSignal.any([signal, AbortSignal.timeout(PROGRESS_LIMITS.timeoutMs)]);
+  signal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(PROGRESS_LIMITS.timeoutMs)]);
   let thread;
   const stop = () => {
     return thread ? client.abortThread(thread.id, { signal: AbortSignal.timeout(PROGRESS_LIMITS.cleanupMs) }).catch(() => {}) : Promise.resolve();
@@ -14,21 +15,35 @@ export async function summarizeProgress(client, model, { prompt, signal }) {
   try {
     // Do not abandon admission's receipt when the observer cancels: if native
     // accepts after the first abort, the finally block aborts that session again.
-    thread = await client.createThread({ title: PROGRESS_TITLE, signal: AbortSignal.timeout(PROGRESS_LIMITS.timeoutMs) });
+    thread = await client.createThread({ title: PROGRESS_TITLE, agent: PROGRESS_AGENT, model, signal: AbortSignal.timeout(PROGRESS_LIMITS.timeoutMs) });
     signal.throwIfAborted();
-    const acceptance = await client.sendTurn(thread.id, { prompt, agent: PROGRESS_AGENT, model, tools: { "*": false }, signal: AbortSignal.timeout(PROGRESS_LIMITS.timeoutMs) });
+    const acceptance = await client.sendTurn(thread.id, { prompt, agent: PROGRESS_AGENT, model, signal: AbortSignal.timeout(PROGRESS_LIMITS.timeoutMs) });
     signal.throwIfAborted();
     for (;;) {
       const snapshot = await client.getThreadSnapshot(thread.id, { signal });
       signal.throwIfAborted();
-      if (snapshot.status.type === "retry") throw new Error("Progress selection refused.");
-      const reply = snapshot.messages.slice(acceptance.messageCountBefore).findLast((message) => message.role === "assistant");
-      if (reply?.error) throw new Error("Progress selection refused.");
-      if (reply?.completedAt != null) {
-        if (reply.parts.some((part) => part.type !== "text" && part.type !== "step-start" && part.type !== "step-finish")) throw new Error("Progress selection refused.");
-        return reply.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
+      if (snapshot.native?.engine !== "v2" || snapshot.status.type === "retry" || acceptance.retried || acceptance.alreadyPresent) throw new Error("Progress selection refused.");
+      const outcome = snapshot.native.turnOutcomes?.[acceptance.messageId];
+      if (outcome === "failed" || outcome === "interrupted") throw new Error("Progress selection refused.");
+      const replies = snapshot.messages.filter((message) => message.role === "assistant");
+      if (snapshot.native.ambiguousTurns?.includes(acceptance.messageId) || replies.length > 1
+        || replies.some((message) => message.parentId != null && message.parentId !== acceptance.messageId)) throw new Error("Progress selection refused.");
+      const reply = replies[0];
+      if (reply?.error || reply?.usage?.reasoningTokens > 0 || reply?.usage?.outputTokens > PROGRESS_LIMITS.maxOutputTokens) throw new Error("Progress selection refused.");
+      let text = "";
+      if (reply) {
+        if (reply.parts.length > PROGRESS_LIMITS.maxReplyParts) throw new Error("Progress selection refused.");
+        for (const part of reply.parts) {
+          if (part.type === "step-start" || part.type === "step-finish") continue;
+          if (part.type !== "text" || typeof part.text !== "string" || part.synthetic || part.ignored) throw new Error("Progress selection refused.");
+          text += part.text;
+          if (Buffer.byteLength(text) > PROGRESS_LIMITS.maxOutputTokens * 16) throw new Error("Progress selection refused.");
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, PROGRESS_LIMITS.summaryPollMs));
+      if (reply?.completedAt != null && reply.parentId === acceptance.messageId && outcome === "succeeded") {
+        return text;
+      }
+      await delay(PROGRESS_LIMITS.summaryPollMs, undefined, { signal });
     }
   } finally {
     signal.removeEventListener("abort", stop);

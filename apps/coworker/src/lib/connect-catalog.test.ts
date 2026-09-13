@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CoworkerMcpError, createCoworkerMcpClient, createCoworkerMcpAppActions, preservedMcpAppResult, type CoworkerMcpAppResource } from "./mcp.ts";
+import type { NativeV2Skill } from "@openwork/headless-threads/v2";
 import {
   mergeSearchMatches,
   parseSearchMatches,
   parseSkillIndex,
 } from "./connect-catalog.ts";
+import { selectCatalogSkill, selectionFields, validateSkillSelections } from "./skill-selection.ts";
 
 const statusMatch = {
   name: "mcp:conn_notion:*",
@@ -96,6 +98,23 @@ test("the skill index reads into titled skills, built-in ones apart", () => {
     ],
   });
   assert.deepEqual(skills.map((skill) => [skill.title, skill.builtIn, skill.pluginName]), [["Create Skill", true, ""], ["Release", false, "Release"]]);
+  assert.equal(skills[1]?.url, "skill://release");
+  const account = { baseUrl: "https://example.invalid", orgId: "org_fixture", accountId: "user_fixture" };
+  const catalog: NativeV2Skill[] = [{ id: "native_exact", name: "Different native title", content: "Private instruction body", location: "/workspace/skills/SKILL.md", source: { type: "openwork-cloud", uri: "skill://release", scope: "opaque-selection-A" } }];
+  const selected = selectCatalogSkill(catalog, { uri: skills[1]!.url, label: skills[1]!.title }, "ws_fixture", account);
+  assert.equal(selected.id, "native_exact");
+  assert.equal(selected.source?.scope, "opaque-selection-A");
+  assert.ok(!JSON.stringify(selected).includes("Private instruction body"));
+  assert.throws(() => selectCatalogSkill(catalog, { uri: "skill://missing", label: "Different native title" }, "ws_fixture", account), /no longer available/);
+  assert.throws(() => selectCatalogSkill(catalog, { label: "Use the Release skill" }, "ws_fixture", account), /no longer available/);
+  validateSkillSelections(selectionFields([selected]), catalog, "ws_fixture", account);
+  const revised = [{ ...catalog[0]!, source: { type: "openwork-cloud", uri: "skill://release", scope: "opaque-selection-B" } }] satisfies NativeV2Skill[];
+  assert.throws(() => validateSkillSelections(selectionFields([selected]), revised, "ws_fixture", account), /source changed/);
+  assert.equal(selected.source?.scope, "opaque-selection-A", "a refreshed catalog never rebinds the selected scope");
+  assert.throws(() => selectCatalogSkill([{ ...catalog[0]!, source: { type: "openwork-cloud", uri: "skill://release", scope: "" } }], { uri: "skill://release" }, "ws_fixture", account), /scope/);
+  for (const changed of [null, { ...account, orgId: "other" }, { ...account, accountId: "other" }, { ...account, baseUrl: "https://other.invalid" }]) assert.throws(() => validateSkillSelections(selectionFields([selected]), catalog, "ws_fixture", changed), /changed/);
+  assert.throws(() => validateSkillSelections(selectionFields([selected]), [], "ws_fixture", account), /no longer available/);
+  assert.throws(() => validateSkillSelections(selectionFields([selected]), catalog, "other-workspace", account), /changed/);
   assert.deepEqual(parseSkillIndex(null), []);
   assert.deepEqual(parseSkillIndex({ skills: "x" }), []);
 });

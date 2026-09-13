@@ -1,11 +1,11 @@
 import { useComposerDraft } from "@/ui/use-composer-draft";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ReactNode } from "react";
-import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { coworkerBridge, type CollaborationReceipt, type CoworkerGroupSummary, type CoworkerGroupTurn, type CoworkerSummary, type GroupInteraction, type GroupTimelineEvent, type RuntimeInfo } from "@/lib/bridge";
 import { assignmentPrompt, assignmentTitle, timeLabelBetween, type DiscussionMessage } from "@/lib/conversation";
 import { combineSummaryLines, describeCoworkerSummary, type CoworkerSummaryLine } from "@/lib/coworker-summary";
 import { classifyThreads, discussionIds, loadDiscussionRegistry } from "@/lib/discussions";
-import { lastDocumentsOpened } from "@/ui/documents";
+import { humanizeDocumentId } from "@/lib/documents";
+import { DocumentCard, lastDocumentsOpened, useDocumentNavigationGuard, type DocumentNavigationGuard } from "@/ui/documents";
 import { GroupDocuments, type GroupDocumentsApi } from "@/ui/group-documents";
 import {
   publishGroupRun,
@@ -28,7 +28,8 @@ import { changeGroupSends, groupConversationRows, groupMessageKey, groupReplyPar
 import { PROGRESS_LIMITS } from "@/lib/progress-config";
 import { safeLiveMarkdown } from "@/lib/live-phase";
 import { LiveRow } from "@/ui/live-row";
-import { Markdown } from "@/ui/markdown";
+import { ChatReply } from "@/ui/chat-reply";
+import { MessageReactions, useMessageReactions } from "@/ui/message-reactions";
 import { acknowledgeCoworker, CoworkerAvatar, GroupAvatars } from "@/ui/coworker-avatar";
 import { InteractionCard, InteractionCards, LETTERS, OptionRow, typingInField } from "@/ui/interactions";
 import { ActionMenu, Button, ErrorNote, PlusIcon } from "@/ui/kit";
@@ -120,50 +121,30 @@ const GroupExecutionRow = memo(function GroupExecutionRow({ activity, coworker, 
   const currentRef = useRef(activity);
   currentRef.current = activity;
   const [streamed, setStreamed] = useState<GroupReplyPart[]>([]);
-  const hiddenParts = useRef(new Set<string>());
   useEffect(() => {
     if (!coworker.workspaceId || !runtime.engineManaged) return;
-    const controller = new AbortController();
-    const approved = new Set<string>();
     let parts: GroupReplyPart[] = [];
-    const client = createOpencodeClient({ baseUrl: `${runtime.serverUrl}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode`, headers: { Authorization: `Bearer ${runtime.ownerToken}` }, redirect: "error" });
-    const accepts = (messageId: string) => approved.has(messageId) || currentRef.current.replies.some((reply) => reply.id === messageId && reply.parentId === activity.messageId);
+    setStreamed([]);
+    const threads = createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: coworker.workspaceId, token: runtime.ownerToken });
     const keep = (part: GroupReplyPart) => {
       parts = mergeGroupReplyParts(parts, [part]);
       setStreamed(parts);
     };
-    void (async () => {
-      try {
-        const subscription = await client.event.subscribe(undefined, { signal: controller.signal });
-        for await (const event of subscription.stream) {
-          if (controller.signal.aborted) return;
-          if (event.type === "message.updated") {
-            const info = event.properties.info;
-            if (info.sessionID === activity.threadId && info.role === "assistant" && info.parentID === activity.messageId && approved.size < PROGRESS_LIMITS.maxReplyParts) approved.add(info.id);
-          } else if (event.type === "message.part.updated") {
-            const part = event.properties.part;
-            if (part.sessionID !== activity.threadId || !accepts(part.messageID) || part.type !== "text") continue;
-            if (part.synthetic || part.ignored) {
-              hiddenParts.current.add(`${part.messageID}:${part.id}`);
-              parts = parts.filter((item) => item.messageId !== part.messageID || item.id !== part.id);
-              setStreamed(parts);
-              continue;
-            }
-            keep({ messageId: part.messageID, id: part.id, text: part.text, ended: part.time?.end !== undefined });
-          } else if (event.type === "message.part.delta") {
-            const part = event.properties;
-            if (part.sessionID !== activity.threadId || !accepts(part.messageID) || part.field !== "text") continue;
-            // Deltas cannot establish that a part is visible text. Require an announced or projected text part.
-            const known = parts.find((item) => item.messageId === part.messageID && item.id === part.partID) ?? currentRef.current.replies.find((reply) => reply.id === part.messageID)?.parts.find((item) => item.id === part.partID);
-            if (known && !known.ended && !hiddenParts.current.has(`${part.messageID}:${part.partID}`)) keep({ messageId: part.messageID, id: part.partID, text: known.text + part.delta });
-          }
-        }
-      } catch { /* The bounded snapshot poll remains authoritative when live events disconnect. */ }
-    })();
-    return () => { controller.abort(); };
+    return threads.subscribe(() => {}, (event) => {
+      // Only the host's verified history projection can attribute a reply.
+      if (!currentRef.current.available) return;
+      const reply = currentRef.current.replies.find((item) => item.id === event.messageId && item.parentId === activity.messageId);
+      if (event.threadId !== activity.threadId || !reply) return;
+      if (event.kind === "part") {
+        if (event.type === "text" && !event.synthetic && !event.ignored) keep({ messageId: event.messageId, id: event.partId, text: event.text, ended: event.ended });
+      } else {
+        const known = parts.find((item) => item.messageId === event.messageId && item.id === event.partId) ?? reply.parts.find((item) => item.id === event.partId);
+        if (known && !known.ended) keep({ messageId: event.messageId, id: event.partId, text: known.text + event.delta });
+      }
+    });
   }, [activity.executionId, activity.messageId, activity.threadId, coworker.workspaceId, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl]);
 
-  const parts = mergeGroupReplyParts(streamed, groupReplyParts(activity)).filter((part) => !hiddenParts.current.has(`${part.messageId}:${part.id}`));
+  const parts = mergeGroupReplyParts(streamed, groupReplyParts(activity)).filter((part) => activity.replies.some((reply) => reply.id === part.messageId && reply.parentId === activity.messageId));
   let text = "";
   let messageId = "";
   for (const part of parts) {
@@ -176,7 +157,7 @@ const GroupExecutionRow = memo(function GroupExecutionRow({ activity, coworker, 
     <p className="mb-1 px-2 text-[11px] font-medium text-mist [overflow-wrap:anywhere]" data-testid="group-speaker-name">{coworker.name}</p>
     {text ? <div className="flex min-w-0 items-end gap-2" data-message-role="assistant" data-live="true">
       <span className="shrink-0"><CoworkerAvatar identity={coworker.slug} animated={false} motion="quiet" gaze={false} color={coworker.avatarColor} glasses={coworker.avatarGlasses} name={coworker.name} size={24} /></span>
-      <div className="bubble bubble-coworker bubble-tail-left min-w-0 max-w-[76%] [overflow-wrap:anywhere]" data-testid="group-live-reply"><Markdown text={safeLiveMarkdown(text)} className="overflow-x-auto" /></div>
+      <div className="min-w-0 max-w-[76%]" data-testid="group-live-reply"><ChatReply text={safeLiveMarkdown(text)} live tail /></div>
     </div> : null}
     <LiveRow coworker={coworker} progress={progress} phase={progress.status === "streaming" ? "writing" : "thinking"} wordsArrived={Boolean(text)} />
   </div>;
@@ -211,7 +192,11 @@ function GroupChatView({
   documentRequest,
   documentsApi,
   activityRequest,
+  onExitActivity,
+  navigationGuard,
 }: {
+  navigationGuard?: DocumentNavigationGuard;
+  onExitActivity?: () => void;
   activityRequest?: { id: number; eventId: string; onOpened?: () => Promise<void> } | null;
   documentsApi?: GroupDocumentsApi;
   active?: boolean;
@@ -234,14 +219,28 @@ function GroupChatView({
   onOpenAssignment?: (slug: string, threadId: string) => void;
 }) {
   const eventId = event?.id ?? group.eventId;
-  const [sharedDocument, setSharedDocument] = useState<{ groupId: string; id: string } | null>(null);
+  const [sharedDocument, setSharedDocument] = useState<{ groupId: string; id: string; requestId: number } | null>(null);
+  const [sharedDocumentSuspended, setSharedDocumentSuspended] = useState(false);
+  const [documentNotice, setDocumentNotice] = useState("");
+  const documentNavigation: DocumentNavigationGuard = useRef(null);
+  const documentSequence = useRef(0);
+  useDocumentNavigationGuard(navigationGuard, () => documentNavigation.current?.() ?? null);
+  const sharedDocumentVisible = Boolean(sharedDocument) && !sharedDocumentSuspended;
+  function openSharedDocument(id: string) {
+    setSharedDocumentSuspended(false);
+    const message = documentNavigation.current?.() ?? "";
+    setDocumentNotice(message);
+    if (message) return;
+    setSharedDocument({ groupId: group.id, id, requestId: ++documentSequence.current });
+  }
   useEffect(() => {
-    if (documentRequest) setSharedDocument({ groupId: group.id, id: documentRequest.documentId });
+    if (documentRequest) openSharedDocument(documentRequest.documentId);
   }, [documentRequest, group.id]);
   const [observed, setObserved] = useState(() => groupObservations.get(group.id) ?? { groupId: "", timeline: [], executions: [] });
   const [activityReadStartedAt, setActivityReadStartedAt] = useState(0);
   const events = observed.groupId === group.id ? observed.timeline : [];
   const executions = observed.groupId === group.id ? observed.executions : [];
+  const messageReactions = useMessageReactions({ kind: "group", groupId: group.id }, active, group.createdAt);
   const [humanWaits, setHumanWaits] = useState<{ groupId: string; entries: GroupInteraction[] }>({ groupId: "", entries: [] });
   const interactions = humanWaits.groupId === group.id ? humanWaits.entries : [];
   const [loaded, setLoaded] = useState(false);
@@ -282,10 +281,20 @@ function GroupChatView({
   eventsRef.current = events;
   const { scrollRef, contentRef, away, jumpToLatest, reveal } = useConversationScroll(`group:${group.id}`, active && !pendingAssignment, observed.groupId === group.id);
   const revealedActivity = useRef(0);
+  const preparedActivity = useRef(0);
   const [activityNotice, setActivityNotice] = useState("");
   const [highlightedEvent, setHighlightedEvent] = useState("");
   useEffect(() => {
-    if (!active || sharedDocument || pendingAssignment || !activityRequest || revealedActivity.current === activityRequest.id || observed.groupId !== group.id) return;
+    if (!active || !activityRequest || preparedActivity.current === activityRequest.id) return;
+    const message = documentNavigation.current?.();
+    if (message) { setDocumentNotice(message); return; }
+    preparedActivity.current = activityRequest.id;
+    setSharedDocumentSuspended(true);
+    setHighlightedEvent("");
+    setActivityNotice("");
+  }, [active, activityRequest]);
+  useEffect(() => {
+    if (!active || sharedDocumentVisible || pendingAssignment || !activityRequest || revealedActivity.current === activityRequest.id || observed.groupId !== group.id) return;
     const event = events.find((entry) => entry.id === activityRequest.eventId);
     // A cached timeline can predate the notification. Only a read started after
     // this navigation can establish that its target is outside recent history.
@@ -297,7 +306,7 @@ function GroupChatView({
     if (event) void activityRequest.onOpened?.().catch((cause) => {
       if (mounted.current && revealedActivity.current === activityRequest.id) setActivityNotice(cause instanceof Error ? cause.message : "The reply opened, but read status could not be saved.");
     });
-  }, [active, activityRequest, activityReadStartedAt, events, group.id, observed.groupId, pendingAssignment, reveal, sharedDocument]);
+  }, [active, activityRequest, activityReadStartedAt, events, group.id, observed.groupId, pendingAssignment, reveal, sharedDocumentVisible]);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const changedRef = useRef(onGroupChanged);
   changedRef.current = onGroupChanged;
@@ -618,7 +627,7 @@ function GroupChatView({
   const voiceTurn = !live && !activityError && latestTurn && (!voiceBaseline || latestTurn.clientMessageId !== voiceBaseline.clientMessageId || latestTurn.updatedAt > voiceBaseline.updatedAt) ? latestTurn : null;
   const spokenReply = useMemo(() => groupVoiceReply(voiceTurn, events, nameFor, voiceBaseline?.eventIds), [voiceTurn, events, nameFor, voiceBaseline?.eventIds]);
   const voice = useVoice({
-    active: active && !assignmentMode && !sharedDocument && !group.archivedAt,
+    active: active && !assignmentMode && !sharedDocumentVisible && !group.archivedAt,
     scope: `group:${group.id}`,
     onTranscript: (text) => { setMessage((draft) => appendVoiceDraft(draft, text)); setMention(null); },
     reply: spokenReply,
@@ -635,6 +644,7 @@ function GroupChatView({
   const statusLine = activityError ? "Reconnecting to activity" : localSends.some((item) => item.state === "uncertain") ? "Checking message confirmation" : sending ? "Sending…" : interactions.length || executions.length || live ? presentation.line : waiting ? "Waiting for requested work" : !loaded || !receiptsLoaded || observed.groupId !== group.id ? "Checking activity" : localSends.some((item) => item.state === "accepted") ? "Message accepted" : "Ready";
   const activeSlugs = presentation.activeSlugs;
   const rows = useMemo(() => groupConversationRows(events, executions, localSends), [events, executions, localSends]);
+  const persistedEventIds = useMemo(() => new Set(events.map((event) => event.id)), [events]);
   const viewEvent = eventId && onOpenEvent ? <button type="button" className="font-medium text-snow/80 underline-offset-2 hover:underline" onClick={() => onOpenEvent(eventId)} data-testid="group-event-phase-link">View event</button> : null;
 
   return (
@@ -663,8 +673,9 @@ function GroupChatView({
           <p className="whitespace-normal text-xs text-mist [overflow-wrap:anywhere]" data-testid="conversation-header-title">{members.map((member) => member.name).join(", ")}</p>
         </div>
         <div className="window-no-drag flex shrink-0 items-center gap-1" data-testid="conversation-header-actions">
+          {onExitActivity ? <Button variant="ghost" onClick={onExitActivity}>Go to chat</Button> : null}
           {eventId && onOpenEvent ? <Button variant="ghost" onClick={() => onOpenEvent(eventId)} data-testid="event-conversation-backlink">View event</Button> : null}
-          {documentsApi ? <Button variant="ghost" onClick={() => setSharedDocument({ groupId: group.id, id: "" })} data-testid="group-shared-documents">Shared documents</Button> : null}
+          {documentsApi ? <Button variant="ghost" onClick={() => sharedDocumentSuspended && sharedDocument ? setSharedDocumentSuspended(false) : openSharedDocument("")} data-testid="group-shared-documents">Shared documents</Button> : null}
           {live ? <Button variant="ghost" disabled={busyActions.includes("stop")} onClick={stopGroup}>{busyActions.includes("stop") ? "Stopping…" : actionAttempts.current.get("stop")?.state === "retryable" ? "Retry stop" : "Stop all"}</Button> : null}
           {!event && !group.eventId ? <ActionMenu
             label="Group chat options"
@@ -681,6 +692,7 @@ function GroupChatView({
         </span>
       </header>
       {event || group.eventId ? <p className="border-b border-line/60 px-5 py-2 text-[11px] text-mist">Event conversation. Change participants and future sessions in the event editor. {group.archivedAt ? "This conversation is archived; its history is kept." : ""}</p> : null}
+      {documentNotice ? <p role="alert" className="border-b border-line px-5 py-2 text-xs text-mist">{documentNotice}<button type="button" className="ml-2 underline" onClick={() => setDocumentNotice("")}>Dismiss</button></p> : null}
       {activityNotice ? <p role="status" className="border-b border-line px-5 py-2 text-xs text-mist">{activityNotice}<button type="button" className="ml-2 underline" onClick={() => setActivityNotice("")}>Dismiss</button></p> : null}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} style={{ overflowAnchor: "none" }} className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -702,6 +714,7 @@ function GroupChatView({
               return member ? <GroupExecutionRow key={`execution:${execution.executionId}:${execution.threadId}:${execution.messageId}:${execution.slug}`} activity={execution} coworker={member} runtime={runtime} unavailable={Boolean(activityError) || !loaded} waiting={interactions.some((entry) => entry.executionId === execution.executionId)} /> : null;
             }
             const { event, delivery } = row;
+            const persistedEventId = persistedEventIds.has(event.id) ? event.id : undefined;
             const previousRow = rows[index - 1];
             const nextRow = rows[index + 1];
             const previous = previousRow && "event" in previousRow ? previousRow.event : undefined;
@@ -712,12 +725,24 @@ function GroupChatView({
             const tail = !sameSpeaker(next);
             const label = timeLabelBetween(previous?.at, event.at);
             if (event.kind === "status") {
+              if (event.status === "document" && event.documentId && documentsApi) {
+                const documentId = event.documentId;
+                return (
+                  <div key={key} className="min-w-0 max-w-[320px] space-y-1" data-testid="group-status" data-status={event.status} data-speaker={event.slug} data-event-id={event.id}>
+                    <DocumentCard
+                      card={{ id: documentId, title: event.title?.trim() || humanizeDocumentId(documentId), summary: event.documentSummary ?? event.text, highlights: [], action: "updated", section: "", revision: event.revision ?? null }}
+                      onOpen={() => openSharedDocument(documentId)}
+                    />
+                    <p className="text-[10px] text-mist" title={new Date(event.at).toLocaleString()}>{timeLabel(event.at)}</p>
+                  </div>
+                );
+              }
               // A quiet line. When it is about a speaker of the latest unfinished turn, it also offers the fix.
               const speaker = recoverable && event.turnId === recoverable.id ? unfinished.find((entry) => entry.slug === event.slug) : undefined;
               const failure = speaker ? describeSpeakerFailure(speaker.error, nameFor(speaker.slug)) : null;
               return (
                 <p key={key} className="flex flex-wrap items-center justify-center gap-x-3 px-12 text-center text-[11px] text-mist" data-testid="group-status" data-status={event.status} data-speaker={event.slug} data-error={speaker?.error}>
-                  {documentsApi && "documentId" in event && typeof event.documentId === "string" ? <button type="button" className="text-spark hover:underline" onClick={() => setSharedDocument({ groupId: group.id, id: String(event.documentId) })}>{event.text}</button> : <span title={speaker?.error && speaker.error !== event.text ? speaker.error : undefined}>{event.text}</span>}
+                  {documentsApi && "documentId" in event && typeof event.documentId === "string" ? <button type="button" className="text-spark hover:underline" onClick={() => openSharedDocument(String(event.documentId))}>{event.text}</button> : <span title={speaker?.error && speaker.error !== event.text ? speaker.error : undefined}>{event.text}</span>}
                   {speaker && recoverable ? eventPhaseRecovery ? viewEvent : (
                     <span className="flex items-center gap-x-3">
                       <button type="button" disabled={recoveryBusy} className="font-medium text-snow/80 underline-offset-2 hover:underline disabled:opacity-50" data-testid="group-speaker-retry" data-speaker={speaker.slug} onClick={() => resume(recoverable, speaker.slug)}>Continue</button>
@@ -745,13 +770,14 @@ function GroupChatView({
               const queued = queue.some((item) => item.clientMessageId === event.clientMessageId);
               const eventPhase = isEventPhaseRequest(delivery?.clientMessageId ?? event.clientMessageId, delivery?.turnId ?? event.turnId);
               return (
-                <div key={key} data-scroll-anchor={key} data-client-message-id={event.clientMessageId} data-delivery-state={delivery?.state ?? "recorded"}>
+                <div key={key} data-scroll-anchor={key} data-event-id={persistedEventId} data-client-message-id={event.clientMessageId} data-delivery-state={delivery?.state ?? "recorded"}>
                   {label ? <p className="pb-1 pt-2 text-center text-[11px] font-medium text-mist/80" data-testid="group-time-label">{label}</p> : null}
                   <div className={`flex justify-end ${continued ? "-mt-1.5" : ""}`} data-message-role="user" data-continued={continued ? "true" : "false"}>
                     <div className={`bubble bubble-user max-w-[72%] whitespace-pre-wrap ${tail ? "bubble-tail-right" : ""}`} title={timeLabel(event.at)}>
                       {event.text}
                     </div>
                   </div>
+                  {persistedEventId ? <MessageReactions messageId={persistedEventId} reactions={messageReactions.get(persistedEventId)} className="ml-auto mt-1 max-w-[72%] justify-end" /> : null}
                   {delivery ? <div className="mt-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 px-2 text-[11px] text-mist" role="status" data-testid={queued ? "group-queued" : delivery.state === "failed" || delivery.state === "uncertain" ? "group-turn-failed" : "group-send-receipt"}>
                     <span>{eventPhase ? "Managed event phase; its run record owns the status" : queued ? "Next" : delivery.state === "pending" ? "Waiting to send" : delivery.state === "sending" ? "Sending…" : delivery.state === "accepted" ? "Accepted" : delivery.state === "cancelled" ? "Removed from queue" : delivery.state === "uncertain" ? "Confirmation delayed. Checking records." : "Could not send"}</span>
                     {delivery.error ? <span className="max-w-prose [overflow-wrap:anywhere]">{delivery.error}</span> : null}
@@ -772,11 +798,12 @@ function GroupChatView({
                   </span>
                   <div className="min-w-0 max-w-[76%]">
                     {!continued ? <p className="mb-0.5 px-2 text-[11px] font-medium text-mist" data-testid="group-speaker-name">{nameFor(event.slug ?? "")}</p> : null}
-                    <div className={`bubble bubble-coworker [overflow-wrap:anywhere] ${tail ? "bubble-tail-left" : ""}`} title={timeLabel(event.at)}>
-                      <Markdown text={event.text} className="overflow-x-auto" />
+                    <div title={timeLabel(event.at)}>
+                      <ChatReply text={event.text} tail={tail} />
                     </div>
                   </div>
                 </div>
+                {persistedEventId ? <MessageReactions messageId={persistedEventId} reactions={messageReactions.get(persistedEventId)} className="ml-8 mt-1 max-w-[76%]" /> : null}
               </div>
             );
           })}
@@ -961,7 +988,7 @@ function GroupChatView({
         </div>
       </div>
       </div>
-      {documentsApi && sharedDocument?.groupId === group.id ? <GroupDocuments api={documentsApi} groupId={group.id} openId={sharedDocument.id} onClose={() => setSharedDocument(null)} /> : null}
+      {documentsApi && sharedDocument?.groupId === group.id ? <div className={sharedDocumentSuspended ? "hidden" : "contents"}><GroupDocuments api={documentsApi} groupId={group.id} openId={sharedDocument.id} openRequestId={sharedDocument.requestId} navigationGuard={documentNavigation} onClose={() => { setSharedDocument(null); setDocumentNotice(""); }} /></div> : null}
     </div>
   );
 }

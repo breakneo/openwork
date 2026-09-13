@@ -147,24 +147,26 @@ async function writeMetadata(coworkersDir, group) {
   return group;
 }
 
-/** Read, change, and write one group's metadata without interleaving another change to it. */
-async function mutateGroup(coworkersDir, id, change) {
-  if (!isGroupId(id)) throw new Error("Invalid group id.");
+export async function withGroupMetadataWrite(coworkersDir, id, change) {
+  groupDir(coworkersDir, id);
   const previous = metadataQueues.get(id) ?? Promise.resolve();
-  const run = previous
-    .catch(() => undefined)
-    .then(async () => {
-      const group = await getGroup(coworkersDir, id);
-      const outcome = await change(group);
-      if (outcome.next !== group) await writeMetadata(coworkersDir, outcome.next);
-      return outcome.result;
-    });
+  const run = previous.catch(() => undefined).then(change);
   metadataQueues.set(id, run);
   try {
     return await run;
   } finally {
     if (metadataQueues.get(id) === run) metadataQueues.delete(id);
   }
+}
+
+/** Read, change, and write one group's metadata without interleaving another change to it. */
+async function mutateGroup(coworkersDir, id, change) {
+  return withGroupMetadataWrite(coworkersDir, id, async () => {
+    const group = await getGroup(coworkersDir, id);
+    const outcome = await change(group);
+    if (outcome.next !== group) await writeMetadata(coworkersDir, outcome.next);
+    return outcome.result;
+  });
 }
 
 function normalizeStoredGroup(raw) {
@@ -421,6 +423,7 @@ export function normalizeEvent(input, { now = Date.now() } = {}) {
     if (!isDocumentId(input.documentId) || !Number.isSafeInteger(input.revision) || input.revision < 1) throw new Error("A document event needs its document id and revision.");
     event.documentId = input.documentId;
     event.revision = input.revision;
+    if (typeof input.documentSummary === "string") event.documentSummary = input.documentSummary;
   }
   return event;
 }
@@ -454,7 +457,7 @@ export function groupEventId(event) {
 export function groupReplyEvent(entry) {
   if (!entry.groupReply || entry.state !== "succeeded" || !entry.result) return null;
   const passed = isNothingToAdd(entry.result);
-  const event = { kind: passed ? "status" : "coworker", slug: entry.owner.slug, part: entry.owner.part ?? "reply", turnId: entry.owner.turnId, text: passed ? `${entry.groupReply.name} had nothing to add.` : entry.result, ...(passed ? { status: "passed" } : {}), threadId: entry.owner.threadId, executionId: entry.id };
+  const event = { kind: passed ? "status" : "coworker", slug: entry.owner.slug, part: entry.owner.part ?? "reply", turnId: entry.owner.turnId, text: entry.reactionOnly ? "" : passed ? `${entry.groupReply.name} had nothing to add.` : entry.result, ...(passed ? { status: entry.reactionOnly ? "reacted" : "passed" } : {}), threadId: entry.owner.threadId, executionId: entry.id };
   return { ...event, id: groupEventId(event) };
 }
 

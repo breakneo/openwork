@@ -1,92 +1,108 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { readCoworkerAbilities } from "../src/lib/abilities.ts";
+import { installNativePlugin } from "./native-plugin.mjs";
 
-export const ABILITIES_PLUGIN = `import { readFile } from "node:fs/promises";
+export const ABILITIES_PLUGIN = `import { Plugin } from "@opencode-ai/plugin/effect";
+import { Tool } from "@opencode-ai/schema/tool";
+import { Effect } from "effect";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-export default async ({ directory }) => {
-  const nativeDirectory = path.resolve(directory);
+export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect.gen(function* () {
+  const nativeDirectory = yield* Effect.promise(() => realpath(ctx.location.directory));
   const file = path.join(nativeDirectory, ".opencode", "coworker-abilities.json");
   const identityError = "Coworker abilities identity does not match the current workspace. Reload the coworker.";
-  const read = async () => {
-    let config;
-    try { config = JSON.parse(await readFile(file, "utf8")); }
-    catch { throw new Error("Coworker abilities configuration could not be read; tool selection was not applied."); }
+  const failure = (name) => new Tool.Error({ message: name === "abilities_check"
+    ? "Coworker abilities check failed; this selected tool call was stopped."
+    : "Coworker abilities transform failed; selected guidance was not applied." });
+  const read = () => Effect.tryPromise({ try: async (signal) => {
+    const config = JSON.parse(await readFile(file, { encoding: "utf8", signal }));
     if (!config || typeof config.createdAt !== "string" || !config.createdAt || typeof config.workspaceId !== "string"
-      || typeof config.directory !== "string" || !config.directory || path.resolve(config.directory) !== nativeDirectory) throw new Error(identityError);
+      || typeof config.directory !== "string" || !config.directory || await realpath(config.directory) !== nativeDirectory) throw new Error(identityError);
     return config;
-  };
-  const initial = await read();
+  }, catch: (error) => new Tool.Error({ message: error.message === identityError ? identityError : "Coworker abilities configuration could not be read; tool selection was not applied." }) });
+  const initial = yield* read().pipe(Effect.orDie);
   const identity = { createdAt: initial.createdAt, workspaceId: initial.workspaceId, directory: nativeDirectory };
-  const fresh = async () => {
-    const config = await read();
-    if (config.createdAt !== identity.createdAt) throw new Error(identityError);
-    // A newly created home can load before its platform workspace is registered.
+  const fresh = () => Effect.gen(function* () {
+    const config = yield* read();
+    if (config.createdAt !== identity.createdAt) return yield* Effect.fail(new Tool.Error({ message: identityError }));
     if (!identity.workspaceId && config.workspaceId) identity.workspaceId = config.workspaceId;
-    if (config.workspaceId !== identity.workspaceId) throw new Error(identityError);
+    if (config.workspaceId !== identity.workspaceId) return yield* Effect.fail(new Tool.Error({ message: identityError }));
     return config;
-  };
+  });
   const inheritsEverything = (abilities) => abilities && abilities.version === 1 && Number.isSafeInteger(abilities.revision) && abilities.revision >= 0
     && Object.keys(abilities).sort().join(",") === "mcpServers,revision,skills,version"
     && [abilities.skills, abilities.mcpServers].every((selection) => selection && selection.mode === "all"
       && Object.keys(selection).sort().join(",") === "ids,mode" && Array.isArray(selection.ids) && selection.ids.length <= 256
       && selection.ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= 4096));
-  const failure = (name) => new Error(name === "abilities_check"
-    ? "Coworker abilities check failed; this selected tool call was stopped."
-    : "Coworker abilities transform failed; selected guidance was not applied.");
-  const request = async (config, name, args) => {
+  const request = (config, name, args) => Effect.tryPromise({ try: async (signal) => {
     if (typeof config.url !== "string" || !config.url || typeof config.token !== "string" || !config.token) throw failure(name);
-    let response;
-    let result;
-    try {
-      response = await fetch(config.url, {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + config.token },
-        body: JSON.stringify({ name, args, context: identity }), signal: AbortSignal.timeout(8000),
-      });
-      result = await response.json();
-    } catch { throw failure(name); }
+    const response = await fetch(config.url, { method: "POST", redirect: "error",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + config.token },
+      body: JSON.stringify({ name, args, context: identity }), signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+    const result = await response.json();
     if (!response.ok) {
-      if (result?.error === identityError) throw new Error(identityError);
-      if (["This skill is not selected for this coworker, or is no longer available.", "This MCP server is not selected for this coworker."].includes(result?.error)) throw new Error(result.error);
+      if ([identityError, "This skill is not selected for this coworker, or is no longer available.", "This MCP server is not selected for this coworker."].includes(result?.error)) throw new Tool.Error({ message: result.error });
       throw failure(name);
     }
     return result;
-  };
-  return {
-    "tool.execute.before": async (input, output) => {
-      const config = await fresh();
-      if (inheritsEverything(config.abilities)) return;
-      const result = await request(config, "abilities_check", { tool: input.tool, args: output.args });
-      if (result?.ok !== true) throw failure("abilities_check");
-    },
-    "experimental.chat.system.transform": async (_input, output) => {
-      const config = await fresh();
-      if (inheritsEverything(config.abilities)) return;
-      const result = await request(config, "abilities_transform", { system: output.system });
-      if (!Array.isArray(result?.system) || !result.system.every((text) => typeof text === "string")) throw failure("abilities_transform");
-      // The engine retains the original array; replacing the property loses the transform.
-      output.system.splice(0, output.system.length, ...result.system);
-    },
-  };
-};
+  }, catch: (error) => error instanceof Tool.Error ? error : failure(name) });
+  const nativeSkills = () => ctx.skill.list().pipe(Effect.map((catalog) => catalog.data.map(({ id, name, description, location }) => ({ id, name, description, location }))), Effect.mapError(() => failure("abilities_check")));
+  const check = (config, tool, args, server) => Effect.gen(function* () {
+    if (inheritsEverything(config.abilities)) return;
+    const skills = tool === "skill" || tool === "openwork-cloud_execute_capability" ? yield* nativeSkills() : undefined;
+    const result = yield* request(config, "abilities_check", { tool, args, ...(server ? { server } : {}), ...(skills ? { nativeSkills: skills } : {}) });
+    if (result?.ok !== true) return yield* Effect.fail(failure("abilities_check"));
+  });
+  const servers = new Set();
+  yield* ctx.mcp.transform((editor) => { for (const [name] of editor.list()) servers.add(name); });
+  yield* ctx.tool.transform((editor) => {
+    for (const tool of editor.list()) {
+      if (tool.id === "skill" && !tool.options?.namespace) continue;
+      const execute = tool.execute;
+      const name = tool.id;
+      const namespace = tool.options?.namespace;
+      editor.update(name, (updated) => {
+        updated.execute = (args, context) => Effect.gen(function* () {
+          const config = yield* fresh();
+          yield* check(config, name, args, servers.has(namespace) ? namespace : undefined);
+          return yield* execute(args, context);
+        });
+      });
+    }
+  });
+  yield* ctx.permission.hook("evaluate", (event) => {
+    if (event.action !== "skill" || event.effect === "deny") return Effect.void;
+    return Effect.gen(function* () {
+      const config = yield* fresh();
+      for (const id of event.resources) yield* check(config, "skill", { id });
+    }).pipe(Effect.matchCause({ onFailure: () => { event.effect = "deny"; event.message = "This skill is not selected for this coworker, or is no longer available."; }, onSuccess: () => undefined }));
+  });
+  yield* ctx.session.hook("prompt", (event) => Effect.gen(function* () {
+    if (!event.prompt.skills?.length) return;
+    const config = yield* fresh();
+    for (const skill of event.prompt.skills) yield* check(config, "skill", { id: skill.id });
+  }).pipe(Effect.orDie));
+  yield* ctx.session.hook("context", (event) => Effect.gen(function* () {
+    const config = yield* fresh();
+    if (inheritsEverything(config.abilities)) return;
+    const positions = event.system.flatMap((part, index) => part.type === "text" && typeof part.text === "string" ? [index] : []);
+    const system = positions.map((index) => event.system[index].text);
+    const skills = yield* nativeSkills();
+    const result = yield* request(config, "abilities_transform", { system, nativeSkills: skills });
+    if (!Array.isArray(result?.system) || result.system.length < system.length || !result.system.every((text) => typeof text === "string")) return yield* Effect.fail(failure("abilities_transform"));
+    for (let index = 0; index < positions.length; index++) event.system[positions[index]] = { ...event.system[positions[index]], text: result.system[index] };
+    event.system.push(...result.system.slice(positions.length).map((text) => ({ type: "text", text })));
+  }).pipe(Effect.orDie));
+}) });
 `;
 
 export async function installAbilitiesPlugin(coworker, { url, token }) {
-  const directory = path.resolve(coworker.path);
+  const directory = await realpath(coworker.path);
   const root = path.join(directory, ".opencode");
-  const target = path.join(directory, "opencode.json");
-  let current;
-  try { current = JSON.parse(await readFile(target, "utf8")); }
-  catch { throw new Error("The coworker OpenCode configuration could not be read; existing settings were kept."); }
-  if (!current || typeof current !== "object" || Array.isArray(current) || (current.plugin !== undefined && !Array.isArray(current.plugin))) {
-    throw new Error("The coworker OpenCode plugin configuration is invalid; existing settings were kept.");
-  }
   if (typeof coworker.createdAt !== "string" || !coworker.createdAt || typeof coworker.workspaceId !== "string"
     || typeof url !== "string" || !url || typeof token !== "string" || !token) throw new Error("Coworker abilities installation requires the current workspace identity and context connection.");
   await mkdir(root, { recursive: true });
-  const source = path.join(root, "coworker-abilities.js");
-  if (await readFile(source, "utf8").catch(() => "") !== ABILITIES_PLUGIN) await writeFile(source, ABILITIES_PLUGIN, "utf8");
   const connectionFile = path.join(root, "coworker-abilities.json");
   const connection = JSON.stringify({ abilities: readCoworkerAbilities(coworker.abilities), createdAt: coworker.createdAt, workspaceId: coworker.workspaceId, directory, url, token });
   if (await readFile(connectionFile, "utf8").catch(() => "") !== connection) {
@@ -95,8 +111,5 @@ export async function installAbilitiesPlugin(coworker, { url, token }) {
     await rename(`${connectionFile}.tmp`, connectionFile);
   }
   await chmod(connectionFile, 0o600);
-  const plugin = pathToFileURL(source).href;
-  if ((current.plugin ?? []).includes(plugin)) return;
-  await writeFile(`${target}.abilities.tmp`, JSON.stringify({ ...current, plugin: [...(current.plugin ?? []), plugin] }, null, 2), "utf8");
-  await rename(`${target}.abilities.tmp`, target);
+  await installNativePlugin(coworker, "coworker-abilities.js");
 }
