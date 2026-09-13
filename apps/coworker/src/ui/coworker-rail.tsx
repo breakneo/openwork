@@ -15,9 +15,9 @@ import type { CalendarPreferences, CalendarPreferencesChange } from "@/ui/calend
 
 export type CoworkerMainContent = MainContent;
 
-/** Identity keeps its personality; execution status only describes observed work. */
+/** Identity keeps its personality; execution status only describes observed work. One line, never wrapped. */
 function RailStatusLabel({ activity }: { coworker: CoworkerSummary; activity: CoworkerActivity | undefined }) {
-  return <span>{activity?.label ?? "Checking status"}</span>;
+  return <span className="min-w-0 truncate">{activity?.label ?? "Checking status"}</span>;
 }
 
 function relativeTime(timestamp: number): string {
@@ -387,20 +387,21 @@ export function CoworkerRail({
                       working={activity?.state === "working"}
                     />
                   </span>
+                  {/* Every text slot is one fixed-height line: changing words truncate instead of wrapping or moving the row. */}
                   <span className="min-w-0 flex-1">
-                    <span className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-snow">{coworker.name}</span>
-                      <span className="shrink-0 text-[10px] text-mist">{relativeTime(activity?.updatedAt ?? 0)}</span>
+                    <span className="flex h-5 items-baseline justify-between gap-2">
+                      <span className="min-w-0 truncate text-sm font-semibold leading-5 text-snow">{coworker.name}</span>
+                      <span className="min-w-[3ch] shrink-0 text-right text-[10px] leading-5 tabular-nums text-mist">{relativeTime(activity?.updatedAt ?? 0)}</span>
                     </span>
-                    <span data-testid="coworker-rail-status" className={`mt-0.5 flex items-center gap-1.5 text-[11px] font-medium ${activityTextTone(activity)}`}>
+                    <span data-testid="coworker-rail-status" className={`mt-0.5 flex h-4 min-w-0 items-center gap-1.5 text-[11px] font-medium leading-4 ${activityTextTone(activity)}`}>
                       <Tooltip content={`Open ${coworker.name}'s calendar`} side="right">
                         <button type="button" aria-label={`Open ${coworker.name}'s calendar`} className="window-no-drag pointer-events-auto inline-flex size-4 shrink-0 items-center justify-center rounded text-mist hover:bg-white/6 hover:text-snow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-spark/60 [&>svg]:size-[14px]" onClick={(event) => { event.stopPropagation(); onOpenCalendar(coworker.slug); }} data-testid="coworker-calendar-shortcut"><CalendarIcon /></button>
                       </Tooltip>
-                      <StatusDot tone={activityTone(activity)} />
+                      <span className="flex size-2 shrink-0 items-center justify-center"><StatusDot tone={activityTone(activity)} /></span>
                       <RailStatusLabel coworker={coworker} activity={activity} />
                     </span>
                     <span
-                      className="mt-0.5 block line-clamp-2 text-[11px] leading-[1.35] text-mist"
+                      className="mt-0.5 block h-4 truncate text-[11px] leading-4 text-mist"
                       data-testid="coworker-rail-line"
                     >
                       {describeRailLine({ activity, personality: coworker.personality, seed: coworker.slug })}
@@ -440,8 +441,8 @@ export function CoworkerRail({
                         <GroupAvatars members={members} size={22} motion="navigation" activeSlugs={groupActiveSlugs[group.id]} />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2"><span className="min-w-0 truncate text-sm font-semibold text-snow">{group.name}</span>{group.eventId || eventGroupIds.has(group.id) ? <span className="shrink-0 text-[9px] font-medium text-spark">Event</span> : null}</span>
-                        <span className="mt-0.5 block truncate text-[11px] text-mist" title={groupLines[group.id] || members.map((member) => member.name).join(", ")} data-testid="group-rail-line">{groupLines[group.id] || members.map((member) => member.name).join(", ")}</span>
+                        <span className="flex h-5 items-center gap-2"><span className="min-w-0 truncate text-sm font-semibold leading-5 text-snow">{group.name}</span>{group.eventId || eventGroupIds.has(group.id) ? <span className="shrink-0 text-[9px] font-medium text-spark">Event</span> : null}</span>
+                        <span className="mt-0.5 block h-4 truncate text-[11px] leading-4 text-mist" title={groupLines[group.id] || members.map((member) => member.name).join(", ")} data-testid="group-rail-line">{groupLines[group.id] || members.map((member) => member.name).join(", ")}</span>
                       </span>
                     </button>
                   );
