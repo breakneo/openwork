@@ -511,7 +511,7 @@ test("the version 13 contract upgrades without changing identity, soul or memory
   const agents = await readFile(path.join(coworker.path, "AGENTS.md"), "utf8");
   assert.equal(agents, agentsTemplate({ name: "Pilot" }));
   assert.equal(agentsContractVersion(agents), AGENTS_CONTRACT_VERSION);
-  assert.equal(agentsContractVersion(agents), 14);
+  assert.equal(agentsContractVersion(agents), 15);
   assert.deepEqual(await getCoworker(coworkersDir, "pilot"), coworker);
   const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
   assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md", "documents/index.md", "team/roster.md"]);
