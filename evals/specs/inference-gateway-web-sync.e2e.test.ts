@@ -173,9 +173,10 @@ test("GATEWAY-WEB-01 a hosted-web worker receives only the member's usable Gatew
     within: 300_000,
     intervalMs: 5_000,
     label: "hosted-web worker ready with server-side provider materialization",
-    until: (value) => value.status === 200 && value.body.status === "ready",
+    until: (value) => value.status === 200 && (value.body.status === "ready" || value.body.status === "failed"),
   });
   expect(resolved.status, resolved.text).toBe(200);
+  expect(resolved.body.status, resolved.text).toBe("ready");
   expect(resolved.body.providerSync).toBeUndefined();
   const providers = await eventually(() => runtimeProviders(resolved.body), {
     within: 60_000,
