@@ -67,11 +67,15 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Typecheck and unit tests
+        shell: bash
+        env:
+          OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR: ${{ github.workspace }}/apps/coworker/resources/native-plugins
         run: |
-          # The tests import the built workspace packages, as build:electron does.
+          # pretest prepares the pinned native plugin SDK and bundles.
           pnpm --filter @openwork/types build
           pnpm --filter @openwork/automations build
           pnpm --filter @openwork/headless-threads build
+          pnpm --filter openwork-server build
           pnpm --filter @openwork/coworker typecheck
           pnpm --filter @openwork/coworker test
 
@@ -190,11 +194,15 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Typecheck and unit tests
+        shell: bash
+        env:
+          OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR: ${{ github.workspace }}/apps/coworker/resources/native-plugins
         run: |
           # Tags skip the unpacked matrix; validate before the packaging version changes.
           pnpm --filter @openwork/types build
           pnpm --filter @openwork/automations build
           pnpm --filter @openwork/headless-threads build
+          pnpm --filter openwork-server build
           pnpm --filter @openwork/coworker typecheck
           pnpm --filter @openwork/coworker test
 
@@ -268,7 +276,7 @@ jobs:
           # Signing alone cannot prove that the embedded workspace can load.
           ELECTRON_RUN_AS_NODE=1 "$app/Contents/MacOS/Open Coworker" \
             --input-type=module -e 'await import(process.argv[1])' \
-            "$PWD/$app/Contents/Resources/app.asar/server/dist/embedded.js"
+            "$PWD/$app/Contents/Resources/app.asar/server/dist/embedded-native.js"
           case "$RUNNER_ARCH" in
             ARM64) arch=arm64 ;;
             X64) arch=x64 ;;
