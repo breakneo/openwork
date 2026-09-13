@@ -466,6 +466,15 @@ export function EventDetails({
       .map((slug) => coworkers.find((member) => member.slug === slug))
       .filter((member): member is CoworkerSummary => Boolean(member));
   }, [current?.participantSlugs, coworkers]);
+  // Who is "talking" in the hero follows the live session: participants still contributing, then the owner concluding.
+  const talkingSlugs =
+    liveRun?.status !== "running"
+      ? []
+      : liveRun.phase === "conclusion"
+        ? [liveRun.event.leadSlug]
+        : liveRun.phase === "contributions"
+          ? liveRun.event.participantSlugs.filter((slug) => !liveRun.contributorSlugs.includes(slug))
+          : [];
   const zoneNote = snapshot ? describeZone(snapshot.schedule.timezone) : "";
 
   // What is happening with this event right now, in one line.
@@ -646,7 +655,7 @@ export function EventDetails({
               <header className="space-y-3">
                 <div className="flex items-start gap-3">
                   {participants.length ? (
-                    <GroupAvatars members={participants} size={36} animated={false} />
+                    <GroupAvatars members={participants} size={36} motion="navigation" activeSlugs={talkingSlugs} />
                   ) : null}
                   <div className="min-w-0 flex-1">
                     <h3 className="break-words text-lg font-semibold leading-snug text-snow">
