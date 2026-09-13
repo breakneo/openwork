@@ -6,12 +6,11 @@ const preview = { browserOrigin: "https://5178-signed.example.test", unsignedOri
 const info = { code: 0, stdout: JSON.stringify({ id: "sandbox-id", public: false, toolboxProxyUrl: "https://example.test/toolbox" }), stderr: "" };
 
 test("private preview requires a hostname-bound credential and never accepts public or query-token URLs", () => {
-  assert.deepEqual(parsePrivatePreview(preview.browserOrigin, "sandbox-id", 5178, "example.test"), preview);
+  assert.deepEqual(parsePrivatePreview(preview.browserOrigin, "sandbox-id", 5178), preview);
   for (const value of [preview.unsignedOrigin, `${preview.browserOrigin}?token=secret`, "http://localhost:5178", "https://5179-secret.example.test", "https://5178-.example.test", "not a URL"]) {
-    assert.throws(() => parsePrivatePreview(value, "sandbox-id", 5178, "example.test"));
+    assert.throws(() => parsePrivatePreview(value, "sandbox-id", 5178));
   }
-  assert.throws(() => parsePrivatePreview("https://5178-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.example.test", "sandbox-id", 5178, "example.test"));
-  assert.throws(() => parsePrivatePreview("https://5178-signed.other.test", "sandbox-id", 5178, "example.test"));
+  assert.throws(() => parsePrivatePreview("https://5178-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.example.test", "sandbox-id", 5178));
 });
 
 test("private identity and signed-preview issuance fail closed without logging provider output", async () => {
