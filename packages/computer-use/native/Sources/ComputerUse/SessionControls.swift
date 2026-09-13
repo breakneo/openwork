@@ -153,6 +153,10 @@ final class SessionControls: NSObject {
         previewView.setAccessibilityLabel("Latest redacted screenshot of the approved window")
         refreshPreviewState()
     }
+    func markPreviewUnavailable() {
+        previewUnavailable = true; previewNeedsRefresh = true
+        refreshPreviewState()
+    }
     private func refreshPreviewState() {
         guard Self.coworkerPresentation, let previewAge, let previewState else { return }
         guard let latestPreviewAt else {
@@ -175,13 +179,13 @@ final class SessionControls: NSObject {
         previewState.textColor = isPaused || previewNeedsRefresh || age > 15 ? .systemOrange : .secondaryLabelColor
         previewView?.setAccessibilityHelp("\(previewAge.stringValue). \(previewState.stringValue). A marker shows a dispatched action, not a verified result.")
     }
-    func showAction(_ action: Action, observation: ObservationLease, records: [ElementRecord]) {
+    func showAction(_ action: Action, observation: ObservationLease, records: [ElementRecord], policy: RuntimePolicy = .desktop) {
         guard Self.hosted || Self.coworkerPresentation else { return }
         let point: CGPoint?
         let label: String
         switch action {
         case .move(let location): point = location; label = "Pointer move"
-        case .click(let location, let count): point = location; label = count == 1 ? "Click" : "Double-click"
+        case .click(let location, let count, _): point = location; label = count == 1 ? "Click" : count == 2 ? "Double-click" : "Triple-click"
         case .scroll(let location, _, _): point = location; label = "Scroll"
         case .drag(let path): point = path.last; label = "Drag"
         case .press(let ref), .setValue(let ref, _):
@@ -190,8 +194,9 @@ final class SessionControls: NSObject {
                 CGPoint(x: ($0.frame.midX - observation.frame.minX) / observation.frame.width * CGFloat(observation.imageWidth),
                         y: ($0.frame.midY - observation.frame.minY) / observation.frame.height * CGFloat(observation.imageHeight))
             }
-        case .key: point = nil; label = "Key press"
+        case .key(let key, let flags): point = nil; label = policy == .coworker && !flags.isEmpty ? "Shortcut \(NativeKey.chord(key, flags))" : "Key press"
         case .type: point = nil; label = "Type text"
+        case .wait: return
         }
         previewView?.actionPoint = nil
         // Text-only observations cannot place a truthful marker on an older image.

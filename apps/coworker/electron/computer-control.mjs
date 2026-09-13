@@ -82,6 +82,27 @@ async function bounded(promise, ms) {
   finally { clearTimeout(timer); }
 }
 
+function deadline(ms) {
+  const controller = new AbortController();
+  const { signal } = controller;
+  const expires = performance.now() + ms;
+  const expire = () => controller.abort(new Error("Computer cleanup or operation timed out."));
+  const timer = setTimeout(expire, ms);
+  const check = () => { if (performance.now() >= expires) expire(); signal.throwIfAborted(); };
+  return { signal, check, dispose: () => clearTimeout(timer), async wait(work, parent = signal) {
+    const pending = parent === signal ? signal : AbortSignal.any([signal, parent]);
+    const active = () => { check(); pending.throwIfAborted(); };
+    active();
+    let abort;
+    try {
+      const stopped = new Promise((_, reject) => { abort = () => reject(pending.reason); pending.addEventListener("abort", abort, { once: true }); });
+      const value = await Promise.race([Promise.resolve().then(() => { active(); return work(pending); }), stopped]);
+      active();
+      return value;
+    } finally { pending.removeEventListener("abort", abort); }
+  } };
+}
+
 /** Adapters are trusted main-process dependencies, never renderer/model input.
  * connect() owns a dedicated session scope. close() MUST confirm session
  * revocation, not merely disconnect HTTP/MCP; reject when revocation is uncertain.
@@ -109,39 +130,70 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
   for (const value of [cleanupMs, operationMs, pollMs]) if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new Error("Computer time limits must be positive bounded milliseconds.");
   const grants = new Map();
   const calls = new Map();
-  const cancelledCalls = new Set();
+  const cancelledCalls = new Map();
   let lease = null;
   let tail = Promise.resolve();
   let closed = false;
   let resetting = 0;
   let epoch = 0;
+  let latestObservation = null;
+  function invalidateObservation(current) {
+    current.observationGeneration = (current.observationGeneration ?? 0) + 1;
+    if (latestObservation?.current === current) latestObservation = null;
+  }
+  function advance(grant) {
+    grant.controller.abort(new Error("Computer control was disabled, revoked, or restarted."));
+    grant.controller = new AbortController();
+    return ++grant.revision;
+  }
   function disable(grant) {
-    grant.enabled = false; grant.revision++;
+    grant.enabled = false; advance(grant);
+    if (lease?.grant === grant) invalidateObservation(lease);
     onRevoke({ slug: grant.slug, threadId: grant.threadId, surface: "computer" });
   }
-  const serial = (work) => {
-    const result = tail.then(work);
-    tail = result.then(() => undefined, () => undefined);
+  const serial = (work, limit, signal) => {
+    const previous = tail;
+    const ready = limit ? limit.wait(() => previous, signal) : previous;
+    const result = ready.then(() => { limit?.check(); signal?.throwIfAborted(); return work(); });
+    tail = Promise.all([previous, result.then(() => undefined, () => undefined)]).then(() => undefined);
     return result;
   };
-  async function grantFor(slug, threadId, assertAdmission = () => {}) {
+  async function readOwner(work, signal) {
+    const limit = deadline(cleanupMs);
+    try { return await limit.wait(work, signal); }
+    finally { limit.dispose(); }
+  }
+  const withBudget = (work) => (slug, request) => {
+    const limit = deadline(operationMs);
+    return work(slug, request, limit).finally(() => limit.dispose());
+  };
+  async function grantFor(slug, threadId, assertAdmission = () => {}, signal) {
     if (closed || resetting) throw new Error("Computer control is stopping.");
     if (typeof slug !== "string" || !slug || typeof threadId !== "string" || !threadId) throw new Error("A coworker and saved discussion are required.");
     const started = epoch;
-    let scope;
-    try { scope = await discussionFor(slug, threadId); }
-    catch (error) { assertAdmission(); await api.revoke({ slug, threadId }); throw error; }
-    assertAdmission();
-    if (closed || resetting || epoch !== started) throw new Error("Computer control is stopping or restarted.");
     const key = keyFor(slug, threadId);
     let grant = grants.get(key);
+    const revision = grant?.revision;
+    const check = () => {
+      assertAdmission(); signal?.throwIfAborted();
+      if (closed || resetting || epoch !== started) throw new Error("Computer control is stopping or restarted.");
+      if (grants.get(key) !== grant || grant?.revision !== revision) throw new Error("Computer settings changed during the ownership lookup.");
+    };
+    let scope;
+    try { scope = await readOwner((signal) => discussionFor(slug, threadId, { signal }), signal); }
+    catch (error) {
+      check();
+      if (grant) { disable(grant); if (lease?.grant === grant) await cleanup(lease); }
+      throw error;
+    }
+    check();
     if (grant && (grant.workspaceId !== scope.workspaceId || grant.directory !== scope.directory)) {
       disable(grant);
       if (lease?.grant === grant) await cleanup(lease);
       throw new Error("This discussion's original workspace changed. Computer control was revoked.");
     }
     if (!grant) {
-      grant = { slug, threadId, ...scope, revision: 0, targetId: defaultTarget.id, adapter: defaultTarget, enabled: false };
+      grant = { slug, threadId, ...scope, revision: 0, controller: new AbortController(), targetId: defaultTarget.id, adapter: defaultTarget, enabled: false };
       grants.set(key, grant);
     }
     return grant;
@@ -158,9 +210,10 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
   }
   function revise(grant, expectedRevision) {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== grant.revision) throw new Error("Computer settings changed. Refresh this discussion before trying again.");
-    return ++grant.revision;
+    return advance(grant);
   }
   function clearPresentation(current) {
+    invalidateObservation(current);
     current.presentation = null;
     current.watchUntil = 0;
     current.frameSequence = -1;
@@ -173,23 +226,45 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
     }
     current.assertActive();
   }
-  function postStillOwned(call) {
-    const { current, generation, sessionId } = call.post;
+  function controlStillOwned(call, observation) {
+    const { current, generation, sessionId } = observation;
     try { assertUiActive(current); } catch { return false; }
     return call.grant.revision === call.revision && current.sessionId === sessionId && current.handoffGeneration === generation
-      && current.session?.state !== "paused" && current.presentation?.phase !== "paused";
+      && current.presentation?.phase !== "paused";
+  }
+  function observationStillOwned(call, observation) {
+    return controlStillOwned(call, observation) && observation.current.observationGeneration === observation.observationGeneration;
+  }
+  function postStillOwned(call) {
+    return observationStillOwned(call, call.post) && call.post.current.session?.state !== "paused";
+  }
+  function observationWarning(call, observation) {
+    if (observation.current.observationGeneration === observation.observationGeneration) observation.current.needsObservation = true;
+    return failure("observation_required", "Computer control changed while observing. The previous observation was withheld. Review the native controls and observe again.",
+      { next: controlStillOwned(call, observation) ? "observe" : "human_takeover", fresh_observation_required: true, actions_replayed: false });
+  }
+  function deliverObservation(call, result) {
+    return !call.observation || result.isError || observationStillOwned(call, call.observation) ? result : observationWarning(call, call.observation);
+  }
+  function deliverResult(call, result) {
+    const observation = call.post?.captured ? call.post : call.observation?.captured ? call.observation : null;
+    if (!observation) return result;
+    if (latestObservation?.call === call && (call.post ? postStillOwned(call) : observationStillOwned(call, observation))) return latestObservation.result;
+    if (latestObservation?.call === call) latestObservation = null;
+    return call.post ? postWarning(call.post.receipt, "observation_withheld", controlStillOwned(call, observation) ? "observe" : "human_takeover") : observationWarning(call, observation);
   }
   async function validateUiOwner(current, opening) {
     assertUiActive(current);
     const { grant } = current;
-    const scope = await discussionFor(grant.slug, grant.threadId);
-    assertUiActive(current);
+    const signal = opening?.signal ?? current.controller.signal;
+    const scope = await readOwner((signal) => discussionFor(grant.slug, grant.threadId, { signal }), signal);
+    assertUiActive(current); signal.throwIfAborted();
     if (scope.workspaceId !== grant.workspaceId || scope.directory !== grant.directory) throw new Error("The original computer workspace changed.");
     if (opening) {
       if (current.opening !== opening) throw new Error("This app request is no longer opening.");
-      opening.signal.throwIfAborted();
-      const owner = await resolveContext(grant.slug, opening.context, { name: "coworker_computer_open", args: opening.args });
-      owner.assertActive(); assertUiActive(current); opening.signal.throwIfAborted();
+      opening.assertActive();
+      const owner = await readOwner((signal) => resolveContext(grant.slug, opening.context, { name: "coworker_computer_open", args: opening.args }, { signal }), signal);
+      owner.assertActive(); assertUiActive(current); opening.assertActive();
       if (current.opening !== opening || owner.entry.id !== current.executionId || owner.entry.workspaceId !== grant.workspaceId
         || (owner.origin?.threadId ?? opening.context.sessionID) !== grant.threadId) throw new Error("The admitted app request changed.");
     }
@@ -206,6 +281,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
     // Reserve the decision before any await so duplicate notifications cannot approve twice.
     opening.decisionSent = true;
     await validateUiOwner(current, opening);
+    opening.assertActive();
     if (current.presentation !== presentation || presentation.phase !== "approval"
       || !presentation.windows.some((window) => window.id === windowId)) throw new Error("The native window choice changed. Review it again.");
     await current.transport.notifyUi({ id: presentation.id, action: "approve", windowId });
@@ -245,6 +321,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
       if (value.phase === "working" && presentation?.frame) next.frame = presentation.frame;
       if (value.phase === "paused") {
         if (presentation?.phase !== "paused") current.handoffGeneration++;
+        invalidateObservation(current);
         current.needsObservation = true; next.inputs = [];
       }
       if (value.phase === "approval" && isDeepStrictEqual(presentation, next)) return;
@@ -268,7 +345,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
       presentation.frame = { sequence: value.sequence, capturedAt: value.capturedAt, width: value.width, height: value.height, mimeType: "image/png", data: value.data };
     } else {
       if (value.sequence <= current.inputSequence || !uiNumber(value.at)
-        || !["move", "click", "double_click", "drag", "scroll", "key", "type", "press", "set_value"].includes(value.action)
+        || !["move", "click", "double_click", "triple_click", "drag", "scroll", "key", "type", "press", "set_value"].includes(value.action)
         || !["move", "down", "up", "dispatched", "uncertain"].includes(value.phase)
         || [value.x, value.y].some((position) => position !== undefined && (!Number.isFinite(position) || position < 0 || position > 1))) return;
       current.inputSequence = value.sequence;
@@ -281,7 +358,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
     const state = stateOf(result);
     if (!state) return;
     const paused = state.state === "paused" || state.next === "human_takeover";
-    if (paused && current.sessionId) current.needsObservation = true;
+    if (paused && current.sessionId) { invalidateObservation(current); current.needsObservation = true; }
     if ((result.isError || state.ok !== true) && !paused) return;
     const opening = current.session?.state === "opening";
     if (Number.isFinite(state.expires_in_seconds)) current.expiresAt = now() + Math.max(0, state.expires_in_seconds) * 1000;
@@ -340,22 +417,29 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
   }
   async function view(grant, poll = false) {
     if (poll && lease?.grant === grant && lease.sessionId && !lease.closing && !lease.busy) {
-      await serial(async () => {
-        const current = lease;
-        if (current?.grant !== grant || current.closing || !current.sessionId) return;
-        current.work = current.transport.callTool("computer_session_status", { session_id: current.sessionId }, { signal: current.controller.signal });
-        try {
-          const result = await bounded(current.work, cleanupMs);
-          if (nativeStopped(current, result)) {
+      const limit = deadline(cleanupMs);
+      try {
+        await serial(async () => {
+          const current = lease;
+          if (current?.grant !== grant || current.closing || !current.sessionId) return;
+          const revision = grant.revision;
+          const signal = AbortSignal.any([limit.signal, current.controller.signal]);
+          current.work = current.transport.callTool("computer_session_status", { session_id: current.sessionId }, { signal });
+          try {
+            const result = await limit.wait(() => current.work, signal);
+            if (lease !== current || current.closing || grant.revision !== revision) return;
+            if (nativeStopped(current, result)) {
+              await cleanup(current);
+            } else if (result.isError || stateOf(result)?.ok !== true) {
+              current.session = { ...current.session, state: "unavailable", reason: stateOf(result)?.message ?? "Native status is unavailable." };
+            } else updateSession(current, result);
+          } catch {
+            if (lease === current && grant.revision === revision) disable(grant);
             await cleanup(current);
-          } else if (result.isError || stateOf(result)?.ok !== true) {
-            current.session = { ...current.session, state: "unavailable", reason: stateOf(result)?.message ?? "Native status is unavailable." };
-          } else updateSession(current, result);
-        } catch {
-          disable(grant);
-          await cleanup(current);
-        }
-      });
+          }
+        }, limit);
+      } catch { }
+      finally { limit.dispose(); }
     }
     const statuses = await Promise.all([...targets.values()].map(async (target) => ({ target, ...await readiness(target) })));
     const other = lease && lease.grant !== grant;
@@ -414,6 +498,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
         return;
       }
       if (input.action === "takeover") {
+        invalidateObservation(current);
         current.needsObservation = true;
         current.handoffGeneration++;
         if (presentation.phase === "paused") return;
@@ -440,6 +525,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
         if (live?.id !== input.id || live.phase !== "paused" || live.canContinue !== true || current.handoffGeneration !== generation) {
           throw new Error("The native controls changed before Continue. Review their current state; no control was resumed.");
         }
+        invalidateObservation(current);
         current.needsObservation = true;
         current.handoffGeneration++;
         try { await current.transport.notifyUi({ id: input.id, action: "resume" }); }
@@ -498,83 +584,103 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
       if (!target) throw new Error("Choose a known computer.");
       await target.setup(permission);
     },
-    async execute(slug, { name, args, context, cancel = false }) {
+    execute: withBudget(async (slug, { name, args, context, cancel = false }, limit) => {
       if (!Object.hasOwn(COMPUTER_TOOLS, name) || !context?.sessionID || !context.messageID || !context.callID || !context.directory) throw new Error("A trusted native computer tool context is required.");
+      args = structuredClone(args); context = structuredClone(context);
+      const readContext = (signal) => readOwner((signal) => resolveContext(slug, context, { name, args }, { signal }), signal);
       const admissionEpoch = epoch;
       // A Worker's origin is not known until resolution. Pin only already-enabled
       // grants now, without letting unrelated permission changes cancel active work.
       const admissionRevisions = new Map([...grants.values()].filter((grant) => grant.slug === slug && grant.enabled).map((grant) => [grant, grant.revision]));
       const key = JSON.stringify([slug, context.directory, context.sessionID, context.messageID, context.callID]);
+      const cancelled = () => {
+        const stopped = cancelledCalls.get(key);
+        return stopped?.name === name && isDeepStrictEqual(stopped.args, args);
+      };
       if (cancel) {
         // A native abort may beat the original HTTP request's admission.
         // Remember that exact call so a delayed request cannot start afterwards.
-        const owner = !calls.has(key) ? await resolveContext(slug, context, { name, args }) : null;
         const call = calls.get(key);
         if (call && (!call.active || call.name !== name || !isDeepStrictEqual(call.args, args))) throw new Error("No matching admitted computer call can be cancelled.");
-        if (cancelledCalls.size >= 4096) throw new Error("The computer cancellation limit was reached. Stop control in the native panel.");
-        cancelledCalls.add(key);
+        if (!call && cancelledCalls.has(key) && !cancelled()) throw new Error("This native cancellation identity was already used for different input.");
+        if (!cancelledCalls.has(key) && cancelledCalls.size >= 4096) throw new Error("The computer cancellation limit was reached. Stop control in the native panel.");
+        cancelledCalls.set(key, { name, args });
+        const owner = call ? null : await readContext(limit.signal);
+        limit.check(); owner?.assertActive();
         const grant = call?.grant ?? grants.get(keyFor(slug, owner?.origin?.threadId ?? context.sessionID));
-        if (grant && epoch === admissionEpoch && grant.revision === (call?.revision ?? admissionRevisions.get(grant))) {
+        const current = lease?.grant === grant ? lease : null;
+        if (grant && epoch === admissionEpoch && grant.revision === (call?.revision ?? admissionRevisions.get(grant))
+          && (!current || current.executionId === (call?.executionId ?? owner?.entry.id))) {
           disable(grant);
           if (lease?.grant === grant) await cleanup(lease);
         }
         return failure("cancelled", "Computer control stopped.");
       }
-      if (cancelledCalls.has(key)) throw new Error("This native computer call was cancelled before admission.");
-      const trusted = await resolveContext(slug, context, { name, args });
+      if (cancelled()) throw new Error("This native computer call was cancelled before admission.");
+      if (closed || resetting) throw new Error("Computer control is stopping or restarted.");
+      const trusted = await readContext(limit.signal);
+      limit.check(); trusted.signal.throwIfAborted();
       const originThreadId = trusted.origin?.threadId ?? context.sessionID;
       const admittedGrant = grants.get(keyFor(slug, originThreadId));
       const revision = admissionRevisions.get(admittedGrant);
       const assertAdmission = () => {
-        if (closed || resetting || epoch !== admissionEpoch || revision === undefined || !admittedGrant.enabled
+        if (closed || resetting || cancelled() || epoch !== admissionEpoch || revision === undefined || !admittedGrant.enabled
           || admittedGrant.revision !== revision || grants.get(keyFor(slug, originThreadId)) !== admittedGrant) {
           throw new Error("Computer control was disabled, revoked, or restarted before this call could be admitted.");
         }
       };
       assertAdmission();
-      const grant = await grantFor(slug, originThreadId, assertAdmission);
+      const admissionSignal = AbortSignal.any([limit.signal, trusted.signal, admittedGrant.controller.signal]);
+      const grant = await grantFor(slug, originThreadId, assertAdmission, admissionSignal);
+      limit.check();
       if (path.resolve(context.directory) !== path.resolve(grant.directory)) throw new Error("This native call belongs to another workspace.");
       const selectedAdapter = grant.adapter;
       const check = () => {
         assertAdmission();
         trusted.assertActive();
-        if (closed || resetting || cancelledCalls.has(key) || !grant.enabled || grant.adapter !== selectedAdapter || grant.revision !== revision || trusted.entry.workspaceId !== grant.workspaceId) throw new Error("Computer control is disabled, revoked, or belongs to another workspace.");
+        if (closed || resetting || cancelled() || !grant.enabled || grant.adapter !== selectedAdapter || grant.revision !== revision || trusted.entry.workspaceId !== grant.workspaceId) throw new Error("Computer control is disabled, revoked, or belongs to another workspace.");
       };
       check();
-      const allowed = name === "coworker_computer_open" ? ["app_id", "pid", "mode", "purpose"] : name === "coworker_computer_observe" ? ["include_image"] : name === "coworker_computer_act" ? ["observation_id", "action"] : [];
+      const allowed = name === "coworker_computer_open" ? ["app_id", "pid", "mode", "purpose"] : name === "coworker_computer_observe" ? ["include_image", "elements"] : name === "coworker_computer_act" ? ["observation_id", "action", "actions"] : [];
       if (!args || Array.isArray(args) || typeof args !== "object" || Object.keys(args).some((key) => !allowed.includes(key))) throw new Error("Only native computer arguments are accepted; session and receipt identities belong to the broker.");
+      if (name === "coworker_computer_act" && (args.action === undefined) === (args.actions === undefined)) throw new Error("Provide exactly one of action or actions.");
       const previous = calls.get(key);
       if (previous) {
         if (previous.name !== name || !isDeepStrictEqual(previous.args, args) || previous.grant !== grant) throw new Error("This native call identity was already used for different input.");
         if (previous.adapter !== selectedAdapter) throw new Error("This native call identity was already used for another computer.");
-        const result = await previous.result;
-        return previous.post?.captured && !postStillOwned(previous)
-          ? postWarning(previous.post.receipt, "observation_withheld", "human_takeover") : result;
+        if (!previous.active && !["coworker_computer_act", "coworker_computer_open"].includes(name)) return failure("already_completed", "This native call already completed. Use a new tool call for a new observation; do not replay actions.");
+        const result = await limit.wait(() => previous.result);
+        return deliverResult(previous, result);
       }
       if (calls.size >= 4096) throw new Error("This app launch reached its computer receipt limit. Stop computer control and restart the app.");
-      const call = { name, args: structuredClone(args), grant, revision, adapter: selectedAdapter, active: true };
+      const call = { name, args, grant, revision, executionId: trusted.entry.id, adapter: selectedAdapter, active: true };
       calls.set(key, call);
       call.result = serial(async () => {
-        check();
-        const fresh = await resolveContext(slug, context, { name, args });
-        fresh.assertActive(); check();
-        await discussionFor(slug, originThreadId).then((scope) => { if (scope.workspaceId !== grant.workspaceId || scope.directory !== grant.directory) throw new Error("The original discussion workspace is unavailable."); });
-        check();
+        limit.check(); check();
+        const fresh = await readContext(admissionSignal);
+        fresh.assertActive(); limit.check(); check();
+        if (fresh.entry.id !== trusted.entry.id || (fresh.origin?.threadId ?? context.sessionID) !== originThreadId) throw new Error("This tool no longer belongs to the admitted execution.");
+        const scope = await readOwner((signal) => discussionFor(slug, originThreadId, { signal }), admissionSignal);
+        limit.check(); check();
+        if (scope.workspaceId !== grant.workspaceId || scope.directory !== grant.directory) throw new Error("The original discussion workspace is unavailable.");
         if (lease && (lease.grant !== grant || lease.adapter !== selectedAdapter || lease.closing || lease.executionId !== trusted.entry.id)) throw new Error("Another discussion or an earlier turn still owns this computer.");
         lease ??= { grant, adapter: selectedAdapter, executionId: trusted.entry.id, messageId: trusted.entry.messageId, controller: new AbortController(), sessionId: null, session: null, busy: false, handoffGeneration: 0 };
         const current = lease;
         current.assertActive = check;
         current.busy = true;
-        const abort = () => { disable(grant); void cleanup(current); };
+        const abort = () => { if (lease === current && grant.revision === revision) disable(grant); void cleanup(current); };
         trusted.signal.addEventListener("abort", abort, { once: true });
-        const signal = AbortSignal.any([trusted.signal, current.controller.signal, AbortSignal.timeout(operationMs)]);
+        const signal = AbortSignal.any([admissionSignal, current.controller.signal]);
+        const progress = () => { limit.check(); signal.throwIfAborted(); check(); };
         let nativeResult;
         let handoff = false;
         let postReadFailed = false;
         current.work = Promise.resolve().then(async () => {
+          progress();
           if (!current.transport) {
             try {
               current.transport = await current.adapter.connect({
+                signal,
                 onUi: (value) => receiveUi(current, value),
                 onClose: () => {
                   clearPresentation(current); current.uiEnded = true;
@@ -588,22 +694,25 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
               current.connectionUncertain = error instanceof AggregateError;
               throw error;
             }
-            signal.throwIfAborted(); check();
+            progress();
           }
-          const latest = await resolveContext(slug, context, { name, args });
-          latest.assertActive();
-          if (latest.entry.id !== trusted.entry.id) throw new Error("This tool no longer belongs to the admitted execution.");
-          signal.throwIfAborted(); check();
+          const latest = await readContext(signal);
+          latest.assertActive(); progress();
+          if (latest.entry.id !== trusted.entry.id || latest.entry.workspaceId !== grant.workspaceId
+            || (latest.origin?.threadId ?? context.sessionID) !== originThreadId) throw new Error("This tool no longer belongs to the admitted execution.");
           if (name === "coworker_computer_open" && current.sessionId) throw new Error("Close the approved session before requesting another app or mode.");
           if (!["coworker_computer_discover", "coworker_computer_open"].includes(name) && !current.sessionId) throw new Error("Open an approved app session first.");
           if (name === "coworker_computer_open") {
             current.session = { state: "opening", purpose: args.purpose, phase: "native-approval" };
-            current.opening = { args: call.args, context, signal, decisionSent: false };
+            current.opening = { args: call.args, context, signal, assertActive: progress, decisionSent: false };
           }
           current.expectedClose = name === "coworker_computer_close";
           const nativeArgs = { ...args, ...(current.sessionId && name !== "coworker_computer_discover" ? { session_id: current.sessionId } : {}),
             ...(name === "coworker_computer_act" ? { request_id: createHash("sha256").update(key).digest("hex") } : {}) };
+          if (["coworker_computer_open", "coworker_computer_observe", "coworker_computer_act", "coworker_computer_close"].includes(name)) invalidateObservation(current);
           const generation = current.handoffGeneration;
+          const observationGeneration = current.observationGeneration;
+          progress();
           const result = name === "coworker_computer_act" && current.needsObservation
             ? failure("observation_required", "Native control paused or continued. Make a fresh observation before any action; no action was dispatched.", current.session?.state === "paused" ? { state: "paused", next: "human_takeover" } : {})
             : (nativeResult = await current.transport.callTool(COMPUTER_TOOLS[name], nativeArgs, { signal }));
@@ -612,20 +721,35 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
           if (name === "coworker_computer_open" && typeof state?.session_id === "string") current.sessionId = state.session_id;
           if (!state || typeof state.ok !== "boolean") throw new Error("The native computer response was unreadable; its outcome is uncertain.");
           if (name === "coworker_computer_open" && state.ok && !current.sessionId) throw new Error("The native approval returned no session identity.");
+          const inputLanded = name === "coworker_computer_act" && (!result.isError && state.ok && state.status === "dispatched"
+            || state.status === "partial" && state.may_have_acted === true && state.next === "observe");
+          if (current.sessionId && (inputLanded || name === "coworker_computer_open" && !result.isError && state.ok && state.state === "active")) {
+            call.post = { current, generation, sessionId: current.sessionId, receipt: result, captured: false,
+              observationGeneration: name === "coworker_computer_open" ? current.observationGeneration : observationGeneration };
+          }
+          progress();
           if (nativeStopped(current, result)) return result;
+          if (name === "coworker_computer_observe" && !result.isError && state.ok && !needsPerson(result)) {
+            call.observation = { current, generation, sessionId: current.sessionId, observationGeneration };
+            // A late read must not overwrite takeover state or unlock input,
+            // even when the person already continued before it arrived.
+            const delivered = deliverObservation(call, result);
+            if (delivered !== result) return delivered;
+            call.observation.captured = true;
+          }
           if (name !== "coworker_computer_discover") updateSession(current, result, name === "coworker_computer_open" ? args.purpose : undefined);
           if (!current.sessionId || name === "coworker_computer_close" || (!needsPerson(result) && current.session?.state !== "paused")) {
             if (name === "coworker_computer_observe" && !result.isError && state.ok && typeof state.observation_id === "string") current.needsObservation = false;
-            if (!result.isError && state.ok && current.sessionId && (name === "coworker_computer_open" && state.state === "active"
-              || name === "coworker_computer_act" && state.status === "dispatched")) {
-              call.post = { current, generation, sessionId: current.sessionId, receipt: result, captured: false };
+            // A partial batch (later step refused) still landed input; the model
+            // needs the settled view exactly as much as after a full dispatch.
+            if (call.post) {
               try {
-                check(); signal.throwIfAborted(); assertUiActive(current);
+                progress(); assertUiActive(current);
                 if (!postStillOwned(call) || current.needsObservation) return postWarning(result, "handoff_required", "human_takeover");
                 const [owner, scope] = await Promise.all([
-                  resolveContext(slug, context, { name, args: call.args }), discussionFor(slug, originThreadId),
+                  readContext(signal), readOwner((signal) => discussionFor(slug, originThreadId, { signal }), signal),
                 ]);
-                owner.assertActive(); check(); signal.throwIfAborted(); assertUiActive(current);
+                owner.assertActive(); progress(); assertUiActive(current);
                 if (owner.entry.id !== current.executionId || owner.entry.workspaceId !== grant.workspaceId
                   || (owner.origin?.threadId ?? context.sessionID) !== originThreadId
                   || scope.workspaceId !== grant.workspaceId || scope.directory !== grant.directory) throw new Error("The original observation context changed.");
@@ -633,7 +757,7 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
                 // One read in this exact tool call, never a repeated input or a
                 // continuation across a person takeover. Watch frames are unrelated.
                 const observation = await current.transport.callTool("computer_observe", { session_id: current.sessionId, include_image: true }, { signal });
-                check(); signal.throwIfAborted(); assertUiActive(current);
+                progress(); assertUiActive(current);
                 if (!postStillOwned(call)) return postWarning(result, "observation_withheld", "human_takeover");
                 const observed = stateOf(observation);
                 if (observation.isError || observed?.ok !== true || typeof observed.observation_id !== "string" || !observed.observation_id || needsPerson(observation)) {
@@ -645,12 +769,18 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
                 updateSession(current, observation);
                 current.needsObservation = false;
                 call.post.captured = true;
-                return withPostObservation(result, { ok: true }, observation.content);
+                latestObservation = { call, current, result: withPostObservation(result, { ok: true }, observation.content) };
+                return result;
               } catch {
                 current.needsObservation = true;
                 postReadFailed = true;
                 return postWarning(result, "post_observation_failed", "human_takeover");
               }
+            }
+            if (call.observation?.captured) {
+              latestObservation = { call, current, result };
+              nativeResult = undefined;
+              return failure("already_completed", "This native call already completed. Use a new tool call for a new observation; do not replay actions.");
             }
             return result;
           }
@@ -662,10 +792,12 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
             current.needsObservation = true;
             updateSession(current, status);
             await delay(pollMs, undefined, { signal });
-            const owner = await resolveContext(slug, context, { name, args });
-            owner.assertActive(); check(); signal.throwIfAborted();
-            if (owner.entry.id !== current.executionId) throw new Error("The computer handoff's owning execution changed.");
+            const owner = await readContext(signal);
+            owner.assertActive(); progress();
+            if (owner.entry.id !== current.executionId || owner.entry.workspaceId !== grant.workspaceId
+              || (owner.origin?.threadId ?? context.sessionID) !== originThreadId) throw new Error("The computer handoff's owning execution changed.");
             status = await current.transport.callTool("computer_session_status", { session_id: current.sessionId }, { signal });
+            progress();
             if (nativeStopped(current, status)) break;
             updateSession(current, status);
           } while (needsPerson(status));
@@ -677,10 +809,13 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
           if (name === "coworker_computer_observe") return withHandoff(failure("observation_required", "The previous observation predates the handoff. Observe again."), status);
           return { ...status, content: [{ type: "text", text: JSON.stringify({ ...state, ...continued, next: "observe", fresh_observation_required: true }) }] };
         });
+        const work = current.work;
+        const settled = () => { if (current.work === work) current.work = null; };
+        void work.then(settled, settled);
         try {
-          const result = await bounded(current.work, operationMs);
+          const result = await limit.wait(() => work);
           if (name === "coworker_computer_close" || current.nativeStopped || current.handoffFailed || postReadFailed || (name === "coworker_computer_open" && result.isError)) {
-            if (name !== "coworker_computer_close") disable(grant);
+            if (name !== "coworker_computer_close" && lease === current && grant.revision === revision) disable(grant);
             if (stateOf(result)?.ok === true && name === "coworker_computer_close") current.sessionId = null;
             await cleanup(current);
           }
@@ -690,8 +825,9 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
           if (current.closing && !call.post && name !== "coworker_computer_act" && name !== "coworker_computer_close") return failure("revoked", "Computer control stopped before this result could be delivered.");
           return result;
         } catch (error) {
-          disable(grant);
-          await cleanup(current);
+          if (lease === current && grant.revision === revision) disable(grant);
+          const stopping = cleanup(current);
+          if (!limit.signal.aborted) await stopping;
           if (call.post) return postWarning(call.post.receipt, "post_observation_failed", "human_takeover");
           const interrupted = failure(handoff ? "handoff_interrupted" : name === "coworker_computer_act" ? "dispatch_uncertain" : "operation_interrupted", `${error.message} Do not replay this call; inspect the native computer controls before continuing.`);
           return nativeResult && (name === "coworker_computer_act" || nativeResult.isError) ? withHandoff(nativeResult, interrupted) : interrupted;
@@ -699,16 +835,13 @@ export function createComputerControl({ adapters, adapter, discussionFor, resolv
           current.busy = false;
           trusted.signal.removeEventListener("abort", abort);
         }
-      }).then((result) => {
+      }, limit, admissionSignal).then((result) => {
         call.active = false;
         if (call.post?.captured && !postStillOwned(call)) result = postWarning(call.post.receipt, "observation_withheld", "human_takeover");
-        // Open/action duplicates reuse the whole paired result while its lease is
-        // still valid. Standalone observation reads are not retained for replay.
-        if (!["coworker_computer_act", "coworker_computer_open"].includes(name)) call.result = Promise.resolve(failure("already_completed", "This native call already completed. Use a new tool call for a new observation; do not replay actions."));
-        return result;
+        return deliverObservation(call, result);
       }, (error) => { call.active = false; throw error; });
-      return call.result;
-    },
+      return deliverResult(call, await call.result);
+    }),
     async endTurn(entry) {
       // Handoffs wait inside their tool, never by borrowing the next turn.
       // An idle lease is revoked here; later opens must match their own admitted task.

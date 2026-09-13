@@ -119,6 +119,36 @@ unforgeable boundary against arbitrary code running as the same OS user, and
 approval to use an app does not authorize every consequential action inside it.
 Dedicated integrations/browser controls remain preferable when sufficient.
 
+## Working at coworker speed
+
+A coworker at the keyboard does not stop to look after every keystroke. The
+loop is tuned so that one model round trip does one meaningful unit of work,
+following the patterns current computer-use references converge on (batched
+actions that stop at the first failure with one screenshot at the end, modifier
+shortcuts, settle-based waits, compact interactive element lists, identity-based
+rather than pixel-based freshness):
+
+- `coworker_computer_act` accepts `action` or `actions` (up to 8). The native
+  runtime validates each step live and stops at the first failure; a partial
+  receipt is `ok: true, status: "partial"` and, like a full dispatch, the broker
+  appends the settled fresh observation so the model never needs a separate
+  observe call between acts.
+- `key` takes `modifiers`; quit, close, hide, minimize, app-switch, Spotlight,
+  screenshot and full-screen chords are refused natively, and `command+v` works
+  only after this session itself copied or cut. Clicks take modifiers too, and
+  `triple_click` and `wait` exist. Refused chords, keys and modifiers are listed
+  by `coworker_computer_discover`.
+- Observations default to interactive elements in compact form; `elements: "all"`
+  is for reading static text, `"none"` for image-only steps. An observation is
+  valid for 60 seconds so a reasoning model does not lose its turn to the clock.
+- The broker's argument allowlist admits only `observation_id`, `action`,
+  `actions` and `elements`; session, receipt and request identities still belong
+  to the broker. Batch steps count individually toward the native action limit.
+
+None of this widens authority: discussion opt-in, native window approval, mode
+scope, human-only Continue, protected fields, hit tests and exact element
+identity all still apply to every step.
+
 ## Adapter strategy
 
 `createComputerControl({ adapters, discussionFor, resolveContext })` accepts

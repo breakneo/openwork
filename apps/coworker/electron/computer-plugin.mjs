@@ -11,12 +11,16 @@ export default async ({ directory }) => {
   const number = tool.schema.number().min(0).max(100000);
   const text = tool.schema.string().max(8000);
   const point = tool.schema.object({ x: number, y: number }).strict();
+  const modifiers = tool.schema.array(tool.schema.enum(["command", "shift", "option", "control"])).max(4).optional();
   const action = (type, fields) => tool.schema.object({ type: tool.schema.literal(type), ...fields }).strict();
   const actions = tool.schema.discriminatedUnion("type", [
     action("press", { ref: string }), action("set_value", { ref: string, text }),
     action("move", { x: number, y: number }),
-    action("click", { x: number, y: number }), action("double_click", { x: number, y: number }),
-    action("type", { text }), action("key", { key: tool.schema.enum(["enter", "tab", "escape", "backspace", "delete", "left", "right", "down", "up", "home", "end", "page_up", "page_down", "space", "select_all", "undo", "redo"]) }),
+    action("click", { x: number, y: number, modifiers }), action("double_click", { x: number, y: number, modifiers }),
+    action("triple_click", { x: number, y: number, modifiers }),
+    action("type", { text }),
+    action("key", { key: tool.schema.string().min(1).max(16), modifiers }),
+    action("wait", { ms: tool.schema.number().int().min(50).max(3000) }),
     action("scroll", { x: number, y: number, delta_x: tool.schema.number().int().min(-1200).max(1200), delta_y: tool.schema.number().int().min(-1200).max(1200) }),
     action("drag", { path: tool.schema.array(point).min(2).max(32) }),
   ]);
@@ -61,10 +65,10 @@ export default async ({ directory }) => {
     coworker_computer_discover: tool({ description: "List running app identities, permissions, modes, keys and limits. Does not grant access." + safety, args: {}, execute: execute("coworker_computer_discover") }),
     coworker_computer_open: tool({ description: "Request native approval for one exact app, one person-selected window, and a mode for up to 15 minutes. Observe reads; assist uses accessible controls; control uses visual input. Never retry a denied request without the person asking." + safety,
       args: { app_id: string, pid: tool.schema.number().int().min(1).max(2147483647).optional(), mode: tool.schema.enum(["observe", "assist", "control"]), purpose: tool.schema.string().min(1).max(500) }, execute: execute("coworker_computer_open") }),
-    coworker_computer_observe: tool({ description: "See the approved window: returns its screenshot (default), accessible elements and short-lived observation_id. Start with a screenshot and keep include_image=true for visual work. The native preview shows the same redacted image. Use include_image=false only for text-only app-control work; it provides no new visual preview." + safety,
-      args: { include_image: tool.schema.boolean().optional() }, execute: execute("coworker_computer_observe") }),
-    coworker_computer_act: tool({ description: "Perform one action using a fresh observation_id. Use move to hover, click/double_click to choose, drag to select or move, and key select_all to select text. These require control mode and a screenshot. Move sends window-scoped hover; it does not promise to relocate the global Mac cursor. The native preview marks dispatched pointer actions. Use press/set_value when accessible controls are sufficient. Coordinates are image pixels, never screen coordinates. Re-observe after every attempt. A dispatched receipt is not proof of completion; uncertain dispatch must not be replayed. Positive delta_y scrolls up, positive delta_x left. Receipt identity is supplied by the native call, not you." + safety,
-      args: { observation_id: string, action: actions }, execute: execute("coworker_computer_act") }),
+    coworker_computer_observe: tool({ description: "See the approved window: returns its screenshot (default), interactive accessible elements (ref, role, label, value, x/y/w/h in image pixels, press/settable/disabled flags) and an observation_id valid for one act within 60 seconds. Every act already returns a fresh settled observation, so call this only at the start, after a person handoff, or when told to. elements=all adds static text for reading; none returns only the image. Keep include_image=true for visual work; the native preview shows the same redacted image." + safety,
+      args: { include_image: tool.schema.boolean().optional(), elements: tool.schema.enum(["interactive", "all", "none"]).optional() }, execute: execute("coworker_computer_observe") }),
+    coworker_computer_act: tool({ description: "Act on the approved window like a coworker at the keyboard, then read the fresh observation returned with the receipt. Pass one action, or actions (up to 8) for a predictable sequence in one round trip: click a field, type, key enter; set_value several refs then press Save; key command+f, type, key enter. Steps run in order and each is validated live; the batch stops at the first failure and the receipt names the completed, failed and skipped steps. Prefer press/set_value on refs for forms; use key with modifiers for app shortcuts (command+s save, command+f find, command+n new, command+z undo, command+a select all, command+enter send) instead of hunting for buttons; quit, close, hide and app-switch chords are refused; command+v works only after this session used command+c or command+x. Use move to hover, click/double_click/triple_click (optionally with modifiers) to choose, drag to select or move, scroll (positive delta_y up, positive delta_x left); these need control mode and a screenshot. Use wait (ms) inside a batch for a load, not between round trips. Coordinates are image pixels, never screen coordinates. A dispatched receipt is not proof of completion; verify in the returned observation and never replay an uncertain dispatch. Receipt identity is supplied by the native call, not you." + safety,
+      args: { observation_id: string, action: actions.optional(), actions: tool.schema.array(actions).min(1).max(8).optional() }, execute: execute("coworker_computer_act") }),
     coworker_computer_status: tool({ description: "Read this discussion's native session status. Cannot resume or extend consent." + safety, args: {}, execute: execute("coworker_computer_status") }),
     coworker_computer_close: tool({ description: "Close this discussion's approved native session and discard its observations." + safety, args: {}, execute: execute("coworker_computer_close") }),
   } };
