@@ -11,6 +11,7 @@ test("headless browser transport is opt-in and leaves loopback defaults unchange
   assert.deepEqual(headlessBrowserEnvironment({ browserHostSuffix: ".example.test", openworkUrl: "http://127.0.0.1:8778" }), {
     OPENWORK_DEV_BROWSER_HOST_SUFFIX: ".example.test", OPENWORK_DEV_OPENWORK_PROXY_TARGET: "http://127.0.0.1:8778",
     VITE_OPENWORK_URL: "/api/openwork", VITE_OPENWORK_PORT: "443",
+    VITE_OPENWORK_FORCE_MANUAL_AUTH: "1",
   });
 });
 

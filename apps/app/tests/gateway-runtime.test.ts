@@ -617,6 +617,45 @@ describe("non-gateway connection modes", () => {
     expect(authUrl.searchParams.get("webAuthReturn")).toBeNull();
   });
 
+  test("HTTPS preview explicitly opts into manual handoff without including its signed origin", () => {
+    const previous = process.env.VITE_OPENWORK_FORCE_MANUAL_AUTH;
+    process.env.VITE_OPENWORK_FORCE_MANUAL_AUTH = "1";
+    installWindow({ origin: "https://signed-preview.example.test" });
+
+    try {
+      const modes: Array<"sign-in" | "sign-up"> = ["sign-in", "sign-up"];
+      for (const mode of modes) {
+        const authUrl = new URL(buildDenAuthUrl(readDenSettings().baseUrl, mode));
+        expect(authUrl.origin).toBe("https://app.openworklabs.com");
+        expect(authUrl.searchParams.get("mode")).toBe(mode);
+        expect(authUrl.searchParams.get("desktopAuth")).toBe("1");
+        expect(authUrl.searchParams.get("desktopScheme")).toBe("openwork");
+        expect(authUrl.searchParams.get("webAuth")).toBeNull();
+        expect(authUrl.searchParams.get("webAuthReturn")).toBeNull();
+        expect(authUrl.toString()).not.toContain("signed-preview");
+      }
+    } finally {
+      restoreEnv("VITE_OPENWORK_FORCE_MANUAL_AUTH", previous);
+    }
+  });
+
+  test("hosted HTTPS web keeps automatic return unless manual handoff is explicitly enabled", () => {
+    const previous = process.env.VITE_OPENWORK_FORCE_MANUAL_AUTH;
+    installWindow({ origin: "https://instance.example.com" });
+
+    try {
+      for (const flag of [undefined, "0"]) {
+        restoreEnv("VITE_OPENWORK_FORCE_MANUAL_AUTH", flag);
+        const authUrl = new URL(buildDenAuthUrl(readDenSettings().baseUrl, "sign-in"));
+        expect(authUrl.searchParams.get("desktopAuth")).toBeNull();
+        expect(authUrl.searchParams.get("webAuth")).toBe("1");
+        expect(authUrl.searchParams.get("webAuthReturn")).toBe("https://instance.example.com");
+      }
+    } finally {
+      restoreEnv("VITE_OPENWORK_FORCE_MANUAL_AUTH", previous);
+    }
+  });
+
   test("force-env clears a stale stored Den base URL on web bootstrap init", async () => {
     const previous = process.env.VITE_OPENWORK_FORCE_ENV_SETTINGS;
     process.env.VITE_OPENWORK_FORCE_ENV_SETTINGS = "1";

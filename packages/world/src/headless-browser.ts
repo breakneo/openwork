@@ -15,5 +15,6 @@ export function headlessBrowserEnvironment(input: {
     OPENWORK_DEV_OPENWORK_PROXY_TARGET: target.origin,
     VITE_OPENWORK_URL: "/api/openwork",
     VITE_OPENWORK_PORT: "443",
+    VITE_OPENWORK_FORCE_MANUAL_AUTH: "1",
   };
 }
