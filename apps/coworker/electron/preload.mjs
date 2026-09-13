@@ -34,5 +34,16 @@ if (process.isMainFrame) {
       ipcRenderer.on("coworker:deep-link", handler);
       return () => ipcRenderer.removeListener("coworker:deep-link", handler);
     },
+    onReactionsChanged: (listener) => {
+      const handler = (_event, change) => {
+        const scope = change?.scope;
+        const validScope = scope?.kind === "private"
+          ? typeof scope.slug === "string" && typeof scope.threadId === "string"
+          : scope?.kind === "group" && typeof scope.groupId === "string";
+        if (validScope && Number.isSafeInteger(change?.revision) && change.revision >= 0) listener({ scope, revision: change.revision });
+      };
+      ipcRenderer.on("coworker:reactions-changed", handler);
+      return () => ipcRenderer.removeListener("coworker:reactions-changed", handler);
+    },
   });
 }

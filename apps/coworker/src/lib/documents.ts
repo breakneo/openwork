@@ -4,6 +4,8 @@
  * the fold a long reply gets are unit-tested and the transcript only renders
  * what these return.
  */
+import { splitChatReply } from "./chat-replies.ts";
+
 export type DocumentStatus = "active" | "aside" | "archived";
 export type DocumentAuthor = "coworker" | "person";
 
@@ -96,11 +98,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * object in `output` counts too. Same reading as the App host, kept here so
  * this module stays free of the App client.
  */
-export function keptResult(call: { output: unknown; metadata: Record<string, unknown> }): { content: unknown[]; structuredContent: Record<string, unknown> | null } | null {
+export function keptResult(call: { output: unknown; metadata: Record<string, unknown> }): { content: unknown[]; structuredContent: Record<string, unknown> | null; isError: boolean } | null {
+  // Native v2 retains content separately from structured metadata. Read the
+  // saved receipt before input/title fallbacks so a suffixed ID opens the
+  // document actually created, not an older document with the same title.
+  if (isRecord(call.metadata.structuredContent)) return {
+    content: Array.isArray(call.output) ? call.output : [],
+    structuredContent: call.metadata.structuredContent, isError: call.metadata.isError === true,
+  };
   for (const candidate of [call.metadata.openworkMcpResult, call.metadata.openworkMcpApp, call.output]) {
     if (!isRecord(candidate) || !Array.isArray(candidate.content)) continue;
-    return { content: candidate.content, structuredContent: isRecord(candidate.structuredContent) ? candidate.structuredContent : null };
+    return { content: candidate.content, structuredContent: isRecord(candidate.structuredContent) ? candidate.structuredContent : null, isError: candidate.isError === true || call.metadata.isError === true };
   }
+  if (Array.isArray(call.output)) return { content: call.output, structuredContent: null, isError: call.metadata.isError === true };
   return null;
 }
 
@@ -130,33 +140,37 @@ function idFromText(output: unknown): { id: string; revision: number | null } {
   return { id: "", revision: match[1] ? Number(match[1]) : null };
 }
 
-/**
- * The cards a reply ends with: one per document the turn created or updated,
- * built from the tool calls (input first, the kept result when there is one),
- * so no Markdown syntax from the model is needed. A document both created and
- * updated in one turn reads as created, with the latest fields.
- */
+export function documentCardPreview(card: Pick<DocumentCardData, "summary" | "highlights">): string {
+  const summary = card.summary.replace(/\s+/g, " ").trim();
+  const preview = summary || (card.highlights[0] ?? "").replace(/\s+/g, " ").trim();
+  return preview.length > 140 ? `${preview.slice(0, 139).trimEnd()}…` : preview;
+}
+
 export function documentCardsFromCalls(
   calls: ReadonlyArray<{ tool: string; status: string; input: Record<string, unknown>; output: unknown; metadata: Record<string, unknown> }>,
 ): DocumentCardData[] {
   const cards = new Map<string, DocumentCardData>();
   for (const call of calls) {
     const name = documentToolName(call.tool);
-    if (!DOCUMENT_WRITE_TOOLS.has(name) || !isDone(call.status)) continue;
+    if (!DOCUMENT_WRITE_TOOLS.has(name) || !isDone(call.status) || call.metadata.isError === true || keptResult(call)?.isError) continue;
     const structured = structuredDocument(call);
-    if (structured && text(structured.action) === "unchanged") continue;
+    if (structured && (text(structured.action) === "unchanged" || structured.changed === false)) continue;
     const fromText = idFromText(call.output);
-    const id = text(structured?.id) || text(call.input.id) || fromText.id || (name === "document_create" ? documentIdGuess(text(call.input.title)) : "");
+    const id = text(structured?.id) || fromText.id || text(call.input.id) || (name === "document_create" ? documentIdGuess(text(call.input.title)) : "");
     if (!id) continue;
     const previous = cards.get(id);
     const patch = isRecord(call.input.patch) ? call.input.patch : null;
     const revision = typeof structured?.revision === "number" ? structured.revision : fromText.revision;
     const action = previous?.action === "created" || name === "document_create" ? "created" : "updated";
+    if (previous?.revision != null && revision != null && revision < previous.revision) {
+      cards.set(id, { ...previous, action });
+      continue;
+    }
     const next: DocumentCardData = {
       id,
       title: text(structured?.title) || text(call.input.title) || previous?.title || humanizeDocumentId(id),
-      summary: text(structured?.summary) || text(call.input.summary) || previous?.summary || "",
-      highlights: (lines(structured?.highlights).length > 0 ? lines(structured?.highlights) : lines(call.input.highlights).length > 0 ? lines(call.input.highlights) : previous?.highlights ?? []).slice(0, 3),
+      summary: typeof structured?.summary === "string" ? text(structured.summary) : text(call.input.summary) || previous?.summary || "",
+      highlights: Array.isArray(structured?.highlights) || typeof structured?.highlights === "string" ? lines(structured.highlights) : lines(call.input.highlights).length > 0 ? lines(call.input.highlights) : previous?.highlights ?? [],
       action,
       section: action === "updated" ? text(structured?.section) || text(patch?.heading) : "",
       revision: revision ?? previous?.revision ?? null,
@@ -195,13 +209,15 @@ export function shouldFoldReply(textValue: string, calls: ReadonlyArray<{ tool: 
 }
 
 /** The lead a folded reply keeps visible, and the rest it hides. A tiny first block takes the next one along. */
-export function splitReplyLead(textValue: string): { lead: string; rest: string } {
-  const blocks = textValue.replace(/\s+$/, "").split(/\n[ \t]*\n/);
-  let count = 1;
-  if ((blocks[0] ?? "").trim().length < 80 && blocks.length > 1) count = 2;
-  const lead = blocks.slice(0, count).join("\n\n").trimEnd();
-  const rest = blocks.slice(count).join("\n\n").trim();
-  return { lead, rest };
+export function splitReplyLead(textValue: string): { lead: string; rest: string; leadMarkdown: string } {
+  const parts = splitChatReply(textValue);
+  const count = (parts[0]?.text.trim().length ?? 0) < 80 && parts.length > 1 ? 2 : 1;
+  const boundary = parts[count]?.start ?? textValue.length;
+  const lead = textValue.slice(0, boundary).trimEnd();
+  const rest = textValue.slice(boundary).trim();
+  const first = parts[0];
+  const context = first ? first.markdown.slice(0, first.markdown.length - first.text.length) : "";
+  return { lead, rest, leadMarkdown: `${context}${lead}` };
 }
 
 /** The small dot on the Activity icon, its Documents row, and the summary line: something changed since the person last opened Documents. */

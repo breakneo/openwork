@@ -4,6 +4,7 @@ import { coworkerBridge, type CoworkerSummary } from "@/lib/bridge";
 import {
   askToUpdatePrompt,
   cardSubline,
+  documentCardPreview,
   groupDocuments,
   type CoworkerDocument,
   type CoworkerDocumentSummary,
@@ -547,34 +548,22 @@ function DiffRow({ row }: { row: ReturnType<typeof sideBySide>[number] }) {
   );
 }
 
-/**
- * The compact card a bubble ends with when the reply's turn created or updated
- * a document: title, summary, up to three highlights, and Open (Open beside when
- * the window allows). One card per document per turn; an update names the
- * section it touched.
- */
-export function DocumentCard({ card, onOpen, canOpenBeside, onOpenBeside }: { card: DocumentCardData; onOpen: () => void; canOpenBeside: boolean; onOpenBeside: () => void }) {
+export function DocumentCard({ card, onOpen, canOpenBeside = false, onOpenBeside }: { card: DocumentCardData; onOpen: () => void; canOpenBeside?: boolean; onOpenBeside?: () => void }) {
   const subline = cardSubline(card);
+  const preview = documentCardPreview(card);
   return (
-    <div className="mt-2 w-full rounded-xl border border-white/10 bg-ink/50 px-3 py-2.5 text-left" data-testid="document-card" data-document-id={card.id} data-action={card.action}>
+    <div className="w-full min-w-0 max-w-[320px] rounded-xl border border-white/10 bg-ink/50 px-3 py-2.5 text-left" data-testid="document-card" data-document-id={card.id} data-action={card.action} data-revision={card.revision ?? undefined}>
       <div className="flex items-start gap-2.5">
-        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-mist"><DocumentsIcon className="size-4" /></span>
+        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center text-mist" title={card.highlights.join("\n") || undefined}><DocumentsIcon className="size-4" /></span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-snow" data-testid="document-card-title">{card.title}</p>
-          {subline ? <p className="text-[10px] text-mist" data-testid="document-card-subline">{subline}</p> : null}
-          {card.summary ? <p className="mt-0.5 text-xs leading-relaxed text-mist" data-testid="document-card-summary">{card.summary}</p> : null}
-          {card.highlights.length > 0 ? (
-            <ul className="mt-1.5 space-y-0.5 text-xs text-snow/85" data-testid="document-card-highlights">
-              {card.highlights.map((highlight, index) => (
-                <li key={index} className="flex gap-1.5"><span className="text-mist" aria-hidden="true">·</span><span className="min-w-0">{highlight}</span></li>
-              ))}
-            </ul>
-          ) : null}
+          <p className="line-clamp-2 break-words text-sm font-semibold text-snow" title={card.title} data-testid="document-card-title">{card.title}</p>
+          {subline ? <p className="line-clamp-1 break-words text-[10px] text-mist" title={subline} data-testid="document-card-subline">{subline}</p> : null}
+          {preview ? <p className="mt-0.5 line-clamp-2 break-words text-xs leading-relaxed text-mist" title={card.summary.trim() || card.highlights[0]} data-testid="document-card-summary">{preview}</p> : null}
         </div>
       </div>
-      <div className="mt-2 flex items-center gap-1.5">
-        <Button variant="default" className="px-2.5 py-1 text-xs" onClick={onOpen} data-testid="document-card-open">Open</Button>
-        {canOpenBeside ? <Button variant="ghost" className="px-2 py-1 text-xs" onClick={onOpenBeside}>Open beside</Button> : null}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <Button type="button" variant="default" className="px-2.5 py-1 text-xs" title="Open current document" onClick={onOpen} data-testid="document-card-open">Open</Button>
+        {canOpenBeside && onOpenBeside ? <Button type="button" variant="ghost" className="px-2 py-1 text-xs" title="Open current document beside the conversation" onClick={onOpenBeside}>Open beside</Button> : null}
       </div>
     </div>
   );

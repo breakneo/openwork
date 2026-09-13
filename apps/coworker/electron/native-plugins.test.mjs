@@ -12,6 +12,8 @@ import test from "node:test";
 import { BROWSER_PLUGIN, installBrowserPlugin } from "./browser-plugin.mjs";
 import { COMPUTER_PLUGIN, installComputerPlugin } from "./computer-plugin.mjs";
 import { COLLABORATION_PLUGIN, installCollaborationPlugin, withInteractiveQuestionDefault } from "./collaboration-plugin.mjs";
+import { assertTeamConsultToolContext } from "./collaboration.mjs";
+import { REACTION_DESCRIPTION } from "./message-reactions-context.mjs";
 import { GROUP_DOCUMENT_PLUGIN, installGroupDocumentPlugin } from "./group-document-plugin.mjs";
 import { ABILITIES_PLUGIN, installAbilitiesPlugin } from "./abilities-plugin.mjs";
 import { EVENT_PLUGIN, installEventPlugin } from "./event-plugin.mjs";
@@ -181,6 +183,7 @@ test("published native tools preserve trusted identity, broker payloads, file im
     [BROWSER_PLUGIN, "coworker_browser_snapshot", { browser_url: "owned", target_id: "page" }, "coworker_browser_snapshot"],
     [COMPUTER_PLUGIN, "coworker_computer_observe", { include_image: true }, "coworker_computer_observe"],
     [COLLABORATION_PLUGIN, "coworker_worker_pause", { id: "worker-one" }, "worker_pause"],
+    [COLLABORATION_PLUGIN, "coworker_react", { emoji: null }, "react"],
     [GROUP_DOCUMENT_PLUGIN, "coworker_group_document_read", { groupId: "grp_12345678", id: "plan" }, "group_document_read"],
     [EVENT_PLUGIN, "coworker_event_details", { id: "event-fixture" }, "event_details"],
   ]) {
@@ -224,6 +227,16 @@ test("published native tools preserve trusted identity, broker payloads, file im
       assert.deepEqual(requests.at(-1).body.args, args);
       assert.equal(f.tools.get("coworker_computer_observe").input["~standard"].validate({ elements: "all", include_image: false }).issues, undefined);
     }
+    if (name === "coworker_react") {
+      assert.equal(tool.description, REACTION_DESCRIPTION);
+      assert.equal(tool.options.codemode, false);
+      assert.equal(tool.input["~standard"].validate({ emoji: "x".repeat(64), messageId: "m".repeat(256) }).issues, undefined);
+      for (const args of [{}, { emoji: "x".repeat(65) }, { emoji: null, messageId: "m".repeat(257) }, { emoji: null, actor: "other" }]) {
+        await assert.rejects(Effect.runPromise(tool.execute(args, context)), /Invalid native tool arguments/);
+      }
+      await Effect.runPromise(tool.execute({ emoji: "\u2764\ufe0f", messageId: "message_target" }, context));
+      assert.deepEqual(requests.at(-1).body.args, { emoji: "\u2764\ufe0f", messageId: "message_target" });
+    }
     if (source === EVENT_PLUGIN) {
       const create = f.tools.get("coworker_event_create");
       const input = { title: "Plan", objective: "Review", leadSlug: "scout", participantSlugs: ["scout"], startsAt: 1000, schedule: { kind: "once", timezone: "Europe/Paris", at: 1000 } };
@@ -246,12 +259,14 @@ test("published native tools preserve trusted identity, broker payloads, file im
     ...reads.map((name) => tool(`coworker_${name}`, { namespace: "coworker", codemode: true })),
     ...direct.map((name) => tool(`coworker_${name}`, { namespace: "coworker", codemode: true, pinned: true })),
     tool("coworker_browser_tabs", { codemode: false }),
+    tool("coworker_react", { codemode: false }),
+    tool("reaction_alias", { permission: "coworker_react", codemode: true, pinned: true }),
     tool("management_alias", { permission: "coworker_assignment_create", codemode: true }),
     tool("receipt_alias", { permission: "coworker_document_create", codemode: true }),
     tool("read", undefined), tool("third_party_read", { codemode: true, pinned: true }), tool("third_party_direct", { codemode: false }),
   ] });
   for (const name of reads) assert.equal(f.tools.get(`coworker_${name}`).options.codemode, true);
-  for (const name of [...direct.map((name) => `coworker_${name}`), "coworker_browser_tabs", "management_alias", "receipt_alias"]) {
+  for (const name of [...direct.map((name) => `coworker_${name}`), "coworker_browser_tabs", "coworker_react", "reaction_alias", "management_alias", "receipt_alias"]) {
     assert.equal(f.tools.get(name).options.codemode, false, name);
     assert.equal(f.tools.get(name).options.pinned, undefined, name);
   }
@@ -268,11 +283,16 @@ test("published native tools preserve trusted identity, broker payloads, file im
   await f.run("rpc", "prepare", {});
   await f.run("session", "prompt", { sessionID: context.sessionID });
   assert.deepEqual(f.agents.get("coworker-worker"), inherited, "RPC/prompt readiness share one inheritance registration");
-  for (const name of ["coworker_assignment_create", "management_alias", "coworker_browser_tabs"]) {
+  for (const name of ["coworker_assignment_create", "management_alias", "coworker_browser_tabs", "coworker_react", "reaction_alias"]) {
     const alias = { ...f.tools.get(name), name: "renamed_again" };
     await assert.rejects(Effect.runPromise(alias.execute({}, { ...context, agent: "coworker-worker" })), /cannot use/);
   }
   assert.equal(effects, 0, "protected aliases and unprepared roles cannot produce effects");
+  await assert.rejects(f.run("tool", "execute.before", { agent: "coworker-worker", tool: "coworker_react" }), /cannot use/);
+  const workerContext = { agent: "coworker-worker", tools: { coworker_react: {}, coworker_document_read: {} }, system: [] };
+  await f.run("session", "context", workerContext);
+  assert.equal(workerContext.tools.coworker_react, undefined);
+  assert.ok(workerContext.tools.coworker_document_read);
   const explicit = await fixture(t, TURN_ROLES_PLUGIN, { tools: [tool("coworker_document_read", { namespace: "coworker", codemode: false })] });
   assert.equal(explicit.tools.get("coworker_document_read").options.codemode, false);
   const notConfigured = await fixture(t, TURN_ROLES_PLUGIN, { configActive: false });
@@ -429,7 +449,7 @@ test("native main binds Worker skills to admitted provenance and consultations t
       return Response.json({ user: { id: account(sandbox.denSession).accountId } });
     },
     maintenanceAdmission: { run: (work) => work() }, COMPUTER_TOOLS: {}, BROWSER_TOOLS: {}, groupDocumentTools: new Set(), eventNativeSchemas: {},
-    WORKER_MANAGEMENT, assertWorkerToolContext,
+    WORKER_MANAGEMENT, assertWorkerToolContext, assertTeamConsultToolContext,
     listCoworkers: async () => { rosterReads++; return [{ slug: "teammate", name: "Teammate" }]; },
     collaboration: {
       change: async (change) => change({ executions: { [entry.id]: entry } }),
@@ -446,15 +466,17 @@ test("native main binds Worker skills to admitted provenance and consultations t
   const consult = { to: "TEAMMATE", question: "Review the bounded plan", continuation: { objective: "Plan", resumeInstructions: "Use the review" } };
   const invoke = (name, args) => api.onContextTool("fixture", { name, args, context: nativeContext });
   part.toolInput = structuredClone(consult);
-  part.tool = "read";
-  await assert.rejects(invoke("team_consult", consult), /exact running native tool/);
+  for (const name of ["read", "coworker_react"]) {
+    part.tool = name;
+    await assert.rejects(invoke("team_consult", consult), /exact running native tool/);
+  }
   part.tool = "coworker_team_consult";
   await assert.rejects(invoke("team_consult", { ...consult, question: "Substituted private question" }), /exact running native tool/);
   part.toolStatus = "completed";
   await assert.rejects(invoke("team_consult", consult), /exact running native tool/);
   part.toolStatus = "running";
   entry.owner.kind = "worker";
-  await assert.rejects(invoke("team_consult", consult), /Workers cannot manage collaboration/);
+  await assert.rejects(invoke("team_consult", consult), /exact running native tool/);
   assert.equal(requests.length, 0);
   assert.equal(rosterReads, 0);
   entry.owner.kind = "private";

@@ -379,15 +379,70 @@ The coworker directory is registered as an ordinary OpenWork workspace, so:
   armed permanent delete. Retirement is refused while one of the coworker's
   scheduled assignments or Workers is still running.
 
+## Message reactions
+
+Coworkers can add one attributed emoji to a visible message from the person or
+another coworker in the same conversation. In private discussions and group
+chats, reactions sit beneath the original bubble; hover or keyboard-focus a
+chip to read who reacted. A new emoji replaces that coworker's previous one;
+removing it leaves everyone else's reactions alone. Reactions persist across
+reopening, without changing the message text or generating Activity notifications.
+
+The native tool is `coworker_react({ emoji, messageId? })`. `emoji` is one Unicode
+emoji (including skin tones, flags and joined emoji), or `null` to remove it.
+Omit `messageId` for the current request; otherwise use an exact ID from the
+host's bounded reaction context. For example:
+
+```json
+{ "emoji": "👀" }
+{ "emoji": "🔎" }
+{ "emoji": "✅" }
+{ "emoji": "💯", "messageId": "<supplied peer message ID>" }
+{ "emoji": null, "messageId": "<supplied message ID>" }
+```
+
+These are conversational expressions, **not** read receipts, task state,
+completion evidence or approval. The coworker's instructions encourage sparse,
+relevant acknowledgment, considered agreement and honest progress—not an emoji
+on every message, empty praise or a replacement for a requested answer. A quiet
+reaction-only group contribution finishes without an extra narration bubble;
+failures and unfinished work retain their ordinary recovery behavior. There is
+no human reaction picker in this slice and no background model run merely to
+react: coworkers use the tool during already-admitted turns.
+
+`electron/message-reactions-context.mjs` binds the raw tool arguments to the
+exact live native call, workspace and admitted conversation. Private targets are
+actual human messages; group targets are published timeline event IDs supplied
+to that speaker, not unseen parallel replies. No actor, conversation, role or
+path can be supplied by the model. Workers, assignments and hidden coordinators
+cannot mutate reactions. Receipts plus native-projection ordering fence duplicate
+or delayed callbacks, including a newer write whose response was lost.
+
+`electron/message-reactions.mjs` keeps private sidecars inside the coworker home
+and group metadata beside its timeline. Atomic writes share identity/group locks,
+verify creation identity and refuse replaced, linked, archived or corrupt stores.
+The limits are 2,000 reaction slots and 2 MiB per conversation, 32 tool commands
+per admission and 512 retained receipts; advancing an authenticated admission
+prunes only its lane's old receipts, never reactions. A limit fails visibly
+instead of erasing history. `reactions:read` and persisted-change notifications
+feed the shared read-only UI, with no new idle polling loop.
+
 ## Documents and how coworkers talk
 
-A coworker answers like a colleague in a chat, not like a report: the point
-first, two to four sentences, at most three highlights, rarely more than about
-120 words. When the answer needs more than that — a plan, a comparison,
-research, a draft, a summary of many things — the coworker writes or updates a
-**document** in the same turn and answers with the short version, naming the
-document. The person is never buried in text and always has one clean place to
-read more.
+A coworker answers like a colleague in a chat, not like a report: the answer
+first, usually 40–80 words in one to three short paragraphs, with one thought
+and one or two sentences per paragraph. Deliberate prose paragraph breaks can
+become separate bubbles; code, lists, tables and quotations stay intact. This
+is presentation of one native message, not extra messages or simulated typing
+delays. Streaming and completed text use the same segmentation, capped at three
+bubbles without discarding any text, and reactions stay on the original message.
+
+Plans, comparisons, research and drafts belong in a **document attachment**.
+The coworker saves it and writes a short handoff, rather than pasting the contents
+into chat. Each attachment has a title, a short preview and the existing Open
+and Open beside actions. Full summaries, highlights, body and History remain
+in the document reader; opening a chat attachment still opens the current
+document, not an implied historical revision.
 
 - **The coworker's document tools** are served by the app itself: the Electron
   main process answers MCP over loopback HTTP (`electron/coworker-tools.mjs`)
@@ -424,15 +479,17 @@ read more.
   Export to a chosen `.md`, History (revisions with a side-by-side line diff
   and Restore), Archive, and — when the window is wide enough — Open beside, a
   reading pane in a second column next to the conversation.
-- **The card in a bubble.** When a reply's turn created or updated a document,
-  the bubble ends with a compact card — title, summary, up to three
-  highlights, Open — built from the tool calls (`lib/documents.ts`), so no
-  Markdown from the model is needed; an update reads *Updated · Timeline
-  section*. Receipts say *Wrote a document · Launch plan*, *Updated Launch plan
-  · Timeline section*, *Put aside · Old vendor notes*.
+- **The document attachment.** A turn that saves a document gets a separate
+  compact tile: title, a bounded two-line preview and Open, plus Open beside
+  where supported. It follows the turn's last assistant message, even for a
+  tool-only result. Saved receipts across that native parent are coalesced once
+  per document, retaining the latest revision; separate turns keep their own
+  attachments. Native structured receipts—not guessed titles—choose the ID.
+  Shared group documents use their own group-scoped receipt and reader. No
+  Markdown from the model is needed to manufacture the card.
 - **Soft enforcement.** A finished reply longer than about 1,200 characters
-  with no document call in its turn renders as its first paragraph behind a
-  quiet **Show the rest**; nothing is cut. The app records it in
+  with no document call in its turn can fold at a safe prose boundary behind
+  **Show the rest**; structured blocks and a single long paragraph stay intact. The app records it in
   `memory/style.jsonl` and the index carries a one-line reminder of the
   contract until the coworker next writes a document.
 - **The contract** lives in the coworker's `AGENTS.md` (`## How I talk`, whose
@@ -440,7 +497,7 @@ read more.
   the reply, an assignment, and a Worker — see *Automatic choices* below — with
   five before/after examples: a research question, a plan request, a quick
   question that needs no document, work on a clock, and a goal for a Worker).
-  It is versioned (13) and regenerated on launch for existing coworkers without
+  It is versioned (15) and regenerated on launch for existing coworkers without
   touching `soul.md` or anything under `memory/`; the repair also adds
   `documents/index.md` to `opencode.json`'s instructions and creates the index
   when it is missing.

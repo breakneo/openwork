@@ -11,6 +11,7 @@ export { NATIVE_COORDINATOR_AGENT };
 const bases = [
   { id: "coworker", tools: {} },
   { id: "coworker-no-computer", tools: { ...COMPUTER_DENY } },
+  { id: "coworker-no-computer-no-reactions", tools: { ...COMPUTER_DENY, coworker_react: false } },
   { id: "coworker-no-referral", tools: { coworker_team_refer: false } },
   { id: "coworker-group", tools: { ...COMPUTER_DENY, coworker_team_refer: false } },
   { id: "coworker-worker", tools: workerTurnTools() },
@@ -51,7 +52,7 @@ export function nativeTurnAgent({ tools, agent = "build" } = {}) {
   if (typeof agent !== "string" || !agent.trim() || agent !== agent.trim()) throw new Error("A native turn agent is required.");
   const key = maskKey(tools);
   if (key === "[]") return agent;
-  if (agent === NATIVE_COORDINATOR_AGENT && [COMPUTER_DENY, { ...COMPUTER_DENY, ...EVENT_WRITE_DENY }, { ...COMPUTER_DENY, ...EVENT_SCHEDULE_DENY }].some((mask) => key === maskKey(mask))) return agent;
+  if (agent === NATIVE_COORDINATOR_AGENT && [COMPUTER_DENY, { ...COMPUTER_DENY, ...EVENT_WRITE_DENY }, { ...COMPUTER_DENY, ...EVENT_SCHEDULE_DENY }].some((mask) => key === maskKey(mask) || key === maskKey({ ...mask, coworker_react: false }))) return agent;
   const role = NATIVE_TURN_ROLES.find((role) => maskKey(role.tools) === key);
   if (!role || (agent !== "build" && agent !== role.id)) throw new Error("Unsupported native turn tool mask or conflicting agent pin.");
   return role.id;

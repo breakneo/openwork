@@ -271,6 +271,7 @@ test("independent parallel replies start together, then follow-up and wrap-up re
   const plan: RoutingPlan = { speakers: [{ slug: "scout", brief: "" }, { slug: "editor", brief: "" }], mode: "parallel", dependsOn: [], followUp: { slug: "scout", brief: "Compare the replies." }, synthesizer: "editor", routedBy: "facilitator" };
   const started: string[] = [];
   const prompts: string[] = [];
+  const reactionTargets: string[][] = [];
   let releaseScout: (() => void) | null = null;
   const result = await runGroupTurn({
     group: { id: "grp_x", name: "Desk" },
@@ -285,6 +286,7 @@ test("independent parallel replies start together, then follow-up and wrap-up re
       ask: async (slug, prompt, _signal, step) => {
         started.push(slug);
         prompts.push(prompt);
+        reactionTargets.push([...(step.reactionTargetIds ?? [])]);
         if (slug === "scout" && step.part === "reply") await new Promise<void>((resolve) => { releaseScout = resolve; });
         // Editor settles first; its bubble still waits for Scout's.
         if (slug === "editor" && step.part === "reply") releaseScout?.();
@@ -294,6 +296,8 @@ test("independent parallel replies start together, then follow-up and wrap-up re
   });
   assert.ok(result);
   assert.deepEqual(started, ["scout", "editor", "scout", "editor"]);
+  assert.deepEqual(reactionTargets.slice(0, 2), [["evt_1"], ["evt_1"]], "parallel speakers cannot react to unseen peer output");
+  assert.deepEqual(reactionTargets[2], ["evt_2", "evt_3", "evt_1"], "follow-up targets use the actual published peer message IDs");
   assert.equal(result.mode, "parallel");
   assert.deepEqual(store.events.filter((entry) => entry.kind === "coworker").map((entry) => entry.slug), started);
   assert.ok(store.published.includes("running:scout=running,editor=running,scout=queued,editor=queued"), "both replies run while later parts wait");

@@ -55,7 +55,7 @@ export function workerTurnTools(control) {
   ];
   const computer = Object.fromEntries(Object.keys(COMPUTER_DENY).map((name) => [name, control === "computer"]));
   const browser = Object.fromEntries(Object.keys(BROWSER_TOOLS).map((name) => [name, control === "browser"]));
-  return { task: false, question: false, coworker_team_consult: false, ...computer, ...browser, ...Object.fromEntries(management.map((name) => [`coworker_${name}`, false])) };
+  return { task: false, question: false, coworker_team_consult: false, coworker_react: false, ...computer, ...browser, ...Object.fromEntries(management.map((name) => [`coworker_${name}`, false])) };
 }
 
 export const WORKER_STATUSES = ["starting", "running", "waiting", "paused", "finished", "cancelled", "failed"];

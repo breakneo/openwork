@@ -171,12 +171,14 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
       summary: card.querySelector('[data-testid="document-card-summary"]')?.textContent?.trim() ?? "",
       highlights: [...card.querySelectorAll('[data-testid="document-card-highlights"] li')].map((node) => node.textContent?.trim() ?? ""),
       open: Boolean(card.querySelector('[data-testid="document-card-open"]')),
-      insideBubble: Boolean(card.closest('[data-message-role="assistant"]')),
+      insideTextBubble: Boolean(card.closest('.bubble')),
+      attachment: Boolean(card.closest('[data-testid="coworker-document-attachments"]')),
+      count: document.querySelectorAll('[data-testid="document-card"][data-document-id="launch-plan"]').length,
     };
   })()`, { timeoutMs: 30_000, label: "document card under the reply" });
-  expect(card).toMatchObject({ action: "created", title: "Launch plan", summary: "Ship onboarding by the end of Q3.", open: true, insideBubble: true });
+  expect(card).toMatchObject({ action: "created", title: "Launch plan", summary: "Ship onboarding by the end of Q3.", open: true, insideTextBubble: false, attachment: true, count: 1 });
   if (!isRecord(card) || !Array.isArray(card.highlights)) throw new Error("Card facts were unavailable.");
-  expect(card.highlights).toHaveLength(3);
+  expect(card.highlights).toHaveLength(0);
   const onDisk = await documentsOnDisk(app);
   expect(onDisk).toHaveLength(1);
   expect(onDisk[0]).toMatchObject({ id: "launch-plan", title: "Launch plan", status: "active", revision: 1, updatedBy: "coworker" });
@@ -185,7 +187,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
 
   evidence.recordAssertionEvidence(
     "A substantial request gets a short reply, a document, and a card",
-    `The reply carrying PLAN READY was ${planReply.length} characters with no section headings pasted in; the action line read ${JSON.stringify(planSteps)}; the bubble ended with a created card titled "Launch plan" with its summary, ${card.highlights.length} highlights, and Open; documents/launch-plan.md exists at revision 1 and documents/index.md lists it.`,
+    `The reply carrying PLAN READY was ${planReply.length} characters with no section headings pasted in; the action line read ${JSON.stringify(planSteps)}; a single standalone attachment titled "Launch plan" retained its summary and Open action without a highlights list or document body in the text bubble; documents/launch-plan.md exists at revision 1 and documents/index.md lists it.`,
     true,
   );
 

@@ -265,6 +265,7 @@ export function createGroupDocumentService({ coworkersDir, coworkerFor, resolveC
       await publish(result.groupId, {
         id: `evt_document_${result.id}_${result.revision}`, kind: "status", status: "document",
         documentId: result.id, revision: result.revision,
+        title: result.title, documentSummary: result.summary || result.highlights[0] || "",
         ...(entry ? { executionId: entry.id, turnId: entry.owner.turnId, threadId: entry.owner.threadId } : {}),
         text: `${result.author} updated ${result.title} · revision ${result.revision}`,
         ...(result.authorSlug ? { slug: result.authorSlug } : {}),

@@ -1,7 +1,7 @@
 import { ActionMenu } from "@/ui/kit";
 import { Fragment, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { coworkerBridge, type CoworkerSummary, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
+import { coworkerBridge, type CoworkerSummary, type MessageReaction, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
 import type { DenSession } from "@/lib/den";
 import {
   artifactKindLabel,
@@ -110,9 +110,10 @@ import { InteractionCard, InteractionCards, LETTERS, OptionRow, typingInField } 
 import { acknowledgeCoworker, CoworkerAvatar } from "@/ui/coworker-avatar";
 import { InlineLoader } from "@/ui/brand";
 import { Button, Empty, ErrorNote, PlusIcon, StatusDot, ToolIcon } from "@/ui/kit";
-import { Markdown } from "@/ui/markdown";
+import { ChatReply } from "@/ui/chat-reply";
+import { MessageReactions, useMessageReactions } from "@/ui/message-reactions";
 import { DocumentCard } from "@/ui/documents";
-import { documentCardsFromCalls, isDocumentTool, shouldFoldReply, splitReplyLead } from "@/lib/documents";
+import { documentCardsFromCalls, isDocumentTool, shouldFoldReply, splitReplyLead, type DocumentCardData } from "@/lib/documents";
 import { newcomerLine, teamCardsFromCalls } from "@/lib/team";
 import { TeamCardsForTurn, type TeamHooks } from "@/ui/team-cards";
 import { WorkPopover, workPopoverPlacement, type WorkPopoverPlacement } from "@/ui/work-popover";
@@ -1168,6 +1169,7 @@ function ThreadView({
   onOpenSummary?: (kind: SummaryKind) => void;
 }) {
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+  const messageReactions = useMessageReactions(kind === "discussion" && browserEligible ? { kind: "private", slug: coworker.slug, threadId } : null, active, coworker.createdAt);
   const [nativeState, setNativeState] = useState<HeadlessThreadSnapshot["native"]>();
   const [transcriptLoaded, setTranscriptLoaded] = useState(false);
   const [transcriptReadStartedAt, setTranscriptReadStartedAt] = useState(0);
@@ -2325,6 +2327,21 @@ function ThreadView({
             if (block.kind === "actions") {
                return <ActionLine key={block.id} review={block.review} calls={block.calls} client={mcpClient} />;
             }
+            if (block.kind === "documents") {
+              return (
+                <div key={block.id} className="flex min-w-0 max-w-[76%] flex-wrap gap-2" data-testid="coworker-document-attachments" data-parent-id={block.parentId}>
+                  {block.cards.map((card) => (
+                    <DocumentCard
+                      key={`${card.id}:${card.revision ?? "unknown"}`}
+                      card={card}
+                      onOpen={() => documents?.onOpenDocument(card.id)}
+                      canOpenBeside={documents?.canOpenBeside ?? false}
+                      onOpenBeside={() => documents?.onOpenDocumentBeside(card.id)}
+                    />
+                  ))}
+                </div>
+              );
+            }
             // A reply that ended without words stays in the transcript as one quiet line; the turn still
             // unresolved is told by the outcome below instead, with its actions.
             if (block.kind === "ended") {
@@ -2336,6 +2353,7 @@ function ThreadView({
                 <TimeLabel label={timeLabelBetween(block.previous?.createdAt, block.message.createdAt)} />
                 <MessageBubble
                   message={block.message}
+                  reactions={messageReactions.get(block.message.id)}
                   coworker={coworker}
                   mcpClient={mcpClient}
                   active={block.active}
@@ -2343,7 +2361,7 @@ function ThreadView({
                   tail={block.tail}
                   kind={kind}
                   turnCalls={block.calls}
-                  documents={documents}
+                  documentCalls={block.documentCalls}
                   team={kind === "discussion" ? team : undefined}
                   laterPersonMessage={(messagePositions.get(block.message.id) ?? -1) < lastPersonIndex}
                   conversation={visibleMessages}
@@ -2382,7 +2400,7 @@ function ThreadView({
               // The words are arriving: the bubble is the live view. It renders in the transcript
               // once the engine has the reply; until then the words stand in here, in the same shape.
               <article className="flex flex-col items-start" data-message-role="assistant" data-live="true">
-                 <div className="bubble bubble-coworker max-w-[76%]" data-testid="coworker-live-bubble"><Markdown text={safeLiveMarkdown(writingText(correlatedStream, null))} /></div>
+                 <ChatReply text={safeLiveMarkdown(writingText(correlatedStream, null))} live className="max-w-[76%]" data-testid="coworker-live-bubble" />
               </article>
             ) : null}
              <LiveRow
@@ -2480,7 +2498,8 @@ function ThreadView({
 
 type ConversationBlock =
   | { kind: "actions"; id: string; review: WorkerReview | null; calls: TranscriptToolCall[] }
-  | { kind: "message"; message: TranscriptMessage; previous: TranscriptMessage | undefined; active: boolean; continued: boolean; tail: boolean; calls: TranscriptToolCall[] }
+  | { kind: "documents"; id: string; parentId: string; cards: DocumentCardData[] }
+  | { kind: "message"; message: TranscriptMessage; previous: TranscriptMessage | undefined; active: boolean; continued: boolean; tail: boolean; calls: TranscriptToolCall[]; documentCalls: TranscriptToolCall[] }
   /** A reply that ended without words — stopped or failed — kept as one quiet line where it happened. */
   | { kind: "ended"; message: TranscriptMessage; ended: "stopped" | "failed" };
 
@@ -2538,7 +2557,22 @@ export function conversationBlocks(
   );
   const bubblePositions = new Map(bubbles.map((message, index) => [message.id, index]));
   const lastReplies = new Map<string, number>();
-  messages.forEach((message, index) => { if (message.role === "assistant" && message.parentId) lastReplies.set(message.parentId, index); });
+  const documentCallsByParent = new Map<string, TranscriptToolCall[]>();
+  messages.forEach((message, index) => {
+    if (message.role !== "assistant" || !message.parentId) return;
+    lastReplies.set(message.parentId, index);
+    const parentCalls = documentCallsByParent.get(message.parentId) ?? [];
+    parentCalls.push(...message.toolCalls);
+    documentCallsByParent.set(message.parentId, parentCalls);
+  });
+  const appendDocuments = (message: TranscriptMessage, index: number) => {
+    if (message.role !== "assistant" || !message.parentId || lastReplies.get(message.parentId) !== index) return;
+    const cards = documentCardsFromCalls(documentCallsByParent.get(message.parentId) ?? []);
+    if (cards.length === 0) return;
+    flush();
+    pendingId = "";
+    blocks.push({ kind: "documents", id: `documents-${message.parentId}`, parentId: message.parentId, cards });
+  };
   messages.forEach((message, index) => {
     if (continuation(message)) return;
     const active = isActive(message, index);
@@ -2550,7 +2584,9 @@ export function conversationBlocks(
     }
     if (message.role === "assistant") {
       if (!pendingId) pendingId = message.id;
-      calls.push(...message.toolCalls);
+      // A saved reaction is already visible on its message, not completed work.
+      // Failed/pending reaction calls remain inspectable through the normal receipt.
+      calls.push(...message.toolCalls.filter((call) => call.tool !== "coworker_react" || !["completed", "success"].includes(call.status)));
       const superseded = message.parentId !== null && lastReplies.get(message.parentId) !== index;
       const ended = active || superseded ? null : endedWithoutWords(message);
       if (ended) {
@@ -2558,11 +2594,14 @@ export function conversationBlocks(
         flush();
         pendingId = "";
         blocks.push({ kind: "ended", message, ended });
+        appendDocuments(message, index);
         return;
       }
-      if (!message.text && !active) return;
+      if (!message.text && !active) {
+        appendDocuments(message, index);
+        return;
+      }
     }
-    // The bubble keeps its own turn's calls too, so it can end with a document card.
     const turnCalls = message.role === "assistant" ? calls : [];
     flush();
     pendingId = "";
@@ -2577,7 +2616,9 @@ export function conversationBlocks(
       continued: Boolean(previous && previous.role === message.role),
       tail: !next || next.role !== message.role,
       calls: turnCalls,
+      documentCalls: message.parentId ? documentCallsByParent.get(message.parentId) ?? turnCalls : turnCalls,
     });
+    appendDocuments(message, index);
   });
   flush();
   return blocks;
@@ -2620,6 +2661,7 @@ function TimeLabel({ label }: { label: string | null }) {
 
 const MessageBubble = memo(function MessageBubble({
   message,
+  reactions,
   coworker,
   mcpClient,
   active,
@@ -2627,7 +2669,7 @@ const MessageBubble = memo(function MessageBubble({
   tail = true,
   kind = "discussion",
   turnCalls = [],
-  documents,
+  documentCalls = turnCalls,
   team,
   laterPersonMessage = false,
   conversation = [],
@@ -2637,6 +2679,7 @@ const MessageBubble = memo(function MessageBubble({
   sentAt = null,
 }: {
   message: TranscriptMessage;
+  reactions?: readonly MessageReaction[];
   coworker: CoworkerSummary;
   mcpClient: CoworkerMcpClient;
   active: boolean;
@@ -2648,9 +2691,8 @@ const MessageBubble = memo(function MessageBubble({
   tail?: boolean;
   /** The previous message is from the same speaker: no avatar or name again, tighter spacing. */
   continued?: boolean;
-  /** Every tool call of this reply's turn: the bubble ends with a card per document it wrote, and knows whether a long reply had one behind it. */
   turnCalls?: TranscriptToolCall[];
-  documents?: DocumentHooks;
+  documentCalls?: TranscriptToolCall[];
   /** The team tiles a reply ends with (a proposed teammate, an offer to pass the request on) and how the person answers them. */
   team?: TeamHooks;
   /** The person wrote again after this reply: a tile's pills are closed. */
@@ -2681,11 +2723,12 @@ const MessageBubble = memo(function MessageBubble({
     const passed = kind === "discussion" ? parseReferralBrief(message.text) : null;
     if (passed) {
       return (
-        <article className={`flex flex-col items-end ${continued ? "-mt-1.5" : ""}`} data-message-role="user" data-passed-from={passed.from}>
+        <article className={`flex flex-col items-end ${continued ? "-mt-1.5" : ""}`} data-message-role="user" data-message-id={message.id} data-passed-from={passed.from}>
           <p className="mb-0.5 pr-1 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-mist/80" data-testid="coworker-passed-from">Passed from {passed.from}</p>
           <div className={`bubble bubble-user max-w-[72%] whitespace-pre-wrap ${tail ? "bubble-tail-right" : ""}`} title={message.createdAt ? new Date(message.createdAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : undefined}>
             {passed.message}
           </div>
+          <MessageReactions messageId={message.id} reactions={reactions} className="mt-1 max-w-[72%] justify-end" />
         </article>
       );
     }
@@ -2729,10 +2772,11 @@ const MessageBubble = memo(function MessageBubble({
       );
     }
     return (
-      <article className={`flex justify-end ${continued ? "-mt-1.5" : ""}`} data-message-role="user" data-continued={continued ? "true" : "false"}>
+      <article className={`flex flex-col items-end ${continued ? "-mt-1.5" : ""}`} data-message-role="user" data-message-id={message.id} data-continued={continued ? "true" : "false"}>
         <div className={`bubble bubble-user max-w-[72%] whitespace-pre-wrap ${tail ? "bubble-tail-right" : ""}`} title={message.createdAt ? new Date(message.createdAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : undefined}>
           {message.text || "…"}
         </div>
+        <MessageReactions messageId={message.id} reactions={reactions} className="mt-1 max-w-[72%] justify-end" />
       </article>
     );
   }
@@ -2749,7 +2793,7 @@ const MessageBubble = memo(function MessageBubble({
   const answeredBy = message.model ? `Answered by ${message.model.providerId}/${message.model.modelId}` : "";
   const tooltip = [answeredBy, speed].filter(Boolean).join(" · ");
   return (
-    <article className={`flex flex-col items-start gap-2 ${continued ? "-mt-1" : ""}`} data-message-role="assistant" data-continued={continued ? "true" : "false"} {...(live ? { "data-live": "true" } : {})}>
+    <article className={`flex flex-col items-start gap-2 ${continued ? "-mt-1" : ""}`} data-message-role="assistant" data-message-id={message.id} data-continued={continued ? "true" : "false"} {...(live ? { "data-live": "true" } : {})}>
       <p className="sr-only">
         {coworker.name}
         {message.model ? (
@@ -2760,29 +2804,15 @@ const MessageBubble = memo(function MessageBubble({
         {speed ? <span data-testid="coworker-reply-speed">{" "}{speed}</span> : null}
       </p>
       {live ? (
-        <div className="bubble bubble-coworker max-w-[76%]" data-testid="coworker-live-bubble">
-          <Markdown text={safeLiveMarkdown(liveWords)} />
-        </div>
+        <ChatReply text={safeLiveMarkdown(liveWords)} live className="max-w-[76%]" data-testid="coworker-live-bubble" />
       ) : message.text ? (
-        <div
-          className={`bubble bubble-coworker max-w-[76%] ${tail && (active || teamCards.length === 0) ? "bubble-tail-left" : ""}`}
-          title={tooltip || undefined}
-          data-testid="coworker-reply-bubble"
-        >
-          <ReplyText message={message} active={active} turnCalls={turnCalls} onLongReply={onLongReply} />
-          {documentCardsFromCalls(turnCalls).map((card) => (
-            <DocumentCard
-              key={card.id}
-              card={card}
-              onOpen={() => documents?.onOpenDocument(card.id)}
-              canOpenBeside={documents?.canOpenBeside ?? false}
-              onOpenBeside={() => documents?.onOpenDocumentBeside(card.id)}
-            />
-          ))}
+        <div className="min-w-0 max-w-[76%]" title={tooltip || undefined}>
+          <ReplyText message={message} active={active} turnCalls={documentCalls} tail={tail && (active || teamCards.length === 0)} onLongReply={onLongReply} />
         </div>
       ) : !active && message.toolCalls.length === 0 && teamCards.length === 0 ? (
         <div className={`bubble bubble-coworker ${tail ? "bubble-tail-left" : ""} text-mist`}>…</div>
       ) : null}
+      {message.role === "assistant" && liveWords ? <MessageReactions messageId={message.id} reactions={reactions} className="-mt-1 max-w-[76%]" /> : null}
       {team && teamCards.length > 0 && !active ? (
         <TeamCardsForTurn
           cards={teamCards}
@@ -2803,18 +2833,17 @@ const MessageBubble = memo(function MessageBubble({
  * only hidden — and is reported once so the coworker's next turn carries a
  * reminder of how it talks.
  */
-function ReplyText({ message, active, turnCalls, onLongReply }: { message: TranscriptMessage; active: boolean; turnCalls: TranscriptToolCall[]; onLongReply?: (messageId: string, chars: number) => void }) {
+function ReplyText({ message, active, turnCalls, tail, onLongReply }: { message: TranscriptMessage; active: boolean; turnCalls: TranscriptToolCall[]; tail: boolean; onLongReply?: (messageId: string, chars: number) => void }) {
   const [open, setOpen] = useState(false);
-  const folded = !active && shouldFoldReply(message.text, turnCalls);
+  const long = !active && shouldFoldReply(message.text, turnCalls);
+  const split = useMemo(() => long ? splitReplyLead(message.text) : null, [long, message.text]);
   useEffect(() => {
-    if (folded && onLongReply) onLongReply(message.id, message.text.length);
-  }, [folded, message.id, message.text.length, onLongReply]);
-  if (!folded) return <Markdown text={message.text} />;
-  const { lead, rest } = splitReplyLead(message.text);
+    if (long && onLongReply) onLongReply(message.id, message.text.length);
+  }, [long, message.id, message.text.length, onLongReply]);
+  if (!split?.rest) return <ChatReply text={message.text} live={active} tail={tail} data-testid="coworker-reply-bubble" />;
   return (
     <div data-testid="reply-fold" data-open={open ? "true" : "false"}>
-      <div data-testid="reply-fold-lead"><Markdown text={lead} /></div>
-      {open ? <Markdown text={rest} className="mt-2" /> : null}
+      <div data-testid="reply-fold-lead"><ChatReply text={open ? message.text : split.leadMarkdown} tail={tail} data-testid="coworker-reply-bubble" /></div>
       <button
         type="button"
         className="mt-2 text-[11px] font-medium text-mist underline decoration-mist/40 underline-offset-2 hover:text-snow"

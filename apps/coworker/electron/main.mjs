@@ -28,8 +28,9 @@ import { dispatchNativeTurn, nativeTurnReceipt, waitForNativeTurn, verifyNativeT
 import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
 import { selectCatalogSkill, selectionFields, validateSkillSelections, sameSkillFields, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
 import { createNativeProviders } from "./native-providers.mjs";
-import { createCollaboration, collaborationId, withAbort } from "./collaboration.mjs";
+import { createCollaboration, collaborationId, withAbort, assertTeamConsultToolContext } from "./collaboration.mjs";
 import { createActivityInbox } from "./activity-inbox.mjs";
+import { createMessageReactionRuntime } from "./message-reactions-context.mjs";
 import { readExecutionActivity } from "../src/lib/progress-activity.ts";
 import { PROGRESS_LIMITS } from "../src/lib/progress-config.ts";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
@@ -929,7 +930,8 @@ const collaboration = createCollaboration({
   invalidateWorker: (slug, id) => { void workerControls.revokeId(slug, id); },
   memoryContext: (owner) => conversationMemory.context(owner),
   executionContext: (owner) => events.context(owner),
-  onSuccess: (entry) => entry.owner.kind === "private" ? captureConversationMemory(entry) : Promise.resolve(),
+  reactionContext: (entry, snapshot) => messageReactions.prepare(entry, snapshot),
+  onSuccess: (entry) => entry.owner.kind === "private" && !entry.reactionOnly ? captureConversationMemory(entry) : Promise.resolve(),
   onExecutionEnd: async (entry, snapshot) => {
     await computerControl.endTurn(entry);
     await events.captureExecution(entry, snapshot);
@@ -954,6 +956,14 @@ const collaboration = createCollaboration({
   }),
 });
 const activityInbox = createActivityInbox({ collaboration, coworkers: () => listCoworkers(coworkersDir), groups: () => listGroups(coworkersDir) });
+const messageReactions = createMessageReactionRuntime({
+  directory: coworkersDir, collaboration,
+  coworkerFor: (slug) => getCoworker(coworkersDir, slug),
+  assertPrivate: (slug, threadId) => savedPrivateDiscussion(slug, threadId),
+  onChange: (scope, revision) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("coworker:reactions-changed", { scope, revision });
+  },
+});
 const computerControl = createComputerControl({
   adapters: [createLocalComputerAdapter({
     // "Back to Coworker" in the native permission coach: the coach is an accessory
@@ -1097,7 +1107,7 @@ async function privateOwner(slug, threadId, kind = "private") {
   return collaboration.registerOwner({ slug, threadId, conversationId: threadId, kind, workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt });
 }
 
-async function computerDiscussion(slug, threadId) {
+async function savedPrivateDiscussion(slug, threadId) {
   if (typeof threadId !== "string" || !threadId || slug === ".coordinator") throw new Error("Choose a saved private discussion.");
   const coworker = await getCoworker(coworkersDir, slug);
   if (!coworker.workspaceId) throw new Error("This coworker's workspace is not ready.");
@@ -1108,6 +1118,11 @@ async function computerDiscussion(slug, threadId) {
     collaboration.read((state) => [state.owners[`${slug}:${threadId}`], ...Object.values(state.executions).filter((entry) => entry.owner.slug === slug && entry.owner.threadId === threadId).map((entry) => entry.owner)].filter(Boolean)),
   ]);
   assertPrivateComputerDiscussion({ slug, threadId, savedIds: parseDiscussionRegistry(saved), workerIds, workers, groups, assignments, owners });
+  return coworker;
+}
+
+async function computerDiscussion(slug, threadId) {
+  const coworker = await savedPrivateDiscussion(slug, threadId);
   const client = await collaborationClient(slug, { observationOnly: true });
   const snapshot = await client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(8000) });
   if (snapshot.threadId !== threadId || !snapshot.directory || path.resolve(snapshot.directory) !== path.resolve(coworker.path) || client.workspaceId !== coworker.workspaceId) throw new Error("This native discussion does not belong to the coworker's workspace.");
@@ -1968,6 +1983,7 @@ async function ensureToolsServer() {
     resolveSlug: (token) => maintenanceAdmission.closed ? null : toolTokenSlugs.get(token) ?? null,
     onContextTool: (slug, input, transportSignal) => maintenanceAdmission.run(async () => {
       const { name, args, context, cancel } = input;
+      if (name === "react") return messageReactions.execute(slug, args, context, transportSignal);
       if (name === "abilities_check") return abilitiesRuntime.check(slug, { ...args, ...context });
       if (name === "abilities_transform") return abilitiesRuntime.transform(slug, { ...args, ...context });
       if (Object.hasOwn(COMPUTER_TOOLS, name)) return computerControl.execute(slug, { name, args, context, cancel });
@@ -1975,15 +1991,20 @@ async function ensureToolsServer() {
       if (groupDocumentTools.has(name)) return groupDocuments.executeNative(slug, { name, args, context });
       if (Object.hasOwn(eventNativeSchemas, name)) return events.executeNative(slug, { name, args, context }, transportSignal);
       const workerTool = name === "worker_spawn" || WORKER_MANAGEMENT.includes(name);
-      const trusted = workerTool || name === "team_consult"
+      const trusted = workerTool
         ? await collaboration.context(slug, context, { name: `coworker_${name}`, args }, assertWorkerToolContext)
-        : await collaboration.context(slug, context);
+        : await collaboration.context(slug, context, { name: `coworker_${name}`, args }, assertTeamConsultToolContext);
       if (name === "team_consult") {
         if (!["private", "group", "consultation", "assignment"].includes(trusted.entry.owner.kind)) throw new Error("Workers cannot manage collaboration.");
         const target = (await listCoworkers(coworkersDir)).find((coworker) => coworker.slug === args.to || coworker.name.toLowerCase() === String(args.to).toLowerCase());
         if (!target) throw new Error("Choose a teammate from the team roster.");
+        transportSignal?.throwIfAborted();
         trusted.assertActive();
-        return collaboration.request(trusted, "consultation", { ...args, to: target.slug }, { workspaceId: target.workspaceId, coworkerCreatedAt: target.createdAt });
+        const current = await collaboration.context(slug, context, { name: "coworker_team_consult", args }, assertTeamConsultToolContext);
+        if (current.entry.id !== trusted.entry.id) throw new Error("This consultation belongs to an earlier admission.");
+        transportSignal?.throwIfAborted();
+        current.assertActive();
+        return collaboration.request(current, "consultation", { ...args, to: target.slug }, { workspaceId: target.workspaceId, coworkerCreatedAt: target.createdAt });
       }
       if (name === "worker_spawn") {
         if (args.control !== undefined) { assertControlOrigin(trusted.entry); await computerDiscussion(slug, trusted.entry.owner.threadId); trusted.assertActive(); }
@@ -2365,6 +2386,7 @@ function shortDate(at) {
 const installTemplates = createTemplateInstaller(coworkersDir, addCoworker);
 
 const commands = {
+  "reactions:read": (scope) => messageReactions.read(scope),
   "activity.list": () => activityInbox.list(),
   "activity.markRead": ({ ids, read = true }) => activityInbox.markRead(ids, read),
   "browser.bind": (input) => browserControl.bind(input),

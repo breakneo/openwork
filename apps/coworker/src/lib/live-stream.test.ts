@@ -149,6 +149,15 @@ test("group snapshots retain unavailable words, isolate native requests, and han
   assert.deepEqual(withDocuments.executions.map((item) => item.executionId), ["exec_1", "exec_2"], "artifact provenance is not reply publication");
   assert.equal(groupReplyParts(withDocuments.executions[0]!)[0]?.text, "kept reply");
   assert.deepEqual(reconcileGroupActivity(withDocuments, withDocuments).timeline, documents, "repeated artifact observations retain each revision once");
+  const documentRows = groupConversationRows([...documents].reverse(), withDocuments.executions, []);
+  assert.deepEqual(documentRows, [{ event: documents[1] }, ...withDocuments.executions.map((execution) => ({ execution }))], "only the highest document revision is displayed; its receipt identity and live executions stay intact");
+  assert.deepEqual(withDocuments.timeline, documents, "visual coalescing never edits the timeline");
+  const separateDocuments: GroupTimelineEvent[] = [
+    ...documents.map((event) => ({ ...event, executionId: undefined })),
+    { ...documents[0]!, id: "other-execution", executionId: second.executionId },
+    { ...documents[0]!, id: "other-document", documentId: "other-brief" },
+  ];
+  assert.deepEqual(groupConversationRows([...documents, ...separateDocuments, { id: "reacted", kind: "status", status: "reacted", text: "", at: 3 }], [], []), [documents[1], ...separateDocuments].map((event) => ({ event })), "missing execution IDs and different documents or executions stay separate; reaction-only receipts stay hidden");
   const published = reconcileGroupActivity(withDocuments, { timeline: [...documents, { id: "evt_1", kind: "coworker", executionId: first.executionId, text: "final reply", at: 3 }], executions: [first, second] });
   assert.deepEqual(published.executions.map((item) => item.executionId), ["exec_2"]);
   assert.deepEqual(published.timeline.slice(0, 2), documents, "published replies preserve the artifact receipts and their provenance");

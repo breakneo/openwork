@@ -16,6 +16,17 @@ import type { ExecutionActivity } from "./progress-activity.ts";
 import type { PendingInteractions, PermissionReply } from "./threads.ts";
 import { eventInputSchema, eventArtifactSchema, type EventInput, type WorkplaceEvent, type EventRun, type EventDetail, type EventArtifact } from "./events";
 
+export type MessageReactionScope =
+  | { kind: "private"; slug: string; threadId: string }
+  | { kind: "group"; groupId: string };
+export type MessageReaction = {
+  messageId: string;
+  emoji: string;
+  actor: { slug: string; name: string; createdAt: string };
+  updatedAt: number;
+};
+export type MessageReactionSnapshot = { revision: number; reactions: MessageReaction[] };
+
 export type GroupInteraction = { executionId: string; slug: string; threadId: string; workspaceId: string; deadline: number; pending: PendingInteractions };
 export type CoworkerActivityItem = {
   id: string;
@@ -121,6 +132,7 @@ export type GroupTimelineEvent = {
   title?: string;
   part?: GroupSpeakerPart;
   documentId?: string;
+  documentSummary?: string;
   revision?: number;
 };
 
@@ -485,6 +497,7 @@ type BridgeWindow = Window & {
   __COWORKER__?: {
     invoke: (command: string, payload?: unknown) => Promise<BridgeResponse>;
     onDeepLink?: (listener: (urls: string[]) => void) => () => void;
+    onReactionsChanged?: (listener: (change: { scope: MessageReactionScope; revision: number }) => void) => () => void;
   };
 };
 
@@ -499,6 +512,13 @@ async function invoke<T>(command: string, payload?: unknown): Promise<T> {
 }
 
 export const coworkerBridge = {
+  reactions: {
+    read: (scope: MessageReactionScope) => invoke<MessageReactionSnapshot>("reactions:read", scope),
+    onChanged: (listener: (change: { scope: MessageReactionScope; revision: number }) => void): (() => void) => {
+      const host: BridgeWindow = window;
+      return host.__COWORKER__?.onReactionsChanged?.(listener) ?? (() => undefined);
+    },
+  },
   activity: {
     list: () => invoke<CoworkerActivityItem[]>("activity.list"),
     markRead: (ids: string[], read = true) => invoke<CoworkerActivityItem[]>("activity.markRead", { ids, read }),

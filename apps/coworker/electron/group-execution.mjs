@@ -29,11 +29,11 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
     const event = await appendGroupEvent(directory, entry.owner.groupId, groupReplyEvent(entry));
     const group = await getGroup(directory, entry.owner.groupId);
     if (group.turns.some((turn) => turn.id === entry.owner.turnId)) {
-      await updateGroupTurn(directory, group.id, entry.owner.turnId, { speaker: { slug: entry.owner.slug, part: entry.owner.part ?? "reply", status: event.status === "passed" ? "passed" : "succeeded", threadId: entry.owner.threadId, error: "", endedAt: entry.endedAt } });
+      await updateGroupTurn(directory, group.id, entry.owner.turnId, { speaker: { slug: entry.owner.slug, part: entry.owner.part ?? "reply", status: ["passed", "reacted"].includes(event.status) ? "passed" : "succeeded", threadId: entry.owner.threadId, error: "", endedAt: entry.endedAt } });
     }
     // The receipt follows both writes; a crash before it retries the same event, never inference.
     await collaboration.groupReplyPublished(entry.id, event);
-    if (event.status !== "passed") await onPublished(entry).catch(() => {});
+    if (!["passed", "reacted"].includes(event.status)) await onPublished(entry).catch(() => {});
     return event;
   }
   async function participant(groupId, slug, signal = AbortSignal.timeout(setupTimeoutMs), coworkerCreatedAt = null) {
@@ -127,7 +127,7 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
           const activityEligible = request.attempt
             ? await collaboration.read((state) => state.tasks[prior?.taskId]?.activityEligible === true)
             : request.activityEligible === true;
-          const entry = await collaboration.submit({ id, owner, activityEligible, groupRequestId: request.id, requestText: request.text, personRequest: request.humanRequest === true && !request.eventRunId && !request.legacyAllHands && !request.attempt, groupReply: { name: participants.find((member) => member.slug === slug).name }, prompt: context ? `${context}\n\n${words}` : words, timeoutMs: replyTimeoutMs, tools: { coworker_team_refer: false, coworker_event_conclude: Boolean(request.eventRunId && request.eventPhase === "conclusion") } });
+          const entry = await collaboration.submit({ id, owner, activityEligible, reactionTargetIds: step.reactionTargetIds, reactionDefaultId: step.messageId, groupRequestId: request.id, requestText: request.text, personRequest: request.humanRequest === true && !request.eventRunId && !request.legacyAllHands && !request.attempt, groupReply: { name: participants.find((member) => member.slug === slug).name }, prompt: context ? `${context}\n\n${words}` : words, timeoutMs: replyTimeoutMs, tools: { coworker_team_refer: false, coworker_event_conclude: Boolean(request.eventRunId && request.eventPhase === "conclusion") } });
           return { ...await collaboration.wait(entry.id, signal), executionId: entry.id };
         },
         route: async (input) => {
@@ -367,7 +367,7 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
         await collaboration.change((state) => { signal.throwIfAborted(); if (!state.tasks[task.id].cancelRequested) state.tasks[task.id].answerOwner = owner; });
       }
       await assertLive();
-      return { owner, prompt: `You are ${to.name}. ${from.name} asks this focused question in your shared group. Answer the question, not the private task behind it. Only the following explicit brief was shared; no private transcript is available.\n\nQuestion: ${task.input.question}\n\nShared context: ${task.input.context || "none"}\n\nGive a concise answer with evidence or uncertainty. Do not perform external writes without the person's authorization. If a question or approval is necessary, explain the blocker.` };
+      return { owner, reactionTargetIds: [`evt_${collaborationId(task.id, "question").slice(5)}`], reactionDefaultId: `evt_${collaborationId(task.id, "question").slice(5)}`, prompt: `You are ${to.name}. ${from.name} asks this focused question in your shared group. Answer the question, not the private task behind it. Only the following explicit brief was shared; no private transcript is available.\n\nQuestion: ${task.input.question}\n\nShared context: ${task.input.context || "none"}\n\nGive a concise answer with evidence or uncertainty. Do not perform external writes without the person's authorization. If a question or approval is necessary, explain the blocker.` };
     },
   };
 }

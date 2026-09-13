@@ -4,7 +4,8 @@ import { coworkerBridge, type CollaborationReceipt, type CoworkerGroupSummary, t
 import { assignmentPrompt, assignmentTitle, timeLabelBetween, type DiscussionMessage } from "@/lib/conversation";
 import { combineSummaryLines, describeCoworkerSummary, type CoworkerSummaryLine } from "@/lib/coworker-summary";
 import { classifyThreads, discussionIds, loadDiscussionRegistry } from "@/lib/discussions";
-import { lastDocumentsOpened } from "@/ui/documents";
+import { humanizeDocumentId } from "@/lib/documents";
+import { DocumentCard, lastDocumentsOpened } from "@/ui/documents";
 import { GroupDocuments, type GroupDocumentsApi } from "@/ui/group-documents";
 import {
   publishGroupRun,
@@ -27,7 +28,8 @@ import { changeGroupSends, groupConversationRows, groupMessageKey, groupReplyPar
 import { PROGRESS_LIMITS } from "@/lib/progress-config";
 import { safeLiveMarkdown } from "@/lib/live-phase";
 import { LiveRow } from "@/ui/live-row";
-import { Markdown } from "@/ui/markdown";
+import { ChatReply } from "@/ui/chat-reply";
+import { MessageReactions, useMessageReactions } from "@/ui/message-reactions";
 import { acknowledgeCoworker, CoworkerAvatar, GroupAvatars } from "@/ui/coworker-avatar";
 import { InteractionCard, InteractionCards, LETTERS, OptionRow, typingInField } from "@/ui/interactions";
 import { ActionMenu, Button, ErrorNote, PlusIcon } from "@/ui/kit";
@@ -155,7 +157,7 @@ const GroupExecutionRow = memo(function GroupExecutionRow({ activity, coworker, 
     <p className="mb-1 px-2 text-[11px] font-medium text-mist [overflow-wrap:anywhere]" data-testid="group-speaker-name">{coworker.name}</p>
     {text ? <div className="flex min-w-0 items-end gap-2" data-message-role="assistant" data-live="true">
       <span className="shrink-0"><CoworkerAvatar identity={coworker.slug} animated={false} motion="quiet" gaze={false} color={coworker.avatarColor} glasses={coworker.avatarGlasses} name={coworker.name} size={24} /></span>
-      <div className="bubble bubble-coworker bubble-tail-left min-w-0 max-w-[76%] [overflow-wrap:anywhere]" data-testid="group-live-reply"><Markdown text={safeLiveMarkdown(text)} className="overflow-x-auto" /></div>
+      <div className="min-w-0 max-w-[76%]" data-testid="group-live-reply"><ChatReply text={safeLiveMarkdown(text)} live tail /></div>
     </div> : null}
     <LiveRow coworker={coworker} progress={progress} phase={progress.status === "streaming" ? "writing" : "thinking"} wordsArrived={Boolean(text)} />
   </div>;
@@ -221,6 +223,7 @@ function GroupChatView({
   const [activityReadStartedAt, setActivityReadStartedAt] = useState(0);
   const events = observed.groupId === group.id ? observed.timeline : [];
   const executions = observed.groupId === group.id ? observed.executions : [];
+  const messageReactions = useMessageReactions({ kind: "group", groupId: group.id }, active, group.createdAt);
   const [humanWaits, setHumanWaits] = useState<{ groupId: string; entries: GroupInteraction[] }>({ groupId: "", entries: [] });
   const interactions = humanWaits.groupId === group.id ? humanWaits.entries : [];
   const [loaded, setLoaded] = useState(false);
@@ -614,6 +617,7 @@ function GroupChatView({
   const statusLine = activityError ? "Reconnecting to activity" : localSends.some((item) => item.state === "uncertain") ? "Checking message confirmation" : sending ? "Sending…" : interactions.length || executions.length || live ? presentation.line : waiting ? "Waiting for requested work" : !loaded || !receiptsLoaded || observed.groupId !== group.id ? "Checking activity" : localSends.some((item) => item.state === "accepted") ? "Message accepted" : "Ready";
   const activeSlugs = presentation.activeSlugs;
   const rows = useMemo(() => groupConversationRows(events, executions, localSends), [events, executions, localSends]);
+  const persistedEventIds = useMemo(() => new Set(events.map((event) => event.id)), [events]);
   const viewEvent = eventId && onOpenEvent ? <button type="button" className="font-medium text-snow/80 underline-offset-2 hover:underline" onClick={() => onOpenEvent(eventId)} data-testid="group-event-phase-link">View event</button> : null;
 
   return (
@@ -681,6 +685,7 @@ function GroupChatView({
               return member ? <GroupExecutionRow key={`execution:${execution.executionId}:${execution.threadId}:${execution.messageId}:${execution.slug}`} activity={execution} coworker={member} runtime={runtime} unavailable={Boolean(activityError) || !loaded} waiting={interactions.some((entry) => entry.executionId === execution.executionId)} /> : null;
             }
             const { event, delivery } = row;
+            const persistedEventId = persistedEventIds.has(event.id) ? event.id : undefined;
             const previousRow = rows[index - 1];
             const nextRow = rows[index + 1];
             const previous = previousRow && "event" in previousRow ? previousRow.event : undefined;
@@ -691,6 +696,18 @@ function GroupChatView({
             const tail = !sameSpeaker(next);
             const label = timeLabelBetween(previous?.at, event.at);
             if (event.kind === "status") {
+              if (event.status === "document" && event.documentId && documentsApi) {
+                const documentId = event.documentId;
+                return (
+                  <div key={key} className="min-w-0 max-w-[320px] space-y-1" data-testid="group-status" data-status={event.status} data-speaker={event.slug} data-event-id={event.id}>
+                    <DocumentCard
+                      card={{ id: documentId, title: event.title?.trim() || humanizeDocumentId(documentId), summary: event.documentSummary ?? event.text, highlights: [], action: "updated", section: "", revision: event.revision ?? null }}
+                      onOpen={() => setSharedDocument({ groupId: group.id, id: documentId })}
+                    />
+                    <p className="text-[10px] text-mist" title={new Date(event.at).toLocaleString()}>{timeLabel(event.at)}</p>
+                  </div>
+                );
+              }
               // A quiet line. When it is about a speaker of the latest unfinished turn, it also offers the fix.
               const speaker = recoverable && event.turnId === recoverable.id ? unfinished.find((entry) => entry.slug === event.slug) : undefined;
               const failure = speaker ? describeSpeakerFailure(speaker.error, nameFor(speaker.slug)) : null;
@@ -724,13 +741,14 @@ function GroupChatView({
               const queued = queue.some((item) => item.clientMessageId === event.clientMessageId);
               const eventPhase = isEventPhaseRequest(delivery?.clientMessageId ?? event.clientMessageId, delivery?.turnId ?? event.turnId);
               return (
-                <div key={key} data-scroll-anchor={key} data-client-message-id={event.clientMessageId} data-delivery-state={delivery?.state ?? "recorded"}>
+                <div key={key} data-scroll-anchor={key} data-event-id={persistedEventId} data-client-message-id={event.clientMessageId} data-delivery-state={delivery?.state ?? "recorded"}>
                   {label ? <p className="pb-1 pt-2 text-center text-[11px] font-medium text-mist/80" data-testid="group-time-label">{label}</p> : null}
                   <div className={`flex justify-end ${continued ? "-mt-1.5" : ""}`} data-message-role="user" data-continued={continued ? "true" : "false"}>
                     <div className={`bubble bubble-user max-w-[72%] whitespace-pre-wrap ${tail ? "bubble-tail-right" : ""}`} title={timeLabel(event.at)}>
                       {event.text}
                     </div>
                   </div>
+                  {persistedEventId ? <MessageReactions messageId={persistedEventId} reactions={messageReactions.get(persistedEventId)} className="ml-auto mt-1 max-w-[72%] justify-end" /> : null}
                   {delivery ? <div className="mt-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-1 px-2 text-[11px] text-mist" role="status" data-testid={queued ? "group-queued" : delivery.state === "failed" || delivery.state === "uncertain" ? "group-turn-failed" : "group-send-receipt"}>
                     <span>{eventPhase ? "Managed event phase; its run record owns the status" : queued ? "Next" : delivery.state === "pending" ? "Waiting to send" : delivery.state === "sending" ? "Sending…" : delivery.state === "accepted" ? "Accepted" : delivery.state === "cancelled" ? "Removed from queue" : delivery.state === "uncertain" ? "Confirmation delayed. Checking records." : "Could not send"}</span>
                     {delivery.error ? <span className="max-w-prose [overflow-wrap:anywhere]">{delivery.error}</span> : null}
@@ -751,11 +769,12 @@ function GroupChatView({
                   </span>
                   <div className="min-w-0 max-w-[76%]">
                     {!continued ? <p className="mb-0.5 px-2 text-[11px] font-medium text-mist" data-testid="group-speaker-name">{nameFor(event.slug ?? "")}</p> : null}
-                    <div className={`bubble bubble-coworker [overflow-wrap:anywhere] ${tail ? "bubble-tail-left" : ""}`} title={timeLabel(event.at)}>
-                      <Markdown text={event.text} className="overflow-x-auto" />
+                    <div title={timeLabel(event.at)}>
+                      <ChatReply text={event.text} tail={tail} />
                     </div>
                   </div>
                 </div>
+                {persistedEventId ? <MessageReactions messageId={persistedEventId} reactions={messageReactions.get(persistedEventId)} className="ml-8 mt-1 max-w-[76%]" /> : null}
               </div>
             );
           })}

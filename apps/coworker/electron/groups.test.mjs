@@ -21,6 +21,8 @@ import { updateAllHands, prepareAllHands, claimAllHands, readAllHands } from "./
 import { createWorker, getWorker, nextWorkerState, parseWorkerReport, prepareWorkerTurn, queueWorkerSteer, updateWorker } from "./workers.mjs";
 import { connectedModelCatalog, createCoworkerThreads } from "../src/lib/threads.ts";
 import { resolveDiscussionModel } from "../src/lib/model-choice.ts";
+import { groupConversationRows, reconcileGroupActivity } from "../src/lib/group-continuity.ts";
+import { describeGroupPresentation } from "../src/lib/group-presentation.ts";
 import { fixtureCatalog, fixtureProvider } from "../src/lib/provider-catalog.fixture.ts";
 import {
   INTERRUPTED_TURN_MESSAGE,
@@ -1280,6 +1282,66 @@ test("Workers stay requested until parent success and return corrections or exha
         assert.match(followups[0].prompt, /spent lifespan is not completion/);
       }
     } finally { await service.stop(); }
+  });
+});
+
+test("quiet reaction-only group replies publish hidden receipts and settle the rail without Activity", async () => {
+  await withHome(async (home) => {
+    const fixture = nativeFixture(async ({ threadId, reply }) => {
+      Object.assign(reply.parts[0], { tool: "coworker_react", toolStatus: "completed" });
+      fixture.held.add(threadId);
+      return "";
+    });
+    const clientFor = async (slug) => {
+      const client = await fixture.clientFor(slug);
+      const normalized = (snapshot) => {
+        const settled = snapshot.status.type === "idle" && !fixture.held.has(snapshot.threadId);
+        const messages = snapshot.messages.map((message) => message.role === "assistant" && !settled ? { ...message, completedAt: null } : message);
+        const turnOutcomes = Object.fromEntries(messages.filter((message) => settled && message.role === "assistant" && message.completedAt != null && !message.error
+          && messages.some((parent) => parent.role === "user" && parent.id === message.parentId)).map((message) => [message.parentId, "succeeded"]));
+        return { ...snapshot, messages, native: { engine: "v2", pendingInputIds: [], ambiguousTurns: [], turnOutcomes } };
+      };
+      return { ...client,
+        getThreadSnapshot: async (...args) => normalized(await client.getThreadSnapshot(...args)),
+        waitForThread: async (...args) => { const result = await client.waitForThread(...args); return { ...result, snapshot: normalized(result.snapshot) }; },
+      };
+    };
+    const service = createCollaboration({ directory: home, clientFor, pollMs: 5 });
+    const groups = createGroupExecution({ directory: home, collaboration: service, clientFor, coworkerFor: fixtureCoworker,
+      coordinator: async () => ({}), catalogFor: async () => ({ models: [] }), pollMs: 5 });
+    try {
+      const group = await createGroup(home, { name: "Quiet reply", participantSlugs: ["scout", "editor"] });
+      await groups.start();
+      await groups.submit(group.id, { clientMessageId: "quiet-reaction", text: "@scout Thanks!" });
+      await eventually(async () => (await service.activityEntries({ groupId: group.id })).some((entry) => entry.state === "running") && fixture.held.size === 1);
+      const writing = await groups.activity(group.id, (scope) => service.activityEntries(scope));
+      assert.equal(writing.executions.length, 1);
+      fixture.held.clear();
+      await eventually(async () => !(await groups.status(group.id)).active);
+
+      const entry = await service.read((state) => state.executions[writing.executions[0].executionId]);
+      assert.equal(entry.state, "succeeded");
+      assert.equal(entry.reactionOnly, true);
+      assert.equal(entry.error, "");
+      assert.equal(entry.groupReply.published, true);
+      assert.equal(await service.read((state) => state.tasks[entry.taskId].state), "succeeded");
+      assert.equal(await service.read((state) => state.tasks[entry.taskId].activityEligible), true);
+      const turn = (await getGroup(home, group.id)).turns[0];
+      assert.equal(turn.status, "succeeded");
+      assert.deepEqual(turn.speakers.map((speaker) => [speaker.status, speaker.error]), [["passed", ""]]);
+      const settled = await groups.activity(group.id, (scope) => service.activityEntries(scope));
+      assert.deepEqual(settled.timeline.map((event) => [event.kind, event.status, event.text]), [["user", undefined, "@scout Thanks!"], ["status", "reacted", ""]]);
+      assert.equal(settled.timeline[1].executionId, entry.id);
+      assert.equal(settled.timeline[1].turnId, turn.id);
+      assert.deepEqual(settled.executions, []);
+      const view = reconcileGroupActivity(writing, settled);
+      assert.deepEqual(view.executions, []);
+      assert.deepEqual(groupConversationRows(view.timeline, view.executions, []), [{ event: settled.timeline[0] }]);
+      assert.deepEqual(describeGroupPresentation({ events: view.timeline, executions: view.executions, ...await groups.status(group.id), nameFor: (slug) => slug === "scout" ? "Scout" : "Editor" }), { line: "Scout reacted", activeSlugs: [] });
+      assert.deepEqual(await service.listActivity(), []);
+      assert.deepEqual(fixture.aborted, []);
+      assert.equal(fixture.requests.length, 1);
+    } finally { await groups.stop(); await service.stop(); }
   });
 });
 

@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { REACTION_DESCRIPTION } from "./message-reactions-context.mjs";
 import { installNativePlugin, NATIVE_BROKER_SOURCE } from "./native-plugin.mjs";
 import { installTurnRolesPlugin } from "./turn-roles-plugin.mjs";
 
@@ -18,6 +19,8 @@ export default Plugin.define({ id: "coworker.collaboration", effect: (ctx) => Ef
     return { ...brokerTool(ctx, name, input, description, { textOnly: true }), name: "coworker_" + name };
   };
   const tools = [
+    define("react", ${JSON.stringify(REACTION_DESCRIPTION)},
+      { emoji: schema.string().min(1).max(64).nullable(), messageId: schema.string().min(1).max(256).optional() }),
     define("team_consult", "Ask one teammate a focused question needed for this task. The question and explicit context appear in a shared pair/group conversation. Never copy private transcript or memory. Give the continuation objective, completed actions and next instructions, NOT reasoning. This returns an acknowledgement, not the answer: end your turn and the app resumes you here once all results arrive. Never poll, self-consult, or call from a Worker.",
       { to: schema.string().max(64), question: schema.string().min(1).max(4000), context: schema.string().max(2000).optional(), continuation }),
     define("worker_spawn", "Start a Worker for one bounded goal beyond this reply. Record the original objective and how to use its result, then acknowledge and END this turn. The app delivers a follow-up here when the Worker finishes; never poll or wait in this turn. Use an assignment for scheduled work. Workers cannot start Workers.",
