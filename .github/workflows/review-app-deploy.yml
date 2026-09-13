@@ -69,7 +69,7 @@ jobs:
         id: deploy
         run: |
           set -euo pipefail
-          url="$(npx --yes vercel@48 deploy --target preview --yes --token "$VERCEL_TOKEN" --meta githubCommitSha="$GITHUB_SHA")"
+          url="$(npx --yes vercel@48 deploy --target preview --yes --scope "$VERCEL_ORG_ID" --token "$VERCEL_TOKEN" --meta githubCommitSha="$GITHUB_SHA")"
           case "$url" in
             https://*) ;;
             *) echo "::error::Unexpected deployment output: $url"; exit 1 ;;
@@ -82,7 +82,7 @@ jobs:
           ALIAS_HOST: ${{ steps.alias.outputs.host }}
         run: |
           set -euo pipefail
-          npx --yes vercel@48 alias set "$DEPLOYMENT_URL" "$ALIAS_HOST" --token "$VERCEL_TOKEN"
+          npx --yes vercel@48 alias set "$DEPLOYMENT_URL" "$ALIAS_HOST" --scope "$VERCEL_ORG_ID" --token "$VERCEL_TOKEN"
       - name: Verify the alias still requires Vercel Authentication
         env:
           ALIAS_HOST: ${{ steps.alias.outputs.host }}
