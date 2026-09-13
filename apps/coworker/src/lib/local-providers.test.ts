@@ -146,6 +146,16 @@ test("OpenAI replacement requires existing disconnect confirmation or deliberate
   assert.equal(openAiSetupGuard([finding({ id: "env:OPENAI_API_KEY", kind: "env", how: "in-use", providerId: "openai", credentialKind: "api-key" })], { providers: [] })?.kind, "environment");
 });
 
+test("native credential metadata and external detections do not imply ChatGPT access or key support", () => {
+  const findings = [finding({ id: "codex", kind: "codex", providerId: "openai", how: "unavailable", credentialKind: "chatgpt-oauth" })];
+  const readiness = { providers: [{ id: "openai", name: "OpenAI", env: [], source: "credential", connected: true, modelCount: 1, acceptsKey: false, integrationID: "fixture-integration" }], signIns: {} };
+  assert.deepEqual(chatgptEvidence(findings, readiness), { kind: "none" });
+  const plan = planLocalMode({ findings, readiness, catalog: { models: [] } });
+  assert.equal(plan.addable[0]?.acceptsKey, false);
+  assert.equal(plan.found[0]?.how, "unavailable");
+  assert.equal(modelGrowthOffer({ findings, readiness, usingFreeModel: false }), null);
+});
+
 test("growth offers are evidence-led navigation and dismissal does not fall through to another nag", () => {
   const codex = finding({ id: "codex", kind: "codex", providerId: "openai", how: "import", credentialKind: "chatgpt-oauth" });
   const input = { findings: [], readiness: { providers: [] }, usingFreeModel: false };

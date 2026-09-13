@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { marked } from "marked";
 import { z } from "zod";
-import { createCollaboration, nativeMessageId } from "./collaboration.mjs";
+import { createCollaboration, nativeMessageId, withAbort } from "./collaboration.mjs";
+import { nativeTurnAgent } from "./native-turns.mjs";
 import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS } from "./activity-inbox.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
@@ -48,9 +49,8 @@ async function withHome(run) {
 }
 
 test("native questions get a client default without overriding explicit tool rules", () => {
-  assert.deepEqual(withInteractiveQuestionDefault({}), { permission: { question: "allow" } });
-  assert.deepEqual(withInteractiveQuestionDefault({ permission: { bash: "ask" } }), { permission: { bash: "ask", question: "allow" } });
-  for (const config of [{ permission: "deny" }, { permission: { "*": "ask" } }, { permission: { question: "deny" } }, { tools: { question: false } }, { tools: { "*": false } }]) {
+  assert.deepEqual(withInteractiveQuestionDefault({}), { permissions: [{ action: "question", resource: "*", effect: "allow" }] });
+  for (const config of ["*", "question", "q*"].map((action) => ({ permissions: [{ action, resource: "*", effect: "deny" }] }))) {
     assert.equal(withInteractiveQuestionDefault(config), config);
   }
 });
@@ -362,6 +362,192 @@ test("Activity parsing failures never fail private completion or group publicati
       });
       assert.deepEqual(await service.listActivity(), before, "a recording failure leaves the index intact");
     } finally { await groups.stop(); await service.stop(); parser.mock.restore(); }
+  });
+});
+
+test("native collaboration rejects completed assistants from interrupted live and recovered turns", async () => {
+  for (const recovered of [false, true]) await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const owner = { slug: "scout", threadId: "ses_receipt", conversationId: "ses_receipt", kind: "private" };
+    const messageId = "msg_receipt";
+    const native = { engine: "v2", pendingInputIds: [], turnOutcomes: { [messageId]: "interrupted", msg_other: "succeeded" } };
+    let captures = 0;
+    const options = { directory: home, pollMs: 5, onSuccess: async () => { captures++; }, clientFor: async (slug) => {
+      const client = await fixture.clientFor(slug);
+      return { ...client,
+        getThreadSnapshot: async (...args) => ({ ...await client.getThreadSnapshot(...args), native }),
+        waitForThread: async (...args) => { const result = await client.waitForThread(...args); return { ...result, snapshot: { ...result.snapshot, native } }; },
+      };
+    } };
+    let service = createCollaboration({ ...options, pollMs: 60_000 });
+    try {
+      const entry = await service.submit({ owner, messageId, prompt: "Keep the earlier work", track: true });
+      if (recovered) {
+        await (await fixture.clientFor(owner.slug)).sendTurn(owner.threadId, { messageId, prompt: entry.prompt });
+        await service.change((state) => { Object.assign(state.executions[entry.id], { state: "running", sentAt: Date.now() }); });
+      }
+      await service.stop();
+      service = createCollaboration(options);
+      await service.start();
+      await eventually(async () => (await service.read((state) => state.executions[entry.id])).state === "failed");
+      const failed = await service.read((state) => state.executions[entry.id]);
+      assert.match(failed.error, /interrupted/);
+      assert.equal(failed.result, "");
+      assert.equal(captures, 0, "an interrupted native receipt cannot publish memory");
+      assert.equal(fixture.requests.length, 1, "recovery never resends the completed history");
+      assert.notEqual(fixture.histories.get(owner.threadId).at(-1).completedAt, null);
+    } finally { await service.stop(); }
+  });
+});
+
+test("native collaboration recovers inbox-only acceptance and fences uncertain admission across restart", async () => {
+  for (const phase of ["inbox", "attempted", "prepared", "legacy-retry", "legacy-queued-retry", "legacy-cleared-retry"]) await withHome(async (home) => {
+    const clearedRetry = ["legacy-queued-retry", "legacy-cleared-retry"].includes(phase);
+    const retryOnSubmit = ["legacy-retry", "legacy-cleared-retry"].includes(phase);
+    const fixture = nativeFixture();
+    const owner = { slug: "scout", threadId: "ses_inbox", conversationId: "ses_inbox", kind: "private" };
+    const messageId = "msg_inbox";
+    const native = { engine: "v2", pendingInputIds: phase === "inbox" ? [messageId] : [], turnOutcomes: { msg_other: "succeeded" } };
+    const waiting = Promise.withResolvers();
+    const finish = Promise.withResolvers();
+    const options = { directory: home, pollMs: 5, clientFor: async (slug) => {
+      const client = await fixture.clientFor(slug);
+      return { ...client,
+        getThreadSnapshot: async (...args) => ({ ...await client.getThreadSnapshot(...args), native }),
+        sendTurn: async (...args) => {
+          const stored = JSON.parse(await readFile(path.join(home, ".collaboration", "state.json"), "utf8"));
+          assert.equal(Object.values(stored.executions)[0].nativeAdmission, "attempted", "the attempt is durable before send");
+          const acceptance = await client.sendTurn(...args);
+          native.turnOutcomes[messageId] = "succeeded";
+          return acceptance;
+        },
+        waitForThread: async (threadId, input) => {
+          assert.equal(input.since.messageId, messageId);
+          waiting.resolve();
+          await withAbort(finish.promise, input.signal);
+          return { outcome: "settled", snapshot: { ...await client.getThreadSnapshot(threadId), native }, terminalError: null };
+        },
+      };
+    } };
+    let service = createCollaboration({ ...options, pollMs: 60_000 });
+    try {
+      const entry = await service.submit({ owner, messageId, prompt: "Keep this exact input" });
+      await service.change((state) => {
+        Object.assign(state.executions[entry.id], {
+          state: retryOnSubmit ? "failed" : clearedRetry ? "queued" : "running",
+          sentAt: clearedRetry ? null : Date.now(),
+          ...(["prepared", "attempted"].includes(phase) ? { nativeAdmission: phase } : {}),
+          ...(clearedRetry ? { acceptance: null, retry: phase === "legacy-queued-retry", attempts: 1, generatedMessageId: true } : {}),
+        });
+        if (retryOnSubmit) state.tasks[entry.taskId].state = "failed";
+      });
+      await service.stop();
+      service = createCollaboration(options);
+      if (clearedRetry) {
+        const saved = await service.read((state) => state.executions[entry.id]);
+        assert.equal(saved.nativeAdmission, undefined);
+        assert.equal(saved.sentAt, null);
+        assert.equal(saved.acceptance, null);
+        assert.equal(saved.state, retryOnSubmit ? "failed" : "queued");
+        assert.equal(saved.retry, !retryOnSubmit);
+        assert.equal(saved.attempts, 1);
+      }
+      await service.start();
+      if (retryOnSubmit) await service.submit({ ...entry, retry: true, retryByPerson: true });
+      if (phase === "inbox") {
+        await withAbort(waiting.promise, AbortSignal.timeout(4000));
+        assert.equal((await service.read((state) => state.executions[entry.id])).state, "running", "another turn's success cannot settle this inbox input");
+        assert.equal(fixture.requests.length, 0);
+        fixture.histories.set(owner.threadId, [
+          { id: messageId, role: "user", parts: [] },
+          { id: "assistant_inbox", role: "assistant", parentId: messageId, completedAt: 1, parts: [{ type: "text", text: "Confirmed result" }] },
+        ]);
+        native.pendingInputIds = [];
+        native.turnOutcomes[messageId] = "succeeded";
+        finish.resolve();
+      }
+      await eventually(async () => ["failed", "succeeded"].includes((await service.read((state) => state.executions[entry.id])).state));
+      const settled = await service.read((state) => state.executions[entry.id]);
+      const failed = !["inbox", "prepared"].includes(phase);
+      assert.equal(settled.state, failed ? "failed" : "succeeded");
+      assert.equal(fixture.requests.length, phase === "prepared" ? 1 : 0);
+      if (failed) assert.match(settled.error, /will not be replayed/);
+      else assert.equal(settled.nativeAdmission, "attempted");
+      if (clearedRetry) assert.equal(settled.messageId, messageId, "uncertain recovery cannot rotate the original input ID");
+      if (retryOnSubmit) assert.equal(settled.nativeAdmission, "attempted", "retry resets retain the conservative phase");
+    } finally { finish.resolve(); await service.stop(); }
+  });
+});
+
+test("native Stop shares cleanup across cancellation and observer release", async () => {
+  await withHome(async (home) => {
+    const fixture = nativeFixture(async ({ threadId, input }) => { if (input.prompt === "Hold") fixture.held.add(threadId); });
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    let stops = 0, endings = 0;
+    const service = createCollaboration({ directory: home, pollMs: 5, onExecutionEnd: async () => { endings++; }, clientFor: async (slug) => {
+      const client = await fixture.clientFor(slug);
+      return { ...client, abortThread: async (id) => {
+        if (++stops > 1) throw new Error("Concurrent native Stop");
+        entered.resolve(); await release.promise;
+        return client.abortThread(id);
+      } };
+    } });
+    try {
+      const owner = { slug: "scout", threadId: "ses_stop", conversationId: "ses_stop", kind: "private" };
+      const entry = await service.submit({ owner, messageId: "msg_stop", prompt: "Hold" });
+      await service.acceptance(entry.id);
+      const cancelling = Promise.all([service.cancel(entry.id), service.cancel(entry.id)]);
+      void cancelling.catch(() => {});
+      await withAbort(entered.promise, AbortSignal.timeout(1000));
+      release.resolve(); await cancelling;
+      await eventually(() => fixture.aborted.length === 1);
+      assert.equal(stops, 1);
+      assert.equal(endings, 1);
+      const next = await service.submit({ owner: { ...owner, threadId: "ses_after", conversationId: "ses_after" }, messageId: "msg_after", prompt: "After Stop" });
+      await service.wait(next.id);
+    } finally { release.resolve(); await service.stop({ requireConfirmed: true }); }
+  });
+});
+
+test("context-only attempted recovery drains its own inbox across restart and terminal Stop", async () => {
+  for (const recover of [true, false]) await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const owner = { slug: "scout", threadId: "ses_context", conversationId: "ses_context", kind: "private" };
+    const messageId = "msg_context", contextId = `${messageId}_context`;
+    const model = { providerId: "fixture", modelId: "text" };
+    let pending = [], agent, deleted = 0;
+    const options = { directory: home, pollMs: recover ? 5 : 60_000, clientFor: async (slug) => ({
+      ...await fixture.clientFor(slug),
+      getThreadSnapshot: async () => ({ threadId: owner.threadId, status: { type: "idle" }, messages: [], native: { engine: "v2", pendingInputIds: pending.map((item) => item.id), turnOutcomes: {} } }),
+      nativeSkills: {
+        getSession: async () => ({ id: owner.threadId, agent, model: { providerID: model.providerId, id: model.modelId }, time: {} }),
+        readHistory: async () => [], readInbox: async () => pending, readActive: async () => ({}),
+        reconcileInput: async (_id, input) => pending.length ? { state: "queued", receipt: pending.find((item) => item.id === input.id) } : { state: "unobserved", id: input.id },
+        cancelInput: async (id, inputId) => { assert.equal(id, owner.threadId); assert.equal(inputId, contextId); deleted++; pending = []; },
+      },
+    }) };
+    let service = createCollaboration({ ...options, pollMs: 60_000 });
+    const entry = await service.submit({ owner, messageId, prompt: "Never replay", model });
+    agent = entry.agent;
+    pending = [{ id: contextId, type: "synthetic", delivery: "steer", payload: { text: "Reference", metadata: { headlessTurn: { version: 1, messageId, contextId, previousMessageId: null, previousIdleAt: null, previousOutcome: null, model: { providerID: model.providerId, id: model.modelId }, agent } } } }];
+    await service.change((state) => {
+      Object.assign(state.executions[entry.id], { state: recover ? "running" : "failed", sentAt: Date.now(), nativeAdmission: "attempted", context: "Reference", workspaceId: "workspace_scout" });
+      state.tasks[entry.taskId].state = recover ? "running" : "failed";
+    });
+    await service.stop();
+    service = createCollaboration(options);
+    try {
+      if (recover) {
+        await service.start();
+        await eventually(async () => (await service.read((state) => state.executions[entry.id])).state === "failed");
+      } else await service.cancel(entry.id);
+      assert.equal(deleted, 1);
+      assert.equal(pending.length, 0);
+      await service.cancel(entry.id);
+      assert.equal(deleted, 1);
+      assert.equal(fixture.requests.length, 0);
+      assert.deepEqual(fixture.aborted, []);
+    } finally { await service.stop(); }
   });
 });
 
@@ -807,6 +993,12 @@ test("fresh admission waits through an idle unfinished placeholder", async () =>
       assert.equal(polls, 2);
        assert.equal(fixture.requests.length, 1);
        assert.deepEqual(fixture.requests[0].model, selected);
+       assert.equal(fixture.requests[0].tools, undefined, "native dispatch never sends a v1 tool mask");
+        const admitted = await service.read((state) => state.executions[entry.id]);
+        assert.equal(fixture.requests[0].agent, nativeTurnAgent({ tools: admitted.tools }));
+        assert.equal(admitted.agent, fixture.requests[0].agent);
+        assert.equal(admitted.tools.coworker_computer_act, false, "legacy mask provenance remains on disk");
+        assert.equal(admitted.tools.coworker_event_create, false, "automatic turns retain their Event write deny");
        assert.deepEqual((await service.read((state) => state.executions[entry.id])).model, selected, "native model selection is pinned at admission");
        const explicit = { providerId: "fixture", modelId: "publisher/fixed" };
        const next = await service.submit({ owner: { slug: "scout", threadId: "ses_explicit", conversationId: "ses_explicit", kind: "private" }, prompt: "Keep this exact model", model: explicit });
@@ -1269,20 +1461,37 @@ test("explicit follow-up keeps the prior failure and native history", async () =
   });
 });
 
-test("private Continue uses a new admission, keeps tool effects once and fences the old dependency generation", async () => {
+test("private Continue uses a new admission with or without tools and fences the old dependency generation", async () => {
   await withHome(async (home) => {
     let effects = 0;
     let service;
     let child;
+    let retries = 0;
+    const nativeOutcomes = {};
     const fixture = nativeFixture(async ({ input, reply, threadId }) => {
+      nativeOutcomes[input.messageId] = "succeeded";
+      if (["failed", "interrupted"].includes(input.prompt)) {
+        nativeOutcomes[input.messageId] = input.prompt;
+        reply.parts = [];
+        reply.error = { message: input.prompt };
+        return;
+      }
       if (input.prompt !== "Write once then fail") return;
       effects++;
       await writeFile(path.join(home, "effect.txt"), String(effects));
       const trusted = await service.context("scout", { sessionID: threadId, messageID: reply.id, callID: reply.parts[0].callId });
       child = await service.request(trusted, "worker", { name: "Old generation", goal: "Check", continuation: { objective: "Finish the receipt", refs: ["effect.txt"], completedActions: ["Wrote effect.txt once"], resumeInstructions: "Read the receipt without writing again." } });
       reply.error = { message: "Interrupted after writing" };
+      nativeOutcomes[input.messageId] = "interrupted";
     });
-    const options = { directory: home, clientFor: fixture.clientFor, pollMs: 5, cancelWorker: async () => {} };
+    const options = { directory: home, clientFor: async (slug) => {
+      const client = await fixture.clientFor(slug);
+      return { ...client,
+        getThreadSnapshot: async (...args) => ({ ...await client.getThreadSnapshot(...args), native: { engine: "v2", turnOutcomes: { ...nativeOutcomes } } }),
+        waitForThread: async (...args) => { const result = await client.waitForThread(...args); return { ...result, snapshot: { ...result.snapshot, native: { engine: "v2", turnOutcomes: { ...nativeOutcomes } } } }; },
+        retryTurn: async () => { retries++; throw new Error("continuation_required"); },
+      };
+    }, pollMs: 5, cancelWorker: async () => {} };
     service = createCollaboration(options);
     try {
       const root = await service.submit({ owner: { slug: "scout", threadId: "ses_once", conversationId: "ses_once", kind: "private" }, messageId: "msg_once", prompt: "Write once then fail", track: true });
@@ -1310,6 +1519,23 @@ test("private Continue uses a new admission, keeps tool effects once and fences 
       await service.start();
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(fixture.requests.length, 2);
+      for (const outcome of ["failed", "interrupted"]) {
+        const threadId = `ses_without_tools_${outcome}`;
+        const prior = await service.submit({ owner: { slug: "scout", threadId, conversationId: threadId, kind: "private" }, messageId: `msg_${outcome}`, prompt: outcome, track: true });
+        await eventually(async () => (await service.read((state) => state.executions[prior.id])).state === "failed" && fixture.aborted.includes(threadId));
+        const original = structuredClone(fixture.histories.get(threadId));
+        assert.equal(original.some((message) => message.parts.some((part) => part.type === "tool")), false);
+        await assert.rejects(service.submit({ ...prior, retry: true }), /Choose Continue/);
+        const continued = await service.submit({ ...prior, retry: true, retryByPerson: true });
+        assert.notEqual(continued.messageId, prior.messageId);
+        assert.equal(continued.owner.threadId, threadId);
+        assert.equal((await service.submit({ ...prior, retry: true, retryByPerson: true })).id, continued.id);
+        await eventually(async () => (await service.read((state) => state.executions[continued.id])).state === "succeeded");
+        assert.deepEqual(fixture.histories.get(threadId).slice(0, original.length), original);
+        assert.equal(fixture.requests.filter((request) => request.messageId === prior.messageId).length, 1, "the failed input is never replayed");
+        assert.equal((await service.read((state) => state.executions[prior.id])).state, "failed");
+      }
+      assert.equal(retries, 0, "native Continue never falls through to retryTurn");
     } finally { await service.stop(); }
   });
 });
@@ -1400,11 +1626,13 @@ test("legacy group recovery observes completed work and questions without model 
       await service.change((state) => {
         assert.ok(state.executions[root.id].sentAt);
         assert.equal(state.executions[root.id].model, null);
+        delete state.executions[root.id].agent;
         state.executions[root.id].state = state.tasks[root.taskId].state = "running";
       });
       await service.start();
       await eventually(async () => (await service.read((state) => state.executions[root.id])).state === "succeeded");
       assert.equal((await service.read((state) => state.executions[root.id])).model, null, "recovery does not invent a model pin");
+      assert.equal((await service.read((state) => state.executions[root.id])).agent, undefined, "recovery does not invent or replace an admitted role pin");
       const fresh = await service.submit({ owner, messageId: "msg_no_catalog", prompt: "New work still needs a model" });
       await eventually(async () => (await service.read((state) => state.executions[fresh.id])).state === "failed");
       assert.equal(fixture.requests.length, 1, "completed recovery never resends, and new admission still fails closed");
@@ -1446,32 +1674,51 @@ test("legacy group recovery observes completed work and questions without model 
   });
 });
 
-test("shared native interaction helpers tolerate an absent v2 HTML route without hiding real failures", async (t) => {
+test("native interaction helpers fail closed on absent routes and keep permission/form replies session-scoped", async (t) => {
   let mode = "html";
   const replies = [];
-  t.mock.method(globalThis, "fetch", async (request) => {
-    const url = new URL(request.url);
-    const v2 = url.pathname.includes("/api/session/");
-    if (request.method === "POST") { replies.push({ path: url.pathname, body: await request.json() }); return Response.json(true); }
-    if (v2 && mode === "html") return new Response("<!doctype html><html></html>", { headers: { "content-type": "text/html" } });
-    if (v2 && mode === "forbidden") return Response.json({ error: "Denied" }, { status: 403 });
-    if (v2 && mode === "server-error") return new Response("Unavailable", { status: 503, headers: { "content-type": "text/html" } });
-    if (!v2 && url.pathname.endsWith("/question") && mode === "question-error") return Response.json({ error: "Unavailable" }, { status: 500 });
-    if (v2) return Response.json({ data: [{ id: "v2-a", sessionID: "ses_a", action: "edit", resources: ["a.md"], source: { type: "tool", messageID: "assistant_a", callID: "call_a" } }] });
-    if (url.pathname.endsWith("/question")) return Response.json([]);
-    return Response.json([{ id: "legacy-a", sessionID: "ses_a", permission: "bash", patterns: ["safe"], always: [], tool: { messageID: "assistant_a", callID: "call_a" } }, { id: "private", sessionID: "ses_private", permission: "bash", patterns: ["PRIVATE"], always: [] }]);
+  const paths = [];
+  const prefix = "/workspace/workspace_a/opencode2/api/session/ses_a";
+  const permission = { id: "per_fixture", sessionID: "ses_a", action: "edit", resources: ["a.md"], source: { type: "tool", messageID: "msg_assistant", id: "call_a" } };
+  const form = { id: "frm_fixture", sessionID: "ses_a", title: "Choose", metadata: { kind: "question" }, fields: [{ key: "choice", type: "string", title: "Choose", options: [{ value: "approved", label: "Approve" }] }] };
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const request = new Request(input, init);
+    const route = new URL(request.url).pathname;
+    paths.push(route);
+    assert.ok(route.startsWith(`${prefix}/`), "no v1 or location-wide fallback");
+    if (request.method === "POST") { replies.push({ path: route, body: await request.json() }); return new Response(null, { status: 204 }); }
+    if (mode === "html") return new Response("<!doctype html><html></html>", { headers: { "content-type": "text/html" } });
+    if (mode === "not-found") return Response.json({ error: "Missing route" }, { status: 404 });
+    if (mode === "forbidden") return Response.json({ error: "Denied" }, { status: 403 });
+    if (mode === "server-error") return new Response("Unavailable", { status: 503, headers: { "content-type": "text/html" } });
+    if (route.endsWith("/form")) return mode === "form-error" ? Response.json({ error: "Unavailable" }, { status: 500 }) : Response.json({ data: [{ ...form, sessionID: mode === "foreign-form" ? "ses_private" : form.sessionID }] });
+    if (route.endsWith("/permission")) return Response.json({ data: [{ ...permission, sessionID: mode === "foreign-permission" ? "ses_private" : permission.sessionID }] });
+    if (route.endsWith(`/permission/${permission.id}`)) return Response.json({ data: permission });
+    if (route.endsWith(`/form/${form.id}`)) return Response.json({ data: form });
+    throw new Error(`Unexpected fixture route: ${route}`);
   });
   const threads = createCoworkerThreads({ serverUrl: "http://127.0.0.1:1", workspaceId: "workspace_a", token: "fixture" });
-  const legacy = await threads.listThreadInteractions("ses_a");
-  assert.deepEqual(legacy.permissions.map((request) => request.id), ["legacy-a"]);
-  assert.deepEqual(legacy.permissions[0].tool, { messageID: "assistant_a", callID: "call_a" });
-  for (mode of ["forbidden", "server-error", "question-error"]) await assert.rejects(threads.listThreadInteractions("ses_a"), /Reading .* failed/);
+  for (const [state, code, status] of [["html", "invalid_response", 200], ["not-found", "request_failed", 404], ["forbidden", "request_failed", 403], ["server-error", "request_failed", 503], ["form-error", "request_failed", 500], ["foreign-permission", "invalid_response", null], ["foreign-form", "invalid_response", null]]) {
+    mode = state;
+    await assert.rejects(threads.listThreadInteractions("ses_a"), { code, status });
+  }
+  assert.deepEqual(replies, []);
   mode = "json";
   const native = await threads.listThreadInteractions("ses_a");
-  assert.equal(native.permissions.length, 2);
-  await threads.replyPermission(native.permissions[1], "once");
-  assert.match(replies[0].path, /workspace\/workspace_a\/opencode\/api\/session\/ses_a\/permission\/v2-a\/reply/);
-  assert.deepEqual(replies[0].body, { reply: "once" });
+  assert.deepEqual(native.permissions.map((request) => request.id), [permission.id]);
+  assert.deepEqual(native.permissions[0].tool, { messageID: "msg_assistant", callID: "call_a" });
+  assert.deepEqual(native.questions.map((question) => question.id), [form.id]);
+  await threads.replyPermission(native.permissions[0], "once");
+  await threads.replyQuestion(native.questions[0], [["Approve"]]);
+  assert.deepEqual(replies, [
+    { path: `${prefix}/permission/${permission.id}/reply`, body: { reply: "once" } },
+    { path: `${prefix}/form/${form.id}/reply`, body: { answer: { choice: "approved" } } },
+  ]);
+  permission.resources = ["changed.md"];
+  await assert.rejects(threads.replyPermission(native.permissions[0], "once"), /Permission changed/);
+  await assert.rejects(threads.replyPermission({ ...native.permissions[0], sessionID: "ses_private" }, "once"), /exact native permission/);
+  assert.equal(replies.length, 2, "stale and cross-session replies never dispatch");
+  assert.ok(paths.every((route) => route.startsWith(`${prefix}/`)));
 });
 
 test("a nested consultation delivers the final child continuation to its parent once", async () => {
@@ -1916,11 +2163,12 @@ test("event occurrences claim once, persist exact participants and accept only t
       assert.deepEqual(run.contributorSlugs, ["scout", "editor"]);
       assert.equal(rejected, 2);
       assert.deepEqual(service.native.requests.map((request) => request.slug), ["scout", "editor", "scout"]);
-      assert.deepEqual(service.native.requests.map((request) => request.tools.coworker_event_conclude), [false, false, true]);
+      const records = await service.collaboration.read((state) => Object.values(state.executions));
+      assert.deepEqual(service.native.requests.map((request) => records.find((entry) => entry.messageId === request.messageId).tools.coworker_event_conclude), [false, false, true]);
+      assert.ok(service.native.requests.every((request) => request.tools === undefined && request.agent === nativeTurnAgent({ tools: records.find((entry) => entry.messageId === request.messageId).tools })));
       await service.events.tick();
       assert.equal((await service.events.get(event.id)).runs.length, 1);
-      assert.ok(service.native.requests.every((request) => request.tools.coworker_computer_act === false));
-      const records = await service.collaboration.read((state) => Object.values(state.executions));
+      assert.ok(records.every((entry) => entry.tools.coworker_computer_act === false));
       assert.ok(records.every((entry) => entry.owner.kind === "group" && !entry.personRequest));
       const inbox = createActivityInbox({ collaboration: service.collaboration, coworkers: async () => Object.values(service.members), groups: () => listGroups(home) });
       const items = await inbox.list();
@@ -2610,7 +2858,9 @@ test("Event continuity freezes at start and stop retains published contributions
     const service = await eventFixture(home, { readArtifact: async () => document, onSend: async (source) => {
       const entry = await source.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.messageId === source.input.messageId));
       if (!entry?.owner.eventRunId) return;
-      assert.equal(source.input.tools.coworker_event_create, false); assert.equal(source.input.tools.coworker_assignment_create, false);
+      assert.equal(source.input.tools, undefined);
+      assert.equal(source.input.agent, nativeTurnAgent({ tools: entry.tools }));
+      assert.equal(entry.tools.coworker_event_create, false); assert.equal(entry.tools.coworker_assignment_create, false);
       if (entry.owner.eventRunId === stopId && source.slug === "scout") source.reply.parts.push({ type: "tool", tool: "coworker_document_create", callId: "created-before-stop", toolStatus: "completed", toolInput: { title: document.title }, toolMetadata: { openworkMcpApp: { structuredContent: { document: { ...document, action: "created" } } } } });
       if (entry.owner.eventRunId === stopId && source.slug === "editor") source.native.held.add(source.threadId);
       if (entry.owner.eventRunId === partialId && source.slug === "editor") throw new Error("A contribution could not finish.");
@@ -2806,35 +3056,31 @@ test("a shared human group request deduplicates run_now across authorized partic
   });
 });
 
-test("Event update plugin and catalog require full replacement fields while create retains defaults", async () => {
-  const tool = (definition) => definition;
-  tool.schema = z;
-  const requests = [];
-  const plugin = await new Function("tool", "readFile", "path", "fetch", "AbortSignal", EVENT_PLUGIN
-    .replace(/^import .*;\n/gm, "").replace("export default", "return"))(tool,
-    async () => JSON.stringify({ url: "http://127.0.0.1:1/context", token: "fixture-only" }), path,
-    async (_url, request) => { requests.push(JSON.parse(request.body)); return { ok: true, json: async () => ({ text: "Updated" }) }; }, AbortSignal)({ directory: "/fixture/workspace" });
+test("Event update plugin and catalog require full replacement fields while create retains defaults", () => {
+  const tools = new Map();
+  const plugin = new Function("Plugin", "Effect", "schema", EVENT_PLUGIN
+    .replace(/^import .*;\n/gm, "").replace("export default", "return"))({ define: (definition) => definition }, { gen: (run) => run() }, z);
+  const registration = plugin.effect({ tool: { transform: (apply) => { apply({ add: (tool) => tools.set(tool.name, tool) }); return []; } } });
+  assert.equal(registration.next().done, true);
+  const validate = (name, args) => tools.get(name).input["~standard"].validate(args);
   const full = eventInput();
   const names = ["description", "template", "durationMinutes", "maxReplies", "state", "artifacts"];
   const catalog = eventToolCatalog();
   const updateCatalog = catalog.find((entry) => entry.name === "coworker_event_update").inputSchema;
   const fromCatalog = z.fromJSONSchema(updateCatalog);
-  const context = { sessionID: "session", messageID: "message", callID: "update", directory: "/fixture/workspace", abort: new AbortController().signal };
   for (const name of names) {
     const input = { ...full }; delete input[name];
     const args = { id: "event", input, expectedRevision: 1 };
     assert.equal(eventNativeSchemas.event_update.safeParse(args).success, false, name);
     assert.equal(fromCatalog.safeParse(args).success, false, name);
-    await assert.rejects(plugin.tool.coworker_event_update.execute(args, context));
+    assert.ok(validate("coworker_event_update", args).issues, name);
     assert.equal(eventNativeSchemas.event_create.safeParse({ input }).success, true, "create may supply defaults");
-    assert.equal(plugin.tool.coworker_event_create.args.input.safeParse(input).success, true);
+    assert.equal(validate("coworker_event_create", { input }).issues, undefined);
   }
-  assert.equal(requests.length, 0, "incomplete updates are rejected before transport");
   assert.equal(updateCatalog.properties.input.required.includes("repeatUntil"), false);
   const args = { id: "event", input: { ...full, title: "  Preserve raw native arguments  " }, expectedRevision: 1 };
   assert.equal(eventNativeSchemas.event_update.safeParse(args).success, true);
   assert.equal(fromCatalog.safeParse(args).success, true);
-  await plugin.tool.coworker_event_update.execute(args, context);
-  assert.deepEqual(requests[0].args, args, "normalization remains after exact raw-argument context verification");
+  assert.deepEqual(validate("coworker_event_update", args).value, args, "native schema validation preserves raw arguments for exact-call verification");
   assert.ok(JSON.stringify(catalog).length <= 10000);
 });

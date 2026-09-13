@@ -185,7 +185,7 @@ export function CoworkerHome({
 }) {
   const [settingsFocus, setSettingsFocus] = useState<{ id: number; section: "model" } | null>(null);
   const [assignmentDraft, setAssignmentDraft] = useState<{ id: number; text: string } | null>(null);
-  const [discussionDraft, setDiscussionDraft] = useState<{ id: number; text: string } | null>(null);
+  const [discussionDraft, setDiscussionDraft] = useState<{ id: number; text: string; skill?: import("@/lib/skill-selection").SelectedSkill } | null>(null);
   const [openThreadRequest, setOpenThreadRequest] = useState<{ id: number; threadId: string; kind?: "thread" | "discussion" | "activity"; onOpened?: () => Promise<void> } | null>(null);
   /** The coworker's one-off assignment threads, as the conversation column lists them, and what each waits on the person for. */
   const [assignmentThreads, setAssignmentThreads] = useState<ThreadListItem[]>([]);
@@ -526,8 +526,8 @@ export function CoworkerHome({
               connect={connect}
               onRepairConnect={onRepairConnect}
               onConnectAccount={onConnectAccount}
-              onDiscuss={(text) => {
-                setDiscussionDraft({ id: Date.now(), text });
+              onDiscuss={(text, skill) => {
+                setDiscussionDraft({ id: Date.now(), text, skill });
                 setBesidePath(null);
               }}
               path={besidePath}
@@ -707,8 +707,8 @@ export function CoworkerHome({
               connect={connect}
               onRepairConnect={onRepairConnect}
               onConnectAccount={onConnectAccount}
-              onDiscuss={(text) => {
-                setDiscussionDraft({ id: Date.now(), text });
+              onDiscuss={(text, skill) => {
+                setDiscussionDraft({ id: Date.now(), text, skill });
                 nav.toRoot("overview");
               }}
               path={settingsLevel.path}

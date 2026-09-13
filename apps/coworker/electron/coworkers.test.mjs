@@ -210,7 +210,7 @@ test("repairing an older coworker regenerates only the app-owned contract files"
   assert.match(agents, /# Legacy — coworker contract/);
   const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
   assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md", "documents/index.md", "team/roster.md"]);
-  assert.deepEqual(config.mcp, { keep: { type: "remote", url: "http://x" } }, "other config keys survive the repair");
+  assert.deepEqual(config.mcp.servers, { keep: { type: "remote", url: "http://x" } }, "MCP configuration survives in native form");
   assert.match(await readFile(path.join(coworker.path, "documents", "index.md"), "utf8"), /\(none yet\)/);
   assert.match(await readFile(path.join(coworker.path, "team", "roster.md"), "utf8"), /^# My team/);
   // Soul and memory are the coworker's; the repair never touches them.
@@ -515,7 +515,7 @@ test("the version 13 contract upgrades without changing identity, soul or memory
   assert.deepEqual(await getCoworker(coworkersDir, "pilot"), coworker);
   const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
   assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md", "documents/index.md", "team/roster.md"]);
-  assert.deepEqual(config.mcp, { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } });
+  assert.deepEqual(config.mcp.servers, { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } });
   assert.equal(config.$schema, "https://opencode.ai/config.json");
   assert.equal(await readFile(soulPath, "utf8"), "# Soul — Pilot\n\n## Role\n\nOps lead, edited by hand.\n");
   assert.equal(await readFile(workingPath, "utf8"), "# Working memory — Pilot\n\n## Now\n\n- Halfway through the audit.\n");

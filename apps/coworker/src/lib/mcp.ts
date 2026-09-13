@@ -122,6 +122,25 @@ export function preservedMcpAppResult(input: {
     ?? preservedResult(input.output);
 }
 
+export function mcpFailureMessage(result: PreservedMcpAppResult, fallback = "This App could not start with the supplied input."): string {
+  const messages = new Set<string>();
+  if (typeof result.structuredContent?.message === "string" && result.structuredContent.message.trim()) messages.add(result.structuredContent.message);
+  for (const item of result.content) {
+    if (item.type !== "text" || typeof item.text !== "string" || !item.text.trim()) continue;
+    try {
+      const parsed: unknown = JSON.parse(item.text);
+      if (isRecord(parsed) && typeof parsed.message === "string" && parsed.message.trim()) {
+        messages.add(parsed.message);
+        continue;
+      }
+    } catch {
+      // Plain-text provider errors remain visible alongside structured failures.
+    }
+    messages.add(item.text);
+  }
+  return [...messages].join("\n") || fallback;
+}
+
 export function gatewayMcpAppLaunch(meta: unknown): CoworkerMcpAppLaunchReference | null {
   if (!isRecord(meta) || !isRecord(meta["openwork/mcpApp"])) return null;
   const launch = meta["openwork/mcpApp"];
@@ -157,6 +176,7 @@ export function createCoworkerMcpClient(input: {
         },
         body: options?.body === undefined ? undefined : JSON.stringify(options.body),
         signal: controller.signal,
+        redirect: "error",
       });
       const text = await response.text();
       const payload: unknown = text ? JSON.parse(text) : null;
@@ -183,17 +203,18 @@ export function createCoworkerMcpClient(input: {
   return {
     listInventory: () => request<{ items: CoworkerMcpItem[] }>(`/workspace/${workspace}/mcp`),
     /** How the coworker's AI service sees each configured server right now, by name. */
-    engineStatus: () => request<unknown>(`/workspace/${workspace}/opencode/mcp`)
-      .then((value): Record<string, unknown> => (isRecord(value) ? value : {})),
-    /** Every tool identifier the AI service offers, including "<server>_<tool>" for each server's tools. */
-    toolIds: () => request<unknown>(`/workspace/${workspace}/opencode/experimental/tool/ids`)
-      .then((ids) => (Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [])),
+    engineStatus: () => request<unknown>(`/workspace/${workspace}/opencode2/api/mcp`)
+      .then((value): Record<string, unknown> => {
+        if (!isRecord(value) || !Array.isArray(value.data)) throw new Error("Native MCP status could not be read.");
+        return Object.fromEntries(value.data.flatMap((item) => isRecord(item) && typeof item.name === "string" ? [[item.name, item.status]] : []));
+      }),
     /** What one configured remote server offers, as it describes itself. */
     listServerTools: (serverName: string) => request<unknown>(`/workspace/${workspace}/mcp/${encodeURIComponent(serverName)}/tools`, { timeoutMs: 20_000 })
       .then((payload): CoworkerMcpServerTool[] => {
-        const tools = isRecord(payload) && Array.isArray(payload.tools) ? payload.tools : [];
+        if (!isRecord(payload) || !Array.isArray(payload.tools)) throw new Error("Tool inventory could not be read.");
+        const tools = payload.tools;
         return tools.flatMap((tool): CoworkerMcpServerTool[] => {
-          if (!isRecord(tool) || typeof tool.name !== "string") return [];
+          if (!isRecord(tool) || typeof tool.name !== "string") throw new Error("Tool inventory could not be read.");
           return [{
             name: tool.name,
             title: typeof tool.title === "string" ? tool.title : null,

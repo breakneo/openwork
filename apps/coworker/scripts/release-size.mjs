@@ -1,10 +1,13 @@
-import { lstatSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
+import { NATIVE_PLUGIN_DEPENDENCIES, NATIVE_PLUGIN_FILES, NATIVE_PLUGIN_VERSION, validateNativePluginManifest } from "../electron/native-plugin.mjs";
+import nativeRuntime from "../native-runtime.json" with { type: "json" };
 
 const MiB = 1024 ** 2;
 const topN = 20;
-// Measured macOS ARM64 candidate: 489.52 MiB. Other targets need their own baseline.
+// Historical v1 macOS ARM64 candidate: 489.52 MiB. Native v2 is not yet measured.
 const targetBudgetsMiB = { "darwin/arm64": 512 };
 const usage = "node apps/coworker/scripts/release-size.mjs <packaged-app-directory> [--check] [--max-mib N] [--json report.json] [--platform darwin|win32|linux] [--arch arm64|x64]";
 
@@ -94,7 +97,7 @@ function main() {
     if (path === archiveName) bucket = "asar";
     else if (path.startsWith(unpacked) && /(?:^|\/)node_modules\//.test(path.slice(unpacked.length))) bucket = "unpackedDependencies";
     else if (path.startsWith(`${resources}sidecars/`)) bucket = "sidecars";
-    else if (path.startsWith(`${resources}opencode-plugins/`)) bucket = "plugins";
+    else if (path.startsWith(`${resources}native-plugins/`) || path.startsWith(`${resources}opencode-plugins/`)) bucket = "plugins";
     else if (platform === "darwin" ? /^(Contents\/(Frameworks|MacOS)\/|Contents\/Resources\/[^/]+\.lproj\/)/.test(path) : !path.startsWith(resources)) bucket = "electronFramework";
     buckets[bucket] += stat.size;
     totalBytes += stat.size;
@@ -106,21 +109,124 @@ function main() {
   }
 
   const sidecars = `${resources}sidecars/`;
-  const engines = [...disk.keys()].filter((path) => path.startsWith(sidecars) && /^opencode(?:-[^/]+|\.exe)?$/.test(path.slice(sidecars.length)));
-  const targetPattern = /^opencode-(aarch64|x86_64)-(apple-darwin|unknown-linux-gnu|pc-windows-msvc)(\.exe)?$/;
-  const qualified = engines.map((path) => basename(path).match(targetPattern)).filter(Boolean);
-  const match = qualified.length === 1 ? qualified[0] : null;
-  const enginePlatform = match ? { "apple-darwin": "darwin", "unknown-linux-gnu": "linux", "pc-windows-msvc": "win32" }[match[2]] : null;
-  const engineArch = match ? { aarch64: "arm64", x86_64: "x64" }[match[1]] : null;
   const failures = [];
-  if (options.check) {
-    if (engines.length !== 1 || !match || enginePlatform !== platform || Boolean(match[3]) !== (platform === "win32") ||
-        (options["--arch"] && engineArch !== options["--arch"]) || !disk.get(engines[0]).isFile() || disk.get(engines[0]).size === 0) {
-      failures.push(`Expected one nonempty target-qualified engine for ${platform}/${options["--arch"] ?? "inferred arch"}, with no generic duplicate; found: ${engines.join(", ") || "none"}`);
+  function resourceBytes(path) {
+    const stat = disk.get(`${resources}${path}`);
+    if (!stat?.isFile() || stat.size === 0) throw new Error("expected a nonempty regular resource file");
+    return readFileSync(join(app, resources, path));
+  }
+  function archiveBytes(path) {
+    const entry = archive.get(path);
+    if (!entry || entry.files || Object.hasOwn(entry, "link") || entry.size === 0) throw new Error("expected a nonempty ASAR file");
+    if (entry.unpacked && (!disk.get(`${unpacked}${path}`)?.isFile() || disk.get(`${unpacked}${path}`).size !== entry.size)) {
+      throw new Error("missing or mismatched unpacked ASAR file");
     }
+    return asar.extractFile(archivePath, path);
+  }
+  function readJson(path, read) {
+    try {
+      const value = JSON.parse(read().toString("utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected a JSON object");
+      return value;
+    } catch (error) {
+      if (options.check) failures.push(`Invalid or missing JSON ${path}: ${error.message}`);
+      return null;
+    }
+  }
+  const metadata = readJson("sidecars/versions.json", () => resourceBytes("sidecars/versions.json"));
+  const sidecar = metadata?.opencode2;
+  const engineArch = ["arm64", "x64"].includes(sidecar?.arch) ? sidecar.arch : null;
+  if (options.check) {
     function reject(label, paths) {
       if (paths.length) failures.push(`${label}: ${paths.length}; ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", ..." : ""}`);
     }
+    const allPaths = [...archive.keys(), ...disk.keys()];
+    // Match executable aliases/target triples, not server modules such as
+    // opencode-v2-binary.js or opencode-connection.js.
+    const executablePattern = /^(opencode2?)(?:-(?:aarch64|x86_64)-(?:apple-darwin|unknown-linux-(?:gnu|musl)|pc-windows-msvc))?(?:\.exe)?$/;
+    const engine = `${sidecars}${platform === "win32" ? "opencode2.exe" : "opencode2"}`;
+    const engines = allPaths.filter((path) => basename(path).match(executablePattern)?.[1] === "opencode2");
+    if (engines.length !== 1 || engines[0] !== engine || !disk.get(engine)?.isFile() || disk.get(engine).size === 0) {
+      failures.push(`Expected exactly one nonempty native engine at ${engine}; found: ${engines.join(", ") || "none"}`);
+    }
+    const constants = readJson("source constants.json", () => readFileSync(new URL("../../../constants.json", import.meta.url)));
+    const packagedConstants = readJson("server/dist/constants.json", () => archiveBytes("server/dist/constants.json"));
+    if (!constants || !packagedConstants || packagedConstants.opencodeVersion !== constants.opencodeVersion ||
+        packagedConstants.opencodeV2Version !== constants.opencodeV2Version) {
+      failures.push("Packaged shared server constants must retain the source Desktop defaults");
+    }
+    const packagedRuntime = readJson("electron-dist/native-runtime.json", () => archiveBytes("electron-dist/native-runtime.json"));
+    const pin = nativeRuntime.opencodeV2Version;
+    if (typeof pin !== "string" || !pin || packagedRuntime?.opencodeV2Version !== pin ||
+        sidecar?.version !== pin || Object.keys(metadata ?? {}).length !== 1 ||
+        sidecar?.platform !== platform || !engineArch || (options["--arch"] && engineArch !== options["--arch"])) {
+      failures.push(`Native sidecar metadata and packaged Coworker runtime must match pin ${pin ?? "missing"} and target ${platform}/${options["--arch"] ?? "arm64 or x64"}, with native-only metadata`);
+    }
+    reject("Unexpected sidecar resources", [...disk.keys()].filter((path) => path.startsWith(sidecars) && path !== engine && path !== `${sidecars}versions.json`));
+    reject("Legacy OpenCode executables", allPaths.filter((path) => basename(path).match(executablePattern)?.[1] === "opencode" &&
+      !disk.get(path)?.isDirectory() && !archive.get(path)?.files));
+    reject("Legacy plugin resources", allPaths.filter((path) => /(?:^|\/)opencode-plugins(?:\/|$)/.test(path)));
+    reject("Duplicate ASAR native plugin bundles", [...archive.keys()].filter((path) => /(?:^|\/)native-plugins(?:\/|$)/.test(path)));
+    // Native plugin/schema dependencies are bundled at build time. Shipping a
+    // legacy runtime closure is a release blocker, not permission to prune imports.
+    const forbidden = ["@opencode-ai/sdk", "@opencode-ai/plugin", "opencode-chrome-devtools", "better-sqlite3", "drizzle-orm"];
+    reject("Forbidden packaged legacy dependencies", allPaths.filter((path) =>
+      [...path.matchAll(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/g)].some((match) => forbidden.includes(match[1]))));
+    function checkPackage(path, read) {
+      const pkg = readJson(path, read);
+      if (!pkg) return;
+      const declared = new Set(forbidden.includes(pkg.name) ? [pkg.name] : []);
+      for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+        for (const [name, version] of Object.entries(pkg[field] ?? {})) {
+          if (forbidden.includes(name) || (typeof version === "string" && forbidden.some((dependency) => version.startsWith(`npm:${dependency}@`)))) declared.add(name);
+        }
+      }
+      if (declared.size) failures.push(`Forbidden packaged legacy dependency declaration in ${path}: ${[...declared].join(", ")}`);
+    }
+    for (const [path, entry] of archive) {
+      if (basename(path) === "package.json" && !entry.files && !Object.hasOwn(entry, "link")) checkPackage(path, () => archiveBytes(path));
+    }
+    for (const [path, stat] of disk) {
+      if (basename(path) === "package.json" && stat.isFile() && !(path.startsWith(unpacked) && archive.has(path.slice(unpacked.length)))) {
+        checkPackage(path, () => readFileSync(join(app, path)));
+      }
+    }
+    const pluginRoot = "native-plugins/";
+    const manifest = readJson(`${pluginRoot}manifest.json`, () => resourceBytes(`${pluginRoot}manifest.json`));
+    // The complete source set emitted by prepareNativePluginBundles. Checking
+    // only declared files lets an omitted mandatory plugin disappear unnoticed.
+    const requiredPlugins = NATIVE_PLUGIN_FILES;
+    try { validateNativePluginManifest(manifest); }
+    catch (error) { failures.push(`Native startup preflight: ${error.message}`); }
+    function hasExactKeys(value, keys) {
+      return value !== null && typeof value === "object" && !Array.isArray(value) &&
+        Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+    }
+    if (manifest?.format !== "coworker-native-plugins/v1" || manifest.opencodeVersion !== pin || pin !== NATIVE_PLUGIN_VERSION ||
+        !hasExactKeys(manifest.dependencies, Object.keys(NATIVE_PLUGIN_DEPENDENCIES)) ||
+        Object.entries(NATIVE_PLUGIN_DEPENDENCIES).some(([name, version]) => manifest.dependencies[name] !== version)) {
+      failures.push("Native plugin manifest must declare the exact runtime version and dependency set, including the pinned plugin/schema, Effect and Zod versions");
+    }
+    if (!hasExactKeys(manifest?.entries, requiredPlugins)) {
+      failures.push(`Native plugin manifest must declare exactly these ${requiredPlugins.length} source entries: ${requiredPlugins.join(", ")}`);
+    }
+    const pluginFiles = new Set([`${resources}${pluginRoot}manifest.json`]);
+    for (const [name, entry] of Object.entries(manifest?.entries ?? {})) {
+      if (!/^[a-z0-9-]+\.js$/.test(name) || entry?.file !== name.replace(/\.js$/, ".mjs") ||
+          !Number.isSafeInteger(entry.bytes) || entry.bytes <= 0 || !/^[a-f0-9]{64}$/.test(entry.sha256)) {
+        failures.push(`Invalid native plugin bundle declaration: ${name}`);
+        continue;
+      }
+      const path = `${pluginRoot}${entry.file}`;
+      pluginFiles.add(`${resources}${path}`);
+      try {
+        const bytes = resourceBytes(path);
+        if (bytes.length !== entry.bytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) throw new Error("size or SHA-256 mismatch");
+      } catch (error) {
+        failures.push(`Invalid or missing native plugin bundle ${path}: ${error.message}`);
+      }
+    }
+    reject("Undeclared native plugin resources", [...disk.keys()].filter((path) => path.startsWith(`${resources}${pluginRoot}`) && !pluginFiles.has(path)));
     reject("Renderer source maps", [...archive.keys()].filter((path) => /^dist\/.*\.map$/.test(path)));
     reject("Server test artifacts", [...archive.keys()].filter((path) => /^server\/.*\.test\.js(?:\.map)?$/.test(path)));
     reject("Dependency source maps", [...archive.keys()].filter((path) => /(?:^|\/)node_modules\/.*\.map$/.test(path)));
@@ -128,22 +234,21 @@ function main() {
     reject("Packaging-only icon files", [...archive.keys()].filter((path) => /^resources\/icons\/(?!icon(?:-macos)?\.png$)/.test(path)));
     reject("Bundled-only packages", [...archive.keys(), ...disk.keys()].filter((path) => /(?:^|\/)node_modules\/@openwork\/(computer-use|ui)(?:\/|$)/.test(path)));
     reject("Unpacked native build debris", [...disk.keys()].filter((path) => path.startsWith(unpacked) && /(?:^|\/)node_modules\//.test(path.slice(unpacked.length)) && /(?:^|\/)(?:\.build|[^/]+\.dSYM)(?:\/|$)/.test(path)));
+    const nativeServerPackage = readJson("server/package.json", () => archiveBytes("server/package.json"));
+    if (nativeServerPackage?.name !== "@openwork/coworker-runtime" || nativeServerPackage.exports?.["."] !== "./dist/embedded-native.js" || nativeServerPackage.bin) {
+      failures.push("Coworker must package the native-only embedded server entry, not the generic server CLI");
+    }
     for (const path of [
-      "package.json", "dist/index.html", "electron-dist/main.mjs", "electron-dist/preload.mjs",
-      "electron-dist/browser-content-preload.cjs", "electron-dist/maintenance-helper.mjs",
-      "server/package.json", "server/dist/embedded.js", "server/dist/constants.json",
+      "package.json", "dist/index.html", "electron-dist/main.mjs", "electron-dist/preload.mjs", "electron-dist/native-runtime.json",
+      "electron-dist/browser-content-preload.cjs", "electron-dist/maintenance-helper.mjs", "electron-dist/THIRD-PARTY-NOTICES",
+      "server/package.json", "server/dist/embedded.js", "server/dist/embedded-native.js", "server/dist/constants.json",
     ]) {
       const entry = archive.get(path);
       const present = entry && !entry.files && !Object.hasOwn(entry, "link") && entry.size > 0 &&
         (!entry.unpacked || (disk.get(`${unpacked}${path}`)?.isFile() && disk.get(`${unpacked}${path}`).size > 0));
       if (!present) failures.push(`Missing nonempty ASAR runtime entry: ${path}`);
     }
-    reject("Duplicate ASAR plugin bundles", [...archive.keys()].filter((path) => path.startsWith("server/dist/opencode-plugins/")));
-    const requiredResources = ["sidecars/versions.json", "opencode-plugins/pdfium.wasm", ...[
-      "managed-policy", "managed-policy-next", "openwork-chrome-devtools", "openwork-extensions-preview",
-      "openwork-capabilities-knowledge", "openwork-office-attachments", "openwork-spreadsheets",
-      "openwork-pdf-attachments", "openwork-anthropic-adaptive-thinking", "openwork-anthropic-tool-schema", "openwork-title-recovery",
-    ].map((name) => `opencode-plugins/${name}.js`)];
+    const requiredResources = [];
     if (platform === "darwin") requiredResources.push(
       "helpers/OpenWork Computer Use.app/Contents/MacOS/ComputerUse",
       "helpers/OpenWork Computer Use.app/Contents/Info.plist",
@@ -154,12 +259,14 @@ function main() {
     }
   }
 
-  const maxMiB = requestedMaxMiB ?? (options.check ? targetBudgetsMiB[`${platform}/${engineArch}`] ?? null : null);
+  const maxMiB = requestedMaxMiB ?? (options.check ? targetBudgetsMiB[`${platform}/${options["--arch"] ?? engineArch}`] ?? null : null);
   const budget = maxMiB === null ? null : { maxMiB, passed: totalBytes / MiB <= maxMiB };
   const report = {
     appDirectory: app,
     platform,
     engineArch,
+    engineVersion: sidecar?.version ?? null,
+    expectedEngineVersion: nativeRuntime.opencodeV2Version,
     expectedArch: options["--arch"] ?? null,
     totalBytes,
     totalMiB: totalBytes / MiB,

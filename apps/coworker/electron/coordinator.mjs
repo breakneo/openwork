@@ -10,27 +10,27 @@
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { updateNativeConfig } from "./native-config.mjs";
 
 export const COORDINATOR_DIR = ".coordinator";
 export const COORDINATOR_SCHEMA_VERSION = 1;
 const RECORD_FILE = "coordinator.json";
-
-/** Every built-in tool the engine could offer, switched off by name as well as by wildcard. */
-const BUILT_IN_TOOLS = ["bash", "edit", "write", "read", "glob", "grep", "list", "patch", "multiedit", "todowrite", "todoread", "webfetch", "websearch", "task", "skill", "question", "lsp"];
+export const COORDINATOR_AGENT = "coworker-coordinator";
 
 export function coordinatorPath(coworkersDir) {
   return path.join(coworkersDir, COORDINATOR_DIR);
 }
 
 export function coordinatorConfig() {
-  const tools = { "*": false };
-  for (const tool of BUILT_IN_TOOLS) tools[tool] = false;
   return {
     $schema: "https://opencode.ai/config.json",
     instructions: [],
-    permission: "deny",
-    tools,
+    permissions: [{ action: "*", resource: "*", effect: "deny" }],
+    default_agent: COORDINATOR_AGENT,
+    agents: { [COORDINATOR_AGENT]: { mode: "primary", hidden: true, permissions: [{ action: "*", resource: "*", effect: "deny" }] } },
+    plugins: [],
     mcp: {},
+    warming: false,
   };
 }
 
@@ -70,7 +70,7 @@ async function writeRecord(coworkersDir, record) {
 export async function ensureCoordinatorHome(coworkersDir) {
   const root = coordinatorPath(coworkersDir);
   await mkdir(root, { recursive: true });
-  await writeFile(path.join(root, "opencode.json"), `${JSON.stringify(coordinatorConfig(), null, 2)}\n`, "utf8");
+  await updateNativeConfig(root, () => coordinatorConfig());
   await writeFile(path.join(root, "AGENTS.md"), coordinatorContract(), "utf8");
   const existing = await readRecord(coworkersDir);
   const record = existing ?? (await writeRecord(coworkersDir, { workspaceId: "" }));

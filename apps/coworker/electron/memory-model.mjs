@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { createNativeV2Id } from "@openwork/headless-threads/v2";
 import { setTimeout as delay } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
+import { installNativePlugin } from "./native-plugin.mjs";
+import { withoutIsolatedAgent, isolatedModelSource } from "./isolated-model-plugin.mjs";
 
 export const MEMORY_LIMITS = Object.freeze({
   maxInputBytes: 20_000,
@@ -39,78 +38,11 @@ function memoryInput(text, { limits, system }) {
   return input;
 }
 
-// The installed module embeds this hook, its validator, and policy; no imports,
-// workspace instructions, provider configuration, or tools accompany it.
-export async function memoryHooks({ agent, limits, system } = policy) {
-  const sessions = new Map();
-  const refuse = () => { throw new Error("Memory extraction refused."); };
-  return {
-    config: async (config) => {
-      config.agent ??= {};
-      // Do not set steps: native injects a last-step instruction after transforms.
-      config.agent[agent] = { hidden: true, mode: "subagent", description: "Extract evidence-backed conversation memory", prompt: system, permission: { "*": "deny" }, tools: { "*": false } };
-    },
-    "chat.message": async (input, output) => {
-      if (input.agent !== agent) return;
-      if (sessions.has(input.sessionID) || !input.model || output.parts.length !== 1 || output.parts[0].type !== "text" || output.message.format?.type === "json_schema") refuse();
-      memoryInput(output.parts[0].text, { limits, system });
-      delete output.message.system;
-      delete output.message.format;
-      output.message.tools = { "*": false };
-      const part = output.parts[0];
-      output.parts[0] = { id: part.id, sessionID: input.sessionID, messageID: output.message.id, type: "text", text: part.text };
-      sessions.set(input.sessionID, { used: false, model: { ...input.model }, message: { ...output.message }, part: { ...output.parts[0] } });
-    },
-    "experimental.chat.messages.transform": async (_input, output) => {
-      const registered = output.messages.find((message) => sessions.has(message.info.sessionID));
-      if (!registered) return;
-      const session = sessions.get(registered.info.sessionID);
-      output.messages.splice(0, output.messages.length, { info: { ...session.message }, parts: [{ ...session.part }] });
-    },
-    "experimental.chat.system.transform": async (input, output) => {
-      if (sessions.has(input.sessionID)) output.system.splice(0, output.system.length, system);
-    },
-    "chat.params": async (input, output) => {
-      const session = sessions.get(input.sessionID);
-      if (!session && input.agent !== agent) return;
-      if (!session || input.agent !== agent || session.used || input.model.providerID !== session.model.providerID || input.model.id !== session.model.modelID) refuse();
-      // A native retry invokes this hook again; fail before a second request.
-      session.used = true;
-      if (!Object.hasOwn(output, "maxOutputTokens")) refuse();
-      const model = input.model;
-      if (!["@ai-sdk/openai", "@ai-sdk/openai-compatible"].includes(model.api?.npm) || model.status !== "active" || model.capabilities?.reasoning !== false || model.capabilities?.input?.text !== true || model.capabilities?.output?.text !== true
-        || !Number.isFinite(model.cost?.input) || model.cost.input <= 0 || model.cost.input > limits.maxInputPrice
-        || !Number.isFinite(model.cost?.output) || model.cost.output <= 0 || model.cost.output > limits.maxOutputPrice) refuse();
-      output.maxOutputTokens = Math.min(limits.maxOutputTokens, Number.isFinite(output.maxOutputTokens) && output.maxOutputTokens > 0 ? output.maxOutputTokens : limits.maxOutputTokens);
-      const instructions = Object.hasOwn(output.options, "instructions");
-      for (const key of Object.keys(output.options)) delete output.options[key];
-      if (instructions) output.options.instructions = system;
-      output.temperature = 0;
-      output.topP = 1;
-      output.topK = undefined;
-    },
-    "tool.execute.before": async (input) => { if (sessions.has(input.sessionID)) refuse(); },
-    "experimental.session.compacting": async (input) => { if (sessions.has(input.sessionID)) refuse(); },
-  };
-}
-
-const pluginSource = `const policy = ${JSON.stringify(policy)};\n${memoryInput.toString()}\n${memoryHooks.toString()}\nexport default async () => memoryHooks(policy);\n`;
+export const MEMORY_PLUGIN = isolatedModelSource(policy, `(text) => (${memoryInput.toString()})(text, policy)`);
 
 export async function installMemoryPlugin(coordinator) {
-  const root = path.join(coordinator.path, ".opencode");
-  await mkdir(root, { recursive: true });
-  const source = path.join(root, "auto-memory.js");
-  if (await readFile(source, "utf8").catch(() => "") !== pluginSource) await writeFile(source, pluginSource, "utf8");
-  const target = path.join(coordinator.path, "opencode.json");
-  const current = JSON.parse(await readFile(target, "utf8"));
-  const plugin = pathToFileURL(source).href;
-  if ((current.plugin ?? []).includes(plugin)) return;
-  await writeFile(`${target}.memory.tmp`, JSON.stringify({ ...current, plugin: [...(current.plugin ?? []), plugin] }, null, 2), "utf8");
-  await rename(`${target}.memory.tmp`, target);
+  await installNativePlugin(coordinator, "auto-memory.js", (config) => withoutIsolatedAgent(config, policy));
 }
-
-let lastMessageTimestamp = 0;
-let messageCounter = 0;
 
 /** Fresh native session; returns validated JSON text, never writes memory. */
 export async function extractConversationMemory(client, model, { prompt, signal }) {
@@ -129,26 +61,25 @@ export async function extractConversationMemory(client, model, { prompt, signal 
   try {
     // Admission has its own deadline: retain late receipts, then abort again in
     // finally if native accepted a session or turn after the observer cancelled.
-    thread = await client.createThread({ title: "Conversation memory extraction", signal: AbortSignal.timeout(MEMORY_LIMITS.timeoutMs) });
+    thread = await client.createThread({ title: "Conversation memory extraction", agent: policy.agent, model: { providerId: model.providerId, modelId: model.modelId }, signal: AbortSignal.timeout(MEMORY_LIMITS.timeoutMs) });
     signal.throwIfAborted();
-    // Match native ascending IDs without importing the collaboration runtime.
-    const timestamp = Date.now();
-    if (timestamp !== lastMessageTimestamp) { lastMessageTimestamp = timestamp; messageCounter = 0; }
-    const order = BigInt(timestamp) * 0x1000n + BigInt(++messageCounter);
-    const prefix = (order & 0xffffffffffffn).toString(16).padStart(12, "0");
-    const messageId = `msg_${prefix}${randomUUID().replaceAll("-", "").slice(0, 14)}`;
+    const messageId = createNativeV2Id("msg");
     const acceptance = await client.sendTurn(thread.id, {
       prompt, agent: policy.agent, model: { providerId: model.providerId, modelId: model.modelId }, messageId,
-      tools: { "*": false }, signal: AbortSignal.timeout(MEMORY_LIMITS.timeoutMs),
+      signal: AbortSignal.timeout(MEMORY_LIMITS.timeoutMs),
     });
     signal.throwIfAborted();
     if (acceptance.messageId !== messageId || acceptance.alreadyPresent || acceptance.retried) refuse();
     for (;;) {
       const snapshot = await client.getThreadSnapshot(thread.id, { signal });
       signal.throwIfAborted();
+      if (snapshot.native?.engine !== "v2") refuse();
+      const outcome = snapshot.native.turnOutcomes?.[acceptance.messageId];
+      if (outcome === "failed" || outcome === "interrupted") refuse();
       if (snapshot.status.type === "retry" || snapshot.status.type === "error") refuse();
       const replies = snapshot.messages.filter((message) => message.role === "assistant");
-      if (replies.some((message) => message.parentId !== acceptance.messageId) || replies.length > 1) refuse();
+      if (snapshot.native.ambiguousTurns?.includes(acceptance.messageId)
+        || replies.some((message) => message.parentId != null && message.parentId !== acceptance.messageId) || replies.length > 1) refuse();
       const reply = replies[0];
       if (reply?.error || reply?.usage?.reasoningTokens > 0 || reply?.usage?.outputTokens > MEMORY_LIMITS.maxOutputTokens) refuse();
       let text = "";
@@ -162,7 +93,9 @@ export async function extractConversationMemory(client, model, { prompt, signal 
           text += part.text;
         }
       }
-      if (reply?.completedAt != null) {
+      // v2 reads the durable log before history. A new reply can be visible one
+      // poll before its correlation evidence; wait, but never publish unbound text.
+      if (reply?.completedAt != null && reply.parentId === acceptance.messageId && outcome === "succeeded") {
         let candidates;
         try { candidates = JSON.parse(text); } catch { refuse(); }
         if (!candidates || Array.isArray(candidates) || Object.keys(candidates).sort().join() !== "longTerm,shortTerm") refuse();

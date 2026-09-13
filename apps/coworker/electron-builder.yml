@@ -37,18 +37,16 @@ extraMetadata:
 extraResources:
   - from: resources/sidecars
     to: sidecars
-    # beforePack narrows this to the builder target and its version metadata.
+    # beforePack verifies the exact native version, platform and architecture.
     filter:
-      - opencode-*
-      - versions.json-*
-  # The embedded server resolves its OpenWork engine plugins from
-  # Resources/opencode-plugins when it runs from an asar, as the desktop does.
-  - from: server/dist/opencode-plugins
-    to: opencode-plugins
+      - opencode2
+      - opencode2.exe
+      - versions.json
+  - from: resources/native-plugins
+    to: native-plugins
     filter:
-      - "*.js"
-      - "*.wasm"
-      - "!*.test.js"
+      - "*.mjs"
+      - manifest.json
 asar: true
 npmRebuild: false
 # Notarization runs in the after-sign hook only when a release asks for it

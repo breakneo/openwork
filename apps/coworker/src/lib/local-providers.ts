@@ -46,7 +46,7 @@ export const LOCAL_MODE_COPY = {
   waitingBrowser: "Finish signing in in your browser; this line updates by itself.",
   waitingCode: (code: string) => `Enter the code ${code} in your browser; this line updates by itself.`,
   connectedLine: (count: number) => count > 0 ? `Connected. ${count} model${count === 1 ? "" : "s"} available.` : "Saved on this Mac, but no models are available yet.",
-  shared: "Sign-ins and keys are shared with OpenWork Desktop and OpenCode on this Mac.",
+  shared: "Sign-ins are stored by the AI service on this Mac. Other apps using the same service may share them.",
   keyPlaceholder: "Paste the key",
   keyHint: (envName: string) => (envName ? `The key you use as ${envName}.` : "The key from your provider's dashboard."),
   customName: "Name",
@@ -121,6 +121,7 @@ function connectedDetail(provider: EngineProviderSummary, findings: LocalProvide
   if (provider.source === "env" && envFinding?.envName) return `From ${envFinding.envName} in your environment.`;
   if (provider.source === "env") return "From a key in your environment.";
   if (provider.source === "config") return "A server you added here.";
+  if (provider.source === "credential") return "A saved connection in the AI service on this Mac.";
   if (provider.id === "openai") {
     if (chatgptEvidence(findings, { providers: [provider] }).kind === "connected") return "ChatGPT sign-in on this Mac; shared with OpenWork Desktop and OpenCode.";
     if (provider.source === "api" || findings.some((finding) => finding.kind === "opencode" && finding.providerId === "openai" && finding.credentialKind === "api-key")) {
@@ -174,7 +175,7 @@ export function planLocalMode(input: {
       label: known.label,
       envName: provider.env[0] ?? "",
       canSignIn,
-      acceptsKey: !known.signInOnly,
+      acceptsKey: provider.acceptsKey ?? !known.signInOnly,
       connected: provider.connected,
     }];
   });
@@ -198,6 +199,7 @@ export function openAiSetupGuard(
     return { kind: "environment", note: "OpenAI uses a key from your environment. Remove it there and restart Open Coworker before choosing another sign-in or key. Nothing is replaced here." };
   }
   if (provider) {
+    if (provider.integrationID) return { kind: "disconnect", note: "OpenAI already has a connection. To replace it, disconnect it first and confirm. Other apps using this same AI service may also lose access." };
     return { kind: "disconnect", note: "OpenAI already has a connection. To replace its key or sign-in, disconnect it first and confirm. This also affects OpenWork Desktop and OpenCode on this Mac." };
   }
   if (findings.some((finding) => finding.kind === "opencode" && finding.providerId === "openai")) {

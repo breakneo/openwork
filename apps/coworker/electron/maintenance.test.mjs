@@ -13,6 +13,8 @@ import { normalizeSettings, readSettings, updateSettings } from "./settings.mjs"
 import { captureMaintenanceProcesses, maintenanceFailureDetail, maintenanceProcessIdentity, maintenanceLaunchArguments, prepareMaintenanceHandoff, readMaintenanceStartup, waitForMaintenanceExit as waitForCapturedExit } from "./maintenance-handoff.mjs";
 
 const waitForMaintenanceExit = (pids, timeout) => waitForCapturedExit(captureMaintenanceProcesses(pids), timeout);
+const sessionTables = ["session_message", "session_pending", "session_inbox", "instruction_entry", "instruction_state"];
+const sharedTables = ["project", "project_directory", "worktree", "workspace", "permission", "credential", "account", "account_state", "control_account", "instruction_blob", "kv", "migration"];
 
 async function fixture(t, overrides = {}) {
   const root = await mkdtemp(path.join(await realpath(tmpdir()), "coworker-reset-"));
@@ -22,7 +24,8 @@ async function fixture(t, overrides = {}) {
   const config = {
     userData: path.join(isolated, "electron-userdata"), coworkers: path.join(isolated, "coworkers"),
     serverConfig: path.join(isolated, "coworker-server.json"), settings: path.join(isolated, "coworker-settings.json"),
-    runtimeDb: path.join(isolated, "runtime.sqlite"), envStore: path.join(isolated, "coworker-env.json"), historyDb: path.join(isolated, "opencode.db"),
+    runtimeDb: path.join(isolated, "runtime.sqlite"), envStore: path.join(isolated, "coworker-env.json"),
+    historyDb: resolveMaintenanceHistoryDb({ rootDir: path.join(isolated, "native-engine") }),
     defaults: { userData: path.join(root, "normal", "profile"), devUserData: path.join(root, "normal", "dev-profile"), coworkers: path.join(root, "shared", "coworkers"), serverConfig: path.join(root, "shared", "coworker-server.json") },
     protectedPaths: [root, path.join(root, "shared"), path.join(root, "credentials.json")], allowedParents: [root], isDev: true,
   };
@@ -33,49 +36,147 @@ async function fixture(t, overrides = {}) {
   for (const file of [config.serverConfig, config.runtimeDb, `${config.runtimeDb}-wal`, `${config.runtimeDb}-shm`, config.envStore]) await writeFile(file, "fixture-state");
   await writeFile(path.join(root, "credentials.json"), "fixture-credential");
   await updateSettings(config.settings, { maxParallelLocalRuns: 7, progressSummariesEnabled: true, progressSummaryModelId: "fixture/summary" });
+  await mkdir(path.dirname(config.historyDb));
   const db = new DatabaseSync(config.historyDb);
+  // Independent disposable DDL from beta19086 core/database/schema.gen.ts,
+  // including native indexes. No engine startup, migration or real auth storage.
   db.exec(`
-    CREATE TABLE project(id TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE project_directory(project_id TEXT, directory TEXT);
-    CREATE TABLE workspace(id TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE account(id TEXT PRIMARY KEY, credential TEXT);
-    CREATE TABLE permission(id TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE session(id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, project_id TEXT REFERENCES project(id));
-    CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE, data TEXT);
-    CREATE TABLE part(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE, data BLOB);
-    CREATE TABLE event_sequence(aggregate_id TEXT PRIMARY KEY, value INTEGER);
-    CREATE TABLE event(id TEXT PRIMARY KEY, aggregate_id TEXT NOT NULL REFERENCES event_sequence(aggregate_id) ON DELETE CASCADE, data TEXT);
-    INSERT INTO project VALUES ('project', 'sentinel');
-    INSERT INTO workspace VALUES ('workspace', 'sentinel');
-    INSERT INTO account VALUES ('account', 'fixture-credential');
-    INSERT INTO permission VALUES ('permission', 'sentinel');
+    CREATE TABLE account_state (
+      id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT,
+      FOREIGN KEY (active_account_id) REFERENCES account(id) ON DELETE SET NULL
+    );
+    CREATE TABLE account (
+      id TEXT PRIMARY KEY, email TEXT NOT NULL, url TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL,
+      token_expiry INTEGER, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+    );
+    CREATE TABLE control_account (
+      email TEXT NOT NULL, url TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, token_expiry INTEGER,
+      active INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, PRIMARY KEY(email, url)
+    );
+    CREATE TABLE credential (
+      id TEXT PRIMARY KEY, integration_id TEXT, label TEXT NOT NULL, value TEXT NOT NULL, connector_id TEXT, method_id TEXT,
+      active INTEGER, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+    );
+    CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, owner_id TEXT);
+    CREATE TABLE event (
+      id TEXT PRIMARY KEY, aggregate_id TEXT NOT NULL, seq INTEGER NOT NULL, created INTEGER DEFAULT 0 NOT NULL,
+      type TEXT NOT NULL, data TEXT NOT NULL, FOREIGN KEY (aggregate_id) REFERENCES event_sequence(aggregate_id) ON DELETE CASCADE
+    );
+    CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+    CREATE TABLE permission (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
+    );
+    CREATE TABLE project_directory (
+      project_id TEXT NOT NULL, directory TEXT NOT NULL, type TEXT, strategy TEXT, time_created INTEGER NOT NULL,
+      PRIMARY KEY(project_id, directory), FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
+    );
+    CREATE TABLE project (
+      id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT, name TEXT, icon_url TEXT, icon_url_override TEXT, icon_color TEXT,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_initialized INTEGER, sandboxes TEXT NOT NULL, commands TEXT
+    );
+    CREATE TABLE instruction_blob (hash TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE instruction_entry (
+      session_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, removed INTEGER DEFAULT false NOT NULL,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, PRIMARY KEY(session_id, key),
+      FOREIGN KEY (session_id) REFERENCES session_v2(id) ON DELETE CASCADE
+    );
+    CREATE TABLE instruction_state (
+      session_id TEXT PRIMARY KEY, epoch_start INTEGER NOT NULL, through_seq INTEGER NOT NULL,
+      initial_values TEXT NOT NULL, current_values TEXT NOT NULL, FOREIGN KEY (session_id) REFERENCES session_v2(id) ON DELETE CASCADE
+    );
+    CREATE TABLE session_inbox (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, delivery TEXT NOT NULL,
+      enqueued_seq INTEGER NOT NULL, time_created INTEGER NOT NULL, FOREIGN KEY (session_id) REFERENCES session_v2(id) ON DELETE CASCADE
+    );
+    CREATE TABLE session_message (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL,
+      time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES session_v2(id) ON DELETE CASCADE
+    );
+    CREATE TABLE session_pending (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, delivery TEXT,
+      admitted_seq INTEGER NOT NULL, time_created INTEGER NOT NULL, FOREIGN KEY (session_id) REFERENCES session_v2(id) ON DELETE CASCADE
+    );
+    CREATE TABLE session_v2 (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT, parent_id TEXT, fork_session_id TEXT, fork_boundary TEXT,
+      slug TEXT NOT NULL, directory TEXT NOT NULL, path TEXT, title TEXT, version TEXT NOT NULL, share_url TEXT,
+      summary_additions INTEGER, summary_deletions INTEGER, summary_files INTEGER, summary_diffs TEXT, metadata TEXT,
+      cost REAL DEFAULT 0 NOT NULL, tokens_input INTEGER DEFAULT 0 NOT NULL, tokens_output INTEGER DEFAULT 0 NOT NULL,
+      tokens_reasoning INTEGER DEFAULT 0 NOT NULL, tokens_cache_read INTEGER DEFAULT 0 NOT NULL, tokens_cache_write INTEGER DEFAULT 0 NOT NULL,
+      revert TEXT, permission TEXT, agent TEXT, model TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+      time_idle INTEGER, time_viewed INTEGER, idle_outcome TEXT, time_compacting INTEGER, time_archived INTEGER,
+      time_suspended INTEGER, resume_attempts INTEGER DEFAULT 0 NOT NULL, FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
+    );
+    CREATE TABLE workspace (id TEXT PRIMARY KEY, provider TEXT NOT NULL, binding TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
+    CREATE TABLE worktree (
+      project_id TEXT NOT NULL, directory TEXT NOT NULL, strategy TEXT, time_created INTEGER NOT NULL,
+      PRIMARY KEY(project_id, directory), FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
+    );
+    CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+    CREATE UNIQUE INDEX event_aggregate_seq_idx ON event(aggregate_id, seq);
+    CREATE INDEX event_aggregate_type_seq_idx ON event(aggregate_id, type, seq);
+    CREATE UNIQUE INDEX permission_project_action_resource_idx ON permission(project_id, action, resource);
+    CREATE INDEX session_inbox_session_delivery_seq_idx ON session_inbox(session_id, delivery, enqueued_seq);
+    CREATE UNIQUE INDEX session_inbox_session_enqueued_seq_idx ON session_inbox(session_id, enqueued_seq);
+    CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message(session_id, seq);
+    CREATE INDEX session_message_session_type_seq_idx ON session_message(session_id, type, seq);
+    CREATE INDEX session_message_session_time_created_id_idx ON session_message(session_id, time_created, id);
+    CREATE INDEX session_message_time_created_idx ON session_message(time_created);
+    CREATE INDEX session_pending_session_delivery_seq_idx ON session_pending(session_id, delivery, admitted_seq);
+    CREATE UNIQUE INDEX session_pending_session_compaction_idx ON session_pending(session_id) WHERE "session_pending"."type" = 'compaction';
+    CREATE UNIQUE INDEX session_pending_session_admitted_seq_idx ON session_pending(session_id, admitted_seq);
+    CREATE INDEX session_v2_project_idx ON session_v2(project_id);
+    CREATE INDEX session_v2_workspace_idx ON session_v2(workspace_id);
+    CREATE INDEX session_v2_parent_idx ON session_v2(parent_id);
+    CREATE INDEX session_v2_time_suspended_idx ON session_v2(time_suspended) WHERE "session_v2"."time_suspended" IS NOT NULL;
+    INSERT INTO project(id, worktree, name, time_created, time_updated, sandboxes) VALUES ('project', '/fixture', 'sentinel', 1, 1, '[]');
+    INSERT INTO project_directory VALUES ('project', '/fixture', 'main', NULL, 1);
+    INSERT INTO worktree VALUES ('project', '/fixture', NULL, 1);
+    INSERT INTO workspace VALUES ('workspace', 'fixture', 'sentinel', 1, 1);
+    INSERT INTO account VALUES ('account', 'fixture@example.invalid', 'https://example.invalid', 'fixture-credential', 'fixture-refresh', NULL, 1, 1);
+    INSERT INTO account_state VALUES (1, 'account', 'fixture-org');
+    INSERT INTO control_account VALUES ('fixture@example.invalid', 'https://example.invalid', 'fixture-control', 'fixture-refresh', NULL, 1, 1, 1);
+    INSERT INTO credential(id, label, value, time_created, time_updated) VALUES ('foreign', 'fixture', 'preserved-credential', 1, 1);
+    INSERT INTO permission VALUES ('permission', 'project', 'fixture', 'sentinel', 1, 1);
+    INSERT INTO instruction_blob VALUES ('shared-hash', '{"text":"shared instruction"}');
+    INSERT INTO kv VALUES ('fixture', '{"sentinel":true}', 1, 1);
+    INSERT INTO migration VALUES ('20260823191254_nullable_workspace_binding', 1);
   `);
-  for (const name of ["credential", "account_state", "data_migration", "migration", "control_account"]) {
-    db.exec(`CREATE TABLE ${name}(id TEXT PRIMARY KEY, value TEXT); INSERT INTO ${name} VALUES ('foreign', 'preserved-${name}');`);
-  }
-  for (const table of ["todo", "session_share", "session_context_epoch", "session_input", "session_message"]) db.exec(`CREATE TABLE ${table}(session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE, value TEXT)`);
   for (const [id, directory] of [["owned", path.join(config.coworkers, "writer")], ["neighbor", `${config.coworkers}-other/writer`], ["unrelated", path.join(root, "another-project")]]) {
-    db.prepare("INSERT INTO session VALUES (?, ?, NULL, 'project')").run(id, directory);
-    db.prepare("INSERT INTO message VALUES (?, ?, ?)").run(`msg-${id}`, id, `message-${id}`);
-    db.prepare("INSERT INTO part VALUES (?, ?, ?, ?)").run(`part-${id}`, id, `msg-${id}`, new Uint8Array([1, 2, 3]));
-    db.prepare("INSERT INTO event_sequence VALUES (?, 1)").run(id);
-    db.prepare("INSERT INTO event VALUES (?, ?, ?)").run(`event-${id}`, id, `event-${id}`);
-    for (const table of ["todo", "session_share", "session_context_epoch", "session_input", "session_message"]) db.prepare(`INSERT INTO ${table} VALUES (?, 'fixture')`).run(id);
+    db.prepare("INSERT INTO session_v2(id, directory, project_id, slug, version, time_created, time_updated) VALUES (?, ?, 'project', ?, 'beta19086', 1, 1)").run(id, directory, id);
+    db.prepare("INSERT INTO session_message VALUES (?, ?, 'user', 1, 1, 1, ?)").run(`msg-${id}`, id, JSON.stringify({ text: `message-${id}` }));
+    db.prepare("INSERT INTO session_pending VALUES (?, ?, 'user', '{}', 'queued', 2, 1)").run(`pending-${id}`, id);
+    db.prepare("INSERT INTO session_inbox VALUES (?, ?, 'user', '{}', 'queued', 3, 1)").run(`inbox-${id}`, id);
+    db.prepare("INSERT INTO instruction_entry VALUES (?, 'fixture', '\"shared-hash\"', false, 1, 1)").run(id);
+    db.prepare("INSERT INTO instruction_state VALUES (?, 0, 1, '{}', '{}')").run(id);
+    db.prepare("INSERT INTO event_sequence VALUES (?, 1, 'fixture-owner')").run(id);
+    db.prepare("INSERT INTO event VALUES (?, ?, 1, 1, 'session.created', ?)").run(`event-${id}`, id, JSON.stringify({ sessionID: id }));
   }
+  // Aggregates without a session are not implicitly owned by this reset.
+  db.exec("INSERT INTO event_sequence VALUES ('unprojected', 1, NULL); INSERT INTO event VALUES ('event-unprojected', 'unprojected', 1, 1, 'session.created', '{}')");
+  const preserved = Object.fromEntries(sharedTables.map((name) => [name, db.prepare(`SELECT * FROM ${name}`).all()]));
   db.close();
   const admission = createMaintenanceAdmission();
   let relaunched = false;
   const service = createMaintenance({ admission, paths: () => validateMaintenancePaths(config), coworkerCount: async () => 1,
     stop: async () => true, relaunch: async () => { relaunched = true; },
     restoreDefaults: () => updateSettings(config.settings, normalizeSettings({})), ...overrides });
-  return { root, config, admission, service, relaunched: () => relaunched };
+  return { root, config, admission, service, preserved, relaunched: () => relaunched };
 }
 
 test("reset backs up and removes only Coworker files, sessions and event aggregates, then relaunches", async (t) => {
   const f = await fixture(t);
   const seed = new DatabaseSync(f.config.historyDb);
-  seed.prepare("INSERT INTO session VALUES ('owned-child', ?, 'owned', 'project')").run(path.join(f.config.coworkers, "writer"));
+  seed.prepare("INSERT INTO session_v2(id, directory, parent_id, project_id, slug, version, time_created, time_updated) VALUES ('owned-child', ?, 'owned', 'project', 'child', 'beta19086', 1, 1)").run(path.join(f.config.coworkers, "writer"));
   seed.close();
+  const legacyPath = path.join(f.root, "legacy-v1.db");
+  const legacy = new DatabaseSync(legacyPath);
+  legacy.exec("CREATE TABLE session(id TEXT PRIMARY KEY, directory TEXT); CREATE TABLE message(id TEXT, session_id TEXT, data TEXT)");
+  legacy.prepare("INSERT INTO session VALUES ('owned', ?)").run(path.join(f.config.coworkers, "writer"));
+  legacy.exec("INSERT INTO message VALUES ('v1-message', 'owned', 'original v1 history')");
+  legacy.close();
+  const legacyBytes = await readFile(legacyPath);
   assert.deepEqual(await f.service.preview(), { coworkerCount: 1, historyCount: 2, backupDirectory: `${f.config.userData}-recovery` });
   const { backupPath } = await f.service.factoryReset({ confirmation: "DELETE" });
   assert.equal(f.relaunched(), true);
@@ -85,26 +186,26 @@ test("reset backs up and removes only Coworker files, sessions and event aggrega
   assert.equal(await readFile(path.join(backupPath, "files", "coworkers", "writer", "memory.md"), "utf8"), "kept in recovery");
   assert.equal(await readFile(path.join(backupPath, "originals", "profile", "onboarding.json"), "utf8"), "old-onboarding");
   assert.equal(await readFile(path.join(f.root, "credentials.json"), "utf8"), "fixture-credential");
+  assert.deepEqual(await readFile(legacyPath), legacyBytes, "Existing v1 history is neither changed nor relocated.");
   assert.equal((await stat(backupPath)).mode & 0o777, 0o700);
   assert.equal((await stat(path.join(backupPath, "history.sqlite"))).mode & 0o777, 0o600);
   const db = new DatabaseSync(f.config.historyDb);
   const backup = new DatabaseSync(path.join(backupPath, "history.sqlite"));
   try {
-    assert.deepEqual(db.prepare("SELECT id FROM session ORDER BY id").all().map((row) => row.id), ["neighbor", "unrelated"]);
-    assert.deepEqual(db.prepare("SELECT aggregate_id FROM event ORDER BY aggregate_id").all().map((row) => row.aggregate_id), ["neighbor", "unrelated"]);
-    assert.equal(db.prepare("SELECT credential FROM account").get().credential, "fixture-credential");
-    assert.equal(db.prepare("SELECT value FROM project").get().value, "sentinel");
-    assert.equal(db.prepare("SELECT value FROM permission").get().value, "sentinel");
-    assert.equal(db.prepare("SELECT value FROM workspace").get().value, "sentinel");
-    for (const name of ["credential", "account_state", "data_migration", "migration", "control_account"]) {
-      assert.equal(db.prepare(`SELECT value FROM ${name}`).get().value, `preserved-${name}`);
+    assert.deepEqual(db.prepare("SELECT id FROM session_v2 ORDER BY id").all().map((row) => row.id), ["neighbor", "unrelated"]);
+    assert.deepEqual(db.prepare("SELECT aggregate_id FROM event ORDER BY aggregate_id").all().map((row) => row.aggregate_id), ["neighbor", "unprojected", "unrelated"]);
+    for (const name of sharedTables) {
+      assert.deepEqual(db.prepare(`SELECT * FROM ${name}`).all(), f.preserved[name]);
       assert.equal(backup.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name = ?").get(name).n, 0);
     }
-    assert.deepEqual(backup.prepare("SELECT id FROM session ORDER BY id").all().map((row) => row.id), ["owned", "owned-child"]);
-    for (const table of ["message", "part", "todo", "session_share", "session_context_epoch", "session_input", "session_message"]) assert.deepEqual(db.prepare(`SELECT session_id FROM ${table} ORDER BY session_id`).all().map((row) => row.session_id), ["neighbor", "unrelated"]);
-    assert.equal(backup.prepare("SELECT count(*) AS n FROM part").get().n, 1);
+    assert.deepEqual(backup.prepare("SELECT id FROM session_v2 ORDER BY id").all().map((row) => row.id), ["owned", "owned-child"]);
+    for (const table of sessionTables) {
+      assert.deepEqual(db.prepare(`SELECT session_id FROM ${table} ORDER BY session_id`).all().map((row) => row.session_id), ["neighbor", "unrelated"]);
+      assert.deepEqual(backup.prepare(`SELECT session_id FROM ${table}`).all().map((row) => row.session_id), ["owned"]);
+    }
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(backup.prepare("SELECT data FROM session_message").get().data, JSON.stringify({ text: "message-owned" }));
     assert.equal(backup.prepare("SELECT count(*) AS n FROM event").get().n, 1);
-    assert.equal(backup.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name = 'account'").get().n, 0);
   } finally { db.close(); backup.close(); }
   await assert.rejects(f.admission.run(() => mkdir(f.config.coworkers)), /Fresh start/);
   await assert.rejects(f.service.factoryReset({ confirmation: "DELETE" }), /Fresh start/);
@@ -128,7 +229,7 @@ test("backup and uncertain native stop failures never remove files or history", 
     await assert.rejects(f.service.factoryReset({ confirmation: "DELETE" }), /preserved/);
     assert.equal(await readFile(path.join(f.config.userData, "onboarding.json"), "utf8"), "old-onboarding");
     const db = new DatabaseSync(f.config.historyDb);
-    try { assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3); } finally { db.close(); }
+    try { assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3); } finally { db.close(); }
     assert.equal(f.relaunched(), false);
   }
 });
@@ -148,27 +249,27 @@ test("a move failure rolls files and history back without overwriting a newly cr
     await assert.rejects(f.service.factoryReset({ confirmation: "DELETE" }), recreate ? /recovery needs attention/ : /preserved/);
     assert.equal(await readFile(path.join(profile, recreate ? "new" : "onboarding.json"), "utf8"), recreate ? "sentinel" : "old-onboarding");
     const db = new DatabaseSync(f.config.historyDb);
-    try { assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3); } finally { db.close(); }
+    try { assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3); } finally { db.close(); }
     assert.equal(f.relaunched(), false);
   }
 });
 
-test("ambiguous paths, outside descendants, ownership mismatches and schema drift fail closed", async (t) => {
+test("ambiguous paths, outside descendants, forks and schema drift fail closed", async (t) => {
   const f = await fixture(t);
   for (const patch of [{ userData: f.root }, { coworkers: f.config.userData }, { runtimeDb: path.join(f.root, "shared", "runtime.sqlite") }, { historyDb: path.join(f.config.userData, "opencode.db") }]) await assert.rejects(validateMaintenancePaths({ ...f.config, ...patch }));
-  const link = path.join(f.root, "linked");
+  const link = path.join(f.root, "opencode.db");
   await symlink(f.config.historyDb, link);
   await assert.rejects(validateMaintenancePaths({ ...f.config, historyDb: link }), /symlink/);
   for (const sql of [
-    "UPDATE session SET parent_id = 'owned' WHERE id = 'unrelated'",
-    "UPDATE part SET message_id = 'msg-owned' WHERE id = 'part-unrelated'",
-    "CREATE TABLE new_history(session_id TEXT REFERENCES session(id) ON DELETE CASCADE)",
+    "UPDATE session_v2 SET parent_id = 'owned' WHERE id = 'unrelated'",
+    "UPDATE session_v2 SET fork_session_id = 'owned' WHERE id = 'unrelated'",
+    "CREATE TABLE new_history(session_id TEXT REFERENCES session_v2(id) ON DELETE CASCADE)",
   ]) {
     const db = new DatabaseSync(f.config.historyDb);
     db.exec(sql); db.close();
     await assert.rejects(f.service.preview(), /Reset refused/);
     const repair = new DatabaseSync(f.config.historyDb);
-    repair.exec("UPDATE session SET parent_id = NULL; UPDATE part SET message_id = 'msg-unrelated' WHERE id = 'part-unrelated'; DROP TABLE IF EXISTS new_history");
+    repair.exec("UPDATE session_v2 SET parent_id = NULL, fork_session_id = NULL; DROP TABLE IF EXISTS new_history");
     repair.close();
   }
 });
@@ -176,11 +277,20 @@ test("ambiguous paths, outside descendants, ownership mismatches and schema drif
 test("unknown schemas fail reset before shutdown, backup, or deletion", async (t) => {
   for (const sql of [
     "CREATE TABLE unknown_records(id TEXT)",
-    "CREATE TABLE sqliteXforeign(session_id TEXT REFERENCES session(id) ON DELETE CASCADE)",
-    "DROP TABLE session_input",
-    "CREATE TRIGGER leak AFTER DELETE ON session BEGIN DELETE FROM account; END",
-    "UPDATE session SET parent_id = 'owned' WHERE id = 'unrelated'",
-    "UPDATE part SET message_id = 'msg-unrelated' WHERE id = 'part-owned'",
+    "CREATE TABLE sqliteXforeign(session_id TEXT REFERENCES session_v2(id) ON DELETE CASCADE)",
+    "DROP TABLE session_inbox",
+    "CREATE TRIGGER leak AFTER DELETE ON session_v2 BEGIN DELETE FROM account; END",
+    "CREATE VIEW unknown_history AS SELECT * FROM session_v2",
+    "UPDATE session_v2 SET parent_id = 'owned' WHERE id = 'unrelated'",
+    "UPDATE session_v2 SET fork_session_id = 'owned' WHERE id = 'unrelated'",
+    "ALTER TABLE session_pending ADD COLUMN future_owner TEXT",
+    "ALTER TABLE event RENAME COLUMN created TO unknown_created",
+    "DROP INDEX session_message_session_seq_idx",
+    "CREATE INDEX unknown_owner ON session_v2(directory COLLATE NOCASE)",
+    "DROP INDEX session_pending_session_compaction_idx; CREATE UNIQUE INDEX session_pending_session_compaction_idx ON session_pending(session_id) WHERE session_pending.type = 'synthetic'",
+    "ALTER TABLE credential ADD COLUMN session_id TEXT REFERENCES session_v2(id) ON DELETE CASCADE",
+    "DROP TABLE instruction_state; CREATE TABLE instruction_state(session_id TEXT PRIMARY KEY REFERENCES session_v2(id), epoch_start INTEGER NOT NULL, through_seq INTEGER NOT NULL, initial_values TEXT NOT NULL, current_values TEXT NOT NULL)",
+    "CREATE TABLE session(id TEXT PRIMARY KEY, directory TEXT); INSERT INTO session VALUES ('v1', '/fixture')",
   ]) {
     let stopped = false;
     const f = await fixture(t, { stop: async () => { stopped = true; return true; } });
@@ -192,10 +302,27 @@ test("unknown schemas fail reset before shutdown, backup, or deletion", async (t
     await assert.rejects(stat(`${f.config.userData}-recovery`), { code: "ENOENT" });
     const check = new DatabaseSync(f.config.historyDb);
     try {
-      assert.equal(check.prepare("SELECT count(*) AS n FROM session").get().n, 3);
-      assert.equal(check.prepare("SELECT credential FROM account").get().credential, "fixture-credential");
+      assert.equal(check.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3);
+      assert.equal(check.prepare("SELECT access_token FROM account").get().access_token, "fixture-credential");
+      if (sql.startsWith("CREATE TABLE session(")) assert.equal(check.prepare("SELECT id FROM session").get().id, "v1");
     } finally { check.close(); }
   }
+});
+
+test("an explicit native path containing only v1 history is refused without changing or relocating it", async (t) => {
+  let stopped = false;
+  const f = await fixture(t, { stop: async () => { stopped = true; return true; } });
+  await rm(f.config.historyDb);
+  const db = new DatabaseSync(f.config.historyDb);
+  db.exec("CREATE TABLE session(id TEXT PRIMARY KEY, directory TEXT); INSERT INTO session VALUES ('v1', '/fixture')");
+  db.close();
+  const original = await readFile(f.config.historyDb);
+  await assert.rejects(f.service.preview(), /Reset refused/);
+  await assert.rejects(f.service.factoryReset({ confirmation: "DELETE" }), /preserved/);
+  assert.equal(stopped, false);
+  assert.deepEqual(await readFile(f.config.historyDb), original);
+  assert.equal(await readFile(path.join(f.config.userData, "onboarding.json"), "utf8"), "old-onboarding");
+  await assert.rejects(stat(`${f.config.userData}-recovery`), { code: "ENOENT" });
 });
 
 test("a failed history commit restores the moved files and deleted rows", async (t) => {
@@ -214,9 +341,10 @@ test("a failed history commit restores the moved files and deleted rows", async 
   assert.equal(await readFile(path.join(f.config.coworkers, "writer", "memory.md"), "utf8"), "kept in recovery");
   const db = new DatabaseSync(f.config.historyDb);
   try {
-    assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3);
-    assert.equal(db.prepare("SELECT count(*) AS n FROM event").get().n, 3);
-    assert.equal(db.prepare("SELECT count(*) AS n FROM part").get().n, 3);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM event").get().n, 4);
+    for (const table of sessionTables) assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n, 3);
+    for (const table of sharedTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), f.preserved[table]);
   } finally { db.close(); }
 });
 
@@ -257,7 +385,8 @@ test("path overrides cannot enter protected trees, recovery, hard links, or syml
   await assert.rejects(validateMaintenancePaths({ ...f.config, serverConfig: path.join(path.parse(f.root).root, "coworker-server.json") }), /shared\/development/);
   const protectedRoot = path.join(f.root, "other-app");
   await assert.rejects(validateMaintenancePaths({ ...f.config, userData: path.join(protectedRoot, "electron-userdata"), protectedPaths: [...f.config.protectedPaths, protectedRoot] }), /shared storage/);
-  await assert.rejects(validateMaintenancePaths({ ...f.config, historyDb: path.join(`${f.config.userData}-recovery`, "history.db") }), /recovery directory/);
+  await assert.rejects(validateMaintenancePaths({ ...f.config, historyDb: path.join(`${f.config.userData}-recovery`, "opencode.db") }), /recovery directory/);
+  await assert.rejects(validateMaintenancePaths({ ...f.config, historyDb: path.join(f.root, "shared", "opencode.db") }), /protected or legacy/);
   await link(path.join(f.root, "credentials.json"), path.join(f.config.userData, "credential-link"));
   await assert.rejects(f.service.factoryReset({ confirmation: "DELETE" }), /shared hard link/);
   assert.equal(await readFile(path.join(f.root, "credentials.json"), "utf8"), "fixture-credential");
@@ -265,7 +394,7 @@ test("path overrides cannot enter protected trees, recovery, hard links, or syml
   const linked = path.join(other.config.coworkers, "linked");
   await symlink(other.root, linked);
   const db = new DatabaseSync(other.config.historyDb);
-  db.prepare("UPDATE session SET directory = ? WHERE id = 'owned'").run(linked); db.close();
+  db.prepare("UPDATE session_v2 SET directory = ? WHERE id = 'owned'").run(linked); db.close();
   await assert.rejects(other.service.factoryReset({ confirmation: "DELETE" }), /symlinked/);
 });
 
@@ -289,8 +418,8 @@ test("reset waits for admitted writes and restoring defaults changes only app pr
   assert.equal(await readFile(path.join(f.config.userData, "onboarding.json"), "utf8"), "old-onboarding");
   const db = new DatabaseSync(f.config.historyDb);
   try {
-    assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3);
-    assert.equal(db.prepare("SELECT credential FROM account").get().credential, "fixture-credential");
+    assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3);
+    assert.equal(db.prepare("SELECT access_token FROM account").get().access_token, "fixture-credential");
   } finally { db.close(); }
   let release;
   const pending = f.admission.run(() => new Promise((resolve) => { release = resolve; }));
@@ -331,7 +460,7 @@ test("post-exit helper waits for parent AND late writer, then resets or rolls ba
       assert.equal(await readFile(path.join(f.config.userData, "onboarding.json"), "utf8"), "old-onboarding");
       await assert.rejects(stat(path.join(f.root, "relaunched.json")), { code: "ENOENT" });
       const before = new DatabaseSync(f.config.historyDb);
-      try { assert.equal(before.prepare("SELECT count(*) AS n FROM session").get().n, 3); } finally { before.close(); }
+      try { assert.equal(before.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3); } finally { before.close(); }
       await writeFile(path.join(f.root, "release-writer"), "release only this fixture");
       await eventually(async () => { try { await stat(path.join(f.root, "relaunched.json")); return true; } catch { return false; } });
       const launched = JSON.parse(await readFile(path.join(f.root, "relaunched.json"), "utf8"));
@@ -348,7 +477,7 @@ test("post-exit helper waits for parent AND late writer, then resets or rolls ba
       assert.equal(readMaintenanceStartup(f.config.userData), null, "The notice is consumed once, not replayed on every start.");
       const db = new DatabaseSync(f.config.historyDb);
       try {
-        assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, failBackup ? 3 : 2);
+        assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, failBackup ? 3 : 2);
         assert.equal(db.prepare("SELECT value FROM credential").get().value, "preserved-credential");
       } finally { db.close(); }
       const previousProfile = failBackup ? f.config.userData : path.join(launched.notice.backupPath, "files", "profile");
@@ -411,7 +540,7 @@ test("a helper exit timeout never erases files and relaunches into a native clea
     assert.match(launched.notice.message, /without confirmed cleanup/);
     assert.equal(await readFile(path.join(f.config.userData, "onboarding.json"), "utf8"), "old-onboarding");
     const db = new DatabaseSync(f.config.historyDb);
-    try { assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3); } finally { db.close(); }
+    try { assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3); } finally { db.close(); }
     await writeFile(path.join(f.root, "release-writer"), "release");
     await waitForMaintenanceExit([prepared.helperPid, prepared.writerPid], 5000);
     assert.deepEqual(readMaintenanceStartup(f.config.userData, { consume: false }), { blocked: false, phase: "failed", backupPath: null, diagnostics: { stage: "waiting-for-exit" } });
@@ -477,7 +606,7 @@ test("lost/delayed acknowledgements and missing final commitment cannot turn ord
       await assert.rejects(stat(path.join(f.root, "relaunched.json")), { code: "ENOENT" });
       const db = new DatabaseSync(f.config.historyDb);
       try {
-        assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3);
+        assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3);
         assert.equal(db.prepare("SELECT value FROM credential").get().value, "preserved-credential");
       } finally { db.close(); }
     } finally {
@@ -526,14 +655,24 @@ test("large file backup does not hold the shared database write lock", async (t)
   try { assert.equal(check.prepare("SELECT value FROM credential").get().value, "concurrent-preserved"); } finally { check.close(); }
 });
 
-test("engine database selection refuses unresolved channels and respects explicit native paths", () => {
-  const input = { env: {}, dataDirectory: "/isolated/opencode", bundled: true, version: "1.18.18" };
-  assert.equal(resolveMaintenanceHistoryDb(input), "/isolated/opencode/opencode.db");
-  assert.throws(() => resolveMaintenanceHistoryDb({ ...input, bundled: false }), /unresolved/);
-  assert.throws(() => resolveMaintenanceHistoryDb({ ...input, version: "1.18.18-custom" }), /unresolved/);
-  assert.equal(resolveMaintenanceHistoryDb({ ...input, bundled: false, env: { OPENCODE_DB: "opencode-feature.db" } }), "/isolated/opencode/opencode-feature.db");
-  assert.equal(resolveMaintenanceHistoryDb({ ...input, bundled: false, env: { OPENCODE_DB: "/other/owned.db" } }), "/other/owned.db");
-  assert.throws(() => resolveMaintenanceHistoryDb({ ...input, env: { OPENCODE_DB: ":memory:" } }), /filesystem/);
+test("engine database selection requires the explicit native v2 root or matching database path", () => {
+  const input = { rootDir: "/isolated/native", platform: "linux" };
+  assert.equal(resolveMaintenanceHistoryDb(input), "/isolated/native/opencode.db");
+  assert.equal(resolveMaintenanceHistoryDb({ ...input, databasePath: "/isolated/native/opencode.db" }), "/isolated/native/opencode.db");
+  assert.equal(resolveMaintenanceHistoryDb({ databasePath: "/isolated/native/opencode.db", platform: "linux" }), "/isolated/native/opencode.db");
+  assert.throws(() => resolveMaintenanceHistoryDb(), /unresolved/);
+  assert.throws(() => resolveMaintenanceHistoryDb({ env: { OPENCODE_DB: "/legacy/opencode.db" }, dataDirectory: "/legacy", bundled: true, version: "1.18.18" }), /unresolved/);
+  for (const rootDir of [null, "", "/", ":memory:", "relative", " /isolated/native", "/isolated/../native", "/isolated/native\0"]) {
+    assert.throws(() => resolveMaintenanceHistoryDb({ ...input, rootDir }), /filesystem/);
+  }
+  for (const databasePath of ["/other/opencode.db", "/isolated/native/legacy.db", "/opencode.db"]) {
+    assert.throws(() => resolveMaintenanceHistoryDb({ ...input, databasePath }), /rootDir\/opencode.db/);
+  }
+  assert.equal(resolveMaintenanceHistoryDb({ rootDir: "C:\\fixture\\native", platform: "win32" }), "C:\\fixture\\native\\opencode.db");
+  assert.equal(resolveMaintenanceHistoryDb({ databasePath: "\\\\host.example\\share\\native\\opencode.db", platform: "win32" }), "\\\\host.example\\share\\native\\opencode.db");
+  for (const rootDir of ["C:relative", "\\native", "C:\\", "C:/fixture/native", "\\\\?\\C:\\fixture"]) {
+    assert.throws(() => resolveMaintenanceHistoryDb({ rootDir, platform: "win32" }), /filesystem/);
+  }
 });
 
 test("a source directory replaced after pre-copy is not moved or overwritten during rollback", async (t) => {
@@ -548,7 +687,7 @@ test("a source directory replaced after pre-copy is not moved or overwritten dur
   assert.equal(await readFile(path.join(profile, "new-setup"), "utf8"), "preserve replacement");
   assert.equal(await readFile(path.join(`${profile}-previous`, "onboarding.json"), "utf8"), "old-onboarding");
   const db = new DatabaseSync(f.config.historyDb);
-  try { assert.equal(db.prepare("SELECT count(*) AS n FROM session").get().n, 3); } finally { db.close(); }
+  try { assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3); } finally { db.close(); }
   assert.equal(f.relaunched(), false);
 });
 

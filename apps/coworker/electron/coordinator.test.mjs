@@ -14,10 +14,8 @@ test("the coordinator home is a locked-down hidden workspace that the coworker l
     assert.equal(created.path, path.join(home, COORDINATOR_DIR));
     assert.equal(created.workspaceId, "");
     const config = JSON.parse(await readFile(path.join(created.path, "opencode.json"), "utf8"));
-    assert.equal(config.permission, "deny");
-    assert.equal(config.tools["*"], false);
-    assert.equal(config.tools.bash, false);
-    assert.equal(config.tools.edit, false);
+    assert.deepEqual(config.permissions, [{ action: "*", resource: "*", effect: "deny" }]);
+    assert.equal(config.tools, undefined);
     assert.deepEqual(config.instructions, []);
     assert.deepEqual(config.mcp, {});
     assert.match(await readFile(path.join(created.path, "AGENTS.md"), "utf8"), /never answer the person yourself/);

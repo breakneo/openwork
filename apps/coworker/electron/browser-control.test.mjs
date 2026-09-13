@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { EventEmitter, getEventListeners } from "node:events";
+import { createBrowserTools } from "@openwork/browser-tabs/tools";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { z } from "zod";
 import { transform } from "esbuild";
 import { assertBrowserToolContext, browserPageUrl, checkBrowserPolicy, createBrowserControl } from "./browser-control.mjs";
-import { BROWSER_PLUGIN, installBrowserPlugin } from "./browser-plugin.mjs";
+import { installBrowserPlugin } from "./browser-plugin.mjs";
 
 function nativeContext() {
   const args = { url: "https://example.com/" };
@@ -519,35 +520,111 @@ test("loading during an observation aborts it and cannot mint a snapshot receipt
   await assert.rejects(f.execute(f.call("snapshot", { browser_url: tab.browser_url, target_id: tab.target_id })), /page is loading/);
 });
 
-test("native turn and exact-tool cancellation reach the provider signal and do not replay", async () => {
+test("native turn and exact-tool cancellation reach the provider signal and do not replay", { timeout: 5_000 }, async (t) => {
+  const timers = new Set();
+  const schedule = globalThis.setTimeout;
+  const clear = globalThis.clearTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => {
+    const timer = schedule(() => { timers.delete(timer); callback(...args); }, delay);
+    timers.add(timer);
+    return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer) => { timers.delete(timer); clear(timer); });
+  t.after(() => { for (const timer of timers) clear(timer); });
   for (const kind of ["turn", "tool"]) {
     const entered = Promise.withResolvers();
+    const packets = [];
+    const sockets = [];
+    const discoveries = [];
     let supplied;
-    const f = fixture({ runTool: async (name, _args, context) => {
-      if (name === "browser_snapshot") return "[2] textbox";
-      supplied = context; entered.resolve();
-      await new Promise((_, reject) => context.abort.addEventListener("abort", () => reject(context.abort.reason), { once: true }));
-    } });
-    const tab = await f.open();
-    const handle = { browser_url: tab.browser_url, target_id: tab.target_id };
-    const { snapshot_id } = JSON.parse(await f.execute(f.call("snapshot", handle)));
-    const request = f.call("fill", { ...handle, uid: 2, snapshot_id, value: "text" });
-    const filling = assert.rejects(f.execute(request), /cancelled/);
-    await entered.promise;
-    assert.equal(supplied.sessionID, request.payload.context.sessionID);
-    assert.equal(supplied.callID, request.payload.context.callID);
-    if (kind === "turn") f.controller.abort(new Error("Turn cancelled"));
-    else {
-      await assert.rejects(f.broker.execute(request.slug, { ...request.payload, args: { ...request.payload.args, value: "different" }, cancel: true }), /exact native browser call/);
-      assert.equal(supplied.abort.aborted, false);
-      await f.broker.execute(request.slug, { ...request.payload, cancel: true });
-      assert.equal(f.controller.signal.aborted, false);
+    class Socket extends EventEmitter {
+      static OPEN = 1;
+      readyState = 0;
+      constructor(endpoint) {
+        super();
+        this.endpoint = endpoint;
+        sockets.push(this);
+        queueMicrotask(() => { if (this.readyState !== 3) { this.readyState = Socket.OPEN; this.emit("open"); } });
+      }
+      send(payload) {
+        assert.equal(this.readyState, Socket.OPEN);
+        const packet = JSON.parse(payload);
+        packets.push({ endpoint: this.endpoint, ...packet });
+        if (packet.method === "Input.dispatchKeyEvent") { entered.resolve(); return; }
+        const backend = this.endpoint.endsWith("/target-1") ? 42 : 142;
+        const result = packet.method === "Accessibility.getFullAXTree" ? { nodes: [
+          { nodeId: "root", ignored: kind === "tool", role: { value: "RootWebArea" }, name: { value: "Review" }, childIds: ["wrapper", "finish"] },
+          { nodeId: "wrapper", ignored: true, role: { value: "none" }, childIds: ["nested", "increment", "hidden"] },
+          { nodeId: "nested", ignored: true, name: { value: "Ignored named wrapper" }, childIds: ["field"] },
+          { nodeId: "field", role: { value: "textbox" }, name: { value: "Draft" }, backendDOMNodeId: backend },
+          { nodeId: "increment", role: { value: "button" }, name: { value: "Increment" }, backendDOMNodeId: 77 },
+          { nodeId: "hidden", ignored: true, name: { value: "Hidden control" }, backendDOMNodeId: 99 },
+          { nodeId: "finish", role: { value: "button" }, name: { value: "Finish" }, backendDOMNodeId: 88 },
+        ] } : packet.method === "DOM.resolveNode" ? { object: { objectId: "field-object" } }
+          : packet.method === "DOM.getBoxModel" ? { model: { content: [0, 0, 20, 0, 20, 20, 0, 20] } } : {};
+        queueMicrotask(() => {
+          if (this.readyState === Socket.OPEN) this.emit("message", Buffer.from(JSON.stringify({ id: packet.id, result })));
+        });
+      }
+      terminate() { this.readyState = 3; this.emit("close"); }
     }
-    await filling;
-    assert.equal(supplied.abort.aborted, true);
-    assert.match(await f.execute(request), /Do not replay/);
-    assert.equal(f.dispatched.filter(({ name }) => name === "browser_fill").length, 1);
-    if (kind === "tool") await assert.rejects(f.execute(f.call("fill", request.payload.args)), /snapshot_id is stale/);
+    const { tool } = await createBrowserTools({ WebSocket: Socket, fetch: async (url, { signal }) => {
+      signal.throwIfAborted();
+      discoveries.push(url);
+      return { ok: true, json: async () => f.tabs.toReversed().map((tab) => ({ id: tab.targetId, type: "page", title: tab.title, url: tab.url,
+        webSocketDebuggerUrl: `ws://127.0.0.1:9222/devtools/page/${tab.targetId}` })) };
+    } });
+    const f = fixture({ runTool: (name, args, context) => {
+      if (name === "browser_fill") supplied = context;
+      return tool[name].execute(args, context);
+    } });
+    try {
+      const tab = await f.open();
+      const other = await f.open("scout", "two");
+      const handle = { browser_url: tab.browser_url, target_id: tab.target_id };
+      const read = async () => JSON.parse(await f.execute(f.call("snapshot", handle)));
+      const observed = await read();
+      assert.doesNotMatch(observed.snapshot, /Ignored named wrapper|Hidden control/);
+      if (kind === "tool") assert.doesNotMatch(observed.snapshot, /RootWebArea/);
+      else assert.match(observed.snapshot, /\[1\] RootWebArea "Review"/);
+      const uid = Number(observed.snapshot.match(/\[(\d+)\] textbox "Draft"/)?.[1]);
+      const increment = Number(observed.snapshot.match(/\[(\d+)\] button "Increment"/)?.[1]);
+      const finish = Number(observed.snapshot.match(/\[(\d+)\] button "Finish"/)?.[1]);
+      assert.ok(uid > 0 && increment > uid && finish > increment);
+      await f.execute(f.call("click", { ...handle, snapshot_id: observed.snapshot_id, uid: increment }));
+      await f.execute(f.call("click", { ...handle, snapshot_id: (await read()).snapshot_id, uid: finish }));
+      const { snapshot_id } = await read();
+      await f.execute(f.call("snapshot", { browser_url: other.browser_url, target_id: other.target_id }, "scout", "two"));
+      const request = f.call("fill", { ...handle, uid, snapshot_id, value: "text" });
+      const filling = assert.rejects(f.execute(request), /cancelled/);
+      await entered.promise;
+      assert.equal(supplied.sessionID, request.payload.context.sessionID);
+      assert.equal(supplied.callID, request.payload.context.callID);
+      if (kind === "turn") f.controller.abort(new Error("Turn cancelled"));
+      else {
+        await assert.rejects(f.broker.execute(request.slug, { ...request.payload, args: { ...request.payload.args, value: "different" }, cancel: true }), /exact native browser call/);
+        assert.equal(supplied.abort.aborted, false);
+        await f.broker.execute(request.slug, { ...request.payload, cancel: true });
+        assert.equal(f.controller.signal.aborted, false);
+      }
+      await filling;
+      assert.equal(supplied.abort.aborted, true);
+      assert.match(await f.execute(request), /Do not replay/);
+      assert.equal(f.dispatched.filter(({ name }) => name === "browser_fill").length, 1);
+      if (kind === "tool") await assert.rejects(f.execute(f.call("fill", request.payload.args)), /snapshot_id is stale/);
+      sockets.at(-1).emit("message", Buffer.from(JSON.stringify({ id: packets.at(-1).id, result: {} })));
+      await new Promise(setImmediate);
+      const resolved = packets.filter((packet) => packet.method === "DOM.resolveNode");
+      assert.deepEqual(resolved.map((packet) => packet.params.backendNodeId), [77, 88, 42]);
+      assert.ok(resolved.every((packet) => packet.endpoint === "ws://127.0.0.1:9222/devtools/page/target-1"));
+      assert.deepEqual(packets.filter((packet) => packet.method === "Input.dispatchKeyEvent").map((packet) => packet.params), [{ type: "keyDown", text: "t" }]);
+      const before = [discoveries.length, sockets.length, packets.length];
+      for (const definition of Object.values(tool)) await assert.rejects(definition.execute({ ...handle, uid, value: "text", expression: "document.title", url: tab.url }, supplied), /cancelled/);
+      assert.deepEqual([discoveries.length, sockets.length, packets.length], before);
+      assert.ok(sockets.every((socket) => socket.readyState === 3));
+      assert.equal(getEventListeners(supplied.abort, "abort").length, 0);
+      assert.equal(timers.size, 0);
+    } finally { f.broker.destroy(); }
   }
 });
 
@@ -798,66 +875,18 @@ test("installed wrapper disables unrestricted tools and preserves config without
     await installBrowserPlugin({ path: directory });
     await installBrowserPlugin({ path: directory });
     const config = JSON.parse(await readFile(path.join(directory, "opencode.json"), "utf8"));
-    assert.equal(config.plugin.length, 2);
-    assert.equal(config.tools.read, false);
-    assert.equal(config.tools.browser_list, false);
-    assert.equal(config.tools.browser_eval, false);
-    for (const name of ["browser_*", "browser_open", "browser_tabs", "browser_observe", "browser_act", "browser_handoff", "browser_future_action", "webmcp_*", "webmcp_list_tools", "webmcp_call_tool", "webmcp_future_action"]) assert.equal(config.tools[name], false, name);
-    assert.equal(config.tools.coworker_browser_open, true);
-    assert.equal(config.tools.coworker_browser_fill, false);
-    assert.deepEqual(config.permission, permission);
-    assert.equal(await readFile(path.join(directory, ".opencode", "coworker-browser.js"), "utf8"), BROWSER_PLUGIN);
+    assert.equal(config.plugins.length, 2);
+    assert.deepEqual(config.permissions, [
+      { action: "edit", resource: "*", effect: "ask" },
+      { action: "coworker_browser_open", resource: "*", effect: "allow" },
+      { action: "coworker_browser_fill", resource: "*", effect: "ask" },
+      { action: "read", resource: "*", effect: "deny" },
+      { action: "coworker_browser_fill", resource: "*", effect: "deny" },
+      { action: "browser_*", resource: "*", effect: "deny" },
+      { action: "webmcp_*", resource: "*", effect: "deny" },
+    ]);
+    assert.equal(await readFile(path.join(directory, ".opencode", "coworker-plugins", "coworker-browser", "server.js"), "utf8"), await readFile(path.join(process.env.OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR, "coworker-browser.mjs"), "utf8"));
   } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test("native plugin hook rejects originals and stamps the actual engine identity on wrapper calls", async () => {
-  const sent = [];
-  const tool = Object.assign((definition) => definition, { schema: z });
-  const factory = new Function("tool", "readFile", "path", "fetch", BROWSER_PLUGIN.replace(/^import .*;\n/gm, "").replace("export default", "return"))(
-    tool, async () => JSON.stringify({ url: "http://127.0.0.1:1234/context", token: "scoped-test-token" }), path,
-    async (url, input) => { sent.push({ url, ...input }); return { ok: true, json: async () => "Page receipt" }; },
-  );
-  const plugin = await factory({ directory: "/workspace/scout" });
-  for (const name of ["browser_list", "browser_snapshot", "browser_eval", "browser_screenshot", "browser_navigate", "browser_open", "browser_tabs", "browser_observe", "browser_act", "browser_handoff", "browser_future_action", "webmcp_list_tools", "webmcp_call_tool", "webmcp_future_action"]) await assert.rejects(plugin["tool.execute.before"]({ tool: name }, { args: {} }), /Unrestricted browser/);
-  assert.deepEqual(sent, [], "generic browser and WebMCP tools never reach host discovery or dispatch");
-  await plugin["tool.execute.before"]({ tool: "read" }, { args: {} });
-  const args = { browser_url: "http://127.0.0.1:9222", target_id: "owned" };
-  assert.equal(z.object(plugin.tool.coworker_browser_snapshot.args).safeParse({ browser_url: args.browser_url }).success, false);
-  assert.equal(z.object(plugin.tool.coworker_browser_click.args).safeParse({ ...args, uid: 2 }).success, false);
-  assert.equal(z.object(plugin.tool.coworker_browser_fill.args).safeParse({ ...args, uid: 2, value: "text", snapshot_id: "receipt" }).success, true);
-  assert.equal(z.object(plugin.tool.coworker_browser_handoff.args).safeParse({ ...args, reason: "sign-in" }).success, true);
-  assert.equal(z.object(plugin.tool.coworker_browser_handoff.args).safeParse({ ...args, reason: "resume" }).success, false);
-  assert.equal(plugin.tool.coworker_browser_resume, undefined);
-  await plugin["tool.execute.before"]({ tool: "coworker_browser_snapshot", sessionID: "native-session", callID: "hook-call" }, { args });
-  assert.equal(await plugin.tool.coworker_browser_snapshot.execute(args, { sessionID: "native-session", messageID: "native-message", directory: "/workspace/scout", abort: new AbortController().signal }), "Page receipt");
-  assert.deepEqual(JSON.parse(sent[0].body), { name: "coworker_browser_snapshot", args, context: { sessionID: "native-session", messageID: "native-message", callID: "hook-call", directory: "/workspace/scout" } });
-  assert.equal(sent[0].headers.Authorization, "Bearer scoped-test-token");
-  await assert.rejects(plugin.tool.coworker_browser_snapshot.execute(args, { sessionID: "native-session", messageID: "native-message", abort: new AbortController().signal }), /native call identity/);
-});
-
-test("the native wrapper propagates tool cancellation to the same scoped broker call", async () => {
-  const requests = [];
-  const started = Promise.withResolvers();
-  const controller = new AbortController();
-  const tool = Object.assign((definition) => definition, { schema: z });
-  const factory = new Function("tool", "readFile", "path", "fetch", BROWSER_PLUGIN.replace(/^import .*;\n/gm, "").replace("export default", "return"))(
-    tool, async () => JSON.stringify({ url: "http://127.0.0.1:1234/context", token: "scoped-test-token" }), path,
-    async (_url, init) => {
-      const request = JSON.parse(init.body); requests.push(request);
-      if (request.cancel) return { ok: true, json: async () => "Cancelled" };
-      started.resolve();
-      return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
-    },
-  );
-  const plugin = await factory({ directory: "/workspace/scout" });
-  const args = { browser_url: "http://127.0.0.1:9222", target_id: "owned", snapshot_id: "receipt", uid: 2, value: "text" };
-  const context = { sessionID: "native-session", messageID: "native-message", callID: "native-call", directory: "/workspace/scout", abort: controller.signal };
-  const operation = assert.rejects(plugin.tool.coworker_browser_fill.execute(args, context), /cancelled/);
-  await started.promise;
-  controller.abort(new Error("Tool cancelled"));
-  await operation;
-  assert.equal(requests.length, 2);
-  assert.deepEqual(requests[1], { ...requests[0], cancel: true });
 });
 
 test("shutdown refuses pending raw browser work, then destroys the host only after it drains", async () => {

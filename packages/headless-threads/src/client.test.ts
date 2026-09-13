@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { describe, expect, test } from "bun:test";
 
-import { createHeadlessThreadClient } from "./client.js";
+import { createHeadlessThreadClient } from "./index.js";
 import { HeadlessThreadError } from "./errors.js";
 import type { HeadlessFetch } from "./types.js";
 
@@ -469,6 +469,8 @@ describe("getThreadSnapshot", () => {
       status: { type: "busy" },
       todos: [{ content: "Check", status: "pending", priority: "high" }],
     });
+    // Default-entry consumers can still use todos as an array without a null guard.
+    expect((await pending).todos.map((todo) => todo.content)).toEqual(["Check"]);
   });
 
   test("falls back to idle when the native status map omits the session", async () => {

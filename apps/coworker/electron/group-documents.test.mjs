@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createGroup, updateGroup, archiveGroup, normalizeEvent, readGroupTimeline } from "./groups.mjs";
 import { createDocument } from "./documents.mjs";
 import { assertGroupDocumentToolContext, createGroupDocumentService, createGroupDocuments, groupDocumentToolCatalog } from "./group-documents.mjs";
-import { GROUP_DOCUMENT_PLUGIN, installGroupDocumentPlugin } from "./group-document-plugin.mjs";
+import { installGroupDocumentPlugin } from "./group-document-plugin.mjs";
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "group-documents-"));
@@ -338,129 +338,6 @@ test("announcement failure never fails or repeats a committed save and document 
   }
 });
 
-// Exercise generated transport without the native SDK or a running HTTP service.
-// The small SDK double validates test inputs before transport.
-function pluginSchema(type, items) {
-  const json = { type };
-  return {
-    isOptional: false,
-    min(value) { json[type === "string" ? "minLength" : "minimum"] = value; return this; },
-    max(value) { json[type === "string" ? "maxLength" : "maxItems"] = value; return this; },
-    int() { json.type = "integer"; return this; },
-    regex(value) { json.pattern = value.source; return this; },
-    optional() { this.isOptional = true; return this; },
-    parse(value) {
-      if (value === undefined && this.isOptional) return value;
-      if (json.type === "string" && (typeof value !== "string" || value.length < (json.minLength ?? 0)
-        || value.length > (json.maxLength ?? Infinity) || (json.pattern && !new RegExp(json.pattern).test(value)))) throw new Error("Invalid string argument.");
-      if (json.type === "integer" && (!Number.isInteger(value) || value < json.minimum)) throw new Error("Invalid revision argument.");
-      if (json.type === "array") {
-        if (!Array.isArray(value) || value.length > json.maxItems) throw new Error("Invalid highlights argument.");
-        value.forEach((entry) => items.parse(entry));
-      }
-      return value;
-    },
-  };
-}
-
-async function generatedPlugin(fetch, read = async () => JSON.stringify({ url: "http://127.0.0.1:1/context", token: "fixture-only" })) {
-  const tool = (definition) => definition;
-  tool.schema = {
-    string: () => pluginSchema("string"), number: () => pluginSchema("number"), array: (items) => pluginSchema("array", items),
-    object: (shape) => ({ strict: () => ({ parse: (input) => {
-      if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !Object.hasOwn(shape, key))) throw new Error("Unexpected tool arguments.");
-      for (const [key, schema] of Object.entries(shape)) schema.parse(input[key]);
-      return structuredClone(input);
-    } }) }),
-  };
-  const factory = new Function("tool", "readFile", "path", "fetch", "AbortSignal", GROUP_DOCUMENT_PLUGIN
-    .replace(/^import .*;\n/gm, "").replace("export default", "return"))(tool, read, path, fetch, AbortSignal);
-  return factory({ directory: "/native/workspace" });
-}
-
-const nativeContext = (extra = {}) => ({ sessionID: "session-one", messageID: "message-one", callID: "call-one", directory: "/native/workspace", abort: new AbortController().signal, ...extra });
-
-test("native plugin stamps every tool with context and sends one authenticated text request", async () => {
-  const requests = [];
-  const reads = [];
-  const plugin = await generatedPlugin(async (url, options) => {
-    requests.push({ url, ...options });
-    return { ok: true, json: async () => ({ text: "Recorded result", structured: { ignored: true } }) };
-  }, async (file) => { reads.push(file); return JSON.stringify({ url: "http://127.0.0.1:1/context", token: "fixture-only" }); });
-  const groupId = "grp_12345678";
-  const inputs = [
-    { groupId }, { groupId, id: "plan" }, { groupId, title: "Plan", body: "Draft" },
-    { groupId, id: "plan" }, { groupId, id: "plan", revision: 1, expectedRevision: 2 },
-  ];
-  for (const [index, { name }] of groupDocumentToolCatalog().entries()) {
-    const context = nativeContext({ callID: `call-${index}`, directory: "/native/current-directory" });
-    const result = await plugin.tool[`coworker_${name}`].execute(inputs[index], context);
-    assert.equal(result, "Recorded result");
-    const request = requests[index];
-    assert.equal(request.url, "http://127.0.0.1:1/context");
-    assert.equal(request.method, "POST");
-    assert.equal(request.headers.Authorization, "Bearer fixture-only");
-    assert.equal(request.redirect, "error");
-    assert.deepEqual(JSON.parse(request.body), {
-      name, args: inputs[index], context: { sessionID: context.sessionID, messageID: context.messageID, callID: context.callID, directory: context.directory },
-    });
-    assert.equal(reads[index], path.join("/native/workspace", ".opencode", "coworker-context.json"));
-  }
-  assert.equal(requests.length, 5);
-});
-
-test("hook call identities are consumed exactly once without mixing direct or parallel calls", async () => {
-  const requests = [];
-  const plugin = await generatedPlugin(async (_url, options) => {
-    requests.push(JSON.parse(options.body));
-    return { ok: true, json: async () => ({ text: "Read" }) };
-  });
-  const tool = "coworker_group_document_read";
-  const args = { id: "plan", groupId: "grp_12345678" };
-  for (const callID of ["first", "second"]) await plugin["tool.execute.before"]({ sessionID: "session-one", tool, callID }, { args });
-  await plugin.tool[tool].execute(args, nativeContext({ callID: "second" }));
-  await plugin.tool[tool].execute(args, nativeContext({ callID: undefined, directory: undefined }));
-  assert.deepEqual(requests.map((entry) => entry.context.callID), ["second", "first"]);
-  assert.equal(requests[1].context.directory, "/native/workspace");
-  await assert.rejects(() => plugin.tool[tool].execute(args, nativeContext({ callID: undefined })), /tool-call identity/);
-  await plugin["tool.execute.before"]({ sessionID: "other-session", tool, callID: "other-call" }, { args });
-  await assert.rejects(() => plugin.tool[tool].execute(args, nativeContext({ callID: undefined })), /tool-call identity/);
-  await plugin["tool.execute.before"]({ sessionID: "session-one", tool: "coworker_document_read", callID: "legacy-call" }, { args });
-  await assert.rejects(() => plugin.tool[tool].execute(args, nativeContext({ callID: undefined })), /tool-call identity/);
-  assert.equal(requests.length, 2);
-});
-
-test("native plugin rejects authority fields, invalid input and missing or aborted identity before transport", async () => {
-  let requests = 0;
-  const plugin = await generatedPlugin(async () => { requests++; throw new Error("No request expected."); });
-  const tool = plugin.tool.coworker_group_document_save;
-  const input = { groupId: "grp_12345678", title: "Plan", body: "Draft" };
-  for (const extra of [{ slug: "editor" }, { name: "Editor" }, { author: "You" }, { directory: "/other" }, { context: nativeContext() },
-    { id: "plan" }, { expectedRevision: 1 }, { id: "plan", expectedRevision: 0 }, { body: "x".repeat(100001) }, { groupId: "../outside" }]) {
-    await assert.rejects(() => tool.execute({ ...input, ...extra }, nativeContext()));
-  }
-  for (const extra of [{ sessionID: "" }, { messageID: "" }, { callID: undefined }, { abort: undefined }, { abort: AbortSignal.abort(new Error("Stopped")) }]) {
-    await assert.rejects(() => tool.execute(input, nativeContext(extra)));
-  }
-  assert.equal(requests, 0);
-});
-
-test("native plugin forwards server failures without retries and propagates cancellation", async () => {
-  let requests = 0;
-  let signal;
-  const plugin = await generatedPlugin(async (_url, options) => {
-    requests++; signal = options.signal;
-    return { ok: false, json: async () => ({ error: "This document changed. Read revision 2." }) };
-  });
-  const controller = new AbortController();
-  await assert.rejects(() => plugin.tool.coworker_group_documents.execute({ groupId: "grp_12345678" }, nativeContext({ abort: controller.signal })), /Read revision 2/);
-  assert.equal(requests, 1);
-  controller.abort();
-  assert.equal(signal.aborted, true);
-  const malformed = await generatedPlugin(async () => ({ ok: true, json: async () => ({ content: [] }) }));
-  await assert.rejects(() => malformed.tool.coworker_group_documents.execute({ groupId: "grp_12345678" }, nativeContext()), /did not contain text/);
-});
-
 test("installer preserves connection and other configuration, repairs source and never duplicates registration", async (t) => {
   const f = await fixture(t);
   const coworker = { path: path.join(f.directory, "editor") };
@@ -472,14 +349,16 @@ test("installer preserves connection and other configuration, repairs source and
   await writeFile(configFile, JSON.stringify(before));
   await writeFile(connectionFile, connection, { mode: 0o600 });
   await installGroupDocumentPlugin(coworker);
-  const sourceFile = path.join(coworker.path, ".opencode", "coworker-group-documents.js");
-  assert.equal(await readFile(sourceFile, "utf8"), GROUP_DOCUMENT_PLUGIN);
-  assert.deepEqual(JSON.parse(await readFile(configFile, "utf8")), { ...before, plugin: [...before.plugin, pathToFileURL(sourceFile).href] });
+  const pluginRoot = path.join(coworker.path, ".opencode", "coworker-plugins", "coworker-group-documents");
+  const sourceFile = path.join(pluginRoot, "server.js");
+  const bundled = await readFile(path.join(process.env.OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR, "coworker-group-documents.mjs"), "utf8");
+  assert.equal(await readFile(sourceFile, "utf8"), bundled);
+  assert.deepEqual(JSON.parse(await readFile(configFile, "utf8")), { model: before.model, permissions: [{ action: "read", resource: "*", effect: "ask" }, { action: "shell", resource: "*", effect: "deny" }], plugins: [...before.plugin, pathToFileURL(pluginRoot).href] });
   const installed = await readFile(configFile, "utf8");
   await writeFile(sourceFile, "outdated source");
   await installGroupDocumentPlugin(coworker);
   await installGroupDocumentPlugin(coworker);
-  assert.equal(await readFile(sourceFile, "utf8"), GROUP_DOCUMENT_PLUGIN);
+  assert.equal(await readFile(sourceFile, "utf8"), bundled);
   assert.equal(await readFile(configFile, "utf8"), installed);
   assert.equal(await readFile(connectionFile, "utf8"), connection);
 });

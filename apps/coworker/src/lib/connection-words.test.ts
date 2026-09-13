@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { ConnectHealth } from "./connect.ts";
 import {
   connectRowStatus,
+  localToolStatus,
   parseCloudConnectionStatus,
   parseEngineToolStatus,
 } from "./connection-words.ts";
@@ -42,4 +43,9 @@ test("connection status parsers preserve action routing and reject malformed rep
   assert.deepEqual(parseEngineToolStatus({ status: "failed", error: "boom" }), { status: "failed", error: "boom" });
   assert.equal(parseEngineToolStatus({ status: "sideways" }), null);
   assert.equal(parseEngineToolStatus(null), null);
+  assert.deepEqual(parseEngineToolStatus("pending"), { status: "pending" });
+  assert.equal(localToolStatus({ enabled: true, engine: parseEngineToolStatus("pending"), reachable: true }).label, "Checking");
+  assert.equal(localToolStatus({ enabled: true, engine: parseEngineToolStatus("connected") }).label, "Connected");
+  assert.equal(localToolStatus({ enabled: true, reachable: true }).label, "Checking");
+  assert.equal(localToolStatus({ enabled: true, engine: parseEngineToolStatus("sideways"), reachable: true }).label, "Checking");
 });

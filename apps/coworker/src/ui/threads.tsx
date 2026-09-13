@@ -1,7 +1,6 @@
 import { ActionMenu } from "@/ui/kit";
 import { Fragment, Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { coworkerBridge, type CoworkerSummary, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
 import type { DenSession } from "@/lib/den";
 import {
@@ -40,7 +39,7 @@ import {
   type PendingInteractions,
   type ThreadListItem,
 } from "@/lib/threads";
-import { isRunning, toTranscript, type HeadlessThreadModel, type HeadlessThreadUsage } from "@openwork/headless-threads";
+import { isRunning, nativeV2InputSkillsMatch, toTranscript, type HeadlessThreadModel, type HeadlessThreadSnapshot, type HeadlessThreadUsage } from "@openwork/headless-threads/v2";
 import {
   classifyThreads,
   configureDiscussionStore,
@@ -100,7 +99,8 @@ import {
   type TurnReplyState,
 } from "@/lib/turn-outcome";
 import { describeTurnFailure, failureText } from "@/lib/turn-failure";
-import { useComposerDraft } from "@/ui/use-composer-draft";
+import { composerDraftStore, useComposerDraft, useSelectedComposerDraft } from "@/ui/use-composer-draft";
+import { mergeSkillSelections, selectionFields, type ComposerDraftSnapshot, type ComposerDraftSubmission, type SelectedSkill } from "@/lib/skill-selection";
 import { classifyFailure, retryDelayMs } from "@/lib/turn-retry";
 import { applyStreamEvent, type LivePart, type LiveStream } from "@/lib/live-stream";
 import { waitForGroup as waitForObservation } from "@/lib/group-continuity";
@@ -158,7 +158,8 @@ type TranscriptMessage = {
   toolCalls: TranscriptToolCall[];
 };
 
-export type AssignmentDraft = { id: number; text: string } | null;
+export type AssignmentDraft = { id: number; text: string; skill?: SelectedSkill } | null;
+const appliedSkillRequests = new Map<string, number>();
 
 /** How the conversation reaches the Documents view: open a document there, or beside the chat when the window allows. */
 export type DocumentHooks = {
@@ -172,8 +173,10 @@ type QueuedTurn = {
   threadId: string;
   prompt: string;
   messageId: string;
+  submission?: ComposerDraftSubmission;
+  ready?: boolean;
 };
-type PreparedVoiceDiscussion = { threadId: string; draft: string; activation: VoiceActivation };
+type PreparedVoiceDiscussion = { threadId: string; activation: VoiceActivation };
 
 /** A turn this view is driving: which message, and whether the engine has accepted it yet. */
 type ActiveTurn = {
@@ -183,7 +186,7 @@ type ActiveTurn = {
 };
 
 /** How a turn is (re)sent: a fresh message, or the same message id run again after a failure, a stop, or a cut-off. */
-type TurnSend = ({ mode: "send" } | { mode: "retry"; attempt: number; switchedTo?: string; byPerson?: boolean }) & { voice?: VoiceExpectation | null };
+type TurnSend = ({ mode: "send" } | { mode: "retry"; attempt: number; switchedTo?: string; byPerson?: boolean }) & { voice?: VoiceExpectation | null; skills?: SelectedSkill[]; submission?: ComposerDraftSubmission };
 
 /** Retry policy travels with the model pin, never today's app defaults. */
 type TurnModelSelection = {
@@ -699,9 +702,25 @@ export function ThreadsPanel({
         warmingUp={warmingUp}
         onRetry={() => void refresh()}
         assignmentDraft={pendingAssignment}
-        onStartDiscussion={async (text) => {
-          const threadId = await ensureDiscussion();
-          setQueuedTurn({ id: Date.now(), threadId, prompt: text, messageId: newMessageId() });
+        onStartDiscussion={async (draft, takeCurrentDraft) => {
+          await coworkerBridge.turns.validateSkills(coworker.slug, selectionFields(draft.value.skills));
+          const messageId = newMessageId();
+          const requestId = Date.now();
+          let submission: ComposerDraftSubmission | undefined;
+          try {
+            await startDiscussion({ isCurrent: () => true, beforeOpen: (threadId) => {
+              const key = `${coworker.slug}:${coworker.createdAt}:${threadId}`;
+              composerDraftStore.transfer(takeCurrentDraft(), key);
+              // Bind before the new composer mounts, including the registration/IPC acknowledgement gap.
+              submission = composerDraftStore.bindSubmission(key, messageId, draft.value);
+              setQueuedTurn({ id: requestId, threadId, prompt: draft.value.text.trim(), messageId, submission, ready: false });
+            } });
+            setQueuedTurn((turn) => turn?.id === requestId ? { ...turn, ready: true } : turn);
+          } catch (cause) {
+            if (submission) composerDraftStore.finishSubmission(submission, false);
+            setQueuedTurn((turn) => turn?.id === requestId ? null : turn);
+            throw cause;
+          }
         }}
         onPrepareVoice={async (request, takeDraft) => {
           await startDiscussion({
@@ -713,7 +732,9 @@ export function ThreadsPanel({
                 : request.field && focused === request.field
                   ? { origin: request.field, target: "draft", start: request.field.selectionStart, end: request.field.selectionEnd }
                   : null;
-              setPreparedVoice({ threadId, draft: takeDraft(), activation: { accountKey: request.accountKey, scope: `${coworker.slug}:${threadId}`, focus } });
+              const draft = takeDraft();
+              composerDraftStore.transfer(draft, `${coworker.slug}:${coworker.createdAt}:${threadId}`);
+              setPreparedVoice({ threadId, activation: { accountKey: request.accountKey, scope: `${coworker.slug}:${threadId}`, focus } });
             },
           });
         }}
@@ -799,25 +820,31 @@ function DiscussionWelcome({
   headerSlots: HeaderSlots;
   /** The teammate who proposed this coworker, when one did: its empty conversation says so. */
   proposerName?: string;
-  onStartDiscussion: (text: string) => Promise<void>;
-  onPrepareVoice: (request: VoicePreparation, takeDraft: () => string) => Promise<void>;
+  onStartDiscussion: (draft: ComposerDraftSnapshot, takeCurrentDraft: () => ComposerDraftSnapshot) => Promise<void>;
+  onPrepareVoice: (request: VoicePreparation, takeDraft: () => ComposerDraftSnapshot) => Promise<void>;
   onCreateAssignment: (outcome: string, messages: ReadonlyArray<DiscussionMessage>) => Promise<void>;
   onAssignmentDraftHandled: () => void;
   summary?: CoworkerSummaryLine | null;
   onOpenSummary?: (kind: SummaryKind) => void;
 }) {
-  const [message, setMessage] = useComposerDraft(`${coworker.slug}:${coworker.createdAt}:new`);
+  const draftKey = `${coworker.slug}:${coworker.createdAt}:new`;
+  const [draft, setDraft] = useSelectedComposerDraft(draftKey);
+  const message = draft.text;
+  const setMessage = useCallback((next: React.SetStateAction<string>) => setDraft((draft) => ({ ...draft, text: typeof next === "function" ? next(draft.text) : next })), [setDraft]);
   const [assignmentText, setAssignmentText] = useComposerDraft(`${coworker.slug}:${coworker.createdAt}:new-assignment`);
   const [assignmentMode, setAssignmentMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [composerError, setComposerError] = useState("");
-  const latestDraft = useRef(message);
-  latestDraft.current = message;
+  const startingDiscussion = useRef(false);
   const voice = useVoice({
     active: active && !assignmentMode && !busy,
     scope: `${coworker.slug}:new`,
     onTranscript: (text) => setMessage((draft) => appendVoiceDraft(draft, text)),
-    onReady: (request) => onPrepareVoice(request, () => { const draft = latestDraft.current; setMessage(""); return draft; }),
+    onReady: async (request) => {
+      let transferred: ComposerDraftSnapshot | undefined;
+      await onPrepareVoice(request, () => { transferred = composerDraftStore.read(draftKey); return transferred; });
+      if (transferred) composerDraftStore.clear(transferred);
+    },
   });
 
   useEffect(() => {
@@ -829,22 +856,32 @@ function DiscussionWelcome({
   useEffect(() => {
     if (!discussionDraft) return;
     setAssignmentMode(false);
+    if (discussionDraft.skill) {
+      const key = `${coworker.slug}:${coworker.createdAt}`;
+      if (appliedSkillRequests.get(key) === discussionDraft.id) return;
+      try { setDraft((draft) => ({ ...draft, skills: mergeSkillSelections(draft.skills, [discussionDraft.skill!]) })); }
+      catch (cause) { setComposerError(cause instanceof Error ? cause.message : String(cause)); }
+      appliedSkillRequests.set(key, discussionDraft.id);
+      return;
+    }
     setMessage(discussionDraft.text);
   }, [discussionDraft]);
 
   async function send() {
-    const text = message.trim();
-    if (!text) return;
+    const snapshot = composerDraftStore.read(draftKey);
+    if (!snapshot.value.text.trim() || startingDiscussion.current) return;
+    startingDiscussion.current = true;
     voice.stop("");
     setBusy(true);
     setComposerError("");
     try {
-      await onStartDiscussion(text);
+      await onStartDiscussion(snapshot, () => composerDraftStore.read(draftKey));
       acknowledgeCoworker(coworker.slug);
-      setMessage((current) => current === message ? "" : current);
+      composerDraftStore.clear(snapshot);
     } catch (cause) {
       setComposerError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      startingDiscussion.current = false;
       setBusy(false);
     }
   }
@@ -879,6 +916,8 @@ function DiscussionWelcome({
       </div>
       <DiscussionComposer
         voice={voice}
+        skills={draft.skills}
+        onRemoveSkill={(index) => setDraft((draft) => ({ ...draft, skills: draft.skills.filter((_, position) => position !== index) }))}
         message={message}
         onMessageChange={setMessage}
         onSend={() => void send()}
@@ -1129,6 +1168,7 @@ function ThreadView({
   onOpenSummary?: (kind: SummaryKind) => void;
 }) {
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+  const [nativeState, setNativeState] = useState<HeadlessThreadSnapshot["native"]>();
   const [transcriptLoaded, setTranscriptLoaded] = useState(false);
   const [transcriptReadStartedAt, setTranscriptReadStartedAt] = useState(0);
   const acknowledgedActivity = useRef(0);
@@ -1173,7 +1213,11 @@ function ThreadView({
   /** What the engine reports for this thread: idle, busy, or retrying (with its next attempt). */
   const [engineStatus, setEngineStatus] = useState<TurnEngineStatus>({ type: "unknown" });
   const [pending, setPending] = useState<PendingInteractions>({ permissions: [], questions: [] });
-  const [reply, setReply] = useComposerDraft(`${coworker.slug}:${coworker.createdAt}:${threadId}`, preparedVoice?.draft);
+  const draftKey = `${coworker.slug}:${coworker.createdAt}:${threadId}`;
+  const [draft, setDraft] = useSelectedComposerDraft(draftKey);
+  const reply = draft.text;
+  const setReply = useCallback((next: React.SetStateAction<string>) => setDraft((draft) => ({ ...draft, text: typeof next === "function" ? next(draft.text) : next })), [setDraft]);
+  const checkingDraft = useRef(false);
   const transferredDraftId = useRef(preparedVoice ? discussionDraft?.id : undefined);
   const voiceRef = useRef<VoiceController | null>(null);
   const [assignmentMode, setAssignmentMode] = useState(false);
@@ -1306,8 +1350,9 @@ function ThreadView({
     void observe("interactions", () => threads.listThreadInteractions(threadId), setPending);
     return observe("transcript", async () => ({ readStartedAt: Date.now(), snapshot: await threads.client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(10_000) }) }), ({ snapshot, readStartedAt }) => {
       const transcript = toTranscript(snapshot);
+      setNativeState(snapshot.native);
       const nativeMessages = new Map(snapshot.messages.map((message) => [message.id, message]));
-      for (const message of snapshot.messages) knownMessages.current.set(message.id, { role: message.role, parentId: message.parentId, ended: knownMessages.current.get(message.id)?.ended || message.completedAt !== null || message.error !== null });
+      knownMessages.current = new Map(snapshot.messages.map((message) => [message.id, { role: message.role, parentId: message.parentId, ended: message.completedAt !== null || message.error !== null }]));
       const lastUser = snapshot.messages.findLast((message) => message.role === "user");
       if (lastUser && (!observedTurn.current || (lastUser.createdAt ?? 0) >= observedTurnAt.current)) {
         observedTurn.current = lastUser.id;
@@ -1316,7 +1361,9 @@ function ThreadView({
       const target = activeTurnRef.current?.messageId ?? turnStateRef.current.pending?.messageId ?? observedTurn.current;
       if (streamTurn.current !== target) { streamTurn.current = target; setLiveStream(null); }
       setLiveStream((current) => {
-        let next = current;
+        const parts = current?.parts.filter((part) => knownMessages.current.get(part.messageId)?.parentId === target) ?? [];
+        const latest = parts.at(-1);
+        let next = latest ? { ...latest, parts } : null;
         for (const message of snapshot.messages) {
           if (message.role !== "assistant" || message.parentId !== target || retiredReplies.current.has(message.id)) continue;
           for (const part of message.parts) {
@@ -1340,7 +1387,7 @@ function ThreadView({
       }
       setEngineStatus(status);
       setMessages(
-        transcript.messages.map((message) => ({
+        transcript.messages.filter((message) => message.role === "user" || message.role === "assistant").map((message) => ({
           id: message.id,
           role: message.role,
           parentId: message.parentId,
@@ -1377,6 +1424,15 @@ function ThreadView({
 
   useEffect(() => {
     if (kind !== "discussion" || !discussionDraft || discussionDraft.id === transferredDraftId.current) return;
+    if (discussionDraft.skill) {
+      const key = `${coworker.slug}:${coworker.createdAt}`;
+      if (appliedSkillRequests.get(key) === discussionDraft.id) return;
+      setAssignmentMode(false);
+      try { setDraft((draft) => ({ ...draft, skills: mergeSkillSelections(draft.skills, [discussionDraft.skill!]) })); }
+      catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+      appliedSkillRequests.set(key, discussionDraft.id);
+      return;
+    }
     setAssignmentMode(false);
     setReply(discussionDraft.text);
   }, [discussionDraft, kind]);
@@ -1385,52 +1441,25 @@ function ThreadView({
     viewMounted.current = true;
     refreshScope.active = true;
     const generation = ++refreshGeneration.current;
-    const controller = new AbortController();
-    let eventTimer: number | undefined;
     void refresh();
-    const client = createOpencodeClient({ baseUrl: `${runtime.serverUrl}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode`, headers: { Authorization: `Bearer ${runtime.ownerToken}` }, redirect: "error" });
-    void (async () => {
-      try {
-        const subscription = await client.event.subscribe(undefined, { signal: controller.signal });
-        for await (const event of subscription.stream) {
-          if (controller.signal.aborted) return;
-          if (event.type === "message.updated") {
-            const info = event.properties.info;
-            if (info.sessionID !== threadId) continue;
-            knownMessages.current.set(info.id, { role: info.role, parentId: info.role === "assistant" ? info.parentID : null, ended: knownMessages.current.get(info.id)?.ended || (info.role === "assistant" && (info.time.completed !== undefined || Boolean(info.error))) });
-            if (info.role === "user" && info.time.created >= observedTurnAt.current) { observedTurn.current = info.id; observedTurnAt.current = info.time.created; }
-          }
-          if (event.type === "message.part.updated" || event.type === "message.part.delta") {
-            const part = event.type === "message.part.updated" ? event.properties.part : event.properties;
-            const target = activeTurnRef.current?.messageId ?? turnStateRef.current.pending?.messageId ?? observedTurn.current;
-            const owner = knownMessages.current.get(part.messageID);
-            if (part.sessionID !== threadId || !target || owner?.role !== "assistant" || owner.parentId !== target || retiredReplies.current.has(part.messageID)) continue;
-            if (streamTurn.current !== target) { streamTurn.current = target; setLiveStream(null); }
-            if (event.type === "message.part.updated") {
-              const part = event.properties.part;
-              if (part.type === "text") setLiveStream((current) => applyStreamEvent(current, { kind: "part", threadId, messageId: part.messageID, partId: part.id, type: part.type, text: part.text, ended: part.time?.end !== undefined, synthetic: part.synthetic, ignored: part.ignored }, threadId));
-            } else if (event.properties.field === "text" && !owner.ended) {
-              const part = event.properties;
-              setLiveStream((current) => applyStreamEvent(current, { kind: "delta", threadId, messageId: part.messageID, partId: part.partID, delta: part.delta }, threadId));
-            }
-          }
-          // Part updates coalesce; status and human decisions still refresh promptly.
-          if (event.type.startsWith("message.")) {
-            if (eventTimer === undefined) eventTimer = window.setTimeout(() => { eventTimer = undefined; void refresh(); }, 600);
-          } else if (event.type.startsWith("session.") || event.type.startsWith("permission.") || event.type.startsWith("question.")) void refresh();
-        }
-      } catch { /* Snapshot polling remains the reconnect path. */ }
-    })();
+    const unsubscribe = threads.subscribe(() => void refresh(), (event) => {
+      const target = activeTurnRef.current?.messageId ?? turnStateRef.current.pending?.messageId ?? observedTurn.current;
+      const owner = knownMessages.current.get(event.messageId);
+      if (event.threadId !== threadId || !target || owner?.role !== "assistant" || owner.parentId !== target || retiredReplies.current.has(event.messageId)) return;
+      if (streamTurn.current !== target) { streamTurn.current = target; setLiveStream(null); }
+      if (event.kind === "part" ? event.type === "text" : !owner.ended) {
+        setLiveStream((current) => applyStreamEvent(current, event, threadId));
+      }
+    });
     const timer = window.setInterval(() => void refresh(), 5_000);
     return () => {
       refreshScope.active = false;
       if (refreshGeneration.current === generation) refreshGeneration.current += 1;
       refreshReads.clear();
-      controller.abort();
-      window.clearTimeout(eventTimer);
+      unsubscribe();
       window.clearInterval(timer);
     };
-  }, [coworker.workspaceId, refresh, refreshReads, refreshScope, runtime.ownerToken, runtime.serverUrl, threadId]);
+  }, [refresh, refreshReads, refreshScope, threadId, threads]);
 
   useEffect(() => {
     viewMounted.current = true;
@@ -1442,7 +1471,7 @@ function ThreadView({
   }, []);
 
   /** Change the thread's turn record: the cache updates at once, the file follows through the main process. */
-  const commitTurnState = useCallback((update: (state: ThreadTurnState) => ThreadTurnState): ThreadTurnState => {
+  const commitTurnState = useCallback((update: (state: ThreadTurnState) => ThreadTurnState, saved?: (kept: boolean) => void): ThreadTurnState => {
     const previous = turnStateRef.current;
     const next = update(previous);
     // A completed observer must not release Next while cancellation is unresolved.
@@ -1452,7 +1481,7 @@ function ThreadView({
     turnStateRef.current = next;
     setTurnState(next);
     turnWrites.current += 1;
-    void saveThreadTurns(coworker.slug, threadId, next, previous).catch((cause) => setError(`Could not keep this turn: ${cause instanceof Error ? cause.message : String(cause)}`)).finally(() => { turnWrites.current -= 1; });
+    void saveThreadTurns(coworker.slug, threadId, next, previous).then(() => saved?.(true)).catch((cause) => { saved?.(false); setError(`Could not keep this turn: ${cause instanceof Error ? cause.message : String(cause)}`); }).finally(() => { turnWrites.current -= 1; });
     return next;
   }, [coworker.slug, stopScope, threadId]);
 
@@ -1511,6 +1540,8 @@ function ThreadView({
     let selection = originalSelection;
     const attempt = send.mode === "retry" ? send.attempt : 0;
     let continued = false;
+    let admissionAttempted = false;
+    const skillFields = selectionFields(send.skills ?? []);
     /**
      * When a model the app chose by itself cannot answer, move to the next
      * choice and try the same message again once, telling the
@@ -1541,7 +1572,7 @@ function ThreadView({
         }
         setProviderRefreshNote(`${turnModelId} could not answer, so ${coworker.name} is trying ${next.modelLabel} instead.`);
         voiceFollowup = true;
-        window.setTimeout(() => void submitTurn(prompt, messageId, { mode: "retry", attempt, switchedTo: next.modelLabel, voice: voiceIntent }, { ...nextModel, ...(variant ? { variant } : {}) }, excluded, selection), 0);
+        window.setTimeout(() => void submitTurn(prompt, messageId, { ...send, mode: "retry", attempt, switchedTo: next.modelLabel, voice: voiceIntent }, { ...nextModel, ...(variant ? { variant } : {}) }, excluded, selection), 0);
         return true;
       } catch {
         return false;
@@ -1565,7 +1596,7 @@ function ThreadView({
         setAppRetry(null);
         // A deferred admission keeps the selected model's receipt. It does not
         // inherit permission to undo a later person-initiated cancellation.
-        void submitTurn(prompt, messageId, { mode: "retry", attempt: attempt + 1, voice: voiceIntent, ...(send.mode === "retry" && send.switchedTo ? { switchedTo: send.switchedTo } : {}) }, turnModel, failedModels, selection);
+        void submitTurn(prompt, messageId, { ...send, mode: "retry", attempt: attempt + 1, voice: voiceIntent, ...(send.mode === "retry" && send.switchedTo ? { switchedTo: send.switchedTo } : {}) }, turnModel, failedModels, selection);
       }, delay);
       return true;
     };
@@ -1591,7 +1622,7 @@ function ThreadView({
     setError("");
     if (send.mode !== "retry" || !send.switchedTo) setProviderRefreshNote("");
     if (resolution?.messageId !== messageId) setResolution(null);
-    commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now() }));
+    commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now(), ...skillFields }));
     onActivityChange({
       state: "working",
       label: "Working",
@@ -1615,8 +1646,9 @@ function ThreadView({
       const ownedFailure = recorded.find((entry) => entry.messageId === messageId)?.failure;
       if (ownedFailure) { message = ownedFailure; engineKnows = false; }
       const snapshot = await threads.client.getThreadSnapshot(threadId).catch(() => null);
-      // Never schedule a replay after tool work, including after a provider failure.
-      if (!snapshot || snapshot.messages.some((entry) => entry.parentId === messageId && entry.parts.some((part) => part.type === "tool"))) {
+      // Once native v2 has observed an input, only reconciliation or an explicit
+      // new continuation is safe, including failures before any tool ran.
+      if (admissionAttempted || !snapshot || snapshot.native?.pendingInputIds.includes(messageId) || snapshot.messages.some((entry) => entry.id === messageId || entry.parentId === messageId)) {
         setFailure(message);
         return;
       }
@@ -1651,14 +1683,16 @@ function ThreadView({
           onActivityChange({ state: "working", label: "Working", detail: describeModelChoice(decision.lane, pick, { tense: "detail" }), updatedAt: Date.now(), threadId });
         }
       }
-      // A re-send waits for the engine to let go of the earlier attempt (a stop is still settling, say).
-      const acceptance = await coworkerBridge.turns.send({ slug: coworker.slug, threadId, kind, prompt, messageId, model: turnModel, retry: send.mode === "retry", retryByPerson: send.mode === "retry" && send.byPerson === true, retryLabel: send.mode === "retry" ? send.switchedTo : undefined });
+      // An uncertain IPC response is not permission to send or switch models again.
+      admissionAttempted = true;
+      const acceptance = await coworkerBridge.turns.send({ slug: coworker.slug, threadId, kind, prompt, messageId, ...skillFields, model: turnModel, retry: send.mode === "retry", retryByPerson: send.mode === "retry" && send.byPerson === true, retryLabel: send.mode === "retry" ? send.switchedTo : undefined });
+      if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
       voiceIntent = voiceRef.current?.rebindExpected(voiceIntent, acceptance.messageId || messageId) ?? null;
       if (acceptance.messageId && acceptance.messageId !== messageId) {
         continued = true;
         messageId = acceptance.messageId;
         prompt = acceptance.prompt;
-        commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: acceptance.acceptedAt }));
+        commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: acceptance.acceptedAt, ...skillFields }));
       }
       // Keep the selected retry model when admission is confirmed. Its receipt
       // is displayed only once the correlated reply actually completes.
@@ -1704,12 +1738,14 @@ function ThreadView({
       // a completed reply or provider error. Honor that snapshot instead of
       // treating a recoverable error (or an answer) as a silent timeout.
       const quiet = !isRunning(result.snapshot.status);
-      const landed = result.outcome !== "settled" && quiet && lastReply?.error === null && lastReply.completedAt !== null;
+      const landed = result.outcome !== "settled" && quiet && result.snapshot.native?.turnOutcomes[messageId] === "succeeded";
       const terminalError = result.terminalError ?? (quiet ? lastReply?.error : null);
       const emptyReply = (result.outcome === "settled" || landed)
         && settledReplies.length > 0
         && settledReplies.every((message) => message.parts.every((part) => part.type !== "tool" && !(part.type === "text" && part.text?.trim())));
-      if (emptyReply) {
+      if ((result.outcome === "settled" || landed) && !nativeV2InputSkillsMatch(result.snapshot, messageId, skillFields.skills)) {
+        setFailure("The native reply's skill attachments could not be verified. Earlier work was kept.");
+      } else if (emptyReply) {
         // The stream closed without a word: the person hears that the reply never came and can retry it.
         await settleFailure(EMPTY_REPLY_MESSAGE, false, true);
       } else if (result.outcome === "settled" || landed) {
@@ -1733,6 +1769,7 @@ function ThreadView({
       await settleFailure(message, null, false);
     } finally {
       if (!voiceIntent?.admitted && !voiceFollowup) voiceRef.current?.abandonReply(voiceIntent);
+      if (send.submission && !voiceFollowup) composerDraftStore.finishSubmission(send.submission, false);
       if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
       waitControllerRef.current = null;
       if (activeTurnRef.current?.messageId === messageId) {
@@ -1746,7 +1783,7 @@ function ThreadView({
    * After a quit or reload the engine may still be on the turn. Follow it to
    * its end the same way, without sending anything, so Next can drain after it.
    */
-  const followTurn = useCallback(async (turn: { messageId: string; prompt: string }) => {
+  const followTurn = useCallback(async (turn: import("@/lib/skill-selection").SkillFields & { messageId: string; prompt: string }) => {
     if (activeTurnRef.current) return;
     const active: ActiveTurn = { messageId: turn.messageId, prompt: turn.prompt, phase: "waiting" };
     activeTurnRef.current = active;
@@ -1762,7 +1799,10 @@ function ThreadView({
         result = await threads.client.waitForThread(threadId, { timeoutMs: TURN_OBSERVER_SLICE_MS, pollIntervalMs: 500, since, signal: controller.signal });
       }
       await refresh();
-      if (result.outcome === "settled") commitTurnState((state) => state.pending?.messageId === turn.messageId ? clearPending(state) : state);
+      if (result.outcome === "settled") {
+        if (turn.skills !== undefined && !nativeV2InputSkillsMatch(result.snapshot, turn.messageId, turn.skills)) setFailure("The native reply's skill attachments could not be verified. Earlier work was kept.");
+        else commitTurnState((state) => state.pending?.messageId === turn.messageId ? clearPending(state) : state);
+      }
       // Anything else is in the transcript now; the outcome names it (a failure, a stop, a cut-off).
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1783,7 +1823,17 @@ function ThreadView({
   }, [engineStatus.type, followTurn, pendingTurn, recovered, turnsLoaded]);
 
   // After a model-related failure, find a different connected model that can use tools.
-  const pendingReply = useMemo(() => pendingTurn ? replyStateFor(messages, pendingTurn.messageId) : NO_REPLY, [messages, pendingTurn?.messageId]);
+  const pendingReply = useMemo((): TurnReplyState => {
+    if (!pendingTurn) return NO_REPLY;
+    if (pendingTurn.skills !== undefined && nativeState && messages.some((message) => message.id === pendingTurn.messageId)
+      && JSON.stringify(nativeState.inputSkills[pendingTurn.messageId]) !== JSON.stringify(pendingTurn.skills)) return { state: "error", error: "The native reply's skill attachments do not match this turn. Earlier work was kept.", retryable: false, aborted: false };
+    if (nativeState?.ambiguousTurns.includes(pendingTurn.messageId)) return { state: "error", error: "Native reply attribution could not be verified. Earlier work has been kept.", retryable: false, aborted: false };
+    const outcome = nativeState?.turnOutcomes[pendingTurn.messageId];
+    if (outcome === "failed" || outcome === "interrupted") return { state: "error", error: nativeState?.turnErrors[pendingTurn.messageId] || "The native turn stopped before completing.", retryable: false, aborted: outcome === "interrupted" };
+    const reply = replyStateFor(messages, pendingTurn.messageId);
+    // Closing one assistant message is not the native turn's idle outcome.
+    return reply.state === "complete" && outcome !== "succeeded" ? { ...reply, state: "writing" } : reply;
+  }, [messages, nativeState, pendingTurn]);
   const needsModelFallback = failure !== "" || pendingReply.state === "error";
   useEffect(() => {
     if (!needsModelFallback) {
@@ -1811,7 +1861,7 @@ function ThreadView({
     check();
   }), []);
 
-  /** The backend retries tool-free work or creates a new continuation after tool work. */
+  /** The execution owner must preserve native work and admit an explicit continuation. */
   const retryPending = useCallback(async (switched?: { model: HeadlessThreadModel; label: string }, requestedVoice?: VoiceExpectation | null) => {
     const requested = turnStateRef.current.pending;
     if (!requested) return;
@@ -1822,7 +1872,7 @@ function ThreadView({
     await untilTurnReleased();
     const turn = turnStateRef.current.pending;
     if (!turn || turn.messageId !== requested.messageId || (voiceIntent && voiceIntent.turnId !== turn.messageId)) { voiceRef.current?.abandonReply(voiceIntent); return; }
-    void submitTurn(turn.prompt, turn.messageId, { mode: "retry", attempt: 0, byPerson: true, voice: voiceIntent, ...(switched ? { switchedTo: switched.label } : {}) }, switched?.model);
+    void submitTurn(turn.prompt, turn.messageId, { mode: "retry", attempt: 0, byPerson: true, skills: turn.skillSelections, voice: voiceIntent, ...(switched ? { switchedTo: switched.label } : {}) }, switched?.model);
   }, [jumpToLatest, submitTurn, untilTurnReleased]);
 
   /** Switch this coworker to the recommended model and retry the failed message. */
@@ -1845,13 +1895,13 @@ function ThreadView({
   }
 
   useEffect(() => {
-    if (!initialTurn || handledInitialTurnRef.current === initialTurn.id) return;
+    if (!initialTurn || initialTurn.ready === false || handledInitialTurnRef.current === initialTurn.id || activeTurnRef.current) return;
     handledInitialTurnRef.current = initialTurn.id;
     jumpToLatest();
     voice.stop("");
-    void submitTurn(initialTurn.prompt, initialTurn.messageId, { mode: "send" })
+    void submitTurn(initialTurn.prompt, initialTurn.messageId, { mode: "send", skills: initialTurn.submission?.snapshot.value.skills, submission: initialTurn.submission })
       .finally(() => onInitialTurnHandled(initialTurn.id));
-  }, [initialTurn, jumpToLatest, onInitialTurnHandled, submitTurn]);
+  }, [activeTurn, initialTurn, jumpToLatest, onInitialTurnHandled, submitTurn]);
 
   /** Send what is next in line, one at a time, once nothing is in flight and nothing unresolved holds the queue. */
   const drainNext = useCallback(() => {
@@ -1860,7 +1910,7 @@ function ThreadView({
     const { state, message } = dequeue(turnStateRef.current);
     if (!message) return;
     commitTurnState(() => state);
-    void submitTurn(message.text, newMessageId(), { mode: "send" });
+    void submitTurn(message.text, newMessageId(), { mode: "send", skills: message.skillSelections });
   }, [commitTurnState, stopScope, submitTurn]);
 
   useEffect(() => {
@@ -1873,53 +1923,68 @@ function ThreadView({
    * The composer never holds. A message typed while the coworker works waits as
    * Next and steers the reply that follows; otherwise it is the next turn.
    */
-  function send() {
-    const text = reply.trim();
-    if (!text) return;
-    setReply("");
-    sendText(text);
+  async function send() {
+    const snapshot = composerDraftStore.read(draftKey);
+    const text = snapshot.value.text.trim();
+    if (!text || checkingDraft.current) return;
+    const submission = composerDraftStore.beginSubmission(snapshot, newMessageId());
+    if (!submission) return;
+    checkingDraft.current = true;
+    try {
+      await coworkerBridge.turns.validateSkills(coworker.slug, selectionFields(snapshot.value.skills));
+      sendText(text, submission);
+    } catch (cause) { composerDraftStore.finishSubmission(submission, false); setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { checkingDraft.current = false; }
   }
 
   /** Words that become the person's next message without passing through the field: a pill the person tapped. */
-  const sendText = useCallback((words: string) => {
+  const sendText = useCallback((words: string, submission?: ComposerDraftSubmission) => {
     const text = words.trim();
     if (!text) return;
     jumpToLatest();
     acknowledgeCoworker(coworker.slug);
-    if (activeTurnRef.current || turnStateRef.current.pending || appRetry || engineRunning || threadStop(stopScope)) {
+    if (activeTurnRef.current || turnStateRef.current.pending || appRetry || engineRunning || threadStop(stopScope) || composerDraftStore.hasOtherSubmission(draftKey, submission?.messageId)) {
       voiceRef.current?.expectReply(null);
-      commitTurnState((state) => enqueue(state, { id: newQueuedId(), text, queuedAt: Date.now() }));
+      commitTurnState((state) => enqueue(state, { id: newQueuedId(), text, queuedAt: Date.now(), ...selectionFields(submission?.snapshot.value.skills ?? []) }), (kept) => { if (submission) composerDraftStore.finishSubmission(submission, kept); });
       return;
     }
-    const messageId = newMessageId();
+    const messageId = submission?.messageId ?? newMessageId();
     const voiceIntent = voiceRef.current?.expectReply(messageId);
-    void submitTurn(text, messageId, { mode: "send", voice: voiceIntent });
-  }, [appRetry, commitTurnState, coworker.slug, engineRunning, jumpToLatest, stopScope, submitTurn]);
+    void submitTurn(text, messageId, { mode: "send", voice: voiceIntent, skills: submission?.snapshot.value.skills, submission });
+  }, [appRetry, commitTurnState, coworker.slug, draftKey, engineRunning, jumpToLatest, stopScope, submitTurn]);
 
   /** Put a waiting message back in the field to change it. */
   function editQueued(id: string) {
     const { state, message } = takeQueued(turnStateRef.current, id);
     if (!message) return;
+    try {
+      const current = composerDraftStore.read(draftKey);
+      const edited = { text: current.value.text.trim() ? `${message.text}\n${current.value.text}` : message.text, skills: mergeSkillSelections(current.value.skills, message.skillSelections ?? []) };
+      if (!composerDraftStore.update(draftKey, edited, current.revision, true)) throw new Error("The draft changed while editing this queued message. Both are kept.");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
     commitTurnState(() => state);
     setAssignmentMode(false);
-    setReply((current) => (current.trim() ? `${message.text}\n${current}` : message.text));
   }
 
   /** Stop the reply in progress and send this waiting message right away. */
   async function sendQueuedNow(id: string) {
     if (threadStop(stopScope)) return;
+    const requested = turnStateRef.current.next.find((item) => item.id === id);
+    if (!requested) return;
+    try { await coworkerBridge.turns.validateSkills(coworker.slug, requested); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
     const message = turnStateRef.current.next.find((item) => item.id === id);
-    if (!message) return;
+    if (!viewMounted.current || threadStop(stopScope) || !message || JSON.stringify(message) !== JSON.stringify(requested)) return;
     jumpToLatest();
     voice.stop("");
     if (activeTurnRef.current || appRetry || engineRunning) {
       if (!await stop()) return;
       await untilTurnReleased();
     }
-    if (!viewMounted.current || threadStop(stopScope) || !turnStateRef.current.next.some((item) => item.id === id)) return;
+    if (!viewMounted.current || threadStop(stopScope) || !turnStateRef.current.next.some((item) => item.id === id && JSON.stringify(item) === JSON.stringify(message))) return;
     // The stopped turn keeps its line in the transcript; the record moves on to this message.
     commitTurnState((state) => clearPending(removeQueued(state, id)));
-    void submitTurn(message.text, newMessageId(), { mode: "send" });
+    void submitTurn(message.text, newMessageId(), { mode: "send", skills: message.skillSelections });
   }
 
   /**
@@ -2054,7 +2119,7 @@ function ThreadView({
     signedIn: session !== null,
     recommendedModel: recommendedModel?.modelLabel ?? "",
   });
-  const needsContinuation = pendingTurn && messages.some((message) => message.parentId === pendingTurn.messageId && message.toolCalls.length > 0);
+  const needsContinuation = pendingTurn && (nativeState?.pendingInputIds.includes(pendingTurn.messageId) || messages.some((message) => message.id === pendingTurn.messageId || message.parentId === pendingTurn.messageId));
   const outcome = stopAttempt ? null : rawOutcome && needsContinuation && ["failed", "stopped-by-you", "cut-off"].includes(rawOutcome.kind)
     ? { ...rawOutcome, detail: "Earlier actions and their history are kept. Continue performs only missing work, using a new message in this discussion.", choices: rawOutcome.choices.map((choice): TurnChoice => choice.id === "retry" || choice.id === "continue" ? { ...choice, id: "continue", label: "Continue" } : choice) }
     : rawOutcome;
@@ -2254,7 +2319,7 @@ function ThreadView({
           {activityOpenError ? <p role="alert" className="text-xs text-amber">{activityOpenError}</p> : null}
           {!transcriptLoaded && !readErrors.transcript ? <p role="status" className="text-xs text-mist">Loading conversation...</p> : null}
           {freshDiscussion ? <QuietEmptyConversation coworker={coworker} proposerName={team?.coworkers.find((member) => member.slug === coworker.suggestedBy?.slug)?.name ?? ""} /> : null}
-          <TranscriptAppContext.Provider value={{ sessionId: threadId, engine: "v1", readOnly: !active || kind !== "discussion" }}>
+          <TranscriptAppContext.Provider value={{ sessionId: threadId, engine: "v2", readOnly: !active || kind !== "discussion" }}>
           {blocks.map((block) => {
             const retriedWith = block.kind === "message" ? executionsByMessage.get(block.message.id)?.retryLabel : undefined;
             if (block.kind === "actions") {
@@ -2363,6 +2428,8 @@ function ThreadView({
       ) : null}
       {kind === "discussion" ? (
         <DiscussionComposer
+          skills={draft.skills}
+          onRemoveSkill={(index) => setDraft((draft) => ({ ...draft, skills: draft.skills.filter((_, position) => position !== index) }))}
           voice={voice}
           message={reply}
           onMessageChange={setReply}
@@ -3005,7 +3072,7 @@ function ToolAttachments({ calls, client }: { calls: TranscriptToolCall[]; clien
 }
 
 /** The standard MCP App a tool call returned, mounted in the existing sandboxed host. */
-const TranscriptAppContext = createContext<CoworkerMcpAppContext>({ sessionId: null, engine: "v1", readOnly: true });
+const TranscriptAppContext = createContext<CoworkerMcpAppContext>({ sessionId: null, engine: "v2", readOnly: true });
 
 function ToolAppFrame({ call, client }: { call: TranscriptToolCall; client: CoworkerMcpClient }) {
   const { sessionId, engine, readOnly } = useContext(TranscriptAppContext);
@@ -3109,6 +3176,8 @@ function ArtifactIcon({ kind }: { kind: CoworkerArtifactKind }) {
 }
 
 function DiscussionComposer({
+  skills = [],
+  onRemoveSkill,
   voice,
   message,
   onMessageChange,
@@ -3133,6 +3202,8 @@ function DiscussionComposer({
   onEffortChange,
   offerStartingPoints = false,
 }: {
+  skills?: SelectedSkill[];
+  onRemoveSkill?: (index: number) => void;
   voice: VoiceController;
   offerStartingPoints?: boolean;
   message: string;
@@ -3181,6 +3252,12 @@ function DiscussionComposer({
         ) : null}
         <div className={`rounded-[24px] border bg-panel/60 p-3 transition-colors focus-within:border-spark/50 ${assignmentMode ? "border-spark/35" : "border-line"}`} data-testid="coworker-input-surface">
           {!assignmentMode ? <VoicePanel voice={voice} /> : null}
+          {!assignmentMode && skills.length ? <div className="flex flex-wrap gap-2 px-1 pb-2" aria-label="Selected skills">
+            {skills.map((skill, index) => <span key={`${skill.id}:${index}`} className="inline-flex max-w-full items-center gap-2 rounded-full border border-line px-2 py-1 text-xs text-snow" data-testid="coworker-selected-skill">
+              <span className="truncate">{skill.label}</span>
+              <button type="button" aria-label={`Remove ${skill.label} skill`} className="shrink-0 text-mist hover:text-snow" onClick={() => onRemoveSkill?.(index)}><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg></button>
+            </span>)}
+          </div> : null}
           <textarea
             ref={fieldRef}
             aria-label={assignmentMode ? "Assignment outcome" : `Message ${coworkerName}`}

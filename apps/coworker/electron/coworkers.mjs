@@ -13,6 +13,7 @@
  */
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { updateNativeConfig } from "./native-config.mjs";
 import { openworkConfigDir } from "@openwork/paths";
 import { DOCUMENTS_INDEX_FILE, documentsIndexTemplate } from "./documents.mjs";
 import { parseFrontmatter as parseFlatFrontmatter, serializeFrontmatter as serializeFlatFrontmatter } from "./frontmatter.mjs";
@@ -504,6 +505,8 @@ function opencodeConfigTemplate() {
     {
       $schema: "https://opencode.ai/config.json",
       instructions: COWORKER_INSTRUCTIONS,
+      plugins: [],
+      permissions: [],
     },
     null,
     2,
@@ -702,21 +705,12 @@ export async function repairCoworkerContract(coworkersDir, slug) {
     await writeAtomic(agentsPath, agentsTemplate({ name: coworker.name }));
     changed.push("AGENTS.md");
   }
-  const configPath = path.join(root, "opencode.json");
-  let config = {};
-  try {
-    const parsed = JSON.parse(await readFile(configPath, "utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) config = parsed;
-  } catch {
-    config = {};
-  }
-  const instructions = Array.isArray(config.instructions) ? config.instructions.filter((entry) => typeof entry === "string") : [];
-  const missing = COWORKER_INSTRUCTIONS.filter((entry) => !instructions.includes(entry));
-  if (missing.length > 0 || !Array.isArray(config.instructions)) {
-    const next = { $schema: "https://opencode.ai/config.json", ...config, instructions: [...instructions, ...missing] };
-    await writeAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
-    changed.push("opencode.json");
-  }
+  if (await updateNativeConfig(root, (config) => {
+    if (config.instructions !== undefined && (!Array.isArray(config.instructions) || config.instructions.some((entry) => typeof entry !== "string"))) throw new Error("Invalid coworker instructions; config was not overwritten.");
+    const instructions = config.instructions ?? [];
+    const missing = COWORKER_INSTRUCTIONS.filter((entry) => !instructions.includes(entry));
+    return { $schema: "https://opencode.ai/config.json", ...config, instructions: [...instructions, ...missing] };
+  })) changed.push("opencode.json");
   const indexPath = path.join(root, DOCUMENTS_INDEX_FILE);
   if (!(await pathExists(indexPath))) {
     await mkdir(path.dirname(indexPath), { recursive: true });

@@ -5,14 +5,15 @@
  * conversation type: a thread created in Open Coworker opens in OpenWork.
  */
 import {
-  createOpencodeClient,
-  type ProviderListResponse,
-  type SessionStatus,
-} from "@opencode-ai/sdk/v2/client";
-import {
-  createHeadlessThreadClient,
+  createHeadlessThreadClientV2,
+  createNativeV2Client,
+  nativeV2PartId,
   type HeadlessThreadClient,
-} from "@openwork/headless-threads";
+  type HeadlessThreadStatus as SessionStatus,
+  type NativeV2Form,
+  type NativeV2Permission,
+  type NativeV2Skill,
+} from "@openwork/headless-threads/v2";
 import { z } from "zod";
 import { RECENT_WORK_LIMIT } from "./activity-summary.ts";
 import { readCloudProviderSyncStatus, type CloudProviderSyncStatus } from "./den.ts";
@@ -78,16 +79,17 @@ export type CoworkerActivity = {
   workers?: { running: number; subject: boolean };
 };
 
-const sessionListSchema = z.array(
-  z
-    .object({
-      id: z.string(),
-      title: z.string().optional(),
-      parentID: z.string().optional(),
-      time: z.object({ created: z.number(), updated: z.number() }).partial().optional(),
-    })
-    .loose(),
-);
+/** Pure display projection input, not an SDK client or a connectivity probe. */
+type ProviderListResponse = {
+  connected: string[];
+  default: Record<string, string>;
+  all: Array<{ id: string; name: string; source?: string; options?: Record<string, unknown>; models: Record<string, {
+    name?: string; family?: string; variants?: Record<string, unknown>; status?: string; release_date?: string;
+    cost?: { input: number; output: number }; api?: { npm?: string; id?: string };
+    limit?: { context: number; input?: number; output: number };
+    capabilities?: { toolcall?: boolean; reasoning?: boolean; input?: Record<string, boolean>; output?: Record<string, boolean> };
+  }> }>;
+};
 
 /**
  * Where a connected provider comes from: `cloud` providers were materialized
@@ -275,9 +277,9 @@ export function stalledRetry(retry: { next: number; message: string; attempt?: n
  * and the reply landed, or the run ended — so it reads as idle rather than keeping a finished
  * coworker "Retrying".
  */
-export function threadStatusOf(status: SessionStatus | undefined, now = Date.now()): SessionStatus["type"] {
+export function threadStatusOf(status: { type: SessionStatus["type"]; next?: number; attempt?: number; message?: string; reason?: string | null } | undefined, now = Date.now()): SessionStatus["type"] {
   if (!status) return "idle";
-  if (status.type === "retry" && Number.isFinite(status.next) && now - status.next > STALE_RETRY_MS) return "idle";
+  if (status.type === "retry" && typeof status.next === "number" && Number.isFinite(status.next) && now - status.next > STALE_RETRY_MS) return "idle";
   return status.type;
 }
 
@@ -326,7 +328,7 @@ export function connectedModelCatalog(
         knownPrice,
         intelligence,
         progressEligibility: {
-          transport: model.api?.npm === "@ai-sdk/openai" ? "openai" : model.api?.npm === "@ai-sdk/openai-compatible" ? "openai-compatible" : null,
+          transport: ["@ai-sdk/openai", "@opencode-ai/ai/providers/openai"].includes(model.api?.npm ?? "") ? "openai" : ["@ai-sdk/openai-compatible", "@opencode-ai/ai/providers/openai-compatible"].includes(model.api?.npm ?? "") ? "openai-compatible" : null,
           knownPrice,
           nonReasoning: model.capabilities?.reasoning === false,
           text: model.capabilities?.input?.text === true && model.capabilities?.output?.text === true,
@@ -389,10 +391,8 @@ export function parseModelPreference(value: string): { providerId: string; model
 }
 
 /**
- * A tool permission the engine is holding a turn on. Both OpenCode permission
- * protocols are normalized here so the UI renders one card and replies through
- * whichever endpoint issued the request — the same split the OpenWork desktop
- * handles in its session sync.
+ * A native tool permission holding a turn. The legacy protocol discriminator is
+ * retained for persisted UI records, but only a fresh native receipt can reply.
  */
 export type PendingPermission = {
   id: string;
@@ -405,6 +405,8 @@ export type PendingPermission = {
   resources: string[];
   /** Whether "always allow" is offered for this request. */
   canAlways: boolean;
+  /** Exact native receipt. Never resolve a control by ID alone or a different session. */
+  native?: NativeV2Permission;
 };
 
 export type PendingQuestionItem = {
@@ -420,6 +422,7 @@ export type PendingQuestion = {
   sessionID: string;
   tool?: { messageID: string; callID: string };
   questions: PendingQuestionItem[];
+  native?: NativeV2Form;
 };
 
 export type PendingInteractions = {
@@ -432,12 +435,14 @@ export type PermissionReply = "once" | "always" | "reject";
 const ACTION_LABELS: Record<string, string> = {
   external_directory: "work outside its home folder",
   bash: "run a command",
+  shell: "run a command",
   edit: "change files",
   write: "write files",
   read: "read files",
   webfetch: "fetch a web page",
   websearch: "search the web",
   task: "start a sub-task",
+  subagent: "start a sub-task",
 };
 
 /** Plain-language summary of what a permission request asks for. */
@@ -471,6 +476,7 @@ export type CoworkerThreads = {
   renameThread: (threadId: string, title: string) => Promise<void>;
   listModelCatalog: () => Promise<EngineModelCatalog>;
   listModels: () => Promise<EngineModelOption[]>;
+  listSkills: (signal?: AbortSignal) => Promise<NativeV2Skill[]>;
   readActivity: () => Promise<CoworkerActivity>;
   /** Pending permissions and questions across the coworker's threads. */
   listPendingInteractions: (signal?: AbortSignal) => Promise<PendingInteractions>;
@@ -487,66 +493,35 @@ export type CoworkerThreads = {
   subscribe: (onEvent: () => void, onStream?: (event: StreamEvent) => void) => () => void;
 };
 
-function normalizeLegacyPermission(value: {
-  id: string;
-  sessionID: string;
-  permission: string;
-  patterns: string[];
-  always: string[];
-  tool?: { messageID: string; callID: string };
-}): PendingPermission {
-  return {
-    id: value.id,
-    sessionID: value.sessionID,
-    protocol: "legacy",
-    tool: value.tool,
-    action: value.permission,
-    resources: value.patterns,
-    canAlways: value.always.length > 0,
-  };
-}
-
-function normalizeV2Permission(value: {
-  id: string;
-  sessionID: string;
-  action: string;
-  resources: string[];
-  save?: string[];
-  source?: { messageID: string; callID: string };
-}): PendingPermission {
+function normalizeV2Permission(value: NativeV2Permission): PendingPermission {
   return {
     id: value.id,
     sessionID: value.sessionID,
     protocol: "v2",
-    tool: value.source,
+    tool: value.source ? { messageID: value.source.messageID, callID: value.source.id } : undefined,
     action: value.action,
     resources: value.resources,
     canAlways: (value.save?.length ?? 0) > 0,
+    native: value,
   };
 }
 
-function normalizeQuestion(value: {
-  id: string;
-  sessionID: string;
-  tool?: { messageID: string; callID: string };
-  questions: Array<{
-    header: string;
-    question: string;
-    options: Array<{ label: string; description?: string }>;
-    multiple?: boolean;
-    custom?: boolean;
-  }>;
-}): PendingQuestion {
+function normalizeQuestion(value: NativeV2Form): PendingQuestion {
+  if (value.metadata?.kind !== "question" || value.fields.some((field) => !["string", "multiselect"].includes(field.type) || field.when?.length)) {
+    throw new Error("This native form cannot be represented by the question controls. It has not been answered or dismissed.");
+  }
+  const tool = z.object({ messageID: z.string(), id: z.string() }).safeParse(value.metadata.tool);
   return {
     id: value.id,
     sessionID: value.sessionID,
-    tool: value.tool,
-    questions: value.questions.map((question) => ({
-      header: question.header,
-      question: question.question,
-      options: question.options.map((option) => ({ label: option.label, description: option.description ?? "" })),
-      multiple: question.multiple === true,
-      custom: question.custom !== false,
+    tool: tool.success ? { messageID: tool.data.messageID, callID: tool.data.id } : undefined,
+    native: value,
+    questions: value.fields.map((field) => ({
+      header: field.title ?? "",
+      question: field.description ?? field.title ?? "",
+      options: (field.options ?? []).map((option) => ({ label: option.label, description: option.description ?? "" })),
+      multiple: field.type === "multiselect",
+      custom: field.custom === true || !field.options?.length,
     })),
   };
 }
@@ -609,7 +584,7 @@ export function createCoworkerThreads(options: {
   const discussions = discussionIds(options.discussionThreadIds ?? [], options.conversationThreadId);
   const workerIds = new Set(options.workerThreadIds ?? []);
   const notAssignments = [...discussions, ...workerIds];
-  const client = createHeadlessThreadClient({
+  const client = createHeadlessThreadClientV2({
     baseUrl: options.serverUrl,
     workspaceId: options.workspaceId,
     token: options.token,
@@ -618,22 +593,21 @@ export function createCoworkerThreads(options: {
       : undefined,
   });
 
-  const opencode = createOpencodeClient({
-    baseUrl: `${options.serverUrl}/workspace/${encodeURIComponent(options.workspaceId)}/opencode`,
-    headers: { Authorization: `Bearer ${options.token}` },
-    redirect: "error",
+  const native = createNativeV2Client({
+    baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token,
   });
 
   async function listAllThreads(): Promise<ThreadListItem[]> {
-    const [listResult, statusResult] = await Promise.all([
-      opencode.session.list(),
-      opencode.session.status(),
+    const [sessions, active] = await Promise.all([
+      native.listSessions(), native.readActive(),
     ]);
-    if (listResult.error !== undefined) {
-      throw new Error(`Listing threads failed (${listResult.response?.status ?? "network"})`);
-    }
-    const sessions = sessionListSchema.parse(listResult.data ?? []);
-    const statuses = statusResult.data ?? {};
+    const statuses = new Map<string, SessionStatus>();
+    await Promise.all(sessions.filter((session) => Object.hasOwn(active, session.id)).map(async (session) => {
+      const page = await native.readHistory(session.id);
+      const last = page.filter((message) => message.type === "assistant").at(-1);
+      const retry = last?.type === "assistant" && last.time.completed === undefined ? last.retry : undefined;
+      statuses.set(session.id, retry ? { type: "retry", attempt: retry.attempt, next: retry.at, message: retry.error.message, reason: retry.error.type } : { type: "busy" });
+    }));
     return sessions
       .filter((session) => !session.parentID)
       .map((session) => ({
@@ -641,8 +615,8 @@ export function createCoworkerThreads(options: {
         title: session.title?.trim() || "Untitled thread",
         createdAt: session.time?.created ?? 0,
         updatedAt: session.time?.updated ?? 0,
-        status: threadStatusOf(statuses[session.id]),
-        ...retryOf(statuses[session.id]),
+        status: statuses.get(session.id)?.type ?? "idle",
+        ...retryOf(statuses.get(session.id)),
       }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
@@ -652,82 +626,56 @@ export function createCoworkerThreads(options: {
   }
 
   async function renameThread(threadId: string, title: string): Promise<void> {
-    const result = await opencode.session.update({ sessionID: threadId, title });
-    if (result.error !== undefined) {
-      throw new Error(`Renaming the thread failed (${result.response?.status ?? "network"})`);
-    }
+    await native.renameSession(threadId, title);
   }
 
   /**
-   * Workspace-wide pending requests. The legacy lists are already scoped to
-   * this coworker's directory by the workspace proxy; v2 requests are
-   * session-scoped and read per thread in `listThreadInteractions`.
+   * Native controls are always read through their exact session-scoped routes,
+   * including child sessions, rather than a location-wide ID-only reply API.
    */
   async function listPendingInteractions(signal?: AbortSignal): Promise<PendingInteractions> {
-    const [permissionsResult, questionsResult] = await Promise.all([
-      opencode.permission.list(undefined, { signal }),
-      opencode.question.list(undefined, { signal }),
-    ]);
-    for (const result of [permissionsResult, questionsResult]) {
-      if (result.error !== undefined || !Array.isArray(result.data)) throw new Error(`Reading pending requests failed (${result.response?.status ?? "network"})`);
-    }
+    const sessions = await native.listSessions(signal);
+    const pending = await Promise.all(sessions.map((session) => listThreadInteractions(session.id, signal)));
     return {
-      permissions: (permissionsResult.data ?? []).map(normalizeLegacyPermission),
-      questions: (questionsResult.data ?? []).map(normalizeQuestion),
+      permissions: pending.flatMap((item) => item.permissions),
+      questions: pending.flatMap((item) => item.questions),
     };
   }
 
   async function listThreadInteractions(threadId: string, signal?: AbortSignal): Promise<PendingInteractions> {
-    const [workspaceWide, v2Result] = await Promise.all([
-      listPendingInteractions(signal),
-      opencode.v2.session.permission.list({ sessionID: threadId }, { signal, fetch: async (request) => {
-        const response = await fetch(request);
-        // The SDK's HTML interceptor discards the HTTP status. Normalize only
-        // this optional route's successful old-engine web shell before it runs.
-        if ((response.ok || response.status === 404) && response.headers.get("content-type")?.includes("text/html")) {
-          await response.body?.cancel();
-          return Response.json({}, { status: 404 });
-        }
-        if (!response.ok && response.status !== 404) throw new Error(`Reading permission requests failed (${response.status})`);
-        return response;
-      } }),
-    ]);
-    // An old engine's HTML shell means this optional route is absent, not
-    // permission to hide authentication, server or malformed JSON failures.
-    if (v2Result.error instanceof Error) throw v2Result.error;
-    const unsupported = v2Result.response?.status === 404;
-    if (!unsupported && (v2Result.error !== undefined || !Array.isArray(v2Result.data?.data))) throw new Error(`Reading permission requests failed (${v2Result.response?.status ?? "network"})`);
-    const legacy = workspaceWide.permissions.filter((permission) => permission.sessionID === threadId);
-    const v2 = unsupported ? [] : (v2Result.data?.data ?? []).map(normalizeV2Permission).filter((permission) => permission.sessionID === threadId);
-    const seen = new Set(legacy.map((permission) => permission.id));
+    const [permissions, forms] = await Promise.all([native.listPermissions(threadId, signal), native.listForms(threadId, signal)]);
     return {
-      permissions: [...legacy, ...v2.filter((permission) => !seen.has(permission.id))],
-      questions: workspaceWide.questions.filter((question) => question.sessionID === threadId),
+      permissions: permissions.map(normalizeV2Permission),
+      questions: forms.map(normalizeQuestion),
     };
   }
 
   async function replyPermission(permission: PendingPermission, reply: PermissionReply, signal?: AbortSignal): Promise<void> {
-    const result =
-      permission.protocol === "v2"
-        ? await opencode.v2.session.permission.reply({ sessionID: permission.sessionID, requestID: permission.id, reply }, { signal })
-        : await opencode.permission.reply({ requestID: permission.id, reply }, { signal });
-    if (result.error !== undefined) {
-      throw new Error(`Replying to the permission request failed (${result.response?.status ?? "network"})`);
-    }
+    if (permission.protocol !== "v2" || !permission.native || permission.native.id !== permission.id || permission.native.sessionID !== permission.sessionID) throw new Error("Read the exact native permission request again before replying.");
+    await native.replyPermission(permission.native, reply, signal);
   }
 
   async function replyQuestion(question: PendingQuestion, answers: string[][], signal?: AbortSignal): Promise<void> {
-    const result = await opencode.question.reply({ requestID: question.id, answers }, { signal });
-    if (result.error !== undefined) {
-      throw new Error(`Answering the question failed (${result.response?.status ?? "network"})`);
+    const form = question.native;
+    if (!form || form.id !== question.id || form.sessionID !== question.sessionID) throw new Error("Read the exact native question again before replying.");
+    normalizeQuestion(form);
+    if (answers.length !== form.fields.length) throw new Error("Answer count does not match the native form.");
+    const answer: Record<string, string | string[]> = {};
+    for (const [index, field] of form.fields.entries()) {
+      const values = (answers[index] ?? []).map((label) => {
+        const matches = (field.options ?? []).filter((option) => option.label === label);
+        if (matches.length > 1 || (!matches.length && field.custom !== true && field.options?.length)) throw new Error("Answer does not identify one native option.");
+        return matches[0]?.value ?? label;
+      });
+      if (field.type === "string" && values.length > 1) throw new Error("This native question accepts one answer.");
+      if (values.length) answer[field.key] = field.type === "multiselect" ? values : values[0] ?? "";
     }
+    await native.replyForm(form, answer, signal);
   }
 
   async function rejectQuestion(question: PendingQuestion, signal?: AbortSignal): Promise<void> {
-    const result = await opencode.question.reject({ requestID: question.id }, { signal });
-    if (result.error !== undefined) {
-      throw new Error(`Skipping the question failed (${result.response?.status ?? "network"})`);
-    }
+    if (!question.native || question.native.id !== question.id || question.native.sessionID !== question.sessionID) throw new Error("Read the exact native question again before dismissing it.");
+    await native.replyForm(question.native, null, signal);
   }
 
   async function readActivity(): Promise<CoworkerActivity> {
@@ -737,7 +685,7 @@ export function createCoworkerThreads(options: {
     // way every few seconds, and the two extra reads per coworker added up to most of the idle traffic.
     const anyRunning = allSessions.some((session) => session.status === "busy" || session.status === "retry");
     const pending = anyRunning
-      ? await listPendingInteractions().catch((): PendingInteractions => ({ permissions: [], questions: [] }))
+      ? await listPendingInteractions()
       : { permissions: [], questions: [] };
     const assignments = assignmentThreads(allSessions, notAssignments);
     const recentOf = (excludeId: string | undefined): RecentWork[] =>
@@ -816,21 +764,33 @@ export function createCoworkerThreads(options: {
   }
 
   async function listModelCatalog(): Promise<EngineModelCatalog> {
-    const [result, cloud] = await Promise.all([
-      // Only providers that are actually connected: a few kilobytes, where the full
-      // provider list (every provider the engine knows, thousands of models) is
-      // megabytes per read and this catalog is read often.
-      opencode.config.providers(),
+    const [result, preferred, cloud] = await Promise.all([
+      native.readCatalog(), native.defaultModel(),
       // Status is advisory: without it, account providers are still recognised by their ids.
       readCloudProviderSyncStatus({ serverUrl: options.serverUrl, token: options.token }).catch(
         (): CloudProviderSyncStatus | null => null,
       ),
     ]);
-    if (result.error !== undefined || !result.data) {
-      throw new Error(`Listing models failed (${result.response?.status ?? "network"})`);
-    }
     return connectedModelCatalog(
-      { all: result.data.providers, connected: result.data.providers.map((provider) => provider.id), default: result.data.default },
+      {
+        connected: result.connectedProviderIds,
+        default: preferred ? { [preferred.providerID]: preferred.id } : {},
+        all: result.providers.map((provider) => ({
+          id: provider.id, name: provider.name,
+          options: { baseURL: provider.settings?.baseURL },
+          models: Object.fromEntries(result.models.filter((model) => model.enabled && model.providerID === provider.id).map((model) => {
+            const price = model.cost.find((cost) => !cost.tier);
+            const modalities = (values: string[]) => Object.fromEntries(["text", "image", "audio", "video", "pdf"].map((kind) => [kind, values.some((value) => value === kind || value.startsWith(`${kind}/`))]));
+            return [model.id, {
+              name: model.name, family: model.family, variants: Object.fromEntries(model.variants.map((variant) => [variant.id, {}])),
+              status: model.status, release_date: model.time.released > 0 ? new Date(model.time.released).toISOString().slice(0, 10) : "",
+              ...(price ? { cost: { input: price.input, output: price.output } } : {}),
+              api: { npm: model.package ?? provider.package, id: model.modelID }, limit: model.limit,
+              capabilities: { toolcall: model.capabilities.tools, reasoning: model.capabilities.output.includes("reasoning"), input: modalities(model.capabilities.input), output: modalities(model.capabilities.output) },
+            }];
+          })),
+        })),
+      },
       cloud,
     );
   }
@@ -848,26 +808,23 @@ export function createCoworkerThreads(options: {
     const messageRefresh = coalesceCalls(onEvent, EVENT_REFRESH_WINDOW_MS);
     void (async () => {
       try {
-        const subscription = await opencode.event.subscribe(undefined, { signal: controller.signal });
-        for await (const event of subscription.stream) {
+        for await (const event of native.events(controller.signal)) {
           if (controller.signal.aborted) return;
-          if (onStream && event.type === "message.part.delta") {
-            const { sessionID, messageID, partID, delta } = event.properties;
-            onStream({ kind: "delta", threadId: sessionID, messageId: messageID, partId: partID, delta });
-            continue;
-          }
-          if (onStream && event.type === "message.part.updated") {
-            const part = event.properties.part;
-            if (part.type === "text" || part.type === "reasoning") {
-              onStream({ kind: "part", threadId: part.sessionID, messageId: part.messageID, partId: part.id, type: part.type, text: part.text, ended: part.time?.end !== undefined });
+          if (onStream && /^session\.(text|reasoning)\.(started|delta|ended)$/.test(event.type)) {
+            const part = z.object({ sessionID: z.string(), assistantMessageID: z.string(), ordinal: z.number().int().nonnegative(), delta: z.string().optional(), text: z.string().optional() }).parse(event.data);
+            const identity = { threadId: part.sessionID, messageId: part.assistantMessageID, partId: nativeV2PartId(part.assistantMessageID, part.ordinal, event.type.includes(".reasoning.") ? "reasoning" : "text") };
+            if (event.type.endsWith(".delta")) {
+              if (part.delta !== undefined) onStream({ kind: "delta", ...identity, delta: part.delta });
+            } else {
+              onStream({ kind: "part", ...identity, type: event.type.includes(".reasoning.") ? "reasoning" : "text", text: part.text ?? "", ended: event.type.endsWith(".ended") });
             }
           }
-          if (event.type.startsWith("message.")) {
+          if (/^session\.(text|reasoning|tool|step|message)\./.test(event.type)) {
             messageRefresh.call();
           } else if (
             event.type.startsWith("session.") ||
             event.type.startsWith("permission.") ||
-            event.type.startsWith("question.")
+            event.type.startsWith("form.") || event.type === "catalog.updated" || event.type === "integration.updated"
           ) {
             messageRefresh.cancel();
             onEvent();
@@ -892,6 +849,7 @@ export function createCoworkerThreads(options: {
     renameThread,
     listModelCatalog,
     listModels,
+    listSkills: (signal) => native.listSkills(signal),
     readActivity,
     listPendingInteractions,
     listThreadInteractions,

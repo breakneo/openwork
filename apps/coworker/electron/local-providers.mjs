@@ -1,14 +1,13 @@
 /**
  * What is already on this Mac that a coworker could use: a ChatGPT sign-in
  * kept by Codex, a Claude Code sign-in, a GitHub Copilot sign-in, providers
- * already connected in OpenCode's shared credential store, API keys in the
+ * connected in the current native catalog, API keys in the
  * app's own environment, and local model servers answering on loopback.
  *
  * Detection is presence-only. A file is opened just long enough to learn its
  * shape; no secret value is kept, returned, or logged, and a missing file or a
- * silent port is "not found", never an error. The connect helpers below turn a
- * sign-in file into the exact credential shape the engine stores itself, so
- * the main process can hand it over loopback and forget it.
+ * silent port is "not found", never an error. External sign-in files are not
+ * native connections and are never converted to engine credentials.
  *
  * No Electron imports here: `node --test electron/local-providers.test.mjs`
  * exercises this module against a temporary HOME.
@@ -70,11 +69,6 @@ export function dataHome(env, homeDir) {
   return nonEmpty(env.XDG_DATA_HOME) ? env.XDG_DATA_HOME.trim() : path.join(homeDir, ".local", "share");
 }
 
-/** OpenCode's credential store, shared by this app, OpenWork Desktop, and the OpenCode CLI. */
-export function opencodeAuthPath(env, homeDir) {
-  return path.join(dataHome(env, homeDir), "opencode", "auth.json");
-}
-
 export function copilotConfigDir(env, homeDir) {
   return path.join(configHome(env, homeDir), "github-copilot");
 }
@@ -101,27 +95,6 @@ export function codexSignInMode(parsed) {
   return null;
 }
 
-/** Classify only the supported stored shape, never subscription validity or token contents. */
-function opencodeCredentialKind(providerId, auth) {
-  if (!isRecord(auth)) return "unknown";
-  if (auth.type === "api" && nonEmpty(auth.key)) return "api-key";
-  if (providerId === "openai" && auth.type === "oauth" && nonEmpty(auth.access) && nonEmpty(auth.refresh)
-    && typeof auth.expires === "number" && Number.isFinite(auth.expires) && auth.expires >= 0) return "chatgpt-oauth";
-  return "unknown";
-}
-
-/** The expiry (ms since epoch) a JWT carries, or 0 when it cannot be read: the engine then refreshes first. */
-export function jwtExpiryMs(token) {
-  const segments = String(token ?? "").split(".");
-  if (segments.length < 2) return 0;
-  try {
-    const payload = JSON.parse(Buffer.from(segments[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
-    return isRecord(payload) && typeof payload.exp === "number" && Number.isFinite(payload.exp) ? Math.round(payload.exp * 1000) : 0;
-  } catch {
-    return 0;
-  }
-}
-
 export class SignInImportError extends Error {
   constructor(code, message) {
     super(message);
@@ -130,26 +103,9 @@ export class SignInImportError extends Error {
   }
 }
 
-/**
- * Turn Codex's sign-in file into the credential the engine's own ChatGPT
- * sign-in would have stored (the same OAuth client and token shape), or into
- * an API key when Codex kept one. Values pass straight through to the caller,
- * who hands them to the engine and drops them.
- */
-export function codexAuthFromFile(parsed) {
-  const mode = codexSignInMode(parsed);
-  if (mode === "chatgpt") {
-    const tokens = parsed.tokens;
-    return {
-      type: "oauth",
-      refresh: tokens.refresh_token,
-      access: tokens.access_token,
-      expires: jwtExpiryMs(tokens.access_token),
-      ...(nonEmpty(tokens.account_id) ? { accountId: tokens.account_id } : {}),
-    };
-  }
-  if (mode === "apikey") return { type: "api", key: parsed.OPENAI_API_KEY.trim() };
-  throw new SignInImportError("missing", "Codex is not signed in on this Mac. Sign in with Codex, then Connect.");
+// Fail closed until main's old import call sites are replaced by native-providers.
+export function codexAuthFromFile() {
+  throw new SignInImportError("not-importable", "Codex credentials cannot be imported here. Sign in to OpenAI directly or add an API key.");
 }
 
 function copilotToken(parsed) {
@@ -168,15 +124,8 @@ export function copilotSignedIn(parsed) {
   return copilotToken(parsed) !== "";
 }
 
-/**
- * The credential the engine's own Copilot sign-in stores: the GitHub token is
- * the long-lived part it exchanges for short Copilot sessions, so it goes in
- * as the refresh token with nothing else.
- */
-export function copilotAuthFromFile(parsed) {
-  const token = copilotToken(parsed);
-  if (!token) throw new SignInImportError("missing", "GitHub Copilot is not signed in on this Mac. Sign in with Copilot in your editor, then Connect.");
-  return { type: "oauth", refresh: token, access: "", expires: 0 };
+export function copilotAuthFromFile() {
+  throw new SignInImportError("not-importable", "Copilot credentials cannot be imported here. Sign in to GitHub Copilot directly.");
 }
 
 /** Normalise an OLLAMA_HOST-style value (`0.0.0.0:11434`, `host:port`, or a URL) into an http(s) origin. */
@@ -208,6 +157,7 @@ export function normalizeOpenAiCompatibleAddress(value) {
     throw new Error("That address is not valid. Use a form like http://127.0.0.1:1234 or https://ai.example.com/v1.");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("The address must start with http:// or https://.");
+  if (url.username || url.password) throw new Error("Use an address without a username or password. Enter the key separately.");
   const pathname = url.pathname.replace(/\/+$/, "");
   url.pathname = pathname === "" ? "/v1" : pathname;
   url.search = "";
@@ -292,8 +242,7 @@ function pluralModels(count) {
 /**
  * Everything on this Mac a coworker could use, as flat findings. Each has a
  * stable `id`, a plain `label`, one line of `detail`, the engine `providerId`
- * it maps to, and `how` connecting works: `import` (the engine can take the
- * sign-in as it is), `add` (a local server the engine can be pointed at),
+ * it maps to, and `how` connecting works: `add` (a local server to configure),
  * `in-use` (already available), or `unavailable` (with the reason).
  */
 export async function detectLocalProviders({
@@ -303,6 +252,7 @@ export async function detectLocalProviders({
   fetchImpl = fetch,
   timeoutMs = NETWORK_TIMEOUT_MS,
   keychainProbe = runKeychainProbe,
+  providers = [],
   log = () => undefined,
 } = {}) {
   const found = [];
@@ -315,10 +265,10 @@ export async function detectLocalProviders({
       kind: "codex",
       credentialKind: "chatgpt-oauth",
       label: "ChatGPT (signed in with Codex)",
-      detail: "A ChatGPT sign-in was found. Connect to check which models are available.",
+      detail: "A ChatGPT sign-in was found in Codex, not connected here.",
       providerId: "openai",
-      how: "import",
-      reason: "",
+      how: "unavailable",
+      reason: "Codex credentials cannot be imported here. Sign in to OpenAI directly or add an API key.",
     });
   } else if (codexMode === "apikey") {
     found.push({
@@ -326,10 +276,10 @@ export async function detectLocalProviders({
       kind: "codex",
       credentialKind: "api-key",
       label: "OpenAI key (saved by Codex)",
-      detail: "Uses the OpenAI key Codex keeps on this Mac.",
+      detail: "An OpenAI key was found in Codex, not connected here.",
       providerId: "openai",
-      how: "import",
-      reason: "",
+      how: "unavailable",
+      reason: "Codex credentials cannot be imported here. Add the API key directly instead.",
     });
   }
 
@@ -356,43 +306,42 @@ export async function detectLocalProviders({
       kind: "copilot",
       credentialKind: "unknown",
       label: "GitHub Copilot (signed in on this Mac)",
-      detail: "Uses your Copilot subscription for coworkers on this Mac.",
+      detail: "A Copilot sign-in was found in another app, not connected here.",
       providerId: "github-copilot",
-      how: "import",
-      reason: "",
+      how: "unavailable",
+      reason: "Copilot credentials cannot be imported here. Sign in to GitHub Copilot directly.",
     });
   }
 
-  const store = await readJsonFile(opencodeAuthPath(env, homeDir));
-  if (isRecord(store)) {
-    for (const providerId of Object.keys(store).filter((id) => id.trim() && !isCloudManagedProviderId(id)).sort()) {
-      const credentialKind = opencodeCredentialKind(providerId, store[providerId]);
-      found.push({
-        id: `opencode:${providerId}`,
-        kind: "opencode",
-        credentialKind,
-        label: credentialKind === "chatgpt-oauth" ? "ChatGPT sign-in (saved in OpenCode)" : `${providerId} (saved in OpenCode)`,
-        detail: "Saved on this Mac; availability is checked by the AI service. OpenWork Desktop shares it.",
-        providerId,
-        how: "in-use",
-        reason: "",
-      });
-    }
+  // Native connection metadata does not expose credential kind or subscription.
+  // Never inspect v1 auth.json as evidence of a current native connection.
+  for (const provider of providers.filter((item) => item.connected && item.source === "credential" && !isCloudManagedProviderId(item.id))) {
+    found.push({
+      id: `opencode:${provider.id}`,
+      kind: "opencode",
+      credentialKind: "unknown",
+      label: `${provider.name} (connected in OpenCode)`,
+      detail: "Available through the current AI service on this Mac.",
+      providerId: provider.id,
+      how: "in-use",
+      reason: "",
+    });
   }
 
   const seenEnvProviders = new Set();
   for (const entry of ENVIRONMENT_KEYS) {
     if (!nonEmpty(env[entry.name]) || seenEnvProviders.has(entry.providerId)) continue;
     seenEnvProviders.add(entry.providerId);
+    const connected = providers.some((provider) => provider.id === entry.providerId && provider.connected && provider.source === "env");
     found.push({
       id: `env:${entry.name}`,
       kind: "env",
       credentialKind: "api-key",
       label: `${entry.label} key in your environment`,
-      detail: `${entry.name} is set, so coworkers on this Mac can already use it.`,
+      detail: connected ? `${entry.name} is set and the AI service reports a connection.` : `${entry.name} is set, but the AI service has not confirmed a connection.`,
       providerId: entry.providerId,
-      how: "in-use",
-      reason: "",
+      how: connected ? "in-use" : "unavailable",
+      reason: connected ? "" : "This environment key is not available to the AI service. Add the key directly or check its setup.",
       envName: entry.name,
     });
   }
@@ -414,7 +363,7 @@ export async function detectLocalProviders({
     });
   }
 
-  log(`local providers detected: ${found.map((finding) => finding.id).join(", ") || "none"}`);
+  log(`local providers detected: ${found.length}`);
   return { found, checkedAt: Date.now() };
 }
 

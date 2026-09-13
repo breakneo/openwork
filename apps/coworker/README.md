@@ -2,8 +2,37 @@
 
 A standalone desktop app for persistent AI coworkers, powered by the OpenWork
 platform. Open Coworker is a second product client, not a second platform: it
-assembles existing OpenWork primitives into a coworker-centric experience and
-adds no new database concepts.
+reuses OpenWork services around a native OpenCode v2 execution foundation.
+
+## Native-first foundation
+
+This branch is a greenfield native-v2 candidate. Coworker may replace legacy
+patterns rather than preserve v1 behavior. OpenWork Desktop is a separate
+compatibility boundary: its engine pins, defaults, v1 client API and optional
+v2 skill path remain unchanged. Shared native additions are host-selected.
+
+- `native-runtime.json` pins Coworker's engine independently. No v1 fallback.
+- Workspace and authorized Cloud skills use the native skill catalog/tool.
+  Explicit selection uses native `skills: [{ id }]` prompt attachments, never
+  copied skill bodies or a synthetic instruction to fetch a capability.
+- **Ask a coworker to use a skill** adds a removable composer chip. Its exact
+  selection survives drafts, Next, explicit Continue and Worker admission.
+  Stale account/source selections fail before sending; words remain recoverable.
+- Coworkers and Workers use native `execute` for eligible Code Mode operations.
+  The app-owned loopback read tools support combining/filtering results.
+  Exact-context controls, delegation and mutations with document receipts remain
+  direct. Native permission decisions and Worker restrictions still apply.
+- Native plugins supply tools and role readiness; the host awaits role setup
+  before a cold Worker's skill permission preflight. No temporary permission
+  grant or warmup inference is used.
+
+See [native contracts](electron/NATIVE-PLUGINS.md) and
+[release validation](RELEASE-SIZE.md). The Coworker feature branch now combines
+native v2 with Events, Activity, Abilities and current Computer Use. Its local
+unsigned build excludes the legacy SDK/browser/ORM runtime dependencies. Source
+and package checks do not certify the still-unrun packaged user journeys or signed
+distribution. Legacy history import is optional separate work; existing profiles
+are not reset or imported.
 
 ## Activity and mentions
 
@@ -1095,18 +1124,21 @@ responsibility run, a Worker turn, and a review (`localRunModel` reads the
 model's offered efforts from the engine once per model per launch), while the
 facilitator always runs at the lowest effort its model offers.
 
-Sign-ins and keys go through the AI service's own credential store
-(`~/.local/share/opencode/auth.json`, shared with OpenWork Desktop and the
-OpenCode CLI on this Mac); servers added here live in Open Coworker's own
-runtime provider config. The renderer never sees a stored secret: the main
-process reads a sign-in file only to hand it to the AI service over loopback
-with the owner token, keeps nothing, and logs ids only. A key the person types
-travels once. The packaged journey uses fixtures with plainly fake values and
-asserts none of them reaches the screen or the app log.
+Native sign-ins use the engine's integration and credential APIs. External
+sign-in files are detection hints, not imported credentials or proof of connection.
+Custom keys use the host environment store and runtime provider configuration;
+stored secrets are not returned to the renderer. `electron/native-providers.mjs`
+owns native method/credential identity. See the native contracts above for current
+startup and source-only proof limits.
 
-### Technical notes
+### Historical v1 technical notes
 
-Verified against the bundled engine (OpenCode 1.18.18) before building:
+The following observations belong to OpenCode 1.18.18 before the native migration.
+They are not current v2 endpoints, credential-storage instructions, SDK-install
+requirements, or native performance evidence. The native host uses prebuilt plugin
+bundles and does not seed per-profile SDK directories.
+
+Previously verified against the bundled v1 engine:
 
 - `GET /provider/auth` lists sign-in methods per provider. `openai` offers
   *ChatGPT Pro/Plus (browser)* and *(headless)* (both `method: "auto"`; the

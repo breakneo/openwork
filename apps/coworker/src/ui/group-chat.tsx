@@ -1,6 +1,5 @@
 import { useComposerDraft } from "@/ui/use-composer-draft";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type ReactNode } from "react";
-import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { coworkerBridge, type CollaborationReceipt, type CoworkerGroupSummary, type CoworkerGroupTurn, type CoworkerSummary, type GroupInteraction, type GroupTimelineEvent, type RuntimeInfo } from "@/lib/bridge";
 import { assignmentPrompt, assignmentTitle, timeLabelBetween, type DiscussionMessage } from "@/lib/conversation";
 import { combineSummaryLines, describeCoworkerSummary, type CoworkerSummaryLine } from "@/lib/coworker-summary";
@@ -120,50 +119,30 @@ const GroupExecutionRow = memo(function GroupExecutionRow({ activity, coworker, 
   const currentRef = useRef(activity);
   currentRef.current = activity;
   const [streamed, setStreamed] = useState<GroupReplyPart[]>([]);
-  const hiddenParts = useRef(new Set<string>());
   useEffect(() => {
     if (!coworker.workspaceId || !runtime.engineManaged) return;
-    const controller = new AbortController();
-    const approved = new Set<string>();
     let parts: GroupReplyPart[] = [];
-    const client = createOpencodeClient({ baseUrl: `${runtime.serverUrl}/workspace/${encodeURIComponent(coworker.workspaceId)}/opencode`, headers: { Authorization: `Bearer ${runtime.ownerToken}` }, redirect: "error" });
-    const accepts = (messageId: string) => approved.has(messageId) || currentRef.current.replies.some((reply) => reply.id === messageId && reply.parentId === activity.messageId);
+    setStreamed([]);
+    const threads = createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: coworker.workspaceId, token: runtime.ownerToken });
     const keep = (part: GroupReplyPart) => {
       parts = mergeGroupReplyParts(parts, [part]);
       setStreamed(parts);
     };
-    void (async () => {
-      try {
-        const subscription = await client.event.subscribe(undefined, { signal: controller.signal });
-        for await (const event of subscription.stream) {
-          if (controller.signal.aborted) return;
-          if (event.type === "message.updated") {
-            const info = event.properties.info;
-            if (info.sessionID === activity.threadId && info.role === "assistant" && info.parentID === activity.messageId && approved.size < PROGRESS_LIMITS.maxReplyParts) approved.add(info.id);
-          } else if (event.type === "message.part.updated") {
-            const part = event.properties.part;
-            if (part.sessionID !== activity.threadId || !accepts(part.messageID) || part.type !== "text") continue;
-            if (part.synthetic || part.ignored) {
-              hiddenParts.current.add(`${part.messageID}:${part.id}`);
-              parts = parts.filter((item) => item.messageId !== part.messageID || item.id !== part.id);
-              setStreamed(parts);
-              continue;
-            }
-            keep({ messageId: part.messageID, id: part.id, text: part.text, ended: part.time?.end !== undefined });
-          } else if (event.type === "message.part.delta") {
-            const part = event.properties;
-            if (part.sessionID !== activity.threadId || !accepts(part.messageID) || part.field !== "text") continue;
-            // Deltas cannot establish that a part is visible text. Require an announced or projected text part.
-            const known = parts.find((item) => item.messageId === part.messageID && item.id === part.partID) ?? currentRef.current.replies.find((reply) => reply.id === part.messageID)?.parts.find((item) => item.id === part.partID);
-            if (known && !known.ended && !hiddenParts.current.has(`${part.messageID}:${part.partID}`)) keep({ messageId: part.messageID, id: part.partID, text: known.text + part.delta });
-          }
-        }
-      } catch { /* The bounded snapshot poll remains authoritative when live events disconnect. */ }
-    })();
-    return () => { controller.abort(); };
+    return threads.subscribe(() => {}, (event) => {
+      // Only the host's verified history projection can attribute a reply.
+      if (!currentRef.current.available) return;
+      const reply = currentRef.current.replies.find((item) => item.id === event.messageId && item.parentId === activity.messageId);
+      if (event.threadId !== activity.threadId || !reply) return;
+      if (event.kind === "part") {
+        if (event.type === "text" && !event.synthetic && !event.ignored) keep({ messageId: event.messageId, id: event.partId, text: event.text, ended: event.ended });
+      } else {
+        const known = parts.find((item) => item.messageId === event.messageId && item.id === event.partId) ?? reply.parts.find((item) => item.id === event.partId);
+        if (known && !known.ended) keep({ messageId: event.messageId, id: event.partId, text: known.text + event.delta });
+      }
+    });
   }, [activity.executionId, activity.messageId, activity.threadId, coworker.workspaceId, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl]);
 
-  const parts = mergeGroupReplyParts(streamed, groupReplyParts(activity)).filter((part) => !hiddenParts.current.has(`${part.messageId}:${part.id}`));
+  const parts = mergeGroupReplyParts(streamed, groupReplyParts(activity)).filter((part) => activity.replies.some((reply) => reply.id === part.messageId && reply.parentId === activity.messageId));
   let text = "";
   let messageId = "";
   for (const part of parts) {

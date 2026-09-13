@@ -172,17 +172,19 @@ export function connectionStatusWords(status: CloudConnectionStatus): Connection
 /** How the coworker's AI service sees one tool set up on this Mac. */
 export type EngineToolStatus =
   | { status: "connected" }
+  | { status: "pending" }
   | { status: "disabled" }
   | { status: "failed"; error: string }
   | { status: "needs_auth" }
   | { status: "needs_client_registration"; error: string };
 
 export function parseEngineToolStatus(value: unknown): EngineToolStatus | null {
-  const record = readAsRecord(value);
+  const record = typeof value === "string" ? { status: value } : readAsRecord(value);
   if (!record) return null;
   const error = typeof record.error === "string" ? record.error : "";
   switch (record.status) {
     case "connected": return { status: "connected" };
+    case "pending": return { status: "pending" };
     case "disabled": return { status: "disabled" };
     case "needs_auth": return { status: "needs_auth" };
     case "failed": return { status: "failed", error };
@@ -222,10 +224,10 @@ export function localToolStatus(input: {
     return { label: "Not connected", tone: "rose", detail: "OpenWork could not reach this tool. Check that it is running and reachable, then refresh.", technical: input.engine.error };
   }
   if (input.engine?.status === "connected") return { label: "Connected", tone: "mint", detail: "", technical: "" };
+  if (input.engine?.status === "pending") return { label: "Checking", tone: "mist", detail: "", technical: "" };
   if (input.reachable === false) {
     return { label: "Not connected", tone: "rose", detail: "OpenWork could not reach this tool. Check that it is running and reachable, then refresh.", technical: "" };
   }
-  if (input.reachable === true) return { label: "Connected", tone: "mint", detail: "", technical: "" };
   return { label: "Checking", tone: "mist", detail: "", technical: "" };
 }
 

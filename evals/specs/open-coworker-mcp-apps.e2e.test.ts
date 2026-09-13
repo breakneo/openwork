@@ -281,7 +281,7 @@ test.skipIf(!enabled)(title, { timeout: 240_000 }, async ({ evidence }) => {
   if (!address || typeof address === "string") throw new Error("Coworker MCP fixture did not bind a port.");
   const mcpUrl = `http://127.0.0.1:${address.port}/mcp`;
 
-  await using app = await coworker({ name: "mcp-apps-store" });
+  await using app = await coworker({ name: "mcp-apps-store", profileDir: process.env.OPENWORK_EVAL_COWORKER_PROFILE_DIR });
   await waitFor(app, () => (document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker"), {
     timeoutMs: 120_000,
     label: "Open Coworker welcome screen",

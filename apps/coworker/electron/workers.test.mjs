@@ -9,11 +9,17 @@ import { after, test } from "node:test";
 import { build } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import vm from "node:vm";
 import { createCoworker, getCoworker, updateCoworker } from "./coworkers.mjs";
 import { createCoworkerToolsServer, handleMcpMessage } from "./coworker-tools.mjs";
 import { assertControlOrigin, assertWorkerSupervisor, createWorkerControls, WORKER_MANAGEMENT } from "./worker-controls.mjs";
 import { createHeadlessThreadClient } from "@openwork/headless-threads";
 import { createCollaboration, withAbort } from "./collaboration.mjs";
+import { toTranscript } from "@openwork/headless-threads/v2";
+import { dispatchNativeTurn, nativeTurnReceipt, verifyNativeTurnSkills, waitForNativeTurn } from "./native-recovery.mjs";
+import { ALL_HANDS_BRIEF, EVENT_SCHEDULE_DENY, EVENT_WRITE_DENY } from "./event-execution.mjs";
+import { nativeTurnAgent } from "./native-turns.mjs";
+import { selectionFields, validateSkillSelections, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
 import {
   DEFAULT_TURN_BUDGET,
   MAX_LIVE_WORKERS,
@@ -61,6 +67,12 @@ after(async () => {
 });
 
 const NOW = Date.UTC(2026, 8, 2, 15, 0);
+
+function mainFunction(source, name) {
+  const declaration = source.match(new RegExp(`^(?:async )?function ${name}\\([\\s\\S]*?^\\}`, "m"))?.[0];
+  assert.ok(declaration, `Missing main function ${name}`);
+  return declaration;
+}
 
 async function controlFixture(surface = "browser", overrides = {}) {
   const directory = await fixture();
@@ -392,6 +404,355 @@ test("an interrupted step cannot reuse an older finding or continue from an inco
   assert.equal(workerTurnOutcome(result, { messages: [old] }, "msg_current").kind, "failed");
   const complete = { ...partial, completedAt: 2, text: "## Finding\nCompared two sources." };
   assert.deepEqual(workerTurnOutcome(result, { messages: [old, partial, complete] }, "msg_current"), { kind: "settled", report: { kind: "finding", text: "Compared two sources." } });
+});
+
+test("native Worker recovery requires its own success receipt before publishing a completed report", async () => {
+  const messageId = "msg_current";
+  const snapshot = { threadId: "ses_worker", status: { type: "idle" }, messages: [
+    { id: messageId, role: "user", parts: [] },
+    { id: "assistant_current", role: "assistant", parentId: messageId, completedAt: 2, parts: [{ type: "text", text: "## Done\nThe report is ready." }] },
+  ], native: { engine: "v2", pendingInputIds: [], turnOutcomes: { msg_other: "succeeded" } } };
+  let waits = 0;
+  const client = { getThreadSnapshot: async () => snapshot, waitForThread: async (_threadId, input) => { waits++; assert.equal(input.since.messageId, messageId); return { outcome: "settled", snapshot, terminalError: null }; } };
+  for (const outcome of ["interrupted", "failed", undefined, "succeeded"]) {
+    snapshot.native.turnOutcomes[messageId] = outcome;
+    const result = await waitForNativeTurn(client, snapshot.threadId, { since: { messageId }, timeoutMs: 100 });
+    const report = workerTurnOutcome(result, toTranscript(result.snapshot), messageId);
+    assert.equal(report.kind, outcome === "succeeded" ? "settled" : "failed");
+    const step = nextWorkerState({ status: "running", lifespan: { kind: "turns", used: 0, max: 1 } }, report);
+    assert.equal(step.events.some((event) => event.kind === "finding"), outcome === "succeeded");
+  }
+  assert.equal(waits, 1, "missing own outcome must reach the correlated waiter, not history success");
+});
+
+test("native Worker failure drains before settlement and retains unconfirmed cleanup", async () => {
+  const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "main.mjs");
+  const source = await readFile(file, "utf8");
+  const declaration = mainFunction(source, "executeWorkerTurn");
+  for (const confirmed of [true, false]) {
+    const model = { providerId: "fixture", modelId: "text" };
+    let worker = { id: "wrk_fixture", name: "Fixture", status: "running", threadId: "ses_worker", lifespan: { kind: "turns", used: 0, max: 1 }, modelSnapshot: model, pendingSteers: [], pendingTurn: { messageId: "msg_worker", prompt: "Fixture", model, agent: "coworker-worker", nativeAdmission: "attempted" } };
+    const snapshot = { threadId: worker.threadId, status: { type: "busy" }, messages: [{ id: worker.pendingTurn.messageId, role: "user", parts: [] }], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {}, ambiguousTurns: [worker.pendingTurn.messageId] } };
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    const order = [], liveWorkerTurns = new Map();
+    let drained = false, settlements = 0;
+    const client = {
+      getThreadSnapshot: async () => snapshot,
+      abortThread: async () => { order.push("interrupt"); entered.resolve(); await release.promise; return { accepted: true }; },
+      waitUntilIdle: async () => { order.push("idle"); drained = confirmed; if (confirmed) snapshot.status = { type: "idle" }; return { outcome: confirmed ? "settled" : "timeout" }; },
+    };
+    const context = vm.createContext({
+      AbortController, AbortSignal, Error, console, setTimeout, clearTimeout, EVENT_SCHEDULE_DENY, EVENT_WRITE_DENY, liveWorkerTurns, activeLocalRuns: new Set(), coworkersDir: "/fixture",
+      collaboration: { admitEventWorker: async () => ({ owner: { slug: "fixture", groupId: "grp_fixture", eventRunId: "event-run" }, deadlineAt: Date.now() + 60_000 }) },
+      events: { captureExecution: async (entry, finalSnapshot) => {
+        assert.equal(drained, true);
+        assert.equal(entry.owner.eventRunId, "event-run");
+        assert.equal(entry.messageId, worker.pendingTurn.messageId);
+        assert.equal(finalSnapshot.threadId, worker.threadId);
+        assert.equal(finalSnapshot.status.type, "idle");
+        order.push("capture");
+      } },
+      workerKey: (slug, id) => `${slug}:${id}`, getWorker: async () => worker,
+      getCoworker: async () => ({ name: "Fixture", workspaceId: "workspace_fixture" }),
+      isWorkerFinished: (value) => ["finished", "failed", "cancelled"].includes(value.status), lifespanSpent: () => false,
+      prepareWorkerTurn: async () => worker, readyWorkerClient: async () => client,
+      updateWorker: async (_dir, _slug, _id, change) => { worker = { ...worker, ...(typeof change === "function" ? change(worker) : change) }; return worker; },
+      workerControls: { allowed: () => true, admit: async () => {}, endRun: async () => true, releaseRun() {} },
+      settleWorkerTurn: async (_slug, _id, outcome) => { assert.equal(drained, true); assert.match(outcome.error, /boundary is ambiguous/); order.push("settle"); settlements++; worker.status = "failed"; return false; },
+      drainLocalRunQueue: async () => {}, nativeTurnAgent: () => "coworker-worker", workerTurnTools,
+      dispatchNativeTurn, nativeTurnReceipt, verifyNativeTurnSkills, waitForNativeTurn, abortWorkerThread, withAbort, workerTurnOutcome, toTranscript, WORKER_TURN_TIMEOUT_MS: 1000,
+    });
+    const execute = vm.runInContext(`${declaration}; executeWorkerTurn`, context);
+    const running = execute("fixture", worker.id, { onStarted() {} });
+    try {
+      await withAbort(entered.promise, AbortSignal.timeout(1000));
+      assert.equal(settlements, 0);
+      assert.equal(liveWorkerTurns.size, 1);
+      release.resolve(); await running;
+      assert.deepEqual(order, confirmed ? ["interrupt", "idle", "capture", "settle"] : ["interrupt", "idle"]);
+      assert.equal(settlements, confirmed ? 1 : 0);
+      assert.equal(liveWorkerTurns.size, confirmed ? 0 : 1);
+      assert.equal(worker.status, confirmed ? "failed" : "running");
+      if (!confirmed) {
+        assert.match(worker.error, /boundary is ambiguous.*cleanup could not be confirmed/);
+        assert.equal(worker.pendingTurn.nativeAdmission, "attempted");
+        assert.ok(liveWorkerTurns.get("fixture:wrk_fixture").cleanupError);
+      }
+    } finally { release.resolve(); await running; }
+  }
+});
+
+test("native Event Worker preparation freezes its role, brief and explicit effort before admission", async () => {
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  for (const preparedBeforeRestart of [false, true]) {
+    const model = { providerId: "fixture", modelId: "text", variant: "high" };
+    const prompt = `${ALL_HANDS_BRIEF}\n\nReview the supplied evidence`;
+    const agent = nativeTurnAgent({ tools: { ...workerTurnTools(), ...EVENT_SCHEDULE_DENY } });
+    let worker = { id: "wrk_fixture", name: "Fixture", status: "running", threadId: "ses_worker", purpose: "delivery", lifespan: { kind: "turns", used: 0, max: 1 }, modelSnapshot: model, pendingSteers: [],
+      pendingTurn: { messageId: "msg_worker", prompt: preparedBeforeRestart ? prompt : "Review the supplied evidence", model, nativeAdmission: "prepared",
+        ...(preparedBeforeRestart ? { agent, eventPromptPrefix: ALL_HANDS_BRIEF } : {}) } };
+    const snapshot = { threadId: worker.threadId, status: { type: "idle" }, messages: [], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } };
+    let sends = 0, captures = 0, settlements = 0;
+    const client = {
+      getThreadSnapshot: async () => snapshot,
+      sendTurn: async (threadId, input) => {
+        assert.equal(threadId, worker.threadId);
+        assert.equal(worker.pendingTurn.nativeAdmission, "attempted");
+        assert.equal(worker.pendingTurn.eventPromptPrefix, ALL_HANDS_BRIEF);
+        assert.equal(worker.pendingTurn.prompt, prompt);
+        assert.equal(input.prompt, prompt);
+        assert.equal(input.agent, agent);
+        assert.deepEqual(input.model, model);
+        assert.equal(input.tools, undefined);
+        sends++;
+        snapshot.messages.push({ id: input.messageId, role: "user", parts: [{ type: "text", text: input.prompt }] },
+          { id: "answer", role: "assistant", parentId: input.messageId, completedAt: 1, error: null, parts: [{ type: "text", text: "## Done\nEvidence reviewed." }] });
+        snapshot.native.turnOutcomes[input.messageId] = "succeeded";
+        return { threadId, messageId: input.messageId, acceptedAt: Date.now(), messageCountBefore: 0 };
+      },
+    };
+    const context = vm.createContext({
+      AbortController, AbortSignal, Error, console, setTimeout, clearTimeout, EVENT_SCHEDULE_DENY, EVENT_WRITE_DENY,
+      liveWorkerTurns: new Map(), activeLocalRuns: new Set(), coworkersDir: "/fixture",
+      workerKey: (slug, id) => `${slug}:${id}`, getWorker: async () => worker,
+      getCoworker: async () => ({ name: "Fixture", workspaceId: "workspace_fixture" }),
+      isWorkerFinished: (value) => ["finished", "failed", "cancelled"].includes(value.status), lifespanSpent: () => false,
+      prepareWorkerTurn: async () => worker, readyWorkerClient: async () => client,
+      workerModelProviders: async () => ({ providers: [] }), resolveWorkerModel: (_coworker, _purpose, _providers, selected) => { assert.deepEqual(selected, model); return selected; },
+      updateWorker: async (_dir, _slug, _id, change) => { worker = { ...worker, ...(typeof change === "function" ? change(worker) : change) }; return worker; },
+      collaboration: { admitEventWorker: async () => ({ owner: { slug: "fixture", groupId: "grp_fixture", eventRunId: "event-run" }, deadlineAt: Date.now() + 60_000, promptPrefix: ALL_HANDS_BRIEF }) },
+      events: { captureExecution: async (entry, finalSnapshot) => { assert.equal(entry.owner.eventRunId, "event-run"); assert.equal(finalSnapshot, snapshot); captures++; } },
+      workerControls: { allowed: () => true, admit: async () => {}, endRun: async () => true, releaseRun() {} },
+      settleWorkerTurn: async (_slug, _id, outcome) => { assert.equal(outcome.kind, "settled"); assert.equal(captures, 1); worker.status = "finished"; settlements++; return false; },
+      drainLocalRunQueue: async () => {}, nativeTurnAgent: (input) => nativeTurnAgent(JSON.parse(JSON.stringify(input))), workerTurnTools,
+      dispatchNativeTurn, nativeTurnReceipt, verifyNativeTurnSkills, waitForNativeTurn, abortWorkerThread, withAbort, workerTurnOutcome, toTranscript, WORKER_TURN_TIMEOUT_MS: 1000,
+    });
+    const execute = vm.runInContext(`${mainFunction(source, "executeWorkerTurn")}; executeWorkerTurn`, context);
+    await execute("fixture", worker.id, { onStarted() {} });
+    assert.equal(sends, 1);
+    assert.equal(settlements, 1);
+    assert.equal(worker.pendingTurn.prompt, prompt);
+  }
+});
+
+test("native Worker inbox recovery never resends and a durable attempt fences lost admission after restart", async () => {
+  const directory = await fixture();
+  const selected = selectionFields([{ id: "skill_exact", label: "Useful skill", workspaceId: "ws_fixture" }]);
+  let worker = await createWorker(directory, "scout", { name: "Recovery", goal: "Keep one input", ...selected, spawnedBy: "person" });
+  const prepared = await prepareWorkerTurn(directory, "scout", worker.id, "Scout");
+  assert.equal((await getWorker(directory, "scout", worker.id)).pendingTurn.nativeAdmission, "prepared");
+  assert.deepEqual((await getWorker(directory, "scout", worker.id)).skills, selected.skills);
+  assert.deepEqual(prepared.pendingTurn.skills, selected.skills, "each pending turn freezes the Worker's explicit skills");
+  assert.deepEqual((await prepareWorkerTurn(directory, "scout", worker.id, "Scout")).pendingTurn, prepared.pendingTurn, "recovery keeps the original ID and selection");
+  let messageId = prepared.pendingTurn.messageId;
+  const threadId = "ses_recovery";
+  const snapshot = { threadId, status: { type: "idle" }, messages: [], native: { engine: "v2", pendingInputIds: [messageId], turnOutcomes: {} } };
+  let sends = 0;
+  let waits = 0;
+  const frozen = { type: "user", id: messageId, payload: { text: prepared.pendingTurn.prompt, skills: [{ id: "skill_exact", name: "Renamed after admission", text: "Frozen body" }], metadata: { headlessTurn: { version: 1, messageId, skillIds: ["skill_exact"] } } } };
+  const client = () => ({
+    nativeSkills: { readHistory: async () => [], readInbox: async () => [frozen] },
+    getThreadSnapshot: async () => snapshot,
+    sendTurn: async (_threadId, input) => {
+      sends++;
+      assert.equal((await getWorker(directory, "scout", worker.id)).pendingTurn.nativeAdmission, "attempted");
+      assert.equal(input.messageId, messageId);
+      assert.equal(input.nativeAdmission, undefined);
+      assert.equal(input.tools, undefined);
+      throw new Error("Admission acknowledgement lost");
+    },
+    waitForThread: async (_threadId, input) => {
+      waits++;
+      assert.equal(input.since.messageId, messageId);
+      snapshot.native.pendingInputIds = [];
+      snapshot.native.turnOutcomes[messageId] = "interrupted";
+      return { outcome: "aborted", snapshot, terminalError: null };
+    },
+  });
+  const dispatch = async () => dispatchNativeTurn({ client: client(), threadId, turn: (await getWorker(directory, "scout", worker.id)).pendingTurn, markAttempted: () => updateWorker(directory, "scout", worker.id, (current) => ({ pendingTurn: { ...current.pendingTurn, nativeAdmission: "attempted" } })) });
+  const { nativeAdmission, ...legacyTurn } = prepared.pendingTurn;
+  await updateWorker(directory, "scout", worker.id, { pendingTurn: legacyTurn });
+  assert.equal((await prepareWorkerTurn(directory, "scout", worker.id, "Scout")).pendingTurn.nativeAdmission, undefined);
+  snapshot.native.pendingInputIds = [];
+  await assert.rejects(dispatch(), /will not be replayed/);
+  assert.equal(sends, 0);
+  snapshot.native.pendingInputIds = [messageId];
+  frozen.payload.metadata.headlessTurn.skillIds = ["different"];
+  await assert.rejects(dispatch(), /do not match/);
+  frozen.payload.metadata.headlessTurn.skillIds = ["skill_exact"];
+  frozen.payload.skills[0].id = "different";
+  await assert.rejects(dispatch(), /do not match/);
+  frozen.payload.skills[0].id = "skill_exact";
+  const acceptance = await dispatch(); // Legacy pendingTurn, no phase or history.
+  assert.equal(acceptance.alreadyPresent, true);
+  const result = await waitForNativeTurn(client(), threadId, { ...selected, since: acceptance, timeoutMs: 100 });
+  assert.equal(result.outcome, "failed");
+  assert.equal(waits, 1);
+  assert.equal(sends, 0);
+  await assert.rejects(dispatch(), /will not be replayed/, "a fresh client cannot resubmit an input removed from the inbox");
+  worker = await createWorker(directory, "scout", { name: "Fresh", goal: "Start a new input", spawnedBy: "person" });
+  messageId = (await prepareWorkerTurn(directory, "scout", worker.id, "Scout")).pendingTurn.messageId;
+  await updateWorker(directory, "scout", worker.id, (current) => ({ pendingTurn: { ...current.pendingTurn, agent: "coworker-worker" } }));
+  assert.equal((await getWorker(directory, "scout", worker.id)).pendingTurn.nativeAdmission, "prepared");
+  await assert.rejects(dispatch(), /acknowledgement lost/);
+  await assert.rejects(dispatch(), /will not be replayed/);
+  assert.equal(sends, 1, "fresh prepared work can start, but an uncertain attempt survives a new client and disk reread");
+});
+
+test("selected Coworker Next survives collaboration restart, preserves native IDs, and refuses revoked or changed selections", async () => {
+  const directory = await fixture();
+  const selected = selectionFields([{ id: "skill_exact", label: "Useful skill", workspaceId: "ws_fixture" }]);
+  const owner = { slug: "scout", threadId: "ses_selected", conversationId: "ses_selected", kind: "private" };
+  const snapshot = { threadId: owner.threadId, status: { type: "idle" }, messages: [], native: { engine: "v2", pendingInputIds: [], inputSkills: {}, turnOutcomes: {}, ambiguousTurns: [] } };
+  let catalog = [{ id: "skill_exact", name: "Native label", content: "Body must stay out of host prompts", location: "/fixture/SKILL.md" }];
+  let sends = 0;
+  const clientFor = async () => ({
+    workspaceId: "ws_fixture", getThreadSnapshot: async () => snapshot,
+    validateSkills: async (turn) => validateSkillSelections(turn, catalog, "ws_fixture", null),
+    sendTurn: async (_threadId, input) => {
+      sends++;
+      assert.equal(input.prompt, "Keep my ordinary words");
+      assert.deepEqual(input.skills, selected.skills);
+      assert.equal(input.skillSelections, undefined, "host labels and provenance are not native prompt text");
+      const stored = JSON.parse(await readFile(path.join(directory, ".collaboration", "state.json"), "utf8"));
+      assert.deepEqual(Object.values(stored.executions).at(-1).skills, selected.skills);
+      snapshot.messages.push({ id: input.messageId, role: "user", parts: [{ type: "text", text: input.prompt }] }, { id: `answer_${sends}`, role: "assistant", parentId: input.messageId, completedAt: Date.now(), error: null, parts: [{ type: "text", text: "Done" }] });
+      snapshot.native.inputSkills[input.messageId] = structuredClone(input.skills);
+      snapshot.native.turnOutcomes[input.messageId] = "succeeded";
+      return { messageId: input.messageId, threadId: owner.threadId, acceptedAt: Date.now(), messageCountBefore: 0 };
+    },
+    abortThread: async () => ({ accepted: true }), waitUntilIdle: async () => ({ outcome: "settled" }),
+  });
+  let service = createCollaboration({ directory, clientFor, pollMs: 60_000 });
+  const settled = async () => {
+    for (let i = 0; i < 300; i++) {
+      const entries = await service.read((state) => Object.values(state.executions));
+      if (entries.length && entries.every((entry) => ["succeeded", "failed"].includes(entry.state))) return entries;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.fail("Selected turn did not settle");
+  };
+  try {
+    await service.registerOwner(owner);
+    await service.updateThread(owner.slug, owner.threadId, { pending: null, next: [] }, { pending: null, next: [{ id: "next_selected", text: "Keep my ordinary words", queuedAt: 1, ...selected }] });
+    await service.stop();
+    service = createCollaboration({ directory, clientFor, pollMs: 5 });
+    assert.deepEqual((await service.threadState(owner.slug, owner.threadId)).next[0].skillSelections, selected.skillSelections);
+    await service.start();
+    const [original] = await settled();
+    assert.equal(original.state, "succeeded");
+    assert.equal(sends, 1);
+    // A saved live receipt after restart is observed even if current access disappeared.
+    catalog = [];
+    await service.change((state) => { state.executions[original.id].state = "running"; state.tasks[original.taskId].state = "running"; });
+    await service.stop();
+    service = createCollaboration({ directory, clientFor, pollMs: 5 });
+    await service.start();
+    assert.equal((await settled())[0].state, "succeeded");
+    assert.equal(sends, 1, "accepted skill input never re-resolves or replays after revocation");
+    await service.change((state) => { state.executions[original.id].state = "running"; state.tasks[original.taskId].state = "running"; });
+    snapshot.native.inputSkills[original.messageId] = [{ id: "wrong" }];
+    await service.stop();
+    service = createCollaboration({ directory, clientFor, pollMs: 5 });
+    await service.start();
+    assert.match((await settled())[0].error, /do not match/);
+    assert.equal(sends, 1);
+    snapshot.native.inputSkills[original.messageId] = selected.skills;
+    snapshot.native.turnOutcomes[original.messageId] = "interrupted";
+    const continued = await service.submit({ owner, messageId: original.messageId, prompt: original.prompt, ...selected, retry: true, retryByPerson: true, track: true });
+    assert.notEqual(continued.messageId, original.messageId, "explicit Continue gets one new identity");
+    assert.deepEqual(continued.skills, selected.skills);
+    const failed = (await settled()).find((entry) => entry.id === continued.id);
+    assert.match(failed.error, /no longer available/);
+    assert.deepEqual((await service.threadState(owner.slug, owner.threadId)).pending.skillSelections, selected.skillSelections);
+    assert.equal(sends, 1, "revoked skills fail before native send");
+  } finally { await service.stop(); }
+});
+
+test("selected-skill main admission waits for the actual Den handoff and leaves Stop usable on account change", async () => {
+  const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "main.mjs");
+  const source = await readFile(file, "utf8");
+  const first = { baseUrl: "https://example.invalid", orgId: "org_first", token: "fixture-first" };
+  const second = { ...first, orgId: "org_second", token: "fixture-second" };
+  const handle = { url: "http://127.0.0.1:8790" };
+  const started = Promise.withResolvers(), release = Promise.withResolvers();
+  const writes = [];
+  let syncStatus = "applied";
+  const catalog = [{ id: "native_exact", name: "Useful skill", location: "/fixture/SKILL.md", content: "Private body", source: { type: "openwork-cloud", uri: "skill://fixture", scope: "opaque-catalog-A" } }];
+  const admissions = [];
+  const context = vm.createContext({
+    denSession: first, serverHandle: handle, denSessionHandoff: Promise.resolve(), storedSkillSession: null, appliedSkillSession: null,
+    AbortSignal, URL, Headers, validateSkillSelections, selectedCloudSkillScope,
+    createHeadlessThreadClient: (options) => ({ transport: options.fetch }), createNativeV2Client: () => ({ listSkills: async () => catalog }),
+    fetchJson: async () => ({ status: syncStatus }),
+    fetch: async (url, init) => {
+      if (url.endsWith("/den-session") && init.method === "PUT") {
+        const session = JSON.parse(init.body); writes.push(session.orgId);
+        if (session.orgId === first.orgId) { started.resolve(); await release.promise; }
+      } else if (url.endsWith("/v1/me")) return { ok: true, json: async () => ({ user: { id: "user_fixture", email: "fixture@example.invalid" } }) };
+      else { writes.push(new URL(url).pathname); admissions.push({ url, headers: new Headers(init.headers) }); }
+      return { ok: true };
+    },
+  });
+  for (const name of ["queueDenSessionHandoff", "confirmSkillSession", "applyDenSession", "runCloudProviderSync", "requestCloudProviderSync", "clearDenSession", "assertSkillSession", "currentSkillAccount", "skillAwareClient"]) {
+    vm.runInContext(mainFunction(source, name), context);
+  }
+  const pendingFirst = context.applyDenSession(handle, "fixture-host", first);
+  await started.promise;
+  context.denSession = second;
+  const pendingSecond = context.applyDenSession(handle, "fixture-host", second);
+  assert.throws(() => context.assertSkillSession(second), /has not finished syncing/);
+  assert.deepEqual(writes, [first.orgId], "session writes cannot overtake each other");
+  release.resolve(); await pendingFirst; await pendingSecond;
+  assert.deepEqual(writes, [first.orgId, second.orgId]);
+  assert.equal(context.appliedSkillSession.session, second);
+  const identity = await context.currentSkillAccount(second);
+  const selected = selectionFields([{ id: "native_exact", label: "Useful skill", workspaceId: "ws_fixture", source: catalog[0].source, account: identity.scope }]);
+  const client = context.skillAwareClient({ baseUrl: handle.url, workspaceId: "ws_fixture" });
+  await client.transport(`${handle.url}/api/session/ses_fixture/prompt`, { method: "POST", headers: { "X-OpenWork-Native-Skills-Scope": "caller-override" } });
+  assert.equal(admissions.at(-1).headers.get("x-openwork-native-skills-scope"), null, "unvalidated caller overrides are stripped");
+  await client.validateSkills(selected);
+  for (const route of ["prompt", "synthetic"]) {
+    await client.transport(`${handle.url}/api/session/ses_fixture/${route}`, { method: "POST", headers: new Headers({ "X-OpenWork-Native-Skills-Scope": "caller-override", authorization: "Bearer fixture-owner" }) });
+    assert.equal(admissions.at(-1).headers.get("x-openwork-native-skills-scope"), "opaque-catalog-A");
+    assert.equal(admissions.at(-1).headers.get("authorization"), "Bearer fixture-owner");
+  }
+  catalog[0].source.scope = "opaque-catalog-B";
+  await assert.rejects(client.validateSkills(selected), /source changed/);
+  const reselected = selectionFields([{ ...selected.skillSelections[0], source: { ...catalog[0].source } }]);
+  await assert.rejects(client.validateSkills(reselected), /scope changed/);
+  await client.transport(`${handle.url}/api/session/ses_fixture/prompt`, { method: "POST" });
+  assert.equal(admissions.at(-1).headers.get("x-openwork-native-skills-scope"), "opaque-catalog-A", "the server receives the original scope even after its async barrier moves to B");
+  catalog[0].source.scope = "opaque-catalog-A";
+  context.denSession = { ...second, token: "fixture-same-account-new-revision" };
+  await context.applyDenSession(handle, "fixture-host", context.denSession);
+  await assert.rejects(client.validateSkills(selected), /account revision changed/);
+  context.denSession = { ...second, orgId: "org_third" };
+  const changing = context.applyDenSession(handle, "fixture-host", context.denSession);
+  assert.throws(() => client.transport(`${handle.url}/api/session/ses_fixture/prompt`, { method: "POST" }), /connection is changing/);
+  await client.transport(`${handle.url}/api/session/ses_fixture/interrupt`, { method: "POST", headers: { "x-openwork-native-skills-scope": "caller-override" } });
+  assert.equal(admissions.at(-1).headers.get("x-openwork-native-skills-scope"), null, "Stop neither inherits nor trusts a skill scope header");
+  await changing;
+  await assert.rejects(client.validateSkills(selected), /organization.*changed/);
+  syncStatus = "failed";
+  await context.runCloudProviderSync(handle, "fixture-host", "refresh");
+  assert.equal(context.appliedSkillSession, null);
+  syncStatus = "noop";
+  await context.runCloudProviderSync(handle, "fixture-host", "refresh");
+  assert.equal(context.appliedSkillSession.session, context.denSession);
+  const refreshStarted = Promise.withResolvers(), refreshRelease = Promise.withResolvers();
+  let firstRefresh = true;
+  context.fetchJson = async () => { if (firstRefresh) { firstRefresh = false; refreshStarted.resolve(); await refreshRelease.promise; return { status: "applied" }; } return { status: "failed" }; };
+  const refreshing = context.runCloudProviderSync(handle, "fixture-host", "refresh");
+  await refreshStarted.promise;
+  const queuedRefresh = context.runCloudProviderSync(handle, "fixture-host", "refresh");
+  refreshRelease.resolve(); await refreshing; await queuedRefresh;
+  assert.equal(context.appliedSkillSession, null, "a queued failed refresh cannot reuse its predecessor's applied binding");
+  context.denSession = null;
+  await context.clearDenSession(handle, "fixture-host");
+  assert.equal(context.appliedSkillSession, null);
+  assert.equal(context.storedSkillSession, null);
+  assert.ok(!JSON.stringify(selected).includes("fixture-second"));
 });
 
 test("a settled turn decides whether the worker continues, holds, or stops", () => {
@@ -781,11 +1142,12 @@ test("the coworker starts, lists, steers, reads, and stops Workers through its o
     assert.match(empty.content[0].text, /^No live Workers/);
     assert.deepEqual(empty.structuredContent.workers, []);
 
-    const started = await call("worker_spawn", { name: "Market scan", goal: "Watch vendor prices.", purpose: "thinking", lifespan: { kind: "turns", turns: 3 } });
+    const started = await call("worker_spawn", { name: "Market scan", goal: "Watch vendor prices.", skills: [{ id: "skill_exact" }, { id: "skill_exact" }], purpose: "thinking", lifespan: { kind: "turns", turns: 3 } });
     assert.equal(started.isError, false);
     assert.match(started.content[0].text, /^Started Worker "Market scan" \(id wrk_[a-z0-9]+\), 3 of 3 turns left\./);
     assert.match(started.content[0].text, /tell the person in a sentence/);
     const id = started.structuredContent.worker.id;
+    assert.deepEqual((await getWorker(coworkersDir, "scout", id)).skills, [{ id: "skill_exact" }], "explicit native IDs survive the spawn handler and deduplicate");
     assert.deepEqual(calls[0], ["spawn", "scout", "Market scan", "lifespan chosen"]);
     assert.equal(started.structuredContent.worker.action, "started");
     assert.equal(started.structuredContent.worker.purpose, "thinking");
@@ -819,6 +1181,7 @@ test("the coworker starts, lists, steers, reads, and stops Workers through its o
     // A lifespan the coworker leaves out is not the tool's to fill in: the app's effort dial sets the default turns.
     const unchosen = await call("worker_spawn", { name: "Inbox pass", goal: "Read the inbox." });
     assert.equal(unchosen.isError, false);
+    assert.equal((await getWorker(coworkersDir, "scout", unchosen.structuredContent.worker.id)).skills, undefined, "no automatic inheritance from other Workers or parent selections");
     assert.deepEqual(calls[3], ["spawn", "scout", "Inbox pass", "lifespan left to the app"]);
     assert.match(unchosen.content[0].text, /10 of 10 turns left/, "the store's default holds when nothing else decides");
     assert.equal((await getWorker(coworkersDir, "scout", id)).status, "cancelled");

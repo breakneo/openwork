@@ -23,6 +23,12 @@ import { effortForTurn, effortStopOf } from "../src/lib/effort.ts";
 import { DEFAULT_MODEL_DEFAULTS } from "../src/lib/model-defaults.ts";
 import { chooseIndexedModel } from "../src/lib/model-intelligence.ts";
 import { connectedModelCatalog, recommendModel } from "../src/lib/threads.ts";
+import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { sameSkillFields, skillSelectionsSchema } from "../src/lib/skill-selection.ts";
+
+function workerSkills(input) {
+  return { ...(input.skills !== undefined ? { skills: nativeV2SkillsSchema.parse(input.skills) } : {}), ...(input.skillSelections !== undefined ? { skillSelections: skillSelectionsSchema.parse(input.skillSelections) } : {}) };
+}
 
 export const WORKERS_DIR = "workers";
 export const WORKERS_REGISTRY_FILE = "workers.json";
@@ -243,6 +249,7 @@ function normalizeStoredWorker(raw) {
     // Keep an invalid saved snapshot visible so execution fails closed, never
     // normalize it back into the legacy owner-model path.
     modelSnapshot: raw.modelSnapshot ?? null,
+    ...workerSkills(raw),
     threadId: typeof raw.threadId === "string" ? raw.threadId : "",
     spawnedBy: SPAWNERS.has(raw.spawnedBy) ? raw.spawnedBy : "person",
     spawnedFromThreadId: typeof raw.spawnedFromThreadId === "string" ? raw.spawnedFromThreadId : "",
@@ -281,6 +288,7 @@ export async function createWorker(coworkersDir, slug, input, { now = Date.now()
   if (!goal) throw new Error("A Worker needs a goal.");
   if (!SPAWNERS.has(input?.spawnedBy)) throw new Error("A Worker is started by the coworker or by the person.");
   const purpose = workerPurpose(input.purpose);
+  const skills = workerSkills(input);
   const control = workerControlRequest(input.control);
   const lifespan = normalizeLifespan(input.lifespan ?? (purpose === "thinking" ? { kind: "turns", max: THINKING_TURN_BUDGET } : undefined), { now });
   if (input.spawnedBy === "coworker" && lifespan.kind === "open") throw new Error("Choose a finite turn limit or deadline. Only the person can start a Worker until stopped.");
@@ -289,7 +297,11 @@ export async function createWorker(coworkersDir, slug, input, { now = Date.now()
   const run = previous.catch(() => undefined).then(async () => {
     if (input.id) {
       if (!isWorkerId(input.id)) throw new Error("Invalid Worker id.");
-      try { return await getWorker(coworkersDir, slug, input.id); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      try {
+        const worker = await getWorker(coworkersDir, slug, input.id);
+        if (!sameSkillFields(worker, skills)) throw new Error("This Worker already records different skill selections.");
+        return worker;
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
     }
     const live = liveWorkers(await listWorkers(coworkersDir, slug));
     if (live.length >= MAX_LIVE_WORKERS) {
@@ -303,6 +315,7 @@ export async function createWorker(coworkersDir, slug, input, { now = Date.now()
       goal,
       purpose,
       modelSnapshot: input.modelSnapshot ? structuredClone(input.modelSnapshot) : null,
+      ...skills,
       threadId: "",
       spawnedBy: input.spawnedBy,
       spawnedFromThreadId: cleanText(input.spawnedFromThreadId, 240),
@@ -441,7 +454,9 @@ export async function prepareWorkerTurn(coworkersDir, slug, id, coworkerName) {
       pendingSteers: worker.pendingTurn ? worker.pendingSteers : [],
       pendingTurn: worker.pendingTurn ?? {
         messageId: `msg_${Date.now().toString(16)}${randomUUID().replace(/-/g, "").slice(0, 20)}`,
+        nativeAdmission: "prepared",
         prompt: workerTurnPrompt({ worker, coworkerName, body }),
+        ...workerSkills(worker),
         steers: worker.pendingSteers,
         ...(worker.modelSnapshot ? { model: worker.modelSnapshot } : {}),
       },
@@ -914,29 +929,30 @@ export function createReviewScheduler({
 // `coworker_<tool>`. The bearer token names the coworker, so no tool takes a
 // coworker from the model; the Worker id is the only handle it passes.
 
-const WORKER_ID_SCHEMA = { type: "string", description: "Worker ID from workers_list or start." };
+const WORKER_ID_SCHEMA = { type: "string", description: "ID from workers_list or start." };
 
 /** What the coworker can do with its Workers, in its own plain words. */
 export function workerToolCatalog() {
   return [
     {
       name: "workers_list",
-      description: `List my Workers — the long-lived helpers I start for one goal each — with status, lifespan left, and their last finding. Check it before starting another: at most ${MAX_LIVE_WORKERS} can be live at once.`,
+      description: `List my Workers with status, remaining lifespan and last finding. Check before starting another: at most ${MAX_LIVE_WORKERS} live.`,
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
       name: "worker_spawn",
-      description: `Start a helper for one bounded goal beyond this reply. Give a name and goal with acceptance criteria and file references. Omit lifespan for two thinking turns or the delivery effort dial's budget (${DEFAULT_TURN_BUDGET} at Balanced). Use an assignment for scheduled work. Follow the Workers contract, acknowledge, and end this turn; the result returns here.`,
+      description: `Start a bounded goal beyond this reply with acceptance criteria, file refs and limits. Default lifespan: two thinking turns or delivery's effort budget (${DEFAULT_TURN_BUDGET} at Balanced). Schedules use assignments. Follow the Workers contract: acknowledge, end this turn; results return here.`,
       inputSchema: {
         type: "object",
         properties: {
           name: { type: "string", description: "Short and specific, e.g. \"Market scan\"." },
           goal: { type: "string", description: "What done looks like, what to watch or produce, and any limits." },
-          purpose: { type: "string", enum: ["thinking", "delivery"], description: "Use thinking for a bounded brief on hard ambiguity, delivery for heavier execution while the coworker stays available. Defaults to delivery. Uses the coworker's role override, then app defaults, then role-based automatic selection; pinned when started." },
+          skills: { type: "array", maxItems: 32, description: "Optional exact native catalog IDs in this workspace, not names, bodies or inherited picks. Workers also discover and load native skills.", items: { type: "object", properties: { id: { type: "string", minLength: 1, maxLength: 2048 } }, required: ["id"], additionalProperties: false } },
+          purpose: { type: "string", enum: ["thinking", "delivery"], description: "Thinking: brief on hard ambiguity. Delivery (default): heavy work while I stay available. Model pins at start: coworker role override, app default, then role-based automatic." },
           control: { type: "string", enum: ["browser", "computer"], description: "Request this discussion's browser or computer for this delivery Worker. It waits for the person's explicit approval; never an inherited grant." },
           lifespan: {
             type: "object",
-            description: "How long it lives. Omit for the default number of turns.",
+            description: "Omit for the default turn budget.",
             properties: {
               kind: { type: "string", enum: ["turns", "until"] },
               turns: { type: "integer", minimum: 1, maximum: MAX_TURN_BUDGET, description: "With kind turns: how many bounded steps." },
@@ -952,7 +968,7 @@ export function workerToolCatalog() {
     },
     {
       name: "worker_steer",
-      description: "Send a Worker a correction, more context, or the decision it is waiting for. It takes the message as its next step. Use it after reviewing a finding that needs a change of course.",
+      description: "After reviewing its finding, send a correction, context or pending decision for the Worker's next step.",
       inputSchema: {
         type: "object",
         properties: { id: WORKER_ID_SCHEMA, text: { type: "string", description: "What to do differently, in plain words." } },
@@ -972,7 +988,7 @@ export function workerToolCatalog() {
     },
     {
       name: "worker_cancel",
-      description: "Stop a Worker for good: the goal is met well enough, it is going the wrong way, or the person asked. Say why in a few words. A stopped Worker keeps its findings but never works again.",
+      description: "Stop permanently when the goal is met, direction is wrong or the person asks. Give a brief reason; findings remain.",
       inputSchema: {
         type: "object",
         properties: { id: WORKER_ID_SCHEMA, reason: { type: "string", description: "Why it stops, in a few words." } },
@@ -1070,6 +1086,7 @@ export function createWorkerToolHandlers({ coworkersDir, spawn, steer, cancel, p
         goal: typeof args.goal === "string" ? args.goal : "",
         purpose: workerPurpose(args.purpose),
         control: args.control,
+        ...(args.skills !== undefined ? { skills: nativeV2SkillsSchema.parse(args.skills) } : {}),
         // A lifespan the coworker did not choose is left to the app: the effort dial sets the default turns.
         lifespan: args.lifespan === undefined || args.lifespan === null ? undefined : lifespanFromToolArgs(args.lifespan, { now: now(), purpose: args.purpose }),
       });

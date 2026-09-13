@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
 import { createAbilitiesRuntime, readAbilitiesCatalog } from "./abilities.mjs";
-import { installAbilitiesPlugin } from "./abilities-plugin.mjs";
-import { createCoworkerToolsServer } from "./coworker-tools.mjs";
 import { cloudSkillAbilityId, defaultCoworkerAbilities, localSkillAbilityId, mcpAbilityId } from "../src/lib/abilities.ts";
 
 const location = path.resolve("fixtures/abilities/triage/SKILL.md");
 const remote = "plugin:plg_fixture:cob_skill";
+const remoteUri = "skill://fixture-remote/SKILL.md";
+const remoteNativeId = `openwork-cloud-${createHash("sha256").update(remoteUri).digest("hex").slice(0, 16)}`;
 const selected = (skills = [], servers = [], revision = 0) => ({ version: 1, revision, skills: { mode: "selected", ids: skills }, mcpServers: { mode: "selected", ids: servers.map(mcpAbilityId) } });
 const identity = (coworker) => ({ createdAt: coworker.createdAt, workspaceId: coworker.workspaceId, directory: coworker.path });
 const serverEntry = (name) => ({ id: mcpAbilityId(name), name, description: "Configured server", source: "workspace", available: true, gateway: name === "openwork-cloud" });
@@ -19,8 +17,8 @@ function fixture(abilities = selected([localSkillAbilityId(location), cloudSkill
     coworker: { slug: "alpha", createdAt: "2026-09-11T00:00:00.000Z", workspaceId: "workspace-alpha", path: path.resolve("fixtures/abilities/alpha"), abilities },
     catalog: {
       skills: [
-        { id: localSkillAbilityId(location), name: "engine-triage", description: "Triage display label", source: "local", location },
-        { id: cloudSkillAbilityId(remote), name: "remote-brief", description: "Remote skill metadata", source: "cloud", capability: remote },
+        { id: localSkillAbilityId(location), nativeId: "native-triage", name: "engine-triage", description: "Triage display label", source: "local", location },
+        { id: cloudSkillAbilityId(remote), nativeId: remoteNativeId, name: "remote-brief", description: "Remote skill metadata", source: "cloud", capability: remote },
         { id: cloudSkillAbilityId("skill:other"), name: "other", description: "Another skill", source: "cloud", capability: "skill:other" },
       ],
       mcpServers: ["notes", "notes_team", "openwork-cloud", "coworker"].map(serverEntry), errors: [],
@@ -37,15 +35,18 @@ test("platform catalog projection returns selectable identities, never credentia
   const calls = [];
   const result = await readAbilitiesCatalog({ workspaceId: "fixture/workspace" }, async (route) => {
     calls.push(route);
-    if (route.endsWith("/opencode/skill")) return [{ name: "native", description: "Native instructions", location, content: "Private skill body" }];
-    if (route === "/experimental/connect/skills") return { skills: [{ name: "cloud", description: "Cloud instructions", capability: remote }] };
+    if (route.endsWith("/opencode2/api/skill")) return { data: [
+      { id: "native-triage", name: "native", description: "Native instructions", location, content: "Private skill body" },
+      { id: remoteNativeId, name: "cloud", description: "Cloud instructions", location: "/private/cloud/SKILL.md", content: "Private Cloud body" },
+    ] };
+    if (route === "/experimental/connect/skills") return { skills: [{ name: "cloud", description: "Cloud instructions", capability: remote, url: remoteUri }] };
     return { items: [
       { name: "coworker", source: "config.project", config: {} },
       { name: "notes", source: "config.project", config: { headers: { Authorization: "Bearer fixture-credential" } } },
       { name: "openwork-cloud", source: "config.remote", config: { enabled: false, url: "https://fixture.invalid/?token=fixture-credential" } },
     ] };
   });
-  assert.deepEqual(calls, ["/workspace/fixture%2Fworkspace/opencode/skill", "/experimental/connect/skills", "/workspace/fixture%2Fworkspace/mcp"]);
+  assert.deepEqual(calls, ["/workspace/fixture%2Fworkspace/opencode2/api/skill", "/experimental/connect/skills", "/workspace/fixture%2Fworkspace/mcp"]);
   assert.deepEqual(result.skills.map((skill) => skill.id), [localSkillAbilityId(location), cloudSkillAbilityId(remote)]);
   assert.deepEqual(result.mcpServers.map((server) => [server.id, server.available]), [[mcpAbilityId("notes"), true], [mcpAbilityId("openwork-cloud"), false]]);
   assert.doesNotMatch(JSON.stringify(result), /fixture-credential|Private skill body|Authorization|fixture\.invalid/);
@@ -54,18 +55,18 @@ test("platform catalog projection returns selectable identities, never credentia
 
 test("native source IDs and longest MCP namespaces select calls without changing broad built-ins", async () => {
   const f = fixture();
-  await f.check("skill", { name: "engine-triage" });
+  await f.check("skill", { id: "native-triage" });
   await f.check("notes_search");
   await assert.rejects(f.check("notes_team_search"), /not selected for this coworker/);
   await assert.rejects(f.check("skill", { name: "Triage display label" }), /not selected for this coworker/);
   f.catalog.skills[0].location = path.resolve("fixtures/abilities/replaced/SKILL.md");
-  await assert.rejects(f.check("skill", { name: "engine-triage" }), /not selected for this coworker/);
+  await assert.rejects(f.check("skill", { id: "native-triage" }), /not selected for this coworker/);
   f.coworker.abilities = selected([], ["notes_team"]);
   await f.check("notes_team_search");
   await assert.rejects(f.check("notes_search"), /not selected for this coworker/);
   f.coworker.abilities = selected();
   for (const tool of ["bash", "read", "write", "edit", "glob", "grep", "webfetch", "task", "batch", "apply_patch", "browser_open", "computer_click", "coworker_document_read", "coworker_worker_spawn", "coworker_team_consult"]) await f.check(tool);
-  await assert.rejects(f.check("skill", { name: "engine-triage" }), /not selected for this coworker/);
+  await assert.rejects(f.check("skill", { id: "native-triage" }), /not selected for this coworker/);
   await assert.rejects(f.check("notes_search"), /not selected for this coworker/);
   f.catalog.mcpServers.push(serverEntry("browser"), serverEntry("apply"));
   await assert.rejects(f.check("browser_open"), /not selected for this coworker/);
@@ -120,7 +121,7 @@ test("legacy all/all avoids catalog I/O but runtime identities still have to mat
   assert.equal(f.reads, 0);
   await f.runtime.check("alpha", { ...identity(f.coworker), directory: `${f.coworker.path}${path.sep}unused${path.sep}..`, tool: "read", args: {} });
   f.coworker.abilities = { version: 0 };
-  await assert.rejects(f.check("skill", { name: "engine-triage" }), /not selected for this coworker/);
+  await assert.rejects(f.check("skill", { id: "native-triage" }), /not selected for this coworker/);
   const before = identity(f.coworker);
   const racing = createAbilitiesRuntime({ coworkerFor: () => f.coworker, readCatalog: async () => { f.coworker = { ...f.coworker, createdAt: "replacement" }; return f.catalog; } });
   await assert.rejects(racing.catalog({ slug: "alpha", createdAt: before.createdAt }), /identity does not match/);
@@ -166,97 +167,28 @@ test("prompt filtering preserves surrounding instructions, bounds guidance and k
   assert.match(bounded.system[0], /omitted from this bounded summary/);
 });
 
-test("installed no-dependency hooks use authenticated context, stop before a witness and reread saves", { timeout: 15000 }, async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "coworker-abilities-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(path.join(root, "package.json"), '{"type":"module"}', "utf8");
+test("native skill checks use supplied metadata without recursively entering host admission", async () => {
   const f = fixture();
-  const owners = {
-    alpha: { ...f.coworker, path: path.join(root, "alpha") },
-    beta: { ...f.coworker, slug: "beta", workspaceId: "", path: path.join(root, "beta"), abilities: selected() },
-  };
-  const runtime = createAbilitiesRuntime({ coworkerFor: (slug) => owners[slug], readCatalog: () => f.catalog });
-  const callbacks = [];
-  const server = await createCoworkerToolsServer({
-    resolveSlug: (token) => ({ "fixture-alpha": "alpha", "fixture-beta": "beta" })[token] ?? null,
-    handlers: {},
-    onContextTool: (slug, input) => {
-      callbacks.push({ slug, name: input.name, context: input.context });
-      const payload = { ...input.args, ...input.context };
-      if (input.name === "abilities_check") return runtime.check(slug, payload);
-      if (input.name === "abilities_transform") return runtime.transform(slug, payload);
-      throw new Error("Unexpected fixture context operation");
-    },
+  const routes = [];
+  const nativeSkills = [
+    { id: "native-triage", name: "Duplicate title", location },
+    { id: remoteNativeId, name: "Duplicate title", location: "/private/cloud/SKILL.md" },
+  ];
+  const runtime = createAbilitiesRuntime({ coworkerFor: () => f.coworker,
+    readCatalog: (coworker, native) => readAbilitiesCatalog(coworker, async (route) => {
+      routes.push(route);
+      if (route.endsWith("/opencode2/api/skill")) throw new Error("Recursive native skill admission");
+      if (route === "/experimental/connect/skills") return { skills: [{ url: remoteUri, capability: remote }] };
+      return { items: [{ name: "notes", config: {} }] };
+    }, native),
   });
-  t.after(() => server.stop());
-  const url = server.url.replace(/\/mcp$/, "/context");
-  const connection = (slug) => ({ url, token: `fixture-${slug}` });
-  const original = { model: "fixture/model", plugin: ["existing-plugin"], permission: { question: "ask" }, tools: { webfetch: true }, agent: { existing: { description: "Keep this role" } } };
-  const hooks = {};
-  for (const coworker of Object.values(owners)) {
-    await mkdir(coworker.path);
-    await writeFile(path.join(coworker.path, "opencode.json"), JSON.stringify(original), "utf8");
-    await installAbilitiesPlugin(coworker, connection(coworker.slug));
-    await installAbilitiesPlugin(coworker, connection(coworker.slug));
-    const source = path.join(coworker.path, ".opencode", "coworker-abilities.js");
-    const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
-    assert.deepEqual(config, { ...original, plugin: [...original.plugin, pathToFileURL(source).href] });
-    if (process.platform !== "win32") assert.equal((await stat(path.join(coworker.path, ".opencode", "coworker-abilities.json"))).mode & 0o777, 0o600);
-    const plugin = await import(pathToFileURL(source).href);
-    hooks[coworker.slug] = await plugin.default({ directory: coworker.path });
-  }
-  // Registration fills the platform reference after a fresh coworker home exists.
-  owners.beta.workspaceId = "workspace-beta";
-  await installAbilitiesPlugin(owners.beta, connection("beta"));
-  const witness = [];
-  const invoke = async (slug, tool, args = {}) => {
-    await hooks[slug]["tool.execute.before"]({ tool, sessionID: "native-session", directory: owners.beta.path }, { args });
-    witness.push(`${slug}:${tool}`);
-  };
-  await invoke("alpha", "notes_search", { directory: owners.beta.path, createdAt: "model-supplied", workspaceId: "workspace-beta" });
-  await invoke("alpha", "skill", { name: "engine-triage" });
-  await assert.rejects(invoke("beta", "notes_search"), /not selected for this coworker/);
-  await assert.rejects(invoke("beta", "skill", { name: "engine-triage" }), /not selected for this coworker/);
-  assert.deepEqual(witness, ["alpha:notes_search", "alpha:skill"]);
-  assert.deepEqual(callbacks[0].context, identity(owners.alpha));
-  const beforeUnauthorized = callbacks.length;
-  const unauthorized = await fetch(url, { method: "POST", headers: { Authorization: "Bearer fixture-unknown" }, body: "{}" });
-  assert.equal(unauthorized.status, 401);
-  assert.equal(callbacks.length, beforeUnauthorized);
-  const output = { system: [`Before\n<available_remote_skills>\n<skill name="keep" capability="${remote}">Keep</skill>\n<skill name="drop" capability="skill:other">Drop</skill>\n</available_remote_skills>\nAfter`] };
-  const engineSystem = output.system;
-  await hooks.alpha["experimental.chat.system.transform"]({}, output);
-  assert.equal(output.system, engineSystem, "native engine keeps the original system array");
-  assert.ok(engineSystem[0].includes(remote));
-  assert.doesNotMatch(output.system[0], /skill:other/);
-  owners.alpha.abilities = selected([], [], 1);
-  await installAbilitiesPlugin(owners.alpha, connection("alpha"));
-  const freshConfig = JSON.parse(await readFile(path.join(owners.alpha.path, ".opencode", "coworker-abilities.json"), "utf8"));
-  assert.equal(freshConfig.abilities.revision, 1);
-  await assert.rejects(invoke("alpha", "notes_search"), /not selected for this coworker/);
-  await assert.rejects(invoke("alpha", "skill", { name: "engine-triage" }), /not selected for this coworker/);
-  assert.equal(witness.length, 2);
-  owners.beta.createdAt = "replacement";
-  await assert.rejects(invoke("beta", "notes_search"), /identity does not match/);
-  await installAbilitiesPlugin(owners.beta, connection("beta"));
-  const beforeStale = callbacks.length;
-  await assert.rejects(invoke("beta", "notes_search"), /identity does not match/);
-  assert.equal(callbacks.length, beforeStale);
-  delete owners.alpha.abilities;
-  await installAbilitiesPlugin(owners.alpha, connection("alpha"));
-  const beforeAll = callbacks.length;
-  const allOutput = { system: ["Unchanged"] };
-  const allSystem = allOutput.system;
-  await invoke("alpha", "notes_search");
-  await hooks.alpha["experimental.chat.system.transform"]({}, allOutput);
-  assert.equal(allOutput.system, allSystem);
-  assert.equal(callbacks.length, beforeAll);
-  owners.alpha.abilities = selected([localSkillAbilityId(location)], ["notes"]);
-  await installAbilitiesPlugin(owners.alpha, connection("alpha"));
-  await server.stop();
-  await assert.rejects(invoke("alpha", "notes_search"), /check failed; this selected tool call was stopped/);
-  const failedOutput = { system: ["Still unchanged"] };
-  await assert.rejects(hooks.alpha["experimental.chat.system.transform"]({}, failedOutput), /transform failed; selected guidance was not applied/);
-  assert.deepEqual(failedOutput, { system: ["Still unchanged"] });
-  assert.equal(witness.length, 3);
+  const check = (id) => runtime.check("alpha", { ...identity(f.coworker), tool: "skill", args: { id }, nativeSkills });
+  await check("native-triage");
+  await check(remoteNativeId);
+  assert.ok(routes.every((route) => !route.endsWith("/opencode2/api/skill")));
+  await assert.rejects(check("Duplicate title"), /not selected/);
+  f.coworker.abilities = selected([], ["notes"], 1);
+  await assert.rejects(check(remoteNativeId), /not selected/);
+  await runtime.check("alpha", { ...identity(f.coworker), tool: "renamed", server: "notes", args: { server: "other" } });
+  await assert.rejects(runtime.check("alpha", { ...identity(f.coworker), tool: "renamed", server: "other", args: { server: "notes" } }), /not selected/);
 });

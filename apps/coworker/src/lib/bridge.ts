@@ -10,7 +10,7 @@ import type { ModelSelectionPreferences } from "./model-intelligence-index.ts";
 import type { Personality } from "./personalities";
 import type { WorkerEvent, WorkerLifespan, WorkerSummary } from "./workers";
 import type { AssignedCoworkerTemplate } from "@openwork/types/coworker-template";
-import type { HeadlessThreadModel, HeadlessTurnAcceptance } from "@openwork/headless-threads";
+import type { HeadlessThreadModel, HeadlessTurnAcceptance } from "@openwork/headless-threads/v2";
 import type { ThreadTurnState } from "./thread-queue.ts";
 import type { ExecutionActivity } from "./progress-activity.ts";
 import type { PendingInteractions, PermissionReply } from "./threads.ts";
@@ -374,6 +374,10 @@ export type EngineProviderSummary = {
   source: string;
   connected: boolean;
   modelCount: number;
+  /** Native integration identity, distinct from the provider and stored credential. */
+  integrationID?: string;
+  /** Native key method availability; absent only in older readiness snapshots. */
+  acceptsKey?: boolean;
 };
 
 export type LocalProvidersReadiness = {
@@ -384,7 +388,7 @@ export type LocalProvidersReadiness = {
   ownerToken: string;
   providers: EngineProviderSummary[];
   /** Provider id → the AI service's own sign-in flows (browser or device code). */
-  signIns: Record<string, Array<{ index: number; label: string }>>;
+  signIns: Record<string, Array<{ index: number; label: string; integrationID?: string; methodID?: string }>>;
 };
 
 export type LocalProviderConnected = { status: "connected"; providerId: string; label: string; modelCount: number };
@@ -400,6 +404,9 @@ export type ProviderSignInStart = {
   code: string;
   instructions: string;
   label: string;
+  integrationID?: string;
+  methodID?: string;
+  mode?: "auto" | "code";
 };
 
 export type ProviderSignInStatus = { state: "waiting" | "connected" | "failed"; error: string; modelCount: number };
@@ -540,7 +547,9 @@ export const coworkerBridge = {
     state: (slug: string, threadId: string) => invoke<ThreadTurnState>("turns.state", { slug, threadId }),
     update: (slug: string, threadId: string, previous: ThreadTurnState, next: ThreadTurnState) => invoke<ThreadTurnState>("turns.update", { slug, threadId, previous, next }),
     /** Explicit person recovery may return a NEW messageId and continuation prompt after tool work. */
-    send: (input: { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<HeadlessTurnAcceptance & { prompt: string }>("turns.send", input),
+    selectSkill: (input: { slug: string; uri: string; label: string; account: { baseUrl: string; orgId: string; email: string } }) => invoke<import("./skill-selection.ts").SelectedSkill>("turns.selectSkill", input),
+    validateSkills: (slug: string, fields: import("./skill-selection.ts").SkillFields) => invoke<void>("turns.validateSkills", { slug, ...fields }),
+    send: (input: import("./skill-selection.ts").SkillFields & { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<HeadlessTurnAcceptance & { prompt: string }>("turns.send", input),
     cancel: (slug: string, threadId: string, messageId?: string) => invoke<{ ok: boolean }>("turns.cancel", { slug, threadId, messageId }),
   },
   templates: {
@@ -692,7 +701,7 @@ export const coworkerBridge = {
     list: (slug: string) => invoke<WorkerSummary[]>("workers.list", { slug }),
     get: (slug: string, id: string) => invoke<WorkerSummary>("workers.get", { slug, id }),
     /** A missing lifespan means the default turn budget; a Worker is never unbounded by accident. */
-    spawn: (slug: string, input: { name: string; goal: string; purpose?: import("./workers.ts").WorkerPurpose; lifespan?: WorkerLifespan; spawnedFromThreadId?: string; control?: "browser" | "computer" }) =>
+    spawn: (slug: string, input: import("./skill-selection.ts").SkillFields & { name: string; goal: string; purpose?: import("./workers.ts").WorkerPurpose; lifespan?: WorkerLifespan; spawnedFromThreadId?: string; control?: "browser" | "computer" }) =>
       invoke<WorkerSummary>("workers.spawn", { slug, ...input }),
     approveControl: (input: { slug: string; id: string; expectedRevision: number }) => invoke<WorkerSummary>("workers.approveControl", input),
     revokeControl: (input: { slug: string; id: string; expectedRevision: number }) => invoke<WorkerSummary>("workers.revokeControl", input),

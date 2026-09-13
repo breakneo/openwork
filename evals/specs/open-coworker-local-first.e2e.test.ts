@@ -403,11 +403,12 @@ test.skipIf(!enabled)(previewOnly ? "Coworker Fresh start fullscreen preview wit
 
 if (!freshStartOnly) {
 test.skipIf(!enabled)("Coworker provider setup without credentials", { timeout: 300_000 }, async ({ evidence, skip }) => {
-  needs({ optIn: ["OPENWORK_EVAL_E2E_TESTS"], commands: ["opencode"] });
+  needs({ optIn: ["OPENWORK_EVAL_E2E_TESTS"], env: ["OPENWORK_EVAL_ELECTRON_BINARY"] });
   await using host = await resolveHost();
   if (host.kind !== "local") skip("needs: a same-host disposable provider fixture; placement is not changed");
-  const profileDir = await mkdtemp(path.join(os.tmpdir(), "open-coworker-provider-setup-"));
-  onTestFinished(() => rm(profileDir, { recursive: true, force: true }));
+  const retainedProfileDir = process.env.OPENWORK_EVAL_COWORKER_PROFILE_DIR?.trim();
+  const profileDir = retainedProfileDir || await mkdtemp(path.join(os.tmpdir(), "open-coworker-provider-setup-"));
+  if (!retainedProfileDir) onTestFinished(() => rm(profileDir, { recursive: true, force: true }));
   const claudeDir = path.join(profileDir, "claude-config");
   await mkdir(claudeDir, { recursive: true });
   // Presence-only detection without a real credential or Keychain probe.
@@ -417,7 +418,7 @@ test.skipIf(!enabled)("Coworker provider setup without credentials", { timeout: 
     COWORKER_HOME_DIR: path.join(profileDir, "coworkers"),
     COWORKER_SERVER_CONFIG: path.join(profileDir, "coworker-server.json"),
     OPENWORK_RUNTIME_DB: path.join(profileDir, "coworker-runtime.sqlite"),
-    OPENCODE_CONFIG: "", OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: ["openai", "anthropic"] }),
+    OPENCODE_CONFIG: "", OPENCODE_MODELS_URL: "http://127.0.0.1:9",
     OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", OPENROUTER_API_KEY: "", GEMINI_API_KEY: "", GOOGLE_API_KEY: "", GOOGLE_GENERATIVE_AI_API_KEY: "", XAI_API_KEY: "",
     OLLAMA_HOST: "127.0.0.1:9", LMSTUDIO_HOST: "127.0.0.1:9",
   } });
@@ -430,7 +431,19 @@ test.skipIf(!enabled)("Coworker provider setup without credentials", { timeout: 
     connected: Boolean(document.querySelector('[data-testid="connected-openai"], [data-testid="connected-anthropic"]')),
     preparationErrors: document.querySelectorAll('[data-testid="local-providers"] > p.text-rose').length,
   }))).toEqual({ claudeActions: ["Add key"], codexFound: false, connected: false, preparationErrors: 0 });
-  await clickButton(app, "Set up ChatGPT");
+  await clickCoworkerControl(app, { testId: "add-another-open" });
+  const addableProviders = await waitFor(app, () => {
+    const list = document.querySelector('[data-testid="add-another"] [role="listbox"]');
+    if (!list) return false;
+    return [...list.querySelectorAll<HTMLElement>('[role="option"]')].map((option) => ({
+      provider: option.querySelector("span > span")?.textContent?.trim(),
+      label: option.innerText.trim(),
+    }));
+  }, { timeoutMs: 10_000, label: "provider choices" });
+  expect(addableProviders).toEqual(expect.arrayContaining([expect.objectContaining({ provider: "OpenAI" })]));
+  const openai: unknown = Array.isArray(addableProviders) ? addableProviders.find((option: unknown) => isRecord(option) && option.provider === "OpenAI") : undefined;
+  if (!isRecord(openai) || typeof openai.label !== "string" || !openai.label) throw new Error("The native OpenAI setup choice has no accessible name.");
+  await clickCoworkerControl(app, { role: "option", label: openai.label });
   await waitFor(app, () => document.querySelector<HTMLButtonElement>('[data-testid="add-openai-sign-in"]')?.disabled === false, { timeoutMs: 10_000, label: "ChatGPT sign-in offered without credentials" });
   expect(await evalIn(app, () => ({
     key: document.querySelector<HTMLInputElement>('[data-testid="add-another"] input[type="password"]')?.value,
@@ -439,9 +452,9 @@ test.skipIf(!enabled)("Coworker provider setup without credentials", { timeout: 
   }))).toEqual({ key: "", waiting: false, connected: false });
   // Opening setup must not authorize anything; do not start the sign-in flow.
   await evalIn(app, () => document.querySelector<HTMLButtonElement>('[data-testid="key-form"] button[type="button"]')?.click());
-  await waitFor(app, () => !document.querySelector('[data-testid="add-another"]') && Boolean(document.querySelector('[data-testid="chatgpt-setup"]')), { timeoutMs: 10_000, label: "setup closes" });
+  await waitFor(app, () => !document.querySelector('[data-testid="add-another"]') && document.querySelector<HTMLButtonElement>('[data-testid="add-another-open"]')?.disabled === false, { timeoutMs: 10_000, label: "setup closes" });
   expect(await evalIn(app, () => Boolean(document.querySelector('[data-testid="connected-openai"], [data-testid="connected-anthropic"], [data-testid="sign-in-wait"]')))).toBe(false);
-  evidence.recordAssertionEvidence("ChatGPT setup is discoverable without credentials", "On first load, detected non-importable Claude credentials did not hide ChatGPT setup or cause a preparation error. Opening and cancelling setup left both providers disconnected, the key empty and authorization unstarted.", true);
+  evidence.recordAssertionEvidence("ChatGPT setup is discoverable without credentials", "Detected non-importable Claude credentials caused no preparation error. Choose then OpenAI offered ChatGPT sign-in and an empty key form. Cancelling returned to Choose with both providers disconnected and authorization unstarted.", true);
 });
 
 test.skipIf(!enabled)(title, async ({ evidence }) => {

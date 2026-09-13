@@ -4,10 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { extractConversationMemory, installMemoryPlugin, MEMORY_LIMITS } from "./memory-model.mjs";
-import { PROGRESS_PLUGIN } from "./progress-plugin.mjs";
+import { extractConversationMemory, installMemoryPlugin } from "./memory-model.mjs";
 import { createProgressSummaries, summarizeProgress } from "./progress-summaries.mjs";
-import { PROGRESS_AGENT, PROGRESS_LIMITS, PROGRESS_SYSTEM, PROGRESS_TITLE } from "../src/lib/progress-config.ts";
+import { PROGRESS_AGENT, PROGRESS_LIMITS, PROGRESS_TITLE } from "../src/lib/progress-config.ts";
 import { connectedModelCatalog, eligibleProgressModels } from "../src/lib/threads.ts";
 import { DEFAULT_MODEL_DEFAULTS } from "../src/lib/model-defaults.ts";
 import {
@@ -127,47 +126,6 @@ test("summary eligibility preserves missing metadata and never treats unknown pr
   assert.equal(eligibleProgressModels(catalog).length, 0);
 });
 
-test("the copied coordinator plugin strips context, caps one attempt, and leaves normal turns alone", async () => {
-  const module = await import(`data:text/javascript,${encodeURIComponent(PROGRESS_PLUGIN)}`);
-  const hooks = await module.default();
-  assert.equal(hooks.tool, undefined);
-  const config = { agent: { build: { prompt: "normal" } } };
-  await hooks.config(config);
-  assert.deepEqual(config.agent.build, { prompt: "normal" });
-  assert.equal(config.agent[PROGRESS_AGENT].hidden, true);
-  assert.equal(config.agent[PROGRESS_AGENT].steps, undefined);
-  assert.deepEqual(config.agent[PROGRESS_AGENT].permission, { "*": "deny" });
-  const input = { agent: PROGRESS_AGENT, sessionID: "summary-one", model: { providerID: "fixture", modelID: "progress" } };
-  const output = { message: { id: "user-one", sessionID: "summary-one", role: "user", system: "private-canary" }, parts: [{ id: "part-one", type: "text", text: selectionPrompt }] };
-  await hooks["chat.message"](input, output);
-  const messages = { messages: [{ info: output.message, parts: [...output.parts, { type: "text", text: "workspace-canary" }] }, { info: { sessionID: "summary-one", role: "assistant" }, parts: [{ type: "text", text: "history-canary" }] }] };
-  await hooks["experimental.chat.messages.transform"]({}, messages);
-  assert.equal(messages.messages.length, 1);
-  assert.doesNotMatch(JSON.stringify(messages), /private-canary|workspace-canary|history-canary/);
-  const system = { system: ["private-canary", "workspace-canary"] };
-  await hooks["experimental.chat.system.transform"]({ sessionID: "summary-one" }, system);
-  assert.deepEqual(system.system, [PROGRESS_SYSTEM]);
-  const params = { maxOutputTokens: 5000, options: { instructions: "private-canary", reasoningEffort: "high" } };
-  await hooks["chat.params"]({ ...input, model: progressModel }, params);
-  assert.equal(params.maxOutputTokens, 80);
-  assert.deepEqual(params.options, { instructions: PROGRESS_SYSTEM });
-  await assert.rejects(hooks["chat.params"]({ ...input, model: progressModel }, params), /^Error: Progress selection refused\.$/);
-  await assert.rejects(hooks["chat.params"]({ ...input, sessionID: "not-registered", model: progressModel }, params));
-  await assert.rejects(hooks["tool.execute.before"]({ sessionID: "summary-one" }));
-  await assert.rejects(hooks["experimental.session.compacting"]({ sessionID: "summary-one" }));
-  await hooks["chat.message"]({ ...input, sessionID: "old-engine" }, { message: {}, parts: [{ type: "text", text: selectionPrompt }] });
-  await assert.rejects(hooks["chat.params"]({ ...input, sessionID: "old-engine", model: progressModel }, { options: {} }));
-  const ordinary = { maxOutputTokens: 4096, options: { reasoningEffort: "high" } };
-  await hooks["chat.params"]({ agent: "build", sessionID: "normal", model: progressModel }, ordinary);
-  assert.deepEqual(ordinary, { maxOutputTokens: 4096, options: { reasoningEffort: "high" } });
-  const ordinarySystem = { system: ["normal instructions"] };
-  await hooks["experimental.chat.system.transform"]({ sessionID: "normal" }, ordinarySystem);
-  assert.deepEqual(ordinarySystem.system, ["normal instructions"]);
-  for (const prompt of ['[{"id":"status","text":"private-canary"}]', "x".repeat(1025), selectionPrompt.replace("Preparing", "Pr\u00e9paring")]) {
-    await assert.rejects(hooks["chat.message"]({ ...input, sessionID: prompt }, { message: {}, parts: [{ type: "text", text: prompt }] }));
-  }
-});
-
 test("summary admission cancels with fresh cleanup signals even when acceptance arrives late", async () => {
   const controller = new AbortController();
   const aborts = [];
@@ -179,7 +137,7 @@ test("summary admission cancels with fresh cleanup signals even when acceptance 
     sendTurn: async (id, input) => {
       assert.equal(id, "fresh-summary");
       assert.equal(input.agent, PROGRESS_AGENT);
-      assert.deepEqual(input.tools, { "*": false });
+      assert.equal(input.tools, undefined);
       assert.equal(input.format, undefined);
       assert.equal(input.maxTokens, undefined);
       sent();
@@ -197,10 +155,11 @@ test("summary admission cancels with fresh cleanup signals even when acceptance 
   assert.equal(aborts.length, 2);
 });
 
-test("the installed memory plugin loads in isolation, strips context, and bounds one eligible attempt", async () => {
+test("the installed memory plugin preserves native config and installs idempotently", async () => {
   const root = path.dirname(await settingsFile());
   const target = path.join(root, "opencode.json");
-  const source = path.join(root, ".opencode", "auto-memory.js");
+  const pluginRoot = path.join(root, ".opencode", "coworker-plugins", "auto-memory");
+  const source = path.join(pluginRoot, "server.js");
   await writeFile(target, JSON.stringify({ plugin: ["existing-plugin"], agent: { build: { prompt: "normal" } } }));
   await installMemoryPlugin({ path: root });
   const installed = await readFile(target, "utf8");
@@ -209,62 +168,9 @@ test("the installed memory plugin loads in isolation, strips context, and bounds
   assert.equal(await readFile(target, "utf8"), installed);
   assert.equal(await readFile(source, "utf8"), code);
   const config = JSON.parse(installed);
-  assert.deepEqual(config.plugin, ["existing-plugin", pathToFileURL(source).href]);
-  // Load the actual installed bytes without access to coordinator-relative imports.
-  const hooks = await (await import(`data:text/javascript,${encodeURIComponent(code)}`)).default();
-  await hooks.config(config);
-  assert.equal(hooks.tool, undefined);
-  assert.deepEqual(config.agent.build, { prompt: "normal" });
-  const agent = config.agent["auto-memory"];
-  assert.equal(agent.hidden, true);
-  assert.equal(agent.mode, "subagent");
-  assert.equal(agent.steps, undefined);
-  assert.deepEqual(agent.permission, { "*": "deny" });
-  assert.deepEqual(agent.tools, { "*": false });
-  const input = { agent: "auto-memory", sessionID: "memory-one", model: { providerID: "fixture", modelID: "progress" } };
-  const output = { message: { id: "user-one", sessionID: input.sessionID, role: "user", system: "private-canary", format: { type: "text" }, tools: { bash: true } }, parts: [{ id: "part-one", type: "text", text: memoryPrompt, synthetic: true, ignored: true, metadata: { injected: "private-canary" } }] };
-  await hooks["chat.message"](input, output);
-  assert.equal(output.message.system, undefined);
-  assert.equal(output.message.format, undefined);
-  assert.deepEqual(output.message.tools, { "*": false });
-  assert.deepEqual(output.parts, [{ id: "part-one", sessionID: input.sessionID, messageID: "user-one", type: "text", text: memoryPrompt }]);
-  const messages = { messages: [{ info: output.message, parts: [...output.parts, { type: "text", text: "workspace-canary" }] }, { info: { sessionID: input.sessionID, role: "assistant" }, parts: [{ type: "tool", text: "history-canary" }] }] };
-  await hooks["experimental.chat.messages.transform"]({}, messages);
-  assert.deepEqual(messages.messages, [{ info: output.message, parts: output.parts }]);
-  const system = { system: ["workspace-canary", "private-canary"] };
-  await hooks["experimental.chat.system.transform"](input, system);
-  assert.deepEqual(system.system, [agent.prompt]);
-  const params = { maxOutputTokens: 5000, options: { instructions: "private-canary", reasoningEffort: "high", response_format: {}, tools: ["bash"] } };
-  await hooks["chat.params"]({ ...input, model: progressModel }, params);
-  assert.equal(params.maxOutputTokens, MEMORY_LIMITS.maxOutputTokens);
-  assert.deepEqual(params.options, { instructions: agent.prompt });
-  assert.equal(params.temperature, 0);
-  await assert.rejects(hooks["chat.params"]({ ...input, model: progressModel }, params), /Memory extraction refused/);
-  await assert.rejects(hooks["tool.execute.before"](input));
-  await assert.rejects(hooks["experimental.session.compacting"](input));
-  const admit = (sessionID, prompt) => hooks["chat.message"]({ ...input, sessionID }, { message: { id: sessionID, sessionID }, parts: [{ type: "text", text: prompt }] });
-  const boundary = { ...memoryInput, recent: [{ ...memoryInput.recent[0], text: "" }] };
-  const available = MEMORY_LIMITS.maxInputBytes - Buffer.byteLength(agent.prompt) - 128 - Buffer.byteLength(JSON.stringify(boundary));
-  boundary.recent[0].text = "\u00e9".repeat(Math.floor(available / 2)) + "x".repeat(available % 2);
-  await admit("byte-boundary", JSON.stringify(boundary));
-  boundary.recent[0].text += "x";
-  const twelve = { ...memoryInput, recent: Array.from({ length: 12 }, (_, index) => ({ ...memoryInput.recent[0], id: `request-${index}` })) };
-  await admit("twelve-messages", JSON.stringify(twelve));
-  for (const [index, prompt] of [JSON.stringify(boundary), "not json", JSON.stringify({ ...memoryInput, tools: [] }), JSON.stringify({ ...twelve, recent: [...twelve.recent, { ...memoryInput.recent[0], id: "thirteenth" }] }), JSON.stringify({ ...memoryInput, shortTerm: {} })].entries()) {
-    await assert.rejects(admit(`invalid-${index}`, prompt), /Memory extraction refused/);
-  }
-  for (const [index, model] of [progressModel, { ...progressModel, cost: { input: 0.51, output: 0.2 } }, { ...progressModel, cost: { input: 0.1, output: 2.01 } }, { ...progressModel, capabilities: { ...progressModel.capabilities, reasoning: true } }, { ...progressModel, api: { npm: "@ai-sdk/anthropic" } }].entries()) {
-    const sessionID = `refused-model-${index}`;
-    await admit(sessionID, memoryPrompt);
-    await assert.rejects(hooks["chat.params"]({ ...input, sessionID, model }, index === 0 ? { options: {} } : { maxOutputTokens: 5000, options: {} }), /Memory extraction refused/);
-  }
-  await admit("lower-cap", memoryPrompt);
-  const lower = { maxOutputTokens: 50, options: {} };
-  await hooks["chat.params"]({ ...input, sessionID: "lower-cap", model: progressModel }, lower);
-  assert.equal(lower.maxOutputTokens, 50);
-  const ordinary = { maxOutputTokens: 4096, options: { instructions: "normal" } };
-  await hooks["chat.params"]({ agent: "build", sessionID: "normal", model: progressModel }, ordinary);
-  assert.deepEqual(ordinary, { maxOutputTokens: 4096, options: { instructions: "normal" } });
+  assert.deepEqual(config.plugins, ["existing-plugin", pathToFileURL(pluginRoot).href]);
+  assert.deepEqual(config.agents.build, { system: "normal" });
+  assert.equal(config.agents["auto-memory"], undefined, "Only the loaded native plugin may register the bounded agent");
 });
 
 test("memory extraction accepts only correlated evidence-backed text and cleans up late admission", async (context) => {
@@ -272,37 +178,37 @@ test("memory extraction accepts only correlated evidence-backed text and cleans 
   const model = { providerId: "fixture", modelId: "progress" };
   const candidate = { text: "The user set a budget of 42 EUR.", evidence: "Budget is 42 EUR." };
   const valid = JSON.stringify({ shortTerm: [candidate], longTerm: [] });
-  let lastOrder = 0n;
-  for (const mode of ["valid", "wrong-parent", "unsupported-evidence", "too-many", "long-text", "oversized", "reasoning", "tool", "retry", "error"]) {
+  const messageIds = new Set();
+  for (const mode of ["valid", "correlation-late", "failed-execution", "wrong-parent", "unsupported-evidence", "too-many", "long-text", "oversized", "reasoning", "tool", "retry", "error"]) {
     let messageId;
     let aborts = 0;
+    let reads = 0;
     const client = {
       createThread: async (input) => { assert.equal(input.prompt, undefined); return { id: `fresh-${mode}` }; },
       sendTurn: async (id, input) => {
         assert.equal(id, `fresh-${mode}`);
         assert.equal(input.agent, "auto-memory");
-        assert.deepEqual(input.tools, { "*": false });
+        assert.equal(input.tools, undefined);
         assert.deepEqual(input.model, model);
         assert.equal(input.prompt, memoryPrompt);
-        assert.match(input.messageId, /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
-        const order = BigInt(`0x${input.messageId.slice(4, 16)}`);
-        assert.equal(order >> 12n, 20_000n);
-        assert.ok(order > lastOrder, "same-millisecond IDs stay in native order");
-        lastOrder = order;
+        assert.match(input.messageId, /^msg_[0-9a-f]+$/);
+        assert.equal(messageIds.has(input.messageId), false);
+        messageIds.add(input.messageId);
         messageId = input.messageId;
         return { threadId: id, messageId, messageCountBefore: 0, alreadyPresent: false };
       },
       getThreadSnapshot: async () => {
+        const unbound = mode === "correlation-late" && reads++ === 0;
         const text = mode === "unsupported-evidence" ? JSON.stringify({ shortTerm: [{ ...candidate, evidence: "Budget is 43 EUR." }], longTerm: [] })
           : mode === "too-many" ? JSON.stringify({ shortTerm: Array(7).fill(candidate), longTerm: [] })
           : mode === "long-text" ? JSON.stringify({ shortTerm: [{ ...candidate, text: "x".repeat(601) }], longTerm: [] })
           : mode === "oversized" ? "\u754c".repeat(6000) : valid;
-        return { status: { type: mode === "retry" ? "retry" : "idle" }, messages: [{ role: "assistant", parentId: mode === "wrong-parent" ? "another-message" : messageId, completedAt: 1, error: mode === "error" ? { message: "Refused" } : null, parts: [{ type: "step-start" }, { type: ["tool", "reasoning"].includes(mode) ? mode : "text", text }, { type: "step-finish" }] }] };
+        return { native: { engine: "v2", turnOutcomes: { [messageId]: unbound ? undefined : mode === "failed-execution" ? "failed" : "succeeded" } }, status: { type: mode === "retry" ? "retry" : "idle" }, messages: [{ role: "assistant", parentId: unbound ? null : mode === "wrong-parent" ? "another-message" : messageId, completedAt: 1, error: mode === "error" ? { message: "Refused" } : null, parts: [{ type: "step-start" }, { type: ["tool", "reasoning"].includes(mode) ? mode : "text", text }, { type: "step-finish" }] }] };
       },
       abortThread: async (id, { signal }) => { assert.equal(id, `fresh-${mode}`); assert.equal(signal.aborted, false); aborts++; },
     };
     const result = extractConversationMemory(client, { ...model, variant: "inherited-reasoning" }, { prompt: memoryPrompt });
-    if (mode === "valid") assert.equal(await result, valid);
+    if (mode === "valid" || mode === "correlation-late") assert.equal(await result, valid);
     else await assert.rejects(result, /Memory extraction refused/, mode);
     assert.equal(aborts, 1, mode);
   }

@@ -62,7 +62,7 @@ function emptyUsage() {
   return { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0 };
 }
 
-export function toTranscript(snapshot: HeadlessThreadSnapshot): HeadlessThreadTranscript {
+export function toTranscript(snapshot: Pick<HeadlessThreadSnapshot, "threadId" | "title" | "status" | "messages">): HeadlessThreadTranscript {
   const messages = snapshot.messages.map(toTranscriptMessage);
   const assistantMessages = snapshot.messages.filter((message) => message.role === "assistant");
   const lastAssistant = messages.filter((message) => message.role === "assistant" && message.text).at(-1);

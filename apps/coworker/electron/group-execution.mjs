@@ -6,6 +6,7 @@ import { eventRunFor } from "./event-execution.mjs";
 import { facilitatorPrompt, earlierSpeakerOrders, routeWithFacilitator, facilitatorModels } from "../src/lib/facilitator.ts";
 import { DEFAULT_MODEL_DEFAULTS } from "../src/lib/model-defaults.ts";
 import { effortForTurn } from "../src/lib/effort.ts";
+import { NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
 
 /** The window only submits requests and reads projections. All group execution
  * and cancellation remain alive when that window navigates or reloads. */
@@ -142,7 +143,8 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
           const client = await withAbort(clientFor(".coordinator", { observationOnly: true, signal }), signal);
           let threadId = current.facilitatorThreadId;
           if (!threadId) {
-            threadId = (await withAbort(client.createThread({ title: `Facilitator: ${current.name}`, signal }), signal)).id;
+            threadId = (await withAbort(client.createThread({ title: `Facilitator: ${current.name}`, agent: NATIVE_COORDINATOR_AGENT,
+              model: { providerId: models.primary.providerId, modelId: models.primary.modelId }, signal }), signal)).id;
             await updateGroup(directory, groupId, { facilitatorThreadId: threadId }, { authority: EVENT_GROUP_AUTHORITY });
           }
           let attempt = 0;
@@ -151,7 +153,7 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
             executions.add(id);
             signal.throwIfAborted();
             const variant = effortForTurn({ kind: "facilitator", stop: "balanced", fixedVariant: !current.facilitatorModel.trim() && appDefault.model ? appDefault.modelVariant : "", variants: model.variants });
-            const entry = await collaboration.submit({ id, groupRequestId: request.id, owner: { slug: ".coordinator", threadId, conversationId: groupId, kind: "coordinator", groupId, ...(request.conversationIdentity ? { conversationIdentity: request.conversationIdentity } : {}) }, prompt: words, model: { providerId: model.providerId, modelId: model.modelId, ...(variant ? { variant } : {}) }, timeoutMs: 40_000 });
+            const entry = await collaboration.submit({ id, groupRequestId: request.id, owner: { slug: ".coordinator", threadId, conversationId: groupId, kind: "coordinator", groupId, ...(request.conversationIdentity ? { conversationIdentity: request.conversationIdentity } : {}) }, prompt: words, agent: NATIVE_COORDINATOR_AGENT, model: { providerId: model.providerId, modelId: model.modelId, ...(variant ? { variant } : {}) }, timeoutMs: 40_000 });
             const onAbort = () => { void collaboration.cancel(entry.id).catch(() => {}); };
             signal.addEventListener("abort", onAbort, { once: true });
             try { return (await collaboration.wait(entry.id, signal)).text; } finally { signal.removeEventListener("abort", onAbort); }

@@ -1,17 +1,16 @@
 /**
- * Open Coworker dev launcher: build the embedded OpenWork server bundle when it is
- * missing, start the Vite renderer, then launch the Electron shell against it.
+ * Open Coworker dev launcher: build the native v2 runtime and plugins, start the
+ * Vite renderer, then launch the Electron shell against it.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import nativeRuntime from "../native-runtime.json" with { type: "json" };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(__dirname, "..");
 const repoRoot = resolve(appRoot, "../..");
-const headlessThreadsBundle = resolve(repoRoot, "packages", "headless-threads", "dist", "index.js");
-const serverBundle = resolve(repoRoot, "apps", "server", "dist", "embedded.js");
 const automationsBundle = resolve(repoRoot, "packages", "automations", "dist", "index.js");
 
 const pnpmCmd = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
@@ -48,15 +47,16 @@ async function waitForVite(url, timeoutMs = 60_000) {
   throw new Error(`Vite dev server did not become ready at ${url}`);
 }
 
-if (!existsSync(headlessThreadsBundle)) {
-  console.log("[coworker-dev] Building shared headless thread runtime…");
-  await runOnce(pnpmCmd, ["--filter", "@openwork/headless-threads", "build"], { cwd: repoRoot });
-}
-
-if (!existsSync(serverBundle)) {
-  console.log("[coworker-dev] Building openwork-server (embedded bundle missing)…");
-  await runOnce(pnpmCmd, ["--filter", "openwork-server", "build"], { cwd: repoRoot });
-}
+// Existing dist bytes may predate the cutover; never boot a stale v1 bundle.
+console.log("[coworker-dev] Building native v2 execution and embedded server…");
+await runOnce(pnpmCmd, ["--filter", "@openwork/headless-threads", "build"], { cwd: repoRoot });
+await runOnce(pnpmCmd, ["--filter", "openwork-server", "build"], { cwd: repoRoot });
+// Preparation imports the memory plugin's built headless v2 client.
+const { prepareNativePluginBundles } = await import("../electron/prepare-native-plugins.mjs");
+await prepareNativePluginBundles({
+  outputDirectory: resolve(appRoot, "resources", "native-plugins"),
+  dependencyDirectory: resolve(appRoot, "resources", "sidecars", `.native-plugin-sdk-${nativeRuntime.opencodeV2Version}`),
+});
 
 if (!existsSync(automationsBundle)) {
   console.log("[coworker-dev] Building shared OpenWork scheduling contracts…");

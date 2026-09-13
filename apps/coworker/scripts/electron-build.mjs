@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { opencodeTargetName } from "../electron/runtime-paths.mjs";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import nativeRuntime from "../native-runtime.json" with { type: "json" };
 
 const dirnameHere = dirname(fileURLToPath(import.meta.url));
 const coworkerRoot = resolve(dirnameHere, "..");
@@ -23,26 +23,61 @@ function run(command, args, cwd = repoRoot, env) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-function buildElectron() {
-  run(process.execPath, [
-    resolve(repoRoot, "apps", "desktop", "scripts", "prepare-sidecar.mjs"),
-    "--force",
-    "--outdir",
-    sidecarDir,
-  ], coworkerRoot);
+export function stageNativeServer({ sourceDirectory = resolve(repoRoot, "apps/server/dist"), outputDirectory = packagedServerRoot } = {}) {
+  const contains = (parent, child) => {
+    const location = relative(resolve(parent), resolve(child));
+    return !location || (!isAbsolute(location) && location !== ".." && !location.startsWith(`..${sep}`));
+  };
+  if (contains(sourceDirectory, outputDirectory) || contains(outputDirectory, sourceDirectory)) throw new Error("Native server staging must be separate from the source build.");
+  const serverPackage = JSON.parse(readFileSync(resolve(repoRoot, "apps/server/package.json"), "utf8"));
+  const nodeOnlyDependencies = Object.fromEntries(Object.entries(serverPackage.dependencies).filter(([name]) =>
+    !["@opencode-ai/sdk", "better-sqlite3", "drizzle-orm", "htmlparser2"].includes(name)));
+  nodeOnlyDependencies["@openwork/paths"] = serverPackage.devDependencies["@openwork/paths"];
+  if (!existsSync(resolve(sourceDirectory, "embedded-native.js"))) throw new Error("Build the native embedded server entry before staging Coworker.");
+  rmSync(outputDirectory, { recursive: true, force: true });
+  const target = resolve(outputDirectory, "dist");
+  cpSync(sourceDirectory, target, { recursive: true });
+  copyFileSync(resolve(repoRoot, "constants.json"), resolve(target, "constants.json"));
+  // Relocate only Coworker's copy. Generic server/Desktop build output stays intact.
+  for (const name of readdirSync(target).filter((name) => name.endsWith(".js"))) {
+    const entry = resolve(target, name);
+    const source = readFileSync(entry, "utf8");
+    const packaged = source.replace(/from\s+["']\.\.\/\.\.\/\.\.\/constants\.json["']/g, 'from "./constants.json"');
+    if (packaged !== source) writeFileSync(entry, packaged, "utf8");
+  }
+  writeFileSync(resolve(outputDirectory, "package.json"), `${JSON.stringify({
+    name: "@openwork/coworker-runtime", version: serverPackage.version, private: true,
+    type: "module", exports: { ".": "./dist/embedded-native.js" }, dependencies: nodeOnlyDependencies,
+  }, null, 2)}\n`);
+}
+
+async function buildElectron() {
+  run(pnpmCommand, ["--filter", "@openwork/automations", "build"]);
+  run(pnpmCommand, ["--filter", "@openwork/headless-threads", "build"]);
+  run(pnpmCommand, ["--filter", "openwork-server", "build"]);
+  // Preparation imports the memory plugin's built headless v2 client.
+  const { prepareNativePluginBundles } = await import("../electron/prepare-native-plugins.mjs");
+  await prepareNativePluginBundles({
+    outputDirectory: resolve(coworkerRoot, "resources", "native-plugins"),
+    dependencyDirectory: resolve(sidecarDir, `.native-plugin-sdk-${nativeRuntime.opencodeV2Version}`),
+  });
+  const { installOpencodeV2Binary } = await import(pathToFileURL(resolve(repoRoot, "apps/server/dist/opencode-v2-binary.js")).href);
+  const binary = await installOpencodeV2Binary(resolve(sidecarDir, ".verified-v2"), nativeRuntime.opencodeV2Version);
+  copyFileSync(binary, resolve(sidecarDir, process.platform === "win32" ? "opencode2.exe" : "opencode2"));
+  writeFileSync(resolve(sidecarDir, "versions.json"), `${JSON.stringify({
+    opencode2: { version: nativeRuntime.opencodeV2Version, platform: process.platform, arch: process.arch },
+  }, null, 2)}\n`);
   run(process.execPath, [
     resolve(repoRoot, "apps", "desktop", "scripts", "prepare-computer-use-helper.mjs"),
     "--force",
     "--outdir",
     helperDir,
   ], coworkerRoot);
-  run(pnpmCommand, ["--filter", "@openwork/automations", "build"]);
-  run(pnpmCommand, ["--filter", "@openwork/headless-threads", "build"]);
-  run(pnpmCommand, ["--filter", "openwork-server", "build"]);
   run(pnpmCommand, ["exec", "vite", "build"], coworkerRoot, { OPENWORK_ELECTRON_BUILD: "1" });
 
   rmSync(packagedElectronRoot, { recursive: true, force: true });
   mkdirSync(packagedElectronRoot, { recursive: true });
+  copyFileSync(resolve(coworkerRoot, "native-runtime.json"), resolve(packagedElectronRoot, "native-runtime.json"));
   run(pnpmCommand, [
     "exec",
     "esbuild",
@@ -53,7 +88,7 @@ function buildElectron() {
     "--target=node24",
     "--external:electron",
     "--external:@modelcontextprotocol/sdk",
-    "--external:opencode-chrome-devtools",
+    "--external:ws",
     `--outfile=${resolve(packagedElectronRoot, "main.mjs")}`,
   ], coworkerRoot);
   run(pnpmCommand, [
@@ -67,21 +102,8 @@ function buildElectron() {
   );
   copyFileSync(fileURLToPath(import.meta.resolve("@openwork/browser-tabs/preload")), resolve(packagedElectronRoot, "browser-content-preload.cjs"));
 
-  const serverDistDir = resolve(repoRoot, "apps", "server", "dist");
-  const constantsSource = resolve(repoRoot, "constants.json");
-  copyFileSync(constantsSource, resolve(serverDistDir, "constants.json"));
-  // Every top-level server module resolves the same packaged copy. New server
-  // modules (including engine preview selection) must not reach outside the asar.
-  for (const name of readdirSync(serverDistDir).filter((name) => name.endsWith(".js"))) {
-    const entry = resolve(serverDistDir, name);
-    const source = readFileSync(entry, "utf8");
-    const packaged = source.replace(/from\s+["']\.\.\/\.\.\/\.\.\/constants\.json["']/g, 'from "./constants.json"');
-    if (packaged !== source) writeFileSync(entry, packaged, "utf8");
-  }
-
-  rmSync(packagedServerRoot, { recursive: true, force: true });
-  cpSync(serverDistDir, resolve(packagedServerRoot, "dist"), { recursive: true });
-  copyFileSync(resolve(repoRoot, "apps", "server", "package.json"), resolve(packagedServerRoot, "package.json"));
+  copyFileSync(resolve(repoRoot, "packages/browser-tabs/THIRD-PARTY-NOTICES"), resolve(packagedElectronRoot, "THIRD-PARTY-NOTICES"));
+  stageNativeServer();
 
   for (const fileName of readdirSync(resolve(coworkerRoot, "electron")).filter((name) => name.endsWith(".mjs")).sort()) {
     run(process.execPath, ["--check", resolve(coworkerRoot, "electron", fileName)]);
@@ -92,36 +114,53 @@ function buildElectron() {
     ok: true,
     renderer: "apps/coworker/dist",
     electronMain: "apps/coworker/electron-dist/main.mjs",
-    server: "apps/coworker/server/dist/embedded.js",
+    server: "apps/coworker/server/dist/embedded-native.js",
     sidecars: "apps/coworker/resources/sidecars",
+    nativePlugins: "apps/coworker/resources/native-plugins",
     computerUseHelper: process.platform === "darwin" ? "apps/coworker/resources/helpers/OpenWork Computer Use.app" : null,
   }, null, 2)}\n`);
 }
 
 // pnpm 11 makes list recursive in workspaces even with --recursive=false.
 // Scope roots before the collector starts; keep the complete dependency depth.
-export function beforePack(context) {
+export async function beforePack(context) {
+  const { lstatSync } = await import("node:fs");
   process.env.pnpm_config_filter = "@openwork/coworker";
-  const arch = { 1: "x64", 3: "arm64", x64: "x64", arm64: "arm64" }[context.arch];
-  const engine = arch && opencodeTargetName(context.electronPlatformName, arch);
-  if (!engine) throw new Error(`Unsupported Coworker sidecar target: ${context.electronPlatformName}/${context.arch}`);
-  const metadata = `versions.json-${engine.slice("opencode-".length)}`;
-  // Select files before copying. Never mutate shared sidecar staging or ship a
-  // second generic executable; the runtime already prefers the qualified name.
-  const staging = resolve(context.packager.projectDir, "resources/sidecars");
-  for (const source of [engine, metadata]) {
-    if (!existsSync(resolve(staging, source))) throw new Error(`Missing Coworker target resource: ${source}`);
+  const platform = context.electronPlatformName;
+  const targetArch = { 1: "x64", 3: "arm64", x64: "x64", arm64: "arm64" }[context.arch];
+  if (!["darwin", "win32", "linux"].includes(platform) || !targetArch) {
+    throw new Error(`Unsupported Coworker sidecar target: ${platform}/${context.arch}`);
   }
-  const sidecars = [
-    // Directory copies retain electron-builder's Windows executable-signing
-    // transformer; its single-file copy fast path bypasses that transformer.
-    { from: staging, to: "sidecars", filter: [engine] },
-    { from: resolve(staging, metadata), to: "sidecars/versions.json" },
-  ];
-  // A multi-target invocation can reuse config after the preceding target.
-  context.packager.config.extraResources = [
-    ...context.packager.config.extraResources.filter((resource) => resource.to !== "sidecars" && !resource.to?.startsWith("sidecars/")),
-    ...sidecars,
+  const projectDir = context.packager.projectDir;
+  const staging = resolve(projectDir, "resources/sidecars");
+  const engine = platform === "win32" ? "opencode2.exe" : "opencode2";
+  for (const name of [engine, "versions.json"]) {
+    const stat = lstatSync(resolve(staging, name), { throwIfNoEntry: false });
+    if (!stat?.isFile() || stat.size === 0) throw new Error(`Missing nonempty Coworker native target resource: ${name}`);
+  }
+  const metadata = JSON.parse(readFileSync(resolve(staging, "versions.json"), "utf8"));
+  const sidecar = metadata?.opencode2;
+  const runtime = JSON.parse(readFileSync(resolve(projectDir, "native-runtime.json"), "utf8"));
+  if (runtime.opencodeV2Version !== nativeRuntime.opencodeV2Version ||
+      Object.keys(metadata).length !== 1 || sidecar?.version !== runtime.opencodeV2Version ||
+      sidecar.platform !== platform || sidecar.arch !== targetArch) {
+    throw new Error("The verified OpenCode v2 sidecar must match the exact version pin, target platform and architecture, with native-only metadata.");
+  }
+  // Select before copying, including repeated targets; never prune shared staging.
+  const config = context.packager.config;
+  for (const scope of [config, config[{ darwin: "mac", win32: "win", linux: "linux" }[platform]]]) {
+    if (!scope?.extraResources) continue;
+    const resources = Array.isArray(scope.extraResources) ? scope.extraResources : [scope.extraResources];
+    scope.extraResources = resources.filter((resource) => {
+      const destination = typeof resource === "string" ? resource : resource.to ?? resource.from;
+      return !destination?.replaceAll("\\", "/").split("/").some((part) => part === "sidecars" || part === "opencode-plugins");
+    });
+  }
+  config.extraResources = [
+    ...(config.extraResources ?? []),
+    // Directory copying retains Windows executable-signing transformations;
+    // electron-builder's single-file fast path bypasses that transformer.
+    { from: staging, to: "sidecars", filter: [engine, "versions.json"] },
   ];
 }
 
@@ -154,4 +193,4 @@ export default function afterPack(context, { runNative = spawnSync } = {}) {
   if (signature.error || signature.status !== 0) throw new Error("The packaged Computer Use helper signature is invalid.");
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) buildElectron();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await buildElectron();
