@@ -15,6 +15,7 @@ import {
 } from "../src/app/lib/openwork-server";
 import { createOpenworkServerStore } from "../src/react-app/domains/connections/openwork-server-store";
 import { buildOpenworkHealthHeaders } from "../src/react-app/kernel/server-provider";
+import { resolveDefaultServerUrl } from "../src/react-app/shell/providers";
 import {
   isStaleStoredDesktopConnection,
   resolveOpenworkConnection,
@@ -460,6 +461,8 @@ describe("non-gateway connection modes", () => {
         installWindow({ origin });
         hydrateOpenworkServerSettingsFromEnv();
         expect(readOpenworkServerSettings().urlOverride).toBe(`${origin}/api/openwork`);
+        expect(resolveDefaultServerUrl()).toBe(`${origin}/api/openwork/opencode`);
+        expect(new URL(`${resolveDefaultServerUrl()}/global/health`).href).toBe(`${origin}/api/openwork/opencode/global/health`);
         const connection = await resolveOpenworkConnection();
         expect(connection.normalizedBaseUrl).toBe(`${origin}/api/openwork`);
         expect(connection.resolvedToken).toBe("client-token");
@@ -600,6 +603,27 @@ describe("non-gateway connection modes", () => {
       expect(authUrl.origin).toBe("https://app.openworklabs.com");
       expect(authUrl.searchParams.get("desktopAuth")).toBe("1");
       expect(authUrl.searchParams.get("webAuth")).toBeNull();
+    } finally {
+      restoreEnv("VITE_DEN_API_BASE_URL", previous);
+    }
+  });
+
+  test("exact relative Den build pin follows the browser origin without relaxing input validation", () => {
+    const previous = process.env.VITE_DEN_API_BASE_URL;
+    try {
+      process.env.VITE_DEN_API_BASE_URL = "/api/den";
+      for (const origin of ["https://first.example.test", "https://second.example.test"]) {
+        installWindow({ origin });
+        const settings = readDenSettings();
+        expect(settings.apiBaseUrl).toBe(`${origin}/api/den`);
+        expect(createDenClient(settings).baseUrls.apiBaseUrl).toBe(`${origin}/api/den`);
+        expect(createDenClient({ baseUrl: settings.baseUrl }).baseUrls.apiBaseUrl).toBe(`${origin}/api/den`);
+        expect(resolveDenBaseUrls({ baseUrl: settings.baseUrl, apiBaseUrl: "https://explicit.example.test" }).apiBaseUrl).toBe("https://explicit.example.test");
+      }
+      for (const value of ["//other.example.test/api/den", "/api/other", "not a URL", ""]) {
+        process.env.VITE_DEN_API_BASE_URL = value;
+        expect(resolveDenBaseUrls({ baseUrl: "https://den.example.test" }).apiBaseUrl).toBe("https://den.example.test/api/den");
+      }
     } finally {
       restoreEnv("VITE_DEN_API_BASE_URL", previous);
     }

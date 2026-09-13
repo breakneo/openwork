@@ -101,9 +101,12 @@ const BUILD_DEN_REQUIRE_SIGNIN =
  * Read dynamically so tests can vary it; Vite inlines the env in real builds.
  */
 function readBuildDenApiBaseUrl(): string {
-  return (typeof import.meta !== "undefined" && typeof import.meta.env?.VITE_DEN_API_BASE_URL === "string"
+  const apiBaseUrl = (typeof import.meta !== "undefined" && typeof import.meta.env?.VITE_DEN_API_BASE_URL === "string"
     ? import.meta.env.VITE_DEN_API_BASE_URL
     : "").trim();
+  return apiBaseUrl === "/api/den" && typeof window !== "undefined"
+    ? new URL(apiBaseUrl, window.location.origin).href
+    : apiBaseUrl;
 }
 
 function readForceEnvDenSettings(): boolean {
