@@ -44,7 +44,7 @@ export interface HeadlessWebLaunchOptions {
   keepTokens?: boolean;
   rotateTokens?: boolean;
   env?: NodeJS.ProcessEnv;
-  browserOrigin?: string;
+  browserHostSuffix?: string;
 }
 
 export interface HeadlessWebHandle {
@@ -702,7 +702,7 @@ export async function launchHeadlessWeb(options: HeadlessWebLaunchOptions): Prom
   }
   const repoRoot = resolve(options.repoRoot);
   const env = options.env ?? process.env;
-  if (options.browserOrigin && (options.state !== "isolated" || env.OPENWORK_PUBLIC_HOST)) {
+  if (options.browserHostSuffix && (options.state !== "isolated" || env.OPENWORK_PUBLIC_HOST)) {
     throw new Error("External browser origins require isolated state and loopback runtime addresses.");
   }
   assertWorldName(options.name);
@@ -779,12 +779,12 @@ export async function launchHeadlessWeb(options: HeadlessWebLaunchOptions): Prom
   const headlessLogPath = runtimePaths.headlessLogPath;
   const openworkUrl = `http://${clientHost}:${openworkPort}`;
   const webUrl = `http://${clientHost}:${webPort}`;
-  const browserEnv = headlessBrowserEnvironment({ browserOrigin: options.browserOrigin, openworkUrl });
+  const browserEnv = headlessBrowserEnvironment({ browserHostSuffix: options.browserHostSuffix, openworkUrl });
   const denProxyEnabled = env.OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY === undefined
     ? true
     : readBool(env.OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY);
   const denTarget = denProxyEnabled ? normalizeDenTarget(env.OPENWORK_DEV_DEN_PROXY_TARGET) : null;
-  const denApiUrl = denTarget ? `${options.browserOrigin ?? webUrl}/api/den` : null;
+  const denApiUrl = denTarget ? (options.browserHostSuffix ? "/api/den" : `${webUrl}/api/den`) : null;
   const clientConnection = resolveHeadlessClientConnection({
     state: options.state,
     env,
@@ -866,7 +866,7 @@ export async function launchHeadlessWeb(options: HeadlessWebLaunchOptions): Prom
       host,
       port: openworkPort,
       configPath: serverConfigPath,
-      corsOrigins: buildHeadlessCorsOrigins({ webUrl: options.browserOrigin ?? webUrl, webPort }),
+      corsOrigins: buildHeadlessCorsOrigins({ webUrl, webPort }),
     }));
     const serverProcess = spawnLogged(serverLaunch.command, serverLaunch.args, headlessLogPath, repoRoot, headlessEnv);
     acquiredChildren.push(serverProcess);

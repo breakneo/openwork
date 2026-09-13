@@ -84,7 +84,7 @@ export async function bootAppWebWorld(
   const preview = await deps.preview(sandboxId, WEB_PORT, undefined, (lifetimeMinutes + 10) * 60);
   const runtime = await deps.remote(sandboxId, runtimeName, "/workspace", room.source, {
     env: { ...selectedEnv, OPENWORK_WEB_PORT: String(WEB_PORT), VITE_HOST: "0.0.0.0" },
-    browserOrigin: preview.browserOrigin,
+    browserHostSuffix: preview.browserHostSuffix,
   });
   stack.adopt(runtime, (owned) => owned.stop());
   if (new URL(runtime.webUrl).port !== String(WEB_PORT)) throw new Error("Private app-web preview port does not match its runtime.");

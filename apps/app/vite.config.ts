@@ -110,9 +110,12 @@ const headlessDenTarget = (process.env.OPENWORK_DEV_HEADLESS_DEN_TARGET ?? "").t
 
 export default defineConfig(({ command, isPreview }) => {
   const openworkProxy = devOpenworkProxy(command === "serve" && !isPreview ? process.env : {});
-  const headlessBrowserOrigin = Object.keys(openworkProxy).length > 0
-    ? new URL(process.env.OPENWORK_DEV_BROWSER_ORIGIN ?? "")
-    : null;
+  const headlessBrowserHostSuffix = Object.keys(openworkProxy).length > 0
+    ? process.env.OPENWORK_DEV_BROWSER_HOST_SUFFIX
+    : undefined;
+  if (headlessBrowserHostSuffix && !/^\.[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(headlessBrowserHostSuffix)) {
+    throw new Error("Invalid development browser host suffix.");
+  }
   return {
     base: isElectronPackagedBuild ? "./" : "/",
     define: {
@@ -145,10 +148,9 @@ export default defineConfig(({ command, isPreview }) => {
     server: {
       port: devPort,
       strictPort: true,
-      ...(allowedHosts.size > 0 || headlessBrowserOrigin
-        ? { allowedHosts: [...allowedHosts, ...(headlessBrowserOrigin ? [headlessBrowserOrigin.hostname] : [])] }
+      ...(allowedHosts.size > 0 || headlessBrowserHostSuffix
+        ? { allowedHosts: [...allowedHosts, ...(headlessBrowserHostSuffix ? [headlessBrowserHostSuffix] : [])] }
         : {}),
-      ...(headlessBrowserOrigin ? { hmr: { host: headlessBrowserOrigin.hostname, protocol: "wss", clientPort: 443 } } : {}),
       proxy: {
         ...(headlessDenTarget ? { "/api/den": { target: headlessDenTarget, changeOrigin: true } } : {}),
         ...openworkProxy,

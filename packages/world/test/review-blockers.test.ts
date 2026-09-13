@@ -54,19 +54,26 @@ test("legacy receipt adoption requires unchanged recipe and default local invoca
 });
 
 test("outputs mask secrets unless reveal is explicitly requested in text or JSON", async () => {
+  const privateUrl = new URL(["https:", "", ["private", "example", "test"].join(".")].join("/")).origin;
   const root = await mkdtemp(join(tmpdir(), "world-outputs-review-"));
   const previous = process.env.OPENWORK_WORLD_SNAPSHOT_DIR;
   try {
     process.env.OPENWORK_WORLD_SNAPSHOT_DIR = root;
     await writeFile(join(root, "probe.json"), JSON.stringify({ version: 2, kind: "script", name: "probe", createdAt: "now", pid: process.pid,
-      sourcePath: "probe.ts", outputs: { webUrl: "https://private.example.test", placement: "daytona" }, outputMeta: { webUrl: { secret: true } } }));
+      sourcePath: "probe.ts", outputs: { webUrl: privateUrl, placement: "daytona" }, outputMeta: { webUrl: { secret: true } } }));
     for (const json of [false, true]) {
       for (const reveal of [false, true]) {
         const lines: string[] = [];
         assert.equal(await main(["outputs", "probe", ...(json ? ["--json"] : []), ...(reveal ? ["--reveal"] : [])],
           { cwd: root, worldsDirectory: root, print: (line) => lines.push(line) }), 0);
-        assert.equal(lines.join("\n").includes("https://private.example.test"), reveal);
-        assert.match(lines.join("\n"), /daytona/);
+        const expected = reveal ? privateUrl : "••••••••";
+        if (json) {
+          assert.deepEqual(JSON.parse(lines.join("\n")).outputs, {
+            webUrl: { value: expected, secret: true }, placement: { value: "daytona", secret: false },
+          });
+        } else {
+          assert.deepEqual(lines, [`webUrl  ${expected}`, "placement  daytona"]);
+        }
       }
     }
   } finally {

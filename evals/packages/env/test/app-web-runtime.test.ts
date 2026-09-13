@@ -47,7 +47,7 @@ function fakeWorld(failure?: "launch" | "verify" | "source") {
     preview: async (_id, _port, _exec, expires) => {
       calls.push("preview");
       assert.equal(expires, 7800);
-      return { browserOrigin: "https://5178-private.example.test", unsignedOrigin: "https://5178-owned-id.example.test" };
+      return { browserOrigin: "https://5178-private.example.test", unsignedOrigin: "https://5178-owned-id.example.test", browserHostSuffix: ".example.test" };
     },
     verify: async () => { calls.push("verify"); if (failure === "verify") throw new Error("security prerequisite"); },
     remote: async (id, name, workspace, receipt, options) => {
@@ -56,7 +56,11 @@ function fakeWorld(failure?: "launch" | "verify" | "source") {
       assert.match(name, /^app-web--test-stage-/);
       assert.equal(workspace, "/workspace");
       assert.equal(receipt.actualSha, ref);
-      assert.equal(options?.browserOrigin, "https://5178-private.example.test");
+      assert.deepEqual(options, {
+        browserHostSuffix: ".example.test",
+        env: { OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY: "1", OPENWORK_DEV_DEN_PROXY_TARGET: "https://app.openworklabs.com",
+          VITE_DISABLE_OPENWORK_MODELS: "0", OPENWORK_WEB_PORT: "5178", VITE_HOST: "0.0.0.0" },
+      });
       assert.equal(options?.env?.OPENWORK_TOKEN, undefined);
       assert.equal(options?.env?.OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY, "1");
       if (failure === "launch") throw new Error("launch failed");

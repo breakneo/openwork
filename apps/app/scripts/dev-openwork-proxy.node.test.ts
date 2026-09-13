@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 import { createServer as createViteServer, loadConfigFromFile } from "vite";
 import { devOpenworkProxy } from "../dev-openwork-proxy.ts";
 
-test("OpenWork proxy is development-only and validates loopback target and signed origin", () => {
-  const env = { OPENWORK_DEV_MODE: "1", OPENWORK_DEV_OPENWORK_PROXY_TARGET: "http://127.0.0.1:8778", OPENWORK_DEV_BROWSER_ORIGIN: "https://5178-signed.example.test" };
+test("OpenWork proxy is development-only and needs only a loopback target", () => {
+  const env = { OPENWORK_DEV_MODE: "1", OPENWORK_DEV_OPENWORK_PROXY_TARGET: "http://127.0.0.1:8778" };
   assert.deepEqual(devOpenworkProxy({ ...env, OPENWORK_DEV_MODE: "0" }), {});
   assert.deepEqual(devOpenworkProxy({ OPENWORK_DEV_MODE: "1" }), {});
   const proxy = devOpenworkProxy(env)["/api/openwork"];
@@ -17,17 +17,16 @@ test("OpenWork proxy is development-only and validates loopback target and signe
   assert(!("headers" in proxy));
   assert(!("configure" in proxy));
   assert.throws(() => devOpenworkProxy({ ...env, OPENWORK_DEV_OPENWORK_PROXY_TARGET: "https://outside.example.test" }));
-  assert.throws(() => devOpenworkProxy({ ...env, OPENWORK_DEV_BROWSER_ORIGIN: "https://example.test?token=secret" }));
 });
 
 test("Vite same-origin proxy preserves client bearer auth on HTTP and WS without host token injection", async () => {
-  const received: Array<{ url?: string; authorization?: string; hostToken?: string | string[] }> = [];
+  const received: Array<{ url?: string; authorization?: string; host?: string; hostToken?: string | string[] }> = [];
   const backend = createServer((req, res) => {
-    received.push({ url: req.url, authorization: req.headers.authorization, hostToken: req.headers["x-openwork-host-token"] });
+    received.push({ url: req.url, authorization: req.headers.authorization, host: req.headers.host, hostToken: req.headers["x-openwork-host-token"] });
     res.end("backend");
   });
   backend.on("upgrade", (req, socket) => {
-    received.push({ url: req.url, authorization: req.headers.authorization, hostToken: req.headers["x-openwork-host-token"] });
+    received.push({ url: req.url, authorization: req.headers.authorization, host: req.headers.host, hostToken: req.headers["x-openwork-host-token"] });
     socket.end("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
   });
   await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
@@ -36,7 +35,7 @@ test("Vite same-origin proxy preserves client bearer auth on HTTP and WS without
   const vite = await createViteServer({
     configFile: false, logLevel: "silent", server: { host: "127.0.0.1", port: 0,
       proxy: devOpenworkProxy({ OPENWORK_DEV_MODE: "1", OPENWORK_DEV_OPENWORK_PROXY_TARGET: `http://127.0.0.1:${address.port}`,
-        OPENWORK_DEV_BROWSER_ORIGIN: "https://5178-signed.example.test", OPENWORK_HOST_TOKEN: "must-not-inject" }),
+        OPENWORK_HOST_TOKEN: "must-not-inject" }),
     },
   });
   try {
@@ -55,9 +54,9 @@ test("Vite same-origin proxy preserves client bearer auth on HTTP and WS without
       req.end();
     });
     assert.deepEqual(received, [
-      { url: "/probe?x=1", authorization: "Bearer client", hostToken: undefined },
-      { url: "/unauthenticated", authorization: undefined, hostToken: undefined },
-      { url: "/socket", authorization: "Bearer ws-client", hostToken: undefined },
+      { url: "/probe?x=1", authorization: "Bearer client", host: `127.0.0.1:${address.port}`, hostToken: undefined },
+      { url: "/unauthenticated", authorization: undefined, host: `127.0.0.1:${address.port}`, hostToken: undefined },
+      { url: "/socket", authorization: "Bearer ws-client", host: `127.0.0.1:${address.port}`, hostToken: undefined },
     ]);
   } finally {
     await vite.close();
@@ -65,18 +64,18 @@ test("Vite same-origin proxy preserves client bearer auth on HTTP and WS without
   }
 });
 
-test("source Vite accepts the exact preview host and pins HMR to HTTPS rather than localhost fallback", async () => {
+test("source Vite accepts a nonsecret host suffix and lets HMR derive the current location", async () => {
   const selected = {
     OPENWORK_DEV_MODE: "1", OPENWORK_DEV_OPENWORK_PROXY_TARGET: "http://127.0.0.1:8778",
-    OPENWORK_DEV_BROWSER_ORIGIN: "https://5178-signed.example.test", OPENWORK_DEV_HEADLESS_DEN_TARGET: "https://den.example.test",
+    OPENWORK_DEV_BROWSER_HOST_SUFFIX: ".example.test", OPENWORK_DEV_HEADLESS_DEN_TARGET: "https://den.example.test",
   };
   const previous = new Map(Object.keys(selected).map((key) => [key, process.env[key]]));
   Object.assign(process.env, selected);
   try {
     const loaded = await loadConfigFromFile({ command: "serve", mode: "development" }, fileURLToPath(new URL("../vite.config.ts", import.meta.url)));
     assert(loaded);
-    assert.deepEqual(loaded.config.server?.hmr, { host: "5178-signed.example.test", protocol: "wss", clientPort: 443 });
-    assert(loaded.config.server?.allowedHosts !== true && loaded.config.server?.allowedHosts?.includes("5178-signed.example.test"));
+    assert.equal(loaded.config.server?.hmr, undefined);
+    assert(loaded.config.server?.allowedHosts !== true && loaded.config.server?.allowedHosts?.includes(".example.test"));
     assert(loaded.config.server?.proxy?.["/api/openwork"]);
     assert(loaded.config.server?.proxy?.["/api/den"]);
     for (const environment of [{ command: "build", mode: "production" }, { command: "serve", mode: "production", isPreview: true }] satisfies Array<import("vite").ConfigEnv>) {

@@ -447,6 +447,29 @@ describe("non-gateway connection modes", () => {
     expect(connection.source).toBe("same-origin");
   });
 
+  test("relative preview backend resolves only in the browser and preserves client credentials", async () => {
+    const keys = ["VITE_OPENWORK_URL", "VITE_OPENWORK_PORT", "VITE_OPENWORK_TOKEN", "VITE_OPENWORK_HOST_TOKEN", "VITE_OPENWORK_FORCE_ENV_SETTINGS"];
+    const previous = new Map(keys.map((key) => [key, process.env[key]]));
+    process.env.VITE_OPENWORK_URL = "/api/openwork";
+    process.env.VITE_OPENWORK_PORT = "443";
+    process.env.VITE_OPENWORK_TOKEN = "client-token";
+    delete process.env.VITE_OPENWORK_HOST_TOKEN;
+    process.env.VITE_OPENWORK_FORCE_ENV_SETTINGS = "1";
+    try {
+      for (const origin of ["https://first.example.test", "https://second.example.test"]) {
+        installWindow({ origin });
+        hydrateOpenworkServerSettingsFromEnv();
+        expect(readOpenworkServerSettings().urlOverride).toBe(`${origin}/api/openwork`);
+        const connection = await resolveOpenworkConnection();
+        expect(connection.normalizedBaseUrl).toBe(`${origin}/api/openwork`);
+        expect(connection.resolvedToken).toBe("client-token");
+        expect(readOpenworkServerSettings().hostToken).toBeUndefined();
+      }
+    } finally {
+      for (const [key, value] of previous) restoreEnv(key, value);
+    }
+  });
+
   test("force-env settings overwrite stale localStorage openwork-server credentials", () => {
     const previous = {
       url: process.env.VITE_OPENWORK_URL,

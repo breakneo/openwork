@@ -87,6 +87,8 @@ test("app-web CLI exposes a private human browser URL and down deletes only its 
       assert.equal(state.htmlHasVite, true);
       assert.equal(state.asset, 200);
       assert.equal(state.webSocket, true);
+      assert.equal(state.sourceOriginFree, true);
+      assert.equal(state.relativeBackend, true);
       assert.equal(state.health, 200);
       assert.equal(state.tokenPresent, true);
       assert.equal(state.hostTokenPresent, false);
@@ -96,7 +98,7 @@ test("app-web CLI exposes a private human browser URL and down deletes only its 
       assert.equal(state.screenshotSafe, true, "Sensitive browser details must not enter screenshot evidence.");
       await screenshot(witness.surface);
       evidence.recordAssertionEvidence("The private human URL serves real app UI, assets, client-authenticated backend and WebSockets",
-        "An external HTTPS navigation renders app controls. Signed HTML/assets/HMR and backend checks pass; unsigned HTTP/assets/WebSockets are denied. Client bearer access reads a workspace but neither anonymous nor client access grants host privileges. Production browser endpoints are blocked and the Den proxy is disabled; no Cloud sign-in is claimed.", true);
+        "An external HTTPS navigation renders app controls. Served app/HMR source contains no signed hostname and the backend env URL is relative. Signed HTML/assets/HMR and backend checks pass; unsigned HTTP/assets/WebSockets are denied. Client bearer access reads a workspace but neither anonymous nor client access grants host privileges. Production browser endpoints are blocked and the Den proxy is disabled; no Cloud sign-in is claimed.", true);
     }
     assert.equal(await up(controlStage), 0);
     const control = await snapshot(controlStage);

@@ -24,7 +24,12 @@ export async function appWebPreviewWitness(options: { sandboxId: string; browser
             const hostTokenPresent = Boolean(localStorage.getItem("openwork.server.hostToken"));
             const expectedBase = `${location.origin}/api/openwork`;
             const client = await fetch("/@vite/client", { signal: AbortSignal.timeout(10000) });
-            const wsToken = (await client.text()).match(/\bwsToken\s*=\s*"([a-zA-Z0-9_-]+)"/)?.[1];
+            const clientSource = await client.text();
+            const source = await fetch("/src/app/lib/openwork-server.ts", { signal: AbortSignal.timeout(10000) });
+            const appSource = await source.text();
+            const sourceOriginFree = source.ok && !clientSource.includes(location.hostname) && !appSource.includes(location.hostname);
+            const relativeBackend = /"VITE_OPENWORK_URL"\s*:\s*"\/api\/openwork"/.test(appSource);
+            const wsToken = clientSource.match(/\bwsToken\s*=\s*"([a-zA-Z0-9_-]+)"/)?.[1];
             const webSocket = wsToken ? await new Promise<boolean>((done) => {
               const socket = new WebSocket(`${location.origin.replace(/^https:/, "wss:")}/?token=${wsToken}`, "vite-hmr");
               const timer = setTimeout(() => finish(false), 10000);
@@ -54,7 +59,7 @@ export async function appWebPreviewWitness(options: { sandboxId: string; browser
               && text.length > 30 && !document.querySelector("vite-error-overlay");
             return {
               externalHttps: location.protocol === "https:" && !["localhost", "127.0.0.1"].includes(location.hostname),
-              sameOriginBackend: base === expectedBase,
+              sameOriginBackend: base === expectedBase, sourceOriginFree, relativeBackend,
               tokenPresent: token.length > 0, hostTokenPresent, rendered, screenshotSafe, webSocket,
               html: html.status, htmlHasVite: (await html.text()).includes("/@vite/client"), asset: client.status,
               health: health.status, unauthenticated: unauthenticated.status, authenticated: authenticated.status,

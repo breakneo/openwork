@@ -83,21 +83,28 @@ browser links. Source SHA and placement are explicit outputs. Private HTTP,
 assets and WebSocket access must pass the launch checks; failures delete the
 owned sandbox, never fall back to public exposure. The source dev proxy preserves
 client bearer auth and never injects host auth. Builds and production preview
-servers do not enable this proxy.
+servers do not enable this proxy. Checked-out source receives only the non-secret
+preview host suffix for Vite allowedHosts, never the signed origin. HMR derives
+its host and protocol from the browser location; `/api/openwork` resolves against
+that same origin in the browser. Signed URLs stay in the trusted launcher,
+witness and private outputs.
 
 Do not claim sign-in is verified. Production handoff rules are unchanged and
 arbitrary preview-origin auto-return is not approved. The existing app sign-in
 surface has **Paste sign-in code**; if the existing Den flow supplies a one-time
 code, paste it directly there. Do not fabricate activation/bootstrap state.
 App-web defaults to two hours from readiness; optionally pass `--lifetime <10-1430>`
-after `--`. Its signed URL is issued before runtime launch for Vite HMR, with the
+after `--`. Its signed URL is issued by the trusted launcher before runtime launch, with the
 lifetime plus a ten-minute startup buffer (within Daytona's 24-hour maximum).
 Startup exceeding that buffer fails closed. `expires` is the authoritative world
 deadline from readiness; `previewExpires` is the conservative URL deadline from
 issuance. The URL credential can outlive the world timer, but sandbox deletion
 invalidates access. World expiry or `down` tears
-down the owned runtime and sandbox. Always explicitly stop when finished; the
-ledger allows scoped cleanup after a driver crash. The preset update helper below
+down the owned runtime and sandbox while the owning driver is running. Always
+explicitly stop when finished. Abrupt driver crashes can leave a sandbox behind:
+ledger ownership is not authenticated, so no Daytona ledger reaper is registered.
+Manual cleanup must independently verify ownership before deleting a sandbox.
+The preset update helper below
 does not update app-web; use a new stage on the next reviewed SHA instead.
 
 Daytona documents signed hosts as `{port}-{token}.{proxyDomain}`, not sandbox-ID

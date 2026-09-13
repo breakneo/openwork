@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parsePrivatePreview, privateSandboxId, privateWebPreview, verifyPrivateWebPreview } from "../src/private-web-preview.ts";
 
-const preview = { browserOrigin: "https://5178-signed.example.test", unsignedOrigin: "https://5178-sandbox-id.example.test" };
+const preview = { browserOrigin: "https://5178-signed.example.test", unsignedOrigin: "https://5178-sandbox-id.example.test", browserHostSuffix: ".example.test" };
 const info = { code: 0, stdout: JSON.stringify({ id: "sandbox-id", public: false, toolboxProxyUrl: "https://example.test/toolbox" }), stderr: "" };
 
 test("private preview requires a hostname-bound credential and never accepts public or query-token URLs", () => {

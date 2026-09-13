@@ -1256,7 +1256,9 @@ export function hydrateOpenworkServerSettingsFromEnv() {
     let changed = false;
 
     if (envUrl && (forceEnvSettings || !current.urlOverride)) {
-      const normalized = normalizeOpenworkServerUrl(envUrl);
+      const normalized = normalizeOpenworkServerUrl(
+        envUrl === "/api/openwork" ? new URL(envUrl, window.location.origin).href : envUrl,
+      );
       if (normalized && normalized !== current.urlOverride) {
         next.urlOverride = normalized;
         changed = true;

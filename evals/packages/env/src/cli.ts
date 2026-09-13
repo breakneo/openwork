@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "mysql2/promise";
-import { appWebDaytonaReaper, main as runWorldCli, parseWorldArgs, type PreflightCheck, type Reaper } from "@openwork/world";
+import { main as runWorldCli, parseWorldArgs, type PreflightCheck, type Reaper } from "@openwork/world";
 import { DEFAULT_MYSQL_URL, localMysqlIsRunning, localRedisIsRunning } from "./place.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
@@ -82,6 +82,6 @@ export function main(argv = process.argv.slice(2)): Promise<number> {
     cwd: REPO_ROOT,
     worldsDirectory: WORLDS_DIRECTORY,
     preflight: [dockerCheck, mysqlCheck, redisCheck],
-    reapers: { "mysql-db": dropEphemeralDatabase, "app-web-daytona": appWebDaytonaReaper },
+    reapers: { "mysql-db": dropEphemeralDatabase },
   });
 }

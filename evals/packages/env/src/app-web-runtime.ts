@@ -21,7 +21,7 @@ export interface AppWebRuntime {
 
 export interface AppWebRuntimeOptions {
   env?: Record<string, string>;
-  browserOrigin?: string;
+  browserHostSuffix?: string;
 }
 
 function executableEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -78,7 +78,7 @@ export async function startLocalRuntime(worldName: string, workspaceRoot: string
       name: worldName,
       state: "isolated",
       workspace: workspaceRoot,
-      browserOrigin: options.browserOrigin,
+      browserHostSuffix: options.browserHostSuffix,
       env: { ...executableEnvironment(process.env), ...isolatedRuntimeEnvironment(fixtureRoot), ...options.env },
     });
     return { webUrl: runtime.manifest.webUrl, openworkUrl: runtime.manifest.openworkUrl, runtimeDirectory, fixtureRoot, source: null, stop: () => runtime.stop() };
@@ -142,7 +142,7 @@ for (const tool of ["bun", "opencode"]) {
 executable.PATH = [toolBin, executable.PATH].filter(Boolean).join(":");
 const handle = await launchHeadlessWeb({
   repoRoot: input.repoRoot, name: input.name, state: "isolated", workspace: input.workspace,
-  browserOrigin: input.browserOrigin, env: { ...executable, ...input.env },
+  browserHostSuffix: input.browserHostSuffix, env: { ...executable, ...input.env },
 });
 await handle.detach();
 console.log(JSON.stringify({ webUrl: handle.manifest.webUrl, openworkUrl: handle.manifest.openworkUrl, runtimeManifestPath: handle.manifest.runtimeManifestPath }));
@@ -168,7 +168,7 @@ export async function startRemoteRuntime(sandbox: string, worldName: string, wor
     directories: [workspaceRoot, ...runtimeDirectories(fixtureRoot)],
     env: { ...isolatedRuntimeEnvironment(fixtureRoot), ...options.env },
     executableEnvKeys: EXECUTABLE_ENV_KEYS,
-    fixtureRoot, name: worldName, repoRoot: "/workspace", workspace: workspaceRoot, browserOrigin: options.browserOrigin,
+    fixtureRoot, name: worldName, repoRoot: "/workspace", workspace: workspaceRoot, browserHostSuffix: options.browserHostSuffix,
   }, `launch remote app-web runtime ${worldName}`, 120_000);
   const receipt = parseRemoteRuntime(output);
   if (receipt.runtimeManifestPath !== posix.join(runtimeDirectory, "runtime.json")) throw new Error("Remote app-web runtime manifest mismatch.");

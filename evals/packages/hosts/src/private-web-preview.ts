@@ -13,7 +13,7 @@ export async function privateSandboxId(sandbox: string, exec: DaytonaExec = defa
   return info.id;
 }
 
-export function parsePrivatePreview(output: string, sandboxId: string, port: number): { browserOrigin: string; unsignedOrigin: string } {
+export function parsePrivatePreview(output: string, sandboxId: string, port: number): { browserOrigin: string; unsignedOrigin: string; browserHostSuffix: string } {
   const match = output.match(/https:\/\/[^\s"'<>)]+/);
   if (!match) throw new Error("Daytona did not return a signed preview origin.");
   const url = new URL(match[0]);
@@ -23,7 +23,7 @@ export function parsePrivatePreview(output: string, sandboxId: string, port: num
     || /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(label.slice(`${port}-`.length))) {
     throw new Error("Security prerequisite: app-web requires a port-bound signed hostname, not a query token or public URL.");
   }
-  return { browserOrigin: url.origin, unsignedOrigin: `https://${port}-${sandboxId}.${domain.join(".")}` };
+  return { browserOrigin: url.origin, unsignedOrigin: `https://${port}-${sandboxId}.${domain.join(".")}`, browserHostSuffix: `.${domain.join(".")}` };
 }
 
 export async function privateWebPreview(sandboxId: string, port: number, exec: DaytonaExec = defaultDaytonaExec, expiresInSeconds = 3600) {
