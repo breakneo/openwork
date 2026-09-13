@@ -15,6 +15,13 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves its recipient without disp
   expect(draftRoutingPrompt).not.toContain(world.connectionId);
   await agent.send(draftRoutingPrompt);
   await user.see({ text: draftRoutingReply }, { timeoutMs: 120_000 });
+  const modelRequests = (await world.den.mocks.slack.agentRequests({ promptMarker: draftRoutingPrompt }))
+    .filter(request => request.kind === "tool" || request.kind === "final");
+  expect(modelRequests.length).toBeGreaterThan(0);
+  for (const request of modelRequests) {
+    expect(request.advertisedToolNames?.some(name => name.endsWith("execute_capability"))).toBe(true);
+    expect(request.advertisedToolNames?.some(name => name.includes("resolve_recipient") || name.includes("other_server_helper"))).toBe(false);
+  }
   await probe.eventually(() => world.reports(), { within: 30_000, label: "SDK draft received launch result", until: values => values.some(value => value.result !== null) });
   await user.screenshot();
   await world.resolveRecipient();

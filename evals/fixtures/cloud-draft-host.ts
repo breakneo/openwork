@@ -56,10 +56,14 @@ export async function reconcileDraftHost(value: unknown) {
       : null;
     const details = isRecord(body.details) ? body.details : {};
     const firstFailure = isRecord(body.firstFailure) ? body.firstFailure : null;
+    const engine = isRecord(body.engine) ? body.engine : {};
+    const desired = isRecord(body.desired) ? body.desired : {};
     return {
       status: response.status, phase: sanitize(body.phase), diagnostic: sanitize(body.connectCatalogDiagnostic),
       error: sanitize(body.error), code: sanitize(body.code), message: sanitize(body.message),
       required: sanitize(details.required), scope: sanitize(details.scope),
+      engineStatus: sanitize(engine.status), desiredPresent: desired.present === true,
+      appHostAuthorizationReady: body.appHostAuthorizationReady === true,
       firstFailure: firstFailure ? {
         code: sanitize(firstFailure.code), stage: sanitize(firstFailure.stage), message: sanitize(firstFailure.message),
         recommendedAction: sanitize(firstFailure.recommendedAction), retryable: firstFailure.retryable === true,

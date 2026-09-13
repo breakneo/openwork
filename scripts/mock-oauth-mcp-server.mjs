@@ -554,7 +554,8 @@ async function handleAgentCompletion(req, res, entry) {
   const workload = matched[0];
   const scopedMessages = workload?.latestUserTurn ? messages.slice(latestUserIndex + 1) : messages;
   const completedTools = scopedMessages.filter((message) => message && typeof message === "object" && message.role === "tool").length;
-  const baseRequest = { model, reasoningEffort: body.reasoning_effort ?? null, matchedMarkers, completedTools };
+  const advertisedToolNames = (Array.isArray(body.tools) ? body.tools : []).map((tool) => tool?.function?.name).filter((name) => typeof name === "string");
+  const baseRequest = { model, reasoningEffort: body.reasoning_effort ?? null, matchedMarkers, completedTools, advertisedToolNames };
 
   if (!Array.isArray(body.tools) || body.tools.length === 0) {
     entry.agentCompletion = { ...baseRequest, kind: "utility", promptMarker: matchedMarkers[0] ?? null, toolName: null, arguments: {} };

@@ -214,7 +214,19 @@ export async function cloudDraftRouting(seed: Seed) {
   const workspace = await seed.workspace(app, workspacePath);
   await configureProvider(seed, app, workspace.workspaceId, "draft-model", "draft-model", {
     provider: { "draft-model": { npm: "@ai-sdk/openai-compatible", name: "Draft model fixture", options: { baseURL: `${den.mocks.slack.url}/v1`, apiKey: "sk-draft-fixture" }, models: { "draft-model": { name: "Draft model fixture" } } } },
+    mcp: { "openwork-cloud": { type: "remote", url: `${den.ref.apiUrl}/mcp/agent`, enabled: true, oauth: false,
+      headers: { Authorization: `Bearer ${field(credentials, "token")}` } } },
   });
+  const gateway = await seed.evalIn(app, browserScript(async (workspaceId) => {
+    const base = "http://127.0.0.1:" + localStorage.getItem("openwork.server.port");
+    const response = await fetch(base + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/mcp", {
+      headers: { Authorization: "Bearer " + localStorage.getItem("openwork.server.token") },
+      signal: AbortSignal.timeout(30_000),
+    });
+    const value = await response.json();
+    return { status: response.status, gatewayStatus: typeof value?.["openwork-cloud"]?.status === "string" ? value["openwork-cloud"].status : null };
+  }, [workspace.workspaceId]), { awaitPromise: true, timeoutMs: 35_000 });
+  if (record(gateway).status !== 200 || record(gateway).gatewayStatus !== "connected") throw new Error(`Fixture gateway did not connect during engine configuration: ${JSON.stringify(gateway)}`);
   const session = await seed.session(app, { title: "Slack draft review" });
   const hostSetup = {
     name: app.handle.name, openworkUrl: app.openworkUrl, workspaceRoot: app.workspaceRoot,
