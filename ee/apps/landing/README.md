@@ -83,6 +83,15 @@ The desktop feedback URL already supplies OS and version information when
 available; this change records that submitted context without inferring missing
 values. Name/email remain on the customer, with the submitted values preserved in metadata. Existing threads are not backfilled.
 
+App feedback links explicitly identify the client runtime as `web` or `desktop`.
+Web feedback uses `web@<build SHA>` as the app version, identifying the UI bundle
+independently of the desktop package and connected server. The build SHA comes
+from Vite's build environment or local Git checkout; Vercel supplies
+`VERCEL_GIT_COMMIT_SHA`, and the Daytona snapshot builder passes `OPENWORK_GIT_SHA`
+into Docker. Custom builds can set `VITE_OPENWORK_BUILD_SHA`. Without a build SHA,
+web feedback omits the app version. Desktop feedback uses its release version and
+omits `0.0.0` development placeholders. Links without a deployment leave it unset.
+
 The forms no longer use Resend, SMTP, or internal feedback recipient overrides.
 Without `PLAIN_API_KEY`, submissions return an unavailable response; this also
 applies in local development. Use a separate Plain workspace/key for development

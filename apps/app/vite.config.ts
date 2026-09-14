@@ -69,6 +69,7 @@ const buildAppVersion =
 const buildSha = firstNonEmpty([
   process.env.VITE_OPENWORK_BUILD_SHA,
   process.env.OPENWORK_GIT_SHA,
+  process.env.VERCEL_GIT_COMMIT_SHA,
   process.env.GITHUB_SHA,
 ]) ?? readLocalGitSha();
 const shortBuildSha = buildSha ? buildSha.slice(0, 7) : "";
