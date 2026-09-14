@@ -31,22 +31,6 @@ function sanitizeContext(input: FeedbackContext | undefined) {
   };
 }
 
-function formatDiagnosticsSummary(context: ReturnType<typeof sanitizeContext>) {
-  const osLabel = [context.osName, context.osVersion].filter(Boolean).join(" ");
-  const lines = [
-    ["Source", context.source],
-    ["Entrypoint", context.entrypoint],
-    ["Deployment", context.deployment],
-    ["App version", context.appVersion],
-    ["OpenWork server", context.openworkServerVersion],
-    ["OpenCode", context.opencodeVersion],
-    ["OS", osLabel],
-    ["Platform", context.platform],
-  ].filter(([, value]) => value);
-
-  return lines.map(([label, value]) => `${label}: ${value}`).join("\n");
-}
-
 export async function POST(request: Request) {
   const originCheck = validateTrustedOrigin(request);
   if (!originCheck.ok) {
@@ -115,7 +99,6 @@ export async function POST(request: Request) {
   }
 
   const context = sanitizeContext(payload.context);
-  const diagnosticsSummary = formatDiagnosticsSummary(context);
   const submittedAt = new Date().toISOString();
 
   const apiKey = process.env.PLAIN_API_KEY?.trim();
@@ -145,13 +128,9 @@ export async function POST(request: Request) {
     const threadResult = await plain.createThread({
       customerIdentifier: { customerId: customerResult.customer.id },
       title: mode === "contact" ? "OpenWork contact message" : "OpenWork app feedback",
-      threadFields: buildFeedbackThreadFields({ ...context, mode, submittedAt }),
+      threadFields: buildFeedbackThreadFields({ ...context, name, email, mode, submittedAt }),
       components: [
         { componentPlainText: { plainText: message } },
-        { componentPlainText: { plainText: `Submitted by: ${name}\nEmail: ${email}` } },
-        { componentPlainText: {
-          plainText: [diagnosticsSummary, `Submitted: ${submittedAt}`].filter(Boolean).join("\n"),
-        } },
       ],
     });
     if (threadResult.error || !threadResult.thread?.id) {

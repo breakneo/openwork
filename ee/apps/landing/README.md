@@ -17,8 +17,8 @@
 
 Both `/contact` and `/feedback` submit to `/api/app-feedback`. Following
 [Plain's contact form flow](https://www.plain.com/docs/product/channels/contact-forms),
-the server upserts a customer by email and creates a thread with the message,
-submitted name, diagnostic context, and submission time. Existing customer
+the server upserts a customer by email and creates a thread containing only the
+user's message. Diagnostic context is stored in thread fields. Existing customer
 profiles are preserved, and new email addresses are marked unverified.
 The SDK transport sends minimal mutations selecting only IDs and error codes.
 Avoid the generated `PlainClient.mutation` helpers here: they also select related
@@ -44,25 +44,22 @@ Before enabling the forms in a deployment:
 
 #### Structured feedback context
 
-Submissions store the old email template's diagnostic context as
-[Plain thread fields](https://www.plain.com/docs/product/platform/threads/thread-fields),
-alongside the readable context in the first message. Empty or `unknown` values
-are omitted. OS versions and app/server versions stay as text so version numbers
-and release suffixes are preserved. The submission time uses a Date field.
+The initial thread entry contains only the user's message. Available OS, app
+version, and deployment are stored as separate [Plain thread fields](https://www.plain.com/docs/product/platform/threads/thread-fields)
+for filtering. Everything else is stored as formatted JSON in a single Text field.
 
-| Input | Plain field key | Type |
+| Plain field key | Label | Type |
 | --- | --- | --- |
-| Form mode | `openwork_form_mode` | Text |
-| Source | `openwork_source` | Text |
-| Entrypoint | `openwork_entrypoint` | Text |
-| Deployment | `openwork_deployment` | Text |
-| App version | `openwork_app_version` | Text |
-| OpenWork server version | `openwork_server_version` | Text |
-| OpenCode version | `openwork_opencode_version` | Text |
-| OS name | `openwork_os_name` | Text |
-| OS version | `openwork_os_version` | Text |
-| Platform | `openwork_platform` | Text |
-| Submitted at | `openwork_submitted_at` | Date |
+| `openwork_os_name` | OpenWork OS | Text |
+| `openwork_app_version` | OpenWork app version | Text |
+| `openwork_deployment` | OpenWork deployment | Text |
+| `openwork_metadata` | OpenWork metadata | Text (JSON) |
+
+Metadata includes the submitted name/email, form mode, source, entrypoint,
+OpenWork server and OpenCode versions, OS version, platform, and submission time.
+Empty and `unknown` values are omitted. Versions remain text. Adding context to
+metadata does not require a new Plain field schema; update the API's allowlisted
+context inputs and it will be included in the JSON automatically.
 
 **Configure the schemas before deploying this change.** Plain rejects thread
 fields whose keys/types do not match the workspace's schemas. Using Node 22.18+
@@ -77,15 +74,14 @@ from `ee/apps/landing`:
    schemas and can be rerun after a partial failure.
 3. Add `threadField:create` to the landing app's existing `PLAIN_API_KEY`.
    Schema-management permissions are only needed for setup.
-4. In Plain's **Settings → Thread fields**, verify the eleven OpenWork fields.
+4. In Plain's **Settings → Thread fields**, verify the four OpenWork fields.
    They are optional, read-only to support agents, and have AI autofill and
    inclusion in AI agent context disabled. Values are sent in `createThread`;
    no extra API calls are made per submission.
 
 The desktop feedback URL already supplies OS and version information when
 available; this change records that submitted context without inferring missing
-values. Name/email remain on the customer and message, and the message body
-remains the thread's first entry. Existing threads are not backfilled.
+values. Name/email remain on the customer, with the submitted values preserved in metadata. Existing threads are not backfilled.
 
 The forms no longer use Resend, SMTP, or internal feedback recipient overrides.
 Without `PLAIN_API_KEY`, submissions return an unavailable response; this also

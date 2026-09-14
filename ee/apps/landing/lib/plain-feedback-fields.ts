@@ -13,30 +13,25 @@ export type FeedbackContext = {
 };
 
 type FeedbackMetadata = FeedbackContext & {
+  name: string;
+  email: string;
   mode: "feedback" | "contact";
   submittedAt: string;
 };
 
 const fieldDefinitions = [
-  { property: "mode", key: "openwork_form_mode", label: "OpenWork form", type: "STRING" },
-  { property: "source", key: "openwork_source", label: "OpenWork source", type: "STRING" },
-  { property: "entrypoint", key: "openwork_entrypoint", label: "OpenWork entrypoint", type: "STRING" },
-  { property: "deployment", key: "openwork_deployment", label: "OpenWork deployment", type: "STRING" },
-  { property: "appVersion", key: "openwork_app_version", label: "OpenWork app version", type: "STRING" },
-  { property: "openworkServerVersion", key: "openwork_server_version", label: "OpenWork server version", type: "STRING" },
-  { property: "opencodeVersion", key: "openwork_opencode_version", label: "OpenWork OpenCode version", type: "STRING" },
-  { property: "osName", key: "openwork_os_name", label: "OpenWork OS", type: "STRING" },
-  { property: "osVersion", key: "openwork_os_version", label: "OpenWork OS version", type: "STRING" },
-  { property: "platform", key: "openwork_platform", label: "OpenWork platform", type: "STRING" },
-  { property: "submittedAt", key: "openwork_submitted_at", label: "OpenWork submitted at", type: "DATE" },
-] satisfies { property: keyof FeedbackMetadata; key: string; label: string; type: "STRING" | "DATE" }[];
+  { key: "openwork_os_name", label: "OpenWork OS" },
+  { key: "openwork_app_version", label: "OpenWork app version" },
+  { key: "openwork_deployment", label: "OpenWork deployment" },
+  { key: "openwork_metadata", label: "OpenWork metadata" },
+];
 
 // Shared by the form and the one-time setup script so schema keys/types stay in sync.
 export const plainFeedbackFieldSchemas: CreateThreadFieldSchemaInput[] = fieldDefinitions.map((field, order) => ({
   key: field.key,
   label: field.label,
   description: `${field.label} recorded when a contact or feedback form was submitted.`,
-  type: field.type,
+  type: "STRING",
   enumValues: [],
   order,
   isRequired: false,
@@ -45,14 +40,19 @@ export const plainFeedbackFieldSchemas: CreateThreadFieldSchemaInput[] = fieldDe
   isAvailableToAgents: false,
 }));
 
-export function buildFeedbackThreadFields(metadata: FeedbackMetadata): CreateThreadFieldOnThreadInput[] {
-  return fieldDefinitions.flatMap((field) => {
-    const value = metadata[field.property]?.trim();
-    if (!value || value.toLowerCase() === "unknown") return [];
-    return [{
-      key: field.key,
-      type: field.type,
-      ...(field.type === "DATE" ? { dateValue: value } : { stringValue: value }),
-    }];
+function availableValue(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.toLowerCase() !== "unknown" ? trimmed : undefined;
+}
+
+export function buildFeedbackThreadFields(input: FeedbackMetadata): CreateThreadFieldOnThreadInput[] {
+  const { osName, appVersion, deployment, ...context } = input;
+  const metadata = Object.fromEntries(Object.entries(context)
+    .map(([key, value]) => [key, availableValue(value)])
+    .filter(([, value]) => value !== undefined));
+  const values = [osName, appVersion, deployment, JSON.stringify(metadata, null, 2)];
+  return fieldDefinitions.flatMap((field, index) => {
+    const value = availableValue(values[index]);
+    return value ? [{ key: field.key, type: "STRING", stringValue: value }] : [];
   });
 }

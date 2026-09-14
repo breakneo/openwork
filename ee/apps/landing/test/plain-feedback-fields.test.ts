@@ -21,18 +21,18 @@ function requestMock() {
 describe("Plain feedback field setup", () => {
   test("reads all pages, preserves existing schemas, and creates only missing fields", async () => {
     const request = requestMock()
-      .mockResolvedValueOnce(schemaPage(plainFeedbackFieldSchemas.slice(0, 5), "page-2"))
+      .mockResolvedValueOnce(schemaPage(plainFeedbackFieldSchemas.slice(0, 2), "page-2"))
       .mockResolvedValueOnce(schemaPage([
-        ...plainFeedbackFieldSchemas.slice(5, -1),
+        ...plainFeedbackFieldSchemas.slice(2, -1),
         { key: "existing_field", type: "STRING", order: 100 },
       ]))
-      .mockResolvedValueOnce({ createThreadFieldSchema: { threadFieldSchema: { key: "openwork_submitted_at" }, error: null } });
+      .mockResolvedValueOnce({ createThreadFieldSchema: { threadFieldSchema: { key: "openwork_metadata" }, error: null } });
 
     await setupPlainFeedbackFields({ request });
     expect(request).toHaveBeenCalledTimes(3);
     expect(request.mock.calls[1][1]).toEqual({ after: "page-2" });
     expect(request.mock.calls[2][1]).toMatchObject({ input: {
-      key: "openwork_submitted_at", type: "DATE", order: 101,
+      key: "openwork_metadata", type: "STRING", order: 101,
       isRequired: false, isClientReadonly: true, isAiAutoFillEnabled: false, isAvailableToAgents: false,
     } });
   });
@@ -54,9 +54,9 @@ describe("Plain feedback field setup", () => {
   test("reports a partial setup failure so reruns can skip completed fields", async () => {
     const request = requestMock()
       .mockResolvedValueOnce(schemaPage([]))
-      .mockResolvedValueOnce({ createThreadFieldSchema: { threadFieldSchema: { key: "openwork_form_mode" }, error: null } })
+      .mockResolvedValueOnce({ createThreadFieldSchema: { threadFieldSchema: { key: "openwork_os_name" }, error: null } })
       .mockResolvedValueOnce({ createThreadFieldSchema: { error: { code: "forbidden" } } });
-    await expect(setupPlainFeedbackFields({ request })).rejects.toThrow("Could not create openwork_source: forbidden");
+    await expect(setupPlainFeedbackFields({ request })).rejects.toThrow("Could not create openwork_app_version: forbidden");
     expect(request).toHaveBeenCalledTimes(3);
   });
 });
