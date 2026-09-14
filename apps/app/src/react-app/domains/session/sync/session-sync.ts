@@ -31,6 +31,7 @@ import {
 import type { OpenworkSessionHistory, OpenworkSessionSnapshot } from "@/app/lib/openwork-server";
 import type { LatestSessionHistory } from "../surface/session-render-state";
 import { applyRevertCursor, reconcileTranscriptMessages } from "./transcript-reconcile";
+import { upsertMessageByChronology } from "./message-merge";
 import { isOrphanedInteraction, isTerminalToolPart, terminalToolCallIds, terminalTranscriptToolCallIds } from "./orphaned-interactions";
 import {
   useSessionActivityStore,
@@ -855,6 +856,11 @@ function toUIParts(part: Part): UIMessage["parts"] {
 
 function upsertMessage(messages: UIMessage[], next: UIMessage) {
   const index = messages.findIndex((message) => message.id === next.id);
+  if (next.metadata !== undefined) {
+    const existing = messages[index];
+    const merged = existing ? { ...existing, ...next, parts: next.parts.length > 0 ? next.parts : existing.parts } : next;
+    return upsertMessageByChronology(messages, merged);
+  }
   if (index === -1) return [...messages, next];
   return messages.map((message, messageIndex) =>
     messageIndex === index

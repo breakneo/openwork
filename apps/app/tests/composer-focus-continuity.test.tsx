@@ -88,7 +88,11 @@ test.each([
   { name: "composer focus, shared Restore, pending stops, and optimistic sends preserve drafts through snapshots and first-message handoff", queueRegression: false, modeRegression: false },
   { name: "busy Enter clears persisted composer text and attachments without losing queued messages or newer typing", queueRegression: true, modeRegression: false },
   { name: "busy mode selection preserves the running turn and composer draft", queueRegression: false, modeRegression: true },
-])("$name", async ({ queueRegression, modeRegression }) => {
+  { name: "new thread keeps the prompt before early assistant output through late native acknowledgement and settlement", orderingRegression: "empty" },
+  { name: "follow-up keeps history before the prompt and early assistant output through settlement", orderingRegression: "history" },
+  { name: "multiple identical pending prompts keep submission order as native siblings settle", orderingRegression: "siblings" },
+])("$name", async ({ queueRegression, modeRegression, orderingRegression }) => {
+  const sessionId = `session-focus-continuity${orderingRegression ? `-${orderingRegression}` : ""}`;
   window.localStorage.clear();
   const require = createRequire(import.meta.url);
   // Bun's isolated test loader cycles Lexical's ESM entries; use their real CJS entries before the app imports the editor.
@@ -138,7 +142,7 @@ test.each([
   const acceptanceRequests: Request[] = [];
   const restoreRequests: Request[] = [];
   const nativePromptTexts: string[] = [];
-  const nativeMessages: { id: string; role: "user"; text: string }[] = [];
+  const nativeMessages: { id: string; role: "user"; text: string; time: { created: number } }[] = [];
   const forkRequests: Request[] = [];
   const admissionStatusRequests: Request[] = [];
   const fetchStub = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -354,6 +358,100 @@ test.each([
   );
   const renderSession = (activeSessionId = sessionId) => renderSurface(undefined, activeSessionId);
   try {
+    if (orderingRegression) {
+      const { __applySessionSyncEventForTest, __createWorkspaceSessionSyncForTest, trackWorkspaceSessionSync } = await import("../src/react-app/domains/session/sync/session-sync");
+      const { createV2EventTranslationState, translateV2Event } = await import("../src/app/lib/opencode-v2-adapter");
+      const { snapshotToUIMessages } = await import("../src/react-app/domains/session/sync/usechat-adapter");
+      const { markComposerAutoSend } = await import("../src/react-app/domains/session/surface/composer-auto-send");
+      const nativeBaseUrl = "http://127.0.0.1:1/opencode2";
+      const syncInput = { workspaceId, baseUrl: nativeBaseUrl, openworkToken: "test-token" };
+      const cleanupSync = __createWorkspaceSessionSyncForTest(syncInput);
+      const release = trackWorkspaceSessionSync(syncInput, sessionId);
+      try {
+        fetchedSnapshot = createSnapshot({ type: "idle" }, 2, sessionId);
+        if (orderingRegression !== "history") fetchedSnapshot.messages = [];
+        const history = snapshotToUIMessages(fetchedSnapshot);
+        if (orderingRegression === "history") history.push({
+          id: "historical-answer", role: "assistant", metadata: { opencode: { created: 2 } },
+          parts: [{ type: "text", text: "Previous answer" }],
+        });
+        queryClient.setQueryData(snapshotKey(workspaceId, sessionId), fetchedSnapshot);
+        queryClient.setQueryData(transcriptKey(workspaceId, sessionId), history);
+        queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" });
+        await act(async () => {
+          markComposerAutoSend(sessionId);
+          useComposerStateStore.getState().setDraft(sessionId, "Order this response");
+          renderSurface(nativeBaseUrl);
+        });
+        await waitFor(() => sentDrafts.length === 1, "the ordering auto-send");
+        expect(sentDrafts[0]?.resolvedText ?? sentDrafts[0]?.text).toBe("Order this response");
+        const pendingId = sentDrafts[0]?.messageId;
+        if (!pendingId) throw new Error("Expected a pending message identity");
+        let secondPendingId: string | undefined;
+        if (orderingRegression === "siblings") {
+          await act(async () => submission.resolve({ outcome: "accepted" }));
+          submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+          await act(async () => {
+            markComposerAutoSend(sessionId);
+            useComposerStateStore.getState().setDraft(sessionId, "Order this response");
+          });
+          await waitFor(() => sentDrafts.length === 2, "the identical pending sibling");
+          secondPendingId = sentDrafts[1]?.messageId;
+          expect(secondPendingId).toBeString();
+        }
+        const rows = () => [...container.querySelectorAll("[data-message-id]")].map((row) => row.getAttribute("data-message-id"));
+        const expected = (userId: string) => [...history.map((message) => message.id), userId, ...(secondPendingId ? [secondPendingId] : []), "early-answer"];
+        await act(async () => {
+          __applySessionSyncEventForTest(syncInput, { type: "message.updated", properties: {
+            info: { id: "early-answer", role: "assistant", sessionID: sessionId, time: { created: 20 } },
+          } });
+          __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: { part: {
+            id: "early-text", messageID: "early-answer", sessionID: sessionId, type: "text", text: "Already working",
+          } } });
+          __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: { part: {
+            id: "early-tool", messageID: "early-answer", sessionID: sessionId, type: "tool", callID: "early-call", tool: "read",
+            state: { status: "running", input: { filePath: "package.json" }, time: { start: 21 } },
+          } } });
+        });
+        await waitFor(() => container.textContent?.includes("Already working") === true, "early assistant output");
+        expect(rows()).toEqual(expected(pendingId));
+        const nativeEvents = translateV2Event({ type: "session.inbox.enqueued", created: 10, properties: {
+          sessionID: sessionId, inboxID: "native-ordered-user", item: { type: "user", payload: { text: "Order this response" } },
+        } }, createV2EventTranslationState());
+        if (!nativeEvents?.length) throw new Error("Expected native acknowledgement events");
+        await act(async () => {
+          for (const event of nativeEvents) __applySessionSyncEventForTest(syncInput, event);
+        });
+        await waitFor(() => rows().includes("native-ordered-user") && !Object.values(useComposerStateStore.getState().pendingMessages).flat()
+          .some((item) => item.draft.messageId === pendingId && item.serverMessageId !== "native-ordered-user"), "late native acknowledgement");
+        expect(rows()).toEqual(expected("native-ordered-user"));
+        if (secondPendingId) {
+          await waitFor(() => Object.values(useComposerStateStore.getState().pendingMessages).flat().length === 1, "the first sibling to settle");
+          expect(rows()).toEqual(expected("native-ordered-user"));
+          const secondEvents = translateV2Event({ type: "session.inbox.enqueued", created: 15, properties: {
+            sessionID: sessionId, inboxID: "native-second-user", item: { type: "user", payload: { text: "Order this response" } },
+          } }, createV2EventTranslationState());
+          if (!secondEvents?.length) throw new Error("Expected the second native acknowledgement");
+          await act(async () => {
+            for (const event of secondEvents) __applySessionSyncEventForTest(syncInput, event);
+          });
+          secondPendingId = "native-second-user";
+          await waitFor(() => rows().includes("native-second-user"), "the second native acknowledgement");
+          expect(rows()).toEqual(expected("native-ordered-user"));
+        }
+        await act(async () => submission.resolve({ outcome: "accepted" }));
+        await waitFor(() => Object.values(useComposerStateStore.getState().pendingMessages).flat().length === 0, "pending cleanup");
+        expect(rows()).toEqual(expected("native-ordered-user"));
+        await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" }));
+        expect(rows()).toEqual(expected("native-ordered-user"));
+        expect(queryClient.getQueryData<import("ai").UIMessage[]>(transcriptKey(workspaceId, sessionId))?.map((message) => message.id))
+          .toEqual(expected("native-ordered-user"));
+      } finally {
+        release();
+        cleanupSync();
+      }
+      return;
+    }
     await act(async () => renderSurface());
     await waitFor(
       () => container.querySelector('[contenteditable="true"][data-lexical-editor="true"]') !== null,
@@ -1142,7 +1240,7 @@ test.each([
       };
       await act(async () => queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(nativeSnapshot)));
     };
-    nativeMessages.push({ id: "native-historical", role: "user", text: "Historical attachment" });
+    nativeMessages.push({ id: "native-historical", role: "user", text: "Historical attachment", time: { created: 100 } });
     await refreshNativeTranscript();
     await act(async () => {
       useComposerStateStore.getState().clearSession(sessionId);
@@ -1189,12 +1287,17 @@ test.each([
     expect(nativePromptTexts[0]).not.toBe(nativePromptTexts[1]);
     expect(nativePending()).toHaveLength(2);
     expect(nativePending().map((item) => item.preparedText)).toEqual(nativePromptTexts);
+    const nativeRowIds = () => [...container.querySelectorAll('[data-message-role="user"]')].map((row) => row.getAttribute("data-message-id"));
+    const firstPendingId = nativeDrafts[0]?.messageId;
+    const secondPendingId = nativeDrafts[1]?.messageId;
+    if (!firstPendingId || !secondPendingId) throw new Error("Expected both pending attachment identities");
+    expect(nativeRowIds().indexOf(firstPendingId)).toBeLessThan(nativeRowIds().indexOf(secondPendingId));
     const firstText = nativePromptTexts[0];
     const secondText = nativePromptTexts[1];
     if (!firstText || !secondText) throw new Error("Expected exact native prompt bodies");
     // Neither an already-known ID nor similar text may take ownership of a preview.
-    nativeMessages[0] = { id: "native-historical", role: "user", text: firstText };
-    nativeMessages.push({ id: "native-unrelated", role: "user", text: `${firstText}\nA different turn` });
+    nativeMessages[0] = { id: "native-historical", role: "user", text: firstText, time: { created: 100 } };
+    nativeMessages.push({ id: "native-unrelated", role: "user", text: `${firstText}\nA different turn`, time: { created: 150 } });
     await refreshNativeTranscript();
     await waitFor(() => nativeRow("native-unrelated") !== null, "the unrelated native turn");
     expect(nativePending().every((item) => !item.serverMessageId)).toBe(true);
@@ -1202,12 +1305,15 @@ test.each([
     expect(nativeRow("native-unrelated")?.querySelector("img")).toBeNull();
 
     // Observe the sibling first: equal filenames must not make the first upload claim it.
-    nativeMessages.push({ id: "native-second", role: "user", text: secondText });
+    nativeMessages.push({ id: "native-second", role: "user", text: secondText, time: { created: 300 } });
     await refreshNativeTranscript();
     await waitFor(() => nativePending()[1]?.serverMessageId === "native-second", "the second upload's exact text-only acknowledgement");
     expect(nativePending()[0]?.serverMessageId).toBeUndefined();
+    expect(nativePending()[0]?.previousMessageIds).toContain("native-second");
+    expect(nativeRowIds().indexOf("native-historical")).toBeLessThan(nativeRowIds().indexOf(firstPendingId));
+    expect(nativeRowIds().indexOf(firstPendingId)).toBeLessThan(nativeRowIds().indexOf("native-second"));
     expect(nativeRow("native-second")?.querySelector("img")?.getAttribute("src")).toBe(nativeAttachments[1]?.previewUrl);
-    nativeMessages.push({ id: "native-first", role: "user", text: firstText });
+    nativeMessages.push({ id: "native-first", role: "user", text: firstText, time: { created: 200 } });
     await refreshNativeTranscript();
     await waitFor(() => nativePending()[0]?.serverMessageId === "native-first", "the first upload's exact text-only acknowledgement");
     expect(nativeRow("native-first")?.querySelector("img")?.getAttribute("src")).toBe(nativeAttachments[0]?.previewUrl);

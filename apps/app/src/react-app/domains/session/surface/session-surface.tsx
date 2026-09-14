@@ -1503,6 +1503,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const pendingReconciliation = useMemo(() => {
     const matchedIds = new Set<string>();
     const messageIdReplacements = new Map<string, string>();
+    const precedingPendingIds = new Set<string>();
     const messages = [...baseRenderedMessages];
     const remaining = (pendingMessages ?? []).flatMap((item) => {
       const { draft: pending, previousMessageIds } = item;
@@ -1516,9 +1517,13 @@ export function SessionSurface(props: SessionSurfaceProps) {
           && Boolean(acknowledgementText?.trim()) && v2PromptText(message.parts) === acknowledgementText)));
       const { parts, attachmentsReady } = pendingMessageParts(text, pending.attachments, match?.parts);
       if (!match) {
-        messages.push({ id: pending.messageId, role: "user", parts });
+        const submissionIds = new Set(item.submissionMessageIds);
+        const previousIndex = messages.findLastIndex((message) => submissionIds.has(message.id) || precedingPendingIds.has(message.id));
+        messages.splice(previousIndex + 1, 0, { id: pending.messageId, role: "user", parts });
+        precedingPendingIds.add(pending.messageId);
         return [item];
       }
+      precedingPendingIds.add(match.id);
       matchedIds.add(match.id);
       if (match.id !== pending.messageId) messageIdReplacements.set(match.id, pending.messageId);
       messages[messages.indexOf(match)] = { ...match, parts };
@@ -1529,9 +1534,15 @@ export function SessionSurface(props: SessionSurfaceProps) {
     });
     // A server turn can acknowledge only one pending send, even when two
     // consecutive prompts have identical text and v2 assigns its own IDs.
+    const acknowledgedIds = new Map([...messageIdReplacements].map(([serverId, pendingId]) => [pendingId, serverId]));
     return { messages, messageIdReplacements, remaining: remaining.map((item) => {
       const claimed = [...matchedIds].filter((id) => id !== item.serverMessageId && !item.previousMessageIds.includes(id));
-      return claimed.length ? { ...item, previousMessageIds: [...item.previousMessageIds, ...claimed] } : item;
+      const submissionMessageIds = item.submissionMessageIds.some((id) => acknowledgedIds.has(id))
+        ? item.submissionMessageIds.map((id) => acknowledgedIds.get(id) ?? id)
+        : item.submissionMessageIds;
+      return claimed.length || submissionMessageIds !== item.submissionMessageIds
+        ? { ...item, submissionMessageIds, previousMessageIds: [...item.previousMessageIds, ...claimed] }
+        : item;
     }) };
   }, [baseRenderedMessages, pendingMessages, props.opencodeBaseUrl]);
   const inputHistory = useMemo(() => deriveComposerHistory(pendingReconciliation.messages), [pendingReconciliation.messages]);
@@ -2181,6 +2192,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
           draft: nextDraft,
           composer: savedComposer,
           previousMessageIds: baseRenderedMessages.map((message) => message.id),
+          submissionMessageIds: [
+            ...baseRenderedMessages.map((message) => message.id),
+            ...(state.pendingMessages[sessionOwner] ?? []).map((item) => item.serverMessageId ?? item.draft.messageId),
+          ],
           settled: false,
         }],
       },

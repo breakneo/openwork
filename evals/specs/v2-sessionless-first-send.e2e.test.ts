@@ -1,5 +1,5 @@
 import { expect } from "vitest";
-import { resolveEvalEngine, spec } from "@openwork/testkit";
+import { browserScript, resolveEvalEngine, spec } from "@openwork/testkit";
 import { sessionlessFirstSendWorld } from "../worlds/first-run.ts";
 
 const test = spec.world(sessionlessFirstSendWorld, {
@@ -241,6 +241,18 @@ test(`${resolveEvalEngine()}: Run task on the sessionless New task route creates
     expect((await probe.composer()).userMessageCount).toBe(1);
     expect(transition.read()).toMatchObject({ creation: 1, prompt: 1, expired: false });
     expect(await world.requests()).toHaveLength(1);
+    const rows = await probe.eval(browserScript((id) => {
+      const surface = document.querySelector<HTMLElement>('[data-session-surface-id="' + id + '"]');
+      return [...(surface?.querySelectorAll<HTMLElement>('[data-message-role]') ?? [])]
+        .filter((node) => node.getClientRects().length && getComputedStyle(node).visibility !== "hidden")
+        .map((node) => ({ role: node.getAttribute("data-message-role"), text: node.innerText }));
+    }, [sessionId]));
+    expect(rows.filter((row) => row.role === "user")).toHaveLength(1);
+    expect(rows[0]?.role).toBe("user");
+    expect(rows[0]?.text).toContain(prompt);
+    expect(rows.slice(1).some((row) => row.role === "assistant" && row.text.includes(world.reply))).toBe(true);
+    evidence.recordAssertionEvidence("The opening prompt stays before its response",
+      "The created thread has exactly one user row, first in transcript order, followed by the engine reply; the prompt is neither duplicated nor rendered below its answer.", true);
     await user.looks([
       `The conversation transcript shows exactly one user-message bubble containing the prompt beginning 'Summarize this workspace in one sentence.' and an assistant reply reading '${world.reply}'.`,
       "An empty composer is visible below the transcript; the 'What do you need done?' hero and Starting indicator are absent.",
