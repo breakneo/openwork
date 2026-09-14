@@ -826,7 +826,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       if (closed || serviceError) throw new Error(serviceError || "The collaboration service is closing.");
       const stoppedBeforeSubmission = (state) => {
         const pending = state.threads[threadKey(input.owner)]?.pending;
-        return isCancelled() || (input.track === true && input.retryByPerson !== true && pending?.messageId === input.messageId && pending.stoppedAt != null);
+        return isCancelled() || (input.track === true && input.retryByPerson !== true && pending != null && pending.messageId === input.messageId && pending.stoppedAt != null);
       };
       const requestedId = input.id ?? collaborationId(input.owner.slug, input.owner.threadId, input.messageId);
       let before = input.retry ? await read((state) => state.executions[requestedId]) : null;
