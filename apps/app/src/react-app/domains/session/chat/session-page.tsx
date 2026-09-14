@@ -96,7 +96,7 @@ import {
   type ConversationTabHistory,
   type ConversationHistoryDirection,
 } from "./conversation-tab-history";
-import { useWorkbenchStore, type WorkbenchSessionTab } from "./workbench-store";
+import { useRouteWorkbench, useWorkbenchStore, type WorkbenchSessionTab } from "./workbench-store";
 import { isSameWorkbenchSession } from "./workbench-store";
 import { ReactSessionRuntime } from "../sync/runtime-sync";
 import { useSessionInteractions } from "../sync/use-session-interactions";
@@ -116,7 +116,6 @@ const STARTUP_SKELETON_ROWS = [
   { id: "final", titleWidth: "36%", bodyWidth: "74%" },
 ];
 const EMPTY_TRANSCRIPT_TARGETS: OpenTarget[] = [];
-const EMPTY_SESSION_TABS: WorkbenchSessionTab[] = [];
 
 export type OpenSessionTab = WorkbenchSessionTab;
 
@@ -508,25 +507,42 @@ export function SessionPage(props: SessionPageProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [sessionActionId, setSessionActionId] = useState<string | null>(null);
-  const workbenchPrimary = useWorkbenchStore((state) => state.primary);
-  const workbenchTabs = useWorkbenchStore((state) => state.tabs);
-  const workbenchSecondary = useWorkbenchStore((state) => state.secondary);
-  const focusedWorkbenchPane = useWorkbenchStore((state) => state.focusedPane);
+  const workspaceName =
+    props.selectedWorkspaceDisplay.displayName?.trim() ||
+    props.selectedWorkspaceDisplay.name?.trim() ||
+    t("session.workspace_fallback");
+  const workbenchInput = useMemo(() => {
+    const workspaceGroup = props.sidebar.workspaceSessionGroups.find(
+      (group) => group.workspace.id === props.selectedWorkspaceId,
+    );
+    return {
+      workspaceId: props.selectedWorkspaceId,
+      workspaceTitle: workspaceName,
+      primarySessionId: props.selectedSessionId,
+      sessionsKnown: workspaceGroup?.status === "ready",
+      archivedSessionIds: (workspaceGroup?.sessions ?? []).filter((session) => session.time?.archived).map((session) => session.id),
+      sessions: (workspaceGroup?.sessions ?? []).map((session) => ({
+        workspaceId: props.selectedWorkspaceId,
+        sessionId: session.id,
+        title: getDisplaySessionTitle(session.title),
+        workspaceTitle: workspaceName,
+      })),
+    };
+  }, [props.selectedWorkspaceId, props.selectedSessionId, props.sidebar.workspaceSessionGroups, workspaceName]);
+  const {
+    primary: workbenchPrimary,
+    tabs: sessionTabs,
+    secondary: splitSession,
+    focusedPane: focusedWorkbenchPane,
+  } = useRouteWorkbench(workbenchInput);
   const [narrowPane, setNarrowPane] = useState<NarrowSessionPane>("chat");
   const narrowPaneNavigationRef = useRef<HTMLElement>(null);
   const activeWorkbenchPane = isMobile
     ? narrowPane === "split" ? "secondary" : "primary"
     : focusedWorkbenchPane;
-  const syncWorkbench = useWorkbenchStore((state) => state.sync);
   const openWorkbenchTab = useWorkbenchStore((state) => state.openTab);
   const setWorkbenchSplit = useWorkbenchStore((state) => state.setSplit);
   const focusWorkbenchPane = useWorkbenchStore((state) => state.focusPane);
-  const selectedSessionRef = props.selectedSessionId
-    ? { workspaceId: props.selectedWorkspaceId, sessionId: props.selectedSessionId }
-    : null;
-  const workbenchOwnsSelectedRoute = isSameWorkbenchSession(workbenchPrimary, selectedSessionRef);
-  const sessionTabs = workbenchOwnsSelectedRoute ? workbenchTabs : EMPTY_SESSION_TABS;
-  const splitSession = workbenchOwnsSelectedRoute ? workbenchSecondary : null;
   const [conversationHistory, setConversationHistory] = useState(() => (
     createConversationTabHistory(props.selectedWorkspaceId, props.selectedSessionId)
   ));
@@ -938,10 +954,6 @@ export function SessionPage(props: SessionPageProps) {
     () => sessionTitleForId(props.sidebar.workspaceSessionGroups, props.selectedSessionId, props.selectedWorkspaceId),
     [props.selectedSessionId, props.selectedWorkspaceId, props.sidebar.workspaceSessionGroups],
   );
-  const workspaceName =
-    props.selectedWorkspaceDisplay.displayName?.trim() ||
-    props.selectedWorkspaceDisplay.name?.trim() ||
-    t("session.workspace_fallback");
   useEffect(() => {
     if (pendingConversationHistoryNavigation) {
       if (
@@ -984,26 +996,6 @@ export function SessionPage(props: SessionPageProps) {
     }, 5000);
     return () => window.clearTimeout(id);
   }, [pendingConversationHistoryNavigation]);
-  const workbenchInventory = useMemo(() => {
-    const workspaceGroup = props.sidebar.workspaceSessionGroups.find(
-      (group) => group.workspace.id === props.selectedWorkspaceId,
-    );
-    return {
-      workspaceId: props.selectedWorkspaceId,
-      workspaceTitle: workspaceName,
-      sessionsKnown: workspaceGroup?.status === "ready",
-      archivedSessionIds: (workspaceGroup?.sessions ?? []).filter((session) => session.time?.archived).map((session) => session.id),
-      sessions: (workspaceGroup?.sessions ?? []).map((session) => ({
-        workspaceId: props.selectedWorkspaceId,
-        sessionId: session.id,
-        title: getDisplaySessionTitle(session.title),
-        workspaceTitle: workspaceName,
-      })),
-    };
-  }, [props.selectedWorkspaceId, props.sidebar.workspaceSessionGroups, workspaceName]);
-  useEffect(() => {
-    syncWorkbench({ ...workbenchInventory, primarySessionId: props.selectedSessionId });
-  }, [props.selectedSessionId, syncWorkbench, workbenchInventory]);
   useEffect(() => {
     props.onSessionTabsChange?.(sessionTabs);
   }, [sessionTabs, props.onSessionTabsChange]);
