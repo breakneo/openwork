@@ -73,7 +73,6 @@ import type { McpConnectResult } from "../../connections/store";
 import { ClaudePluginImportModal } from "../../connections/modals/claude-plugin-import-modal";
 import {
   canDisconnectMemberConnection,
-  canDisconnectNativeProviderAccount,
   canMemberAuthorizeConnection,
 } from "../../connections/native-provider-connections";
 import type { OpenworkClaudePluginPreview } from "../../../../app/lib/openwork-server";
@@ -556,13 +555,12 @@ export function McpView(props: McpViewProps) {
   const addDisabledReason = cloudIssue ?? (!props.createLibraryItem && filter !== "mcp" ? t("extensions.cloud_unavailable") : undefined);
   const addControl = (
     <LibraryAddControl
-      kinds={libraryAddKindsForFilter(filter)}
+      kinds={libraryAddKindsForFilter("all")}
       connectorCues={connectorCues}
-      iconOnly
       variant="ghost"
       pending={denAuth.status === "checking"}
       disabledReason={addDisabledReason}
-      label={addLabel}
+      label={t("extensions.add_to_library")}
       onSelect={(kind) => handleAddKind(kind)}
     />
   );
@@ -2128,41 +2126,26 @@ export function McpQuickConnectSection(props: {
 
   for (const item of (props.orgMcpItems ?? []).filter(isOrgMcpConnectionItem)) {
     const connection = item.orgMcpConnection;
-    const canDisconnect = canDisconnectNativeProviderAccount(connection);
-    const disconnecting = props.orgMcpDisconnectingId === connection.id;
     const group = resolveExtensionInventoryGroup(item);
     cards.push({
       key: item.id,
       searchText: `${item.name} ${item.description ?? ""} ${connection.url}`,
       group,
       node: (
-        <div className="space-y-2">
-          <ExtensionCard
-            layout={props.layout}
-            name={item.name}
-            description={orgMcpCardDescription(item, props.state)}
-            taxonomy="connection"
-            url={connection.url}
-            connected={group === "ready"}
-            connectedLabel={orgMcpConnectionActionLabel(connection)}
-            beta
-            meta={orgMeta}
-            actionLabel={disconnecting ? t("mcp.org_connection_disconnecting_action") : "View details"}
-            nextActionLabel={group === "needs_signin" ? t("mcp.login_action") : undefined}
-            onClick={() => props.onOrgMcpDetail?.(item)}
-          />
-          {canDisconnect ? (
-            <Button
-              size="sm"
-              variant="destructive"
-              className="w-full"
-              disabled={disconnecting}
-              onClick={() => props.disconnectOrgMcp?.(connection.id)}
-            >
-              {disconnecting ? t("mcp.org_connection_disconnecting_action") : t("mcp.org_connection_disconnect_action")}
-            </Button>
-          ) : null}
-        </div>
+        <ExtensionCard
+          layout={props.layout}
+          name={item.name}
+          description={orgMcpCardDescription(item, props.state)}
+          taxonomy="connection"
+          url={connection.url}
+          connected={group === "ready"}
+          connectedLabel={orgMcpConnectionActionLabel(connection)}
+          beta
+          meta={orgMeta}
+          actionLabel="View details"
+          nextActionLabel={group === "needs_signin" ? t("mcp.login_action") : undefined}
+          onClick={() => props.onOrgMcpDetail?.(item)}
+        />
       ),
     });
   }

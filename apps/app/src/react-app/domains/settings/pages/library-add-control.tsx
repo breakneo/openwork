@@ -73,17 +73,24 @@ export function LibraryAddControl(props: {
 
   return (
     <>
-      <Button
-        variant={variant}
-        size={props.iconOnly ? "icon-sm" : size}
-        className="shrink-0 gap-1 rounded-lg"
-        aria-label={t("common.add")}
-        disabled={props.pending || Boolean(props.disabledReason)}
-        onClick={() => setPickerOpen(true)}
-      >
-        <Plus size={props.iconOnly ? 20 : 16} className={props.iconOnly ? "size-5" : undefined} />
-        {props.iconOnly ? null : t("common.add")}
-      </Button>
+      <Tooltip>
+        <TooltipTrigger render={
+          <Button
+            variant={variant}
+            size={props.iconOnly ? "icon-sm" : size}
+            className="shrink-0 gap-1 rounded-lg"
+            aria-label={props.label ?? t("common.add")}
+            aria-busy={props.pending}
+            disabled={props.pending || Boolean(props.disabledReason)}
+            focusableWhenDisabled
+            onClick={() => setPickerOpen(true)}
+          >
+            {props.pending ? <Loader2 size={16} className="animate-spin" /> : <Plus size={props.iconOnly ? 20 : 16} className={props.iconOnly ? "size-5" : undefined} />}
+            {props.iconOnly ? null : props.label ?? t("common.add")}
+          </Button>
+        } />
+        <TooltipContent>{props.disabledReason ?? (props.pending ? pendingLabel : props.label ?? t("common.add"))}</TooltipContent>
+      </Tooltip>
       <LibraryAddKindPicker
         open={pickerOpen}
         kinds={kinds}

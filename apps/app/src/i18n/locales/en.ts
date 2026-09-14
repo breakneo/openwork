@@ -669,6 +669,7 @@ export default {
   "extensions.badge_skill": "Skill",
   "extensions.badge_command": "Command",
   "extensions.badge_agent": "Agent",
+  "extensions.add_to_library": "Add to library",
   "extensions.add_skill": "Create skill",
   "extensions.add_command": "Add command",
   "extensions.add_agent": "Add agent",

@@ -46,10 +46,10 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     await seed.evalIn(desktop, browserScript((id: string) => {
       location.hash = `#/workspace/${id}/extensions`;
     }, [workspaceId]));
-    await user.see({ role: "button", label: "Add MCP", nth: 0 }, { timeoutMs: 90_000 });
-    await probe.eventually(() => probe.dom('header button[aria-label="Add MCP"]:not(:disabled):not([aria-disabled="true"])'), {
+    await user.see({ role: "button", label: "Add to library" }, { timeoutMs: 90_000 });
+    await probe.eventually(() => probe.dom('header button[aria-label="Add to library"]:not(:disabled):not([aria-disabled="true"])'), {
       within: 90_000,
-      label: "the signed-in admin's header Add MCP is enabled",
+      label: "the signed-in admin's header Add to library is enabled",
       until: (snapshot) => snapshot.elements.length === 1,
     });
     expect(await probe.hash()).toBe(`#/workspace/${workspaceId}/extensions`);
@@ -71,11 +71,11 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     expect(libraryText).not.toContain("Voice Mode");
     expect(libraryText).not.toMatch(/Google OAuth|Google Client ID|Google Client Secret/i);
     expect((await probe.dom('[aria-label*="voice mode" i]')).elements).toHaveLength(0);
-    const add = await probe.dom('header button[aria-label="Add MCP"]');
+    const add = await probe.dom('header button[aria-label="Add to library"]');
     expect(add.elements).toHaveLength(1);
     const addButton = add.elements[0];
-    if (!addButton) throw new Error("Library has no header Add MCP control.");
-    expect(addButton.text).toBe("");
+    if (!addButton) throw new Error("Library has no header Add to library control.");
+    expect(addButton.text).toBe("Add to library");
     expect(addButton.rect.left).toBeGreaterThanOrEqual(0);
     expect(addButton.rect.right).toBeLessThanOrEqual(820);
     expect(addButton.rect.top).toBeGreaterThanOrEqual(0);
@@ -90,7 +90,18 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     const openedBefore = await probe.eventually(() => world.browserUrls.opened(), {
       within: 10_000, label: "external-open requests before admin Add MCP",
     });
-    await user.click({ role: "button", label: "Add MCP", nth: 0 });
+    await user.click({ role: "button", label: "Add to library" });
+    await user.see({ testId: "library-add-choices" });
+    expect((await probe.dom('[data-testid="library-add-choices"] [role="radio"]')).elements).toHaveLength(3);
+    for (const kind of ["mcp", "skill", "plugin"]) {
+      expect((await probe.dom(`[data-kind="${kind}"]`)).elements).toHaveLength(1);
+    }
+    expect(await world.browserUrls.opened()).toEqual(openedBefore);
+    await user.press("Escape");
+    await user.notSee({ testId: "library-add-choices" });
+    expect(await world.browserUrls.opened()).toEqual(openedBefore);
+    await user.click({ role: "button", label: "Add to library" });
+    await user.click({ role: "button", label: "Continue" });
     const openedAfter = await probe.eventually(() => world.browserUrls.opened(), {
       within: 10_000,
       label: "admin Add MCP issues a fresh external-open request",
@@ -104,8 +115,8 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     expect((await probe.dom('[role="dialog"]')).elements).toHaveLength(0);
     expect(await probe.hash()).toBe(libraryHash);
     expect(await probe.storage("openwork.den.activeOrgId")).toBe(orgId);
-    await user.see({ role: "button", label: "Add MCP", nth: 0 });
-    expect((await probe.dom('header button[aria-label="Add MCP"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
+    await user.see({ role: "button", label: "Add to library" });
+    expect((await probe.dom('header button[aria-label="Add to library"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
     evidence.recordAssertionEvidence(
       "Admin Cloud MCP Add requests the exact fixture Den MCP connections URL without local creation UI",
       `Bootstrap context=${JSON.stringify(bootstrap)}; external-open count=${openedBefore.length}->${openedAfter.length}; captured URL=${openedAfter.at(-1)}; expected=${expectedUrl}; Library route and organization retained with zero dialogs. The fixture captures the final desktop boundary without launching an OS browser.`,
@@ -122,9 +133,9 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
       await user.see({ text: emptyTitle });
       await user.see({ text: hint });
       expect((await probe.dom('[aria-label="Library filters"] button[aria-pressed="true"]:not([aria-label])')).elements.map((element) => element.text)).toEqual([filter]);
-      expect((await probe.dom(`header button[aria-label="${addLabel}"]`)).elements).toMatchObject([{ text: "" }]);
-      expect((await probe.dom(`header button[aria-label="${addLabel}"]:not(:disabled):not([aria-disabled="true"])`)).elements).toHaveLength(1);
-      await user.see({ role: "button", label: addLabel, nth: 1 }, { text: addLabel });
+      expect((await probe.dom('header button[aria-label="Add to library"]')).elements).toMatchObject([{ text: "Add to library" }]);
+      expect((await probe.dom('header button[aria-label="Add to library"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
+      await user.see({ role: "button", label: addLabel }, { text: addLabel });
       await user.notSee({ role: "button", label: "Add MCP" });
       await user.notSee({ role: "button", label: "Add workspace MCP" });
       await user.type({ placeholder: "Search your library" }, "library-discovery-no-match", { replace: true });
@@ -133,10 +144,15 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
       await user.click({ role: "button", label: "Clear filters" });
       await user.see({ placeholder: "Search your library" }, { value: "" });
       await user.see({ text: emptyTitle });
-      // The icon-only header precedes the labeled empty-state CTA in DOM order.
-      for (const nth of [0, 1]) {
-        await user.see({ role: "button", label: addLabel, nth }, { text: nth === 0 ? "" : addLabel });
-        await user.click({ role: "button", label: addLabel, nth });
+      for (const entryPoint of ["header", "empty-state"]) {
+        if (entryPoint === "header") {
+          await user.click({ role: "button", label: "Add to library" });
+          await user.see({ testId: "library-add-choices" });
+          await user.click({ text: filter === "Skills" ? /^Skill$/ : /^Plugin$/ });
+          await user.click({ role: "button", label: "Continue" });
+        } else {
+          await user.click({ role: "button", label: addLabel });
+        }
         await user.see({ text: formTitle });
         await user.notSee({ role: "textbox", label: "App name" });
         await user.notSee({ testId: "library-add-choices" });
@@ -160,8 +176,8 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     await user.click({ role: "button", label: /^Advanced\b/ });
     await user.notSee({ role: "button", label: "Add workspace MCP" });
     await user.notSee({ text: "Local MCP" });
-    await user.see({ role: "button", label: "Add MCP", nth: 0 });
-    expect((await probe.dom('header button[aria-label="Add MCP"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
+    await user.see({ role: "button", label: "Add to library" });
+    expect((await probe.dom('header button[aria-label="Add to library"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
     expect((await probe.dom('[role="dialog"]')).elements).toHaveLength(0);
     await user.screenshot();
   });

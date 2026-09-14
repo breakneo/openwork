@@ -4,7 +4,7 @@ import { act, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { PluginsExtensionsStore } from "../src/react-app/domains/settings/pages/plugins-view";
-import type { ExtensionInventoryGroup } from "../src/react-app/domains/settings/extension-items";
+import type { ExtensionInventoryGroup, ExtensionItem } from "../src/react-app/domains/settings/extension-items";
 import { readExtensionLayout, writeExtensionLayout } from "../src/react-app/domains/settings/extension-state";
 
 const ownedDom = typeof window === "undefined";
@@ -255,6 +255,61 @@ describe("Library state tabs", () => {
     expect(button?.querySelector("svg")?.getAttribute("width")).toBe("20");
     await act(async () => button?.click());
     expect(select).not.toHaveBeenCalled();
+  });
+
+  test("labeled Library Add opens the existing picker without dispatching until Continue", async () => {
+    const select = mock(() => {});
+    const host = await mount(<LibraryAddControl kinds={["mcp", "skill", "plugin"]} label="Add to library" onSelect={select} />);
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Add to library"]');
+    expect(button?.textContent).toBe("Add to library");
+    await act(async () => button?.click());
+    const choices = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="library-add-choices"] [role="radio"]')];
+    expect(choices.map((choice) => choice.dataset.kind)).toEqual(["mcp", "skill", "plugin"]);
+    expect(select).not.toHaveBeenCalled();
+    await act(async () => choices[1].click());
+    const next = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((item) => item.textContent === "Continue");
+    await act(async () => next?.click());
+    expect(select).toHaveBeenCalledWith("skill");
+    expect(document.querySelector('[data-testid="library-add-choices"]')).toBeNull();
+  });
+
+  test.each([false, true])("Library picker stays closed while unavailable (pending=%s)", async (pending) => {
+    const select = mock(() => {});
+    const host = await mount(<LibraryAddControl kinds={["mcp", "skill", "plugin"]} label="Add to library" pending={pending} disabledReason={pending ? undefined : "Sign in to OpenWork Cloud"} onSelect={select} />);
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Add to library"]');
+    await act(async () => button?.click());
+    expect(document.querySelector('[data-testid="library-add-choices"]')).toBeNull();
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  test.each(["grid", "list"] as const)("%s MCP cards open details without exposing or invoking Disconnect", async (layout) => {
+    const detail = mock(() => {});
+    const disconnect = mock(() => {});
+    const item: ExtensionItem = {
+      id: "org-mcp:google-workspace", name: "Google Workspace", source: "org-connection",
+      description: null, installState: "installed", setupState: "ready", active: true,
+      enablement: null, resources: [],
+      orgMcpConnection: {
+        id: "google-workspace", name: "Google Workspace", url: "https://workspace.example.test/mcp",
+        authType: "oauth", credentialMode: "per_member", connected: true,
+        connectedForMe: true, connectedAt: null, exposeDirectly: false,
+      },
+    };
+    const host = await mount(<McpQuickConnectSection
+      skillCount={0} entries={[]} loading={false} layout={layout} filter="mcp" state="ready"
+      orgMcpItems={[item]} availableConnectMcpStatuses={{}} busy={false} connectingName={null}
+      isEntryHidden={() => false} isSkillHidden={() => false} isPluginHidden={() => false}
+      disabledReasonForEntry={() => null} isConfigured={() => false} statusForEntry={() => undefined}
+      onConnect={() => {}} onDetail={() => {}} onOrgMcpDetail={detail}
+      orgMcpDisconnectingId={null} disconnectOrgMcp={disconnect}
+    />);
+    expect(host.textContent).toContain("Google Workspace");
+    expect(host.textContent).not.toContain("Disconnect");
+    const buttons = host.querySelectorAll<HTMLButtonElement>("button");
+    expect(buttons).toHaveLength(1);
+    await act(async () => buttons[0].click());
+    expect(detail).toHaveBeenCalledWith(item);
+    expect(disconnect).not.toHaveBeenCalled();
   });
 
   test("Library Add distinguishes cloud and workspace MCP labels", () => {
