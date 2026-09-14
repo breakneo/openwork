@@ -146,12 +146,7 @@ export function GatewayUsageSection({ orgId }: { orgId: string }) {
         </div>
         {usage && !noTeams && !isCost ? <GatewayUsageCoverageNotice usage={usage} /> : null}
         {isCost ? <div role="note" className="mt-5 text-xs leading-5 text-gray-500">
-          <p>Costs are approximate based on publicly listed model prices when each request was recorded. They do not reflect any contract or discount agreements you may have. If no cost data is available for a model, it is not shown.</p>
-          {usage && !noTeams && hasMissing ? <p className="mt-1">
-            {missing === null
-              ? "Cost coverage is unknown for some historical requests."
-              : `${missing?.toLocaleString()} ${groupBy === "team" ? "team-attributed " : ""}${missing === 1 ? "request has" : "requests have"} no cost estimate.`} Cost includes known costs only; missing costs are not treated as free.
-          </p> : null}
+          <p>Costs are approximate based on publicly listed model prices when each request was recorded. <a href="https://openworklabs.com/docs/ai-gateway/token-costs" target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-gray-900">Click here to see how costs are calculated</a></p>
         </div> : null}
       </DenCard>
     </section>

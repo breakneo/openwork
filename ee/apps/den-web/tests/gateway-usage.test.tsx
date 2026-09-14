@@ -83,6 +83,9 @@ test("omits empty token series, preserves real unknown usage and keeps colors ac
     expect(cost).toBeDefined();
     await act(async () => cost?.click());
     expect(color()).toBe(tokenColor);
+    const costNote = container.querySelector('[role="note"]');
+    expect(costNote?.textContent).toBe("Costs are approximate based on publicly listed model prices when each request was recorded. Click here to see how costs are calculated");
+    expect(costNote?.querySelector("a")?.getAttribute("href")).toBe("https://openworklabs.com/docs/ai-gateway/token-costs");
     expect(container.textContent).toContain("$12,345.68");
     expect(container.textContent).toContain("$6,172.84");
     expect(container.textContent).not.toContain("$12,345.678901");
