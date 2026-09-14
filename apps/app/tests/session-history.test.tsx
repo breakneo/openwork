@@ -439,15 +439,21 @@ describe("opening a thread", () => {
     await paint();
     await paint();
     checkGeometry("Loading earlier messages…");
+    const loadingStatus = view.host.querySelector("[data-thread-history-status]");
     await act(async () => view.reads[1].reject(new Error("Full read unavailable")));
     await settle();
     checkGeometry("could not be loaded");
+    expect(view.host.querySelector('[data-thread-history-status] [role="status"]')).toBeNull();
+    expect(view.host.querySelectorAll("[data-thread-history-status]")).toHaveLength(1);
     await act(async () => view.host.querySelector("button")?.click());
     checkGeometry("Retrying…");
     await view.resolve(2, snapshot("a", "Full history", ["before", ...fullWindow, "anchor", "after"]));
     expect(scroller.scrollTop).toBe(800);
     expect(scroller.querySelector('[data-message-id="anchor"]')).toBe(anchor);
     expect(view.host.querySelector("[data-thread-history-status]")).toBeNull();
+    expect(loadingStatus?.isConnected).toBe(false);
+    await view.render();
+    checkGeometry(null);
   });
 
   test("branching at a singleton preview waits for the next native message in complete history", async () => {
@@ -695,6 +701,24 @@ describe("opening a thread", () => {
     expect(view.host.querySelector('[role="status"]')).toBeNull();
     await act(async () => { jest.advanceTimersByTime(150); });
     expect(view.host.querySelector('[data-thread-loading-visual]')).toBeNull();
+  });
+
+  test("an empty preview and completed empty read leave no history status or loading node", async () => {
+    const view = fixture();
+    await view.render();
+    const loading = view.host.querySelector("[data-thread-loading]");
+    expect(loading).not.toBeNull();
+    await view.resolve(0, snapshot("a", "Empty conversation"));
+    expect(loading?.isConnected).toBe(false);
+    await paint();
+    await paint();
+    expect(view.reads.map((read) => read.window)).toEqual([{ limit: 24 }, undefined]);
+    expect(view.host.querySelector("[data-thread-history-status]")).toBeNull();
+    await view.resolve(1, snapshot("a", "Empty conversation"));
+    expect(view.client.getQueryState(snapshotKey("workspace", "a"))).toMatchObject({ status: "success", fetchStatus: "idle" });
+    await view.render();
+    expect(view.host.querySelectorAll("[data-message-id], [data-thread-loading], [data-thread-history-status]")).toHaveLength(0);
+    expect(view.reads).toHaveLength(2);
   });
 
   test("a short preview never announces earlier messages, and a reverted read does not stay announced", async () => {
