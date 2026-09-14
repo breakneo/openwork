@@ -1579,14 +1579,15 @@ export function MessageList({ messages, messageIdReplacements, status, activityS
     () => collectLatestAssistantToolParts(messages),
     [messages],
   )
-  const hasVisibleToolActivity = latestAssistantToolParts.some(isToolPartInFlight)
+  // Delegated task rows may be above newer messages; keep the run footer visible.
+  const hasVisibleToolActivity = latestAssistantToolParts.some((part) => !isTaskToolPart(part) && isToolPartInFlight(part))
   const waiting = activityStatus === "waiting" || activityStatus === "compacting" || childBlocked
   const showReconnecting = !waiting && !retryStatus && shouldShowRunReconnecting(status, syncDegraded)
   const noNewActivity = hasNoNewActivity({
     active: activityActive && activityStatus !== "error", waiting, retrying: status === "retrying" || Boolean(retryStatus),
     disconnected: syncDegraded, lastProgressAt, now: Date.now(),
   })
-  const showLoading = !waiting && !noNewActivity && !showReconnecting && tasks.length === 0
+  const showLoading = !waiting && !noNewActivity && !showReconnecting
     && shouldShowMessageListLoading(status, messages.length, hasVisibleToolActivity)
   const baseUrl = workspace?.opencodeBaseUrl
   React.useEffect(() => {
