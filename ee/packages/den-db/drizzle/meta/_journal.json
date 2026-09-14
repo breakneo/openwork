@@ -694,6 +694,13 @@
       "when": 1789411682313,
       "tag": "0099_cloud_runtime_instance",
       "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "5",
+      "when": 1789424530207,
+      "tag": "0100_external_mcp_scope_text",
+      "breakpoints": true
     }
   ]
 }
