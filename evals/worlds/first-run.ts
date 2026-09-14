@@ -454,12 +454,22 @@ export async function scopedPermissionRefreshWorld(seed: Seed) {
 }
 
 export async function artifactCodeBrowserWorld(seed: Seed) {
+  const tableMarkdown = [
+    "# Table interactions",
+    "",
+    "| Name | Details |",
+    "| --- | --- |",
+    "| First row | [Documentation](https://example.com/docs) |",
+    `| Second row | ${"wide-column-".repeat(40)} |`,
+    "",
+    "After the table",
+  ].join("\n");
   const base = await workspaceWorld(seed);
   const [session] = await seed.sessions(base.app, ["Artifact code browser proof"]);
   if (!session) throw new Error("Could not seed the artifact code browser session.");
   await go(base.app, `/workspace/${base.workspace.workspaceId}/session/${session.sessionId}`);
   // TODO(primitive): write workspace files through the local server fixture.
-  const wrote = await seed.evalIn(base.app, browserScript(async (workspaceId) => {
+  const wrote = await seed.evalIn(base.app, browserScript(async (workspaceId, tableMarkdown) => {
     const port = localStorage.getItem("openwork.server.port");
     const token = localStorage.getItem("openwork.server.token");
     if (!port || !token) return false;
@@ -475,9 +485,10 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
       write("restricted/hidden-proof.ts", "export const restricted = true;"),
       write("src/openwork-artifact-proof.ts", "export const artifactEditor = true;\n"),
       write("config/openwork-artifact-settings.json", "{\"artifactEditor\":true}\n"),
+      write("docs/table-interactions.md", tableMarkdown),
     ]);
     return responses.every((response) => response.ok);
-  }, [base.workspace.workspaceId]), { awaitPromise: true });
+  }, [base.workspace.workspaceId, tableMarkdown]), { awaitPromise: true });
   if (wrote !== true) throw new Error("Could not seed artifact code files.");
   // TODO(primitive): open an initial built-in browser artifact tab.
   await seed.evalIn(base.app, () => (window.__openworkControl.execute("browser.open_url", { url: "about:blank" })), { awaitPromise: true });
@@ -491,6 +502,7 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
   if (!isRecord(tabs) || tabs.ok !== true) throw new Error(`Could not seed artifact tabs: ${JSON.stringify(tabs)}`);
   return {
     ...base,
+    tableMarkdown,
     async visibleArtifactCode() {
       return seed.evalIn(base.app, () => {
         const root = document.querySelector<HTMLElement>("[data-artifact-code-view]");
