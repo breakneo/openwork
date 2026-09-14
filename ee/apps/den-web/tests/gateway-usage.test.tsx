@@ -21,7 +21,7 @@ test("assigns distinct colors beyond 24 categories and preserves them through fi
 function fixture(): GatewayUsageResponse {
   return { usage: {
     groupBy: "model", days: 31, from: "2026-01-01", to: "2026-01-31", timezone: "UTC",
-    requestCount: 1000, totalTokens: 150, totalCostMicroUsd: 1000,
+    requestCount: 1000, totalTokens: 150, totalCostMicroUsd: 12345678901,
     unreportedRequests: 9, uncountableRequests: { ok: 1, upstream_error: 3, upstream_unreachable: 1, client_aborted: 2, rejected: 2 }, unpricedRequests: 9,
     series: [
       { id: "model-a", label: "Model A" },
@@ -34,8 +34,8 @@ function fixture(): GatewayUsageResponse {
       date: `2026-01-${String(index + 1).padStart(2, "0")}`,
       totalTokens: index === 30 ? 150 : 0,
       values: index === 30 ? { "model-a": 100, "model-b": 40, "unknown-empty": 0, "unknown-used": 10 } : {},
-      totalCostMicroUsd: index === 30 ? 1000 : 0,
-      costValues: index === 30 ? { "model-a": 1000, "model-b": 0, "unknown-empty": null, "unknown-used": null } : {},
+      totalCostMicroUsd: index === 30 ? 12345678901 : 0,
+      costValues: index === 30 ? { "model-a": 12345678901, "model-b": 0, "unknown-empty": null, "unknown-used": null } : {},
     })),
   } };
 }
@@ -83,6 +83,10 @@ test("omits empty token series, preserves real unknown usage and keeps colors ac
     expect(cost).toBeDefined();
     await act(async () => cost?.click());
     expect(color()).toBe(tokenColor);
+    expect(container.textContent).toContain("$12,345.68");
+    expect(container.textContent).toContain("$6,172.84");
+    expect(container.textContent).not.toContain("$12,345.678901");
+    expect(container.querySelector('[aria-label="2026-01-31 UTC: $12,345.68 cost · usd"]')).not.toBeNull();
     expect(legend()?.textContent).toContain("Model B"); // Observed zero cost is still known.
     expect(legend()?.textContent).not.toContain("Unreported model");
   });
