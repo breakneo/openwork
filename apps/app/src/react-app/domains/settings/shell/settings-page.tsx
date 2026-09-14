@@ -101,6 +101,8 @@ export function getSettingsTabLabel(tab: SettingsTab) {
   switch (tab) {
     case "ai":
       return "AI Providers";
+    case "ollama":
+      return "Ollama";
     case "preferences":
       return "Preferences";
     case "permissions":
@@ -140,6 +142,8 @@ export function getSettingsTabDescription(tab: SettingsTab) {
   switch (tab) {
     case "ai":
       return "Connect services that provide AI models";
+    case "ollama":
+      return "Connect to Ollama and manage local models";
     case "preferences":
       return "Default model, reasoning, and compaction";
     case "permissions":
@@ -183,7 +187,7 @@ export function getGlobalSettingsTabs(
   developerMode: boolean,
   capabilities: Pick<PlatformCapabilities, "autoUpdate">,
 ): SettingsTab[] {
-  const tabs: SettingsTab[] = ["ai", "appearance", "environment"];
+  const tabs: SettingsTab[] = ["ai", "ollama", "appearance", "environment"];
   if (capabilities.autoUpdate) tabs.push("updates");
   if (developerMode) tabs.push("debug");
   return tabs;

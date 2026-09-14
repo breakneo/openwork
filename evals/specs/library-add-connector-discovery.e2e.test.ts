@@ -41,6 +41,16 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     activeOrgId: orgId,
   });
 
+  await step("Ollama has its own Settings page with the existing local model setup", async () => {
+    await seed.evalIn(desktop, browserScript((id: string) => {
+      location.hash = `#/workspace/${id}/settings/ollama`;
+    }, [workspaceId]));
+    await user.see({ text: "Connect to Ollama and manage local models" }, { timeoutMs: 30_000 });
+    await user.see({ text: "Connect to a local Ollama instance and choose a model." });
+    expect(await probe.hash()).toBe(`#/workspace/${workspaceId}/settings/ollama`);
+    await user.notSee({ role: "button", label: "Add MCP" });
+  });
+
   await step("Library defaults to MCPs, Ready to use, and cards with only three type filters", async () => {
     // Arrange the surface under test without exercising responsive Settings navigation.
     await seed.evalIn(desktop, browserScript((id: string) => {
@@ -69,6 +79,7 @@ test(title, async ({ evidence, world, seed, user, probe, step }) => {
     await user.notSee({ text: "Local MCP" });
     const libraryText = await probe.text();
     expect(libraryText).not.toContain("Voice Mode");
+    expect(libraryText).not.toContain("Ollama");
     expect(libraryText).not.toMatch(/Google OAuth|Google Client ID|Google Client Secret/i);
     expect((await probe.dom('[aria-label*="voice mode" i]')).elements).toHaveLength(0);
     const add = await probe.dom('header button[aria-label="Add to library"]');

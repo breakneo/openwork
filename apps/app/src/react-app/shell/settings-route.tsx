@@ -83,7 +83,7 @@ import ProviderAuthModal from "@/react-app/domains/connections/provider-auth/pro
 import ConnectionsModals from "@/react-app/domains/connections/modals";
 import { AiSettingsView } from "@/react-app/domains/settings/pages/ai-view";
 // Side-effect imports: register extension config components into the registry.
-import "@/react-app/domains/settings/ollama-config";
+import { OllamaConfig } from "@/react-app/domains/settings/ollama-config";
 import "@/react-app/domains/settings/computer-use-config";
 import "@/react-app/domains/settings/browser-extension-config";
 import { useSettingsExtensionController } from "@/react-app/domains/settings/settings-extension-controller";
@@ -310,6 +310,7 @@ export function parseSettingsPath(pathname: string): {
   switch (head) {
     case "general":
     case "ai":
+    case "ollama":
     case "preferences":
     case "permissions":
     case "appearance":
@@ -2449,6 +2450,15 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
                 serverSync={providerAuthSnapshot.cloudProviderServerSync}
               />
             }
+          />
+        );
+      case "ollama":
+        return (
+          <OllamaConfig
+            busy={localProviderBusy}
+            status={localProviderStatus}
+            error={localProviderError}
+            onInstall={installLocalProvider}
           />
         );
       case "preferences":
