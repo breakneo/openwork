@@ -34,10 +34,42 @@ const MIN_HEIGHT = 160
 const MAX_HEIGHT = 800
 const DEFAULT_HEIGHT = 320
 const SIZE_EVENT_INTERVAL_MS = 100
-const SANDBOX_READY_TIMEOUT_MS = 5_000
+const SANDBOX_READY_TIMEOUT_MS = 10_000
 const RESOURCE_ACCEPT_TIMEOUT_MS = 1_000
 const MAX_RESOURCE_SEND_ATTEMPTS = 2
 const INITIALIZE_TIMEOUT_MS = 10_000
+const MAX_CONCURRENT_APP_STARTUPS = 2
+const pendingAppStartups = new Set<() => void>()
+let activeAppStartups = 0
+
+function drainAppStartups() {
+  while (activeAppStartups < MAX_CONCURRENT_APP_STARTUPS) {
+    const start = pendingAppStartups.values().next().value
+    if (!start) return
+    pendingAppStartups.delete(start)
+    start()
+  }
+}
+
+function enqueueAppStartup(start: (release: () => void) => void): () => void {
+  let active = false
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    pendingAppStartups.delete(run)
+    if (active) activeAppStartups -= 1
+    queueMicrotask(drainAppStartups)
+  }
+  const run = () => {
+    active = true
+    activeAppStartups += 1
+    start(release)
+  }
+  pendingAppStartups.add(run)
+  drainAppStartups()
+  return release
+}
 
 const ACTIONABLE_MCP_APP_RESOLUTION_CODES = new Set([
   "ambiguous_tool",
@@ -307,6 +339,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     const checkpoints: string[] = []
     let sandboxDocument: McpAppDiagnostic["sandboxDocument"]
     let failed = false
+    let stopSandbox: (() => void) | undefined
     const checkpoint = (name: string) => checkpoints.push(`${name}+${Math.round(performance.now() - startedAt)}ms`)
     const fail = (
       code: string,
@@ -318,6 +351,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       if (disposed || failed) return
       failed = true
       actions.dispose()
+      stopSandbox?.()
       const diagnostic: McpAppDiagnostic = {
         code,
         stage,
@@ -382,15 +416,10 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     let initialized = false
     let resourceAccepted = false
     let resourceSendAttempts = 0
-    const sandboxReadyTimer = window.setTimeout(() => {
-      fail(
-        "MCP_APP_SANDBOX_PROXY_TIMEOUT",
-        "sandbox-proxy",
-        null,
-        "The sandbox proxy did not report that it was ready within 5 seconds.",
-        sandbox.expectedOrigin,
-      )
-    }, SANDBOX_READY_TIMEOUT_MS)
+    let sandboxReadyTimer: number | undefined
+    let releaseStartup: (() => void) | undefined
+    let navigationStarted = false
+    let connected = false
 
     let pendingHeight: number | null = null
     let sizeSettleTimer: number | undefined
@@ -399,6 +428,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(requestedHeight))))
     }
     bridge.onsizechange = ({ height: requestedHeight }) => {
+      if (disposed || failed) return
       if (!Number.isFinite(requestedHeight) || requestedHeight === undefined) return
       if (Date.now() - lastSizeEventAt >= SIZE_EVENT_INTERVAL_MS) {
         applyHeight(requestedHeight)
@@ -414,7 +444,9 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       }, SIZE_EVENT_INTERVAL_MS)
     }
     bridge.onrequestteardown = () => {
-      actions.dispose()
+      if (disposed || failed) return
+      disposed = true
+      stopSandbox?.()
       teardownRef.current?.()
     }
     if (!readOnly) bridge.oncalltool = async ({ name, arguments: args }) => {
@@ -428,7 +460,9 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       }
     }
     bridge.oninitialized = () => {
+      if (disposed || failed || initialized) return
       initialized = true
+      releaseStartup?.()
       checkpoint("app-initialized")
       if (resourceDeliveryTimer !== undefined) window.clearTimeout(resourceDeliveryTimer)
       if (initializeTimer !== undefined) window.clearTimeout(initializeTimer)
@@ -470,7 +504,8 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       startInitializeTimer()
     }
     const handleSandboxDiagnosticMessage = (event: MessageEvent) => {
-      if (event.source !== iframe.contentWindow
+      if (disposed || failed || !navigationStarted
+        || event.source !== iframe.contentWindow
         || event.origin !== sandbox.expectedOrigin
         || !isRecord(event.data)) return
       if (event.data.method === "ui/notifications/sandbox-resource-loaded") {
@@ -503,15 +538,17 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       }
     }
     const handleSandboxReady = (event: MessageEvent) => {
-      if (event.source !== iframe.contentWindow
+      if (disposed || failed || !navigationStarted
+        || event.source !== iframe.contentWindow
         || event.origin !== sandbox.expectedOrigin
         || !isRecord(event.data)
         || event.data.method !== "ui/notifications/sandbox-proxy-ready") return
       window.removeEventListener("message", handleSandboxReady)
       checkpoint("sandbox-proxy-ready")
-      window.clearTimeout(sandboxReadyTimer)
+      if (sandboxReadyTimer !== undefined) window.clearTimeout(sandboxReadyTimer)
       const transport = new PostMessageTransport(iframe.contentWindow!, iframe.contentWindow!)
       const deliverResource = async () => {
+        if (disposed || failed) return
         resourceSendAttempts += 1
         try {
           await bridge.sendSandboxResourceReady({
@@ -520,9 +557,9 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
             sandbox: "allow-scripts",
           })
           checkpoint(resourceSendAttempts === 1 ? "resource-sent" : `resource-resent-${resourceSendAttempts}`)
-          if (resourceAccepted || initialized) return
+          if (disposed || failed || resourceAccepted || initialized) return
           resourceDeliveryTimer = window.setTimeout(() => {
-            if (resourceAccepted || initialized) return
+            if (disposed || failed || resourceAccepted || initialized) return
             if (resourceSendAttempts < MAX_RESOURCE_SEND_ATTEMPTS) {
               void deliverResource()
               return
@@ -547,6 +584,8 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       }
       void bridge.connect(transport)
         .then(() => {
+          if (disposed || failed) return bridge.close().catch(() => undefined)
+          connected = true
           checkpoint("bridge-connected")
           return deliverResource()
         })
@@ -560,24 +599,54 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
           )
         })
     }
-    window.addEventListener("message", handleSandboxDiagnosticMessage)
-    window.addEventListener("message", handleSandboxReady)
-    checkpoint("sandbox-navigation-started")
-    iframe.src = sandbox.url
-
-    return () => {
-      disposed = true
+    let stopped = false
+    stopSandbox = () => {
+      if (stopped) return
+      stopped = true
       actions.dispose()
+      releaseStartup?.()
       window.removeEventListener("message", handleSandboxDiagnosticMessage)
       window.removeEventListener("message", handleSandboxReady)
-      window.clearTimeout(sandboxReadyTimer)
+      if (sandboxReadyTimer !== undefined) window.clearTimeout(sandboxReadyTimer)
       if (resourceDeliveryTimer !== undefined) window.clearTimeout(resourceDeliveryTimer)
       if (initializeTimer !== undefined) window.clearTimeout(initializeTimer)
       if (sizeSettleTimer !== undefined) window.clearTimeout(sizeSettleTimer)
-      void Promise.race([
-        bridge.teardownResource({}),
-        new Promise<void>((resolve) => window.setTimeout(resolve, 500)),
-      ]).catch(() => undefined).finally(() => bridge.close().catch(() => undefined))
+      if (connected) {
+        let teardownTimer: number | undefined
+        void Promise.race([
+          bridge.teardownResource({}),
+          new Promise<void>((resolve) => { teardownTimer = window.setTimeout(resolve, 500) }),
+        ]).catch(() => undefined).finally(() => {
+          if (teardownTimer !== undefined) window.clearTimeout(teardownTimer)
+          return bridge.close().catch(() => undefined)
+        })
+      } else {
+        void bridge.close().catch(() => undefined)
+      }
+      if (navigationStarted) iframe.removeAttribute("src")
+    }
+    window.addEventListener("message", handleSandboxDiagnosticMessage)
+    window.addEventListener("message", handleSandboxReady)
+    checkpoint("sandbox-startup-queued")
+    releaseStartup = enqueueAppStartup((release) => {
+      releaseStartup = release
+      navigationStarted = true
+      checkpoint("sandbox-navigation-started")
+      iframe.src = sandbox.url
+      sandboxReadyTimer = window.setTimeout(() => {
+        fail(
+          "MCP_APP_SANDBOX_PROXY_TIMEOUT",
+          "sandbox-proxy",
+          null,
+          "The sandbox proxy did not report that it was ready within 10 seconds.",
+          sandbox.expectedOrigin,
+        )
+      }, SANDBOX_READY_TIMEOUT_MS)
+    })
+
+    return () => {
+      disposed = true
+      stopSandbox?.()
     }
   }, [app, inputArguments, openworkServerClient, result, toolName, workspaceId, readOnly, origin, requestApproval])
 

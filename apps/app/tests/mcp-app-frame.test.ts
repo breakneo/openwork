@@ -50,6 +50,210 @@ function fixture(overrides: Partial<OpenworkMcpAppResource> = {}): OpenworkMcpAp
   }
 }
 
+async function startupFixture() {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT")
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true)
+  const container = document.body.appendChild(document.createElement("div"))
+  const root = createRoot(container)
+  const timers = new Map<number, { at: number; run: () => void }>()
+  const deadlines: number[] = []
+  let now = 0
+  let timerId = 0
+  const timerSpy = spyOn(window, "setTimeout").mockImplementation((callback, delay = 0, ...args) => {
+    if (typeof callback !== "function") throw new Error("Expected a timer callback")
+    timers.set(++timerId, { at: now + delay, run: () => callback(...args) })
+    if (delay === 10_000) deadlines.push(now + delay)
+    return timerId
+  })
+  const clearSpy = spyOn(window, "clearTimeout").mockImplementation(id => { if (id !== undefined) timers.delete(id) })
+  const bridges: AppBridge[] = []
+  const connectSpy = spyOn(AppBridge.prototype, "connect").mockImplementation(async function () { bridges.push(this) })
+  const resourceSpy = spyOn(AppBridge.prototype, "sendSandboxResourceReady").mockResolvedValue(undefined)
+  const inputSpy = spyOn(AppBridge.prototype, "sendToolInput").mockResolvedValue(undefined)
+  const resultSpy = spyOn(AppBridge.prototype, "sendToolResult").mockResolvedValue(undefined)
+  const teardownSpy = spyOn(AppBridge.prototype, "teardownResource").mockResolvedValue({})
+  const closeSpy = spyOn(AppBridge.prototype, "close").mockResolvedValue(undefined)
+  const errorSpy = spyOn(console, "error").mockImplementation(() => {})
+  const addListenerSpy = spyOn(window, "addEventListener")
+  const removeListenerSpy = spyOn(window, "removeEventListener")
+  const client: OpenworkServerClient = {
+    ...createOpenworkServerClient({ baseUrl: "http://localhost:1" }),
+    mcpAppSandbox: app => ({ url: `about:blank#${app.toolName}`, expectedOrigin: "https://sandbox.example" }),
+  }
+  const views = Array.from({ length: 6 }, (_, index) => createElement(McpAppSandboxView, {
+    key: index,
+    origin: { client, workspaceId: `workspace-${index % 2}`, sessionId: null, readOnly: true },
+    app: fixture({ toolName: `render-${index}` }), toolName: `render-${index}`,
+    inputArguments: {}, result: { content: [] }, unavailableNotice: "Unavailable",
+  }))
+  const render = async (ids: number[]) => { await act(async () => root.render(createElement("div", null, ids.map(id => views[id])))) }
+  const frame = (id: number) => {
+    const iframe = container.querySelector<HTMLIFrameElement>(`iframe[title="render-${id} interactive view"]`)
+    if (!iframe?.contentWindow) throw new Error(`Missing iframe ${id}`)
+    return iframe
+  }
+  const notify = async (id: number, method: string, origin = "https://sandbox.example") => {
+    await act(async () => { window.dispatchEvent(new MessageEvent("message", { source: frame(id).contentWindow, origin, data: { method } })) })
+  }
+  const advance = async (ms: number) => {
+    const target = now + ms
+    for (;;) {
+      const next = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0]
+      if (!next) break
+      now = next[1].at
+      timers.delete(next[0])
+      await act(async () => next[1].run())
+    }
+    now = target
+  }
+  return {
+    render, frame, notify, advance, bridges, deadlines, timers, container,
+    connectSpy, resourceSpy, inputSpy, resultSpy, teardownSpy, closeSpy, errorSpy,
+    async dispose() {
+      try {
+        await act(async () => root.unmount())
+        expect(timers.size).toBe(0)
+        const added = addListenerSpy.mock.calls.filter(([name]) => name === "message").map(([, listener]) => listener)
+        const removed = removeListenerSpy.mock.calls.filter(([name]) => name === "message").map(([, listener]) => listener)
+        expect(removed).toEqual(expect.arrayContaining(added))
+      } finally {
+        for (const spy of [timerSpy, clearSpy, connectSpy, resourceSpy, inputSpy, resultSpy, teardownSpy, closeSpy, errorSpy, addListenerSpy, removeListenerSpy]) spy.mockRestore()
+        container.remove()
+        Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct)
+      }
+    },
+  }
+}
+
+describe("MCP App startup scheduling", () => {
+  test("starts at most two Apps across workspaces and advances FIFO only after initialization", async () => {
+    const host = await startupFixture()
+    try {
+      await host.render([0, 1, 2, 3, 4])
+      expect([0, 1, 2, 3, 4].map(id => host.frame(id).getAttribute("src"))).toEqual(["about:blank#render-0", "about:blank#render-1", null, null, null])
+      expect(host.deadlines).toEqual([10_000, 10_000])
+      await host.notify(2, "ui/notifications/sandbox-proxy-ready")
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready", "https://wrong.example")
+      expect(host.connectSpy).not.toHaveBeenCalled()
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      await host.notify(1, "ui/notifications/sandbox-proxy-ready")
+      expect(host.resourceSpy).toHaveBeenCalledTimes(2)
+      expect(host.frame(2).getAttribute("src")).toBeNull()
+      await act(async () => { host.bridges[1].oninitialized?.() })
+      expect(host.frame(2).getAttribute("src")).toBe("about:blank#render-2")
+      expect(host.frame(3).getAttribute("src")).toBeNull()
+      await act(async () => { host.bridges[1].oninitialized?.() })
+      expect(host.frame(3).getAttribute("src")).toBeNull()
+      await act(async () => { host.bridges[0].oninitialized?.() })
+      expect(host.frame(3).getAttribute("src")).toBe("about:blank#render-3")
+      expect(host.frame(4).getAttribute("src")).toBeNull()
+      expect(host.inputSpy).toHaveBeenCalledTimes(2)
+      expect(host.resultSpy).toHaveBeenCalledTimes(2)
+      await host.advance(10_000)
+      expect(host.errorSpy.mock.calls.map(([, diagnostic]) => diagnostic.toolName)).toEqual(["render-2", "render-3"])
+      expect(host.frame(0).getAttribute("src")).toBe("about:blank#render-0")
+      expect(host.frame(1).getAttribute("src")).toBe("about:blank#render-1")
+    } finally { await host.dispose() }
+  })
+
+  test("gives each navigation ten seconds, excludes queue time, and never retries a timed-out startup", async () => {
+    const host = await startupFixture()
+    try {
+      await host.render([0, 1, 2, 3, 4])
+      await host.advance(9_999)
+      expect(host.errorSpy).not.toHaveBeenCalled()
+      await host.advance(1)
+      expect(host.errorSpy).toHaveBeenCalledTimes(2)
+      expect(host.deadlines).toEqual([10_000, 10_000, 20_000, 20_000])
+      expect(host.frame(2).getAttribute("src")).toBe("about:blank#render-2")
+      expect(host.frame(4).getAttribute("src")).toBeNull()
+      await host.advance(9_999)
+      expect(host.errorSpy).toHaveBeenCalledTimes(2)
+      await host.advance(1)
+      expect(host.errorSpy).toHaveBeenCalledTimes(4)
+      expect(host.deadlines).toEqual([10_000, 10_000, 20_000, 20_000, 30_000])
+      await host.advance(9_999)
+      expect(host.errorSpy).toHaveBeenCalledTimes(4)
+      await host.advance(1)
+      expect(host.errorSpy).toHaveBeenCalledTimes(5)
+      for (const [, diagnostic] of host.errorSpy.mock.calls) {
+        expect(diagnostic).toMatchObject({ code: "MCP_APP_SANDBOX_PROXY_TIMEOUT", message: expect.stringContaining("within 10 seconds") })
+      }
+      await host.advance(60_000)
+      expect(host.deadlines).toHaveLength(5)
+      expect(host.timers.size).toBe(0)
+      expect(host.connectSpy).not.toHaveBeenCalled()
+      expect(host.teardownSpy).not.toHaveBeenCalled()
+      expect(host.closeSpy).toHaveBeenCalledTimes(5)
+    } finally { await host.dispose() }
+  })
+
+  test("cancels queued unmounts and does not navigate siblings during a whole-view teardown", async () => {
+    const host = await startupFixture()
+    try {
+      await host.render([0, 1, 2, 3, 4])
+      await host.render([0, 1, 3, 4])
+      expect(host.deadlines).toHaveLength(2)
+      await host.render([1, 3, 4])
+      expect(host.frame(3).getAttribute("src")).toBe("about:blank#render-3")
+      expect(host.frame(4).getAttribute("src")).toBeNull()
+      expect(host.deadlines).toHaveLength(3)
+      await host.render([])
+      expect(host.deadlines).toHaveLength(3)
+      expect(host.timers.size).toBe(0)
+      await host.render([0, 1, 2])
+      expect(host.frame(0).getAttribute("src")).toBe("about:blank#render-0")
+      expect(host.frame(1).getAttribute("src")).toBe("about:blank#render-1")
+      expect(host.frame(2).getAttribute("src")).toBeNull()
+    } finally { await host.dispose() }
+  })
+
+  test.each(["failure", "initialize-timeout", "teardown"])("releases a startup slot on %s and ignores late callbacks", async mode => {
+    const host = await startupFixture()
+    try {
+      await host.render([0, 1, 2])
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      await host.notify(1, "ui/notifications/sandbox-proxy-ready")
+      await host.notify(0, "ui/notifications/sandbox-resource-accepted")
+      await host.notify(1, "ui/notifications/sandbox-resource-accepted")
+      if (mode === "failure") await host.notify(0, "ui/notifications/sandbox-diagnostic")
+      else if (mode === "teardown") await act(async () => { await host.bridges[0].onrequestteardown?.({}) })
+      else {
+        await host.advance(10_000)
+        expect(host.errorSpy).toHaveBeenCalledTimes(2)
+        for (const [, diagnostic] of host.errorSpy.mock.calls) expect(diagnostic.code).toBe("MCP_APP_INITIALIZE_TIMEOUT")
+      }
+      expect(host.frame(2).getAttribute("src")).toBe("about:blank#render-2")
+      const timerCount = host.timers.size
+      await act(async () => { host.bridges[0].oninitialized?.() })
+      expect(host.inputSpy).not.toHaveBeenCalled()
+      expect(host.timers.size).toBe(timerCount)
+      expect(host.resourceSpy).toHaveBeenCalledTimes(2)
+    } finally { await host.dispose() }
+  })
+
+  test.each(["connect", "delivery"])("unmount during pending %s cannot deliver or recreate startup timers", async mode => {
+    const host = await startupFixture()
+    let finish: (() => void) | undefined
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    try {
+      if (mode === "connect") host.connectSpy.mockImplementationOnce(() => pending)
+      else host.resourceSpy.mockImplementationOnce(() => pending)
+      await host.render([0, 1, 2])
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      await host.render([1, 2])
+      expect(host.frame(2).getAttribute("src")).toBe("about:blank#render-2")
+      await act(async () => { finish?.() })
+      expect(host.resourceSpy).toHaveBeenCalledTimes(mode === "connect" ? 0 : 1)
+      expect(host.timers.size).toBe(2)
+      await host.render([])
+      await host.advance(60_000)
+      expect(host.errorSpy).not.toHaveBeenCalled()
+      expect(host.timers.size).toBe(0)
+    } finally { finish?.(); await host.dispose() }
+  })
+})
+
 describe("MCP App iframe policy", () => {
   test.each([
     { isError: true, readOnly: false, preview: false, challenge: false },
