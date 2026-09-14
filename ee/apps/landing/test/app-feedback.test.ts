@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { ForbiddenError, PlainClient } from "@team-plain/graphql";
+import { parse, visit } from "graphql";
 
 const checkBotId = mock(async () => ({ isBot: false }));
 mock.module("botid/server", () => ({ checkBotId }));
@@ -11,6 +13,7 @@ const errorLog = spyOn(console, "error").mockImplementation(() => {});
 const requests: { url: unknown; options: RequestInit | undefined; body: unknown }[] = [];
 let responses: Response[] = [];
 let requestNumber = 0;
+let restrictRelatedResourceReads = false;
 
 function formRequest(overrides: Record<string, unknown> = {}, origin = "https://openworklabs.com") {
   return new Request("https://openworklabs.com/api/app-feedback", {
@@ -41,12 +44,27 @@ beforeEach(() => {
   responses = [customerResponse(), Response.json({ data: { createThread: { thread: { id: "t_test" }, error: null } } })];
   checkBotId.mockResolvedValue({ isBot: false });
   errorLog.mockClear();
+  restrictRelatedResourceReads = false;
   fetchMock.mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], options?: RequestInit) => {
+    const body: unknown = typeof options?.body === "string" ? JSON.parse(options.body) : null;
     requests.push({
       url,
       options,
-      body: typeof options?.body === "string" ? JSON.parse(options.body) : null,
+      body,
     });
+    if (restrictRelatedResourceReads && body && typeof body === "object" && "query" in body && typeof body.query === "string") {
+      let readsRelatedResource = false;
+      visit(parse(body.query), {
+        Field(node) {
+          if (["company", "user", "machineUser", "workflow", "tenant", "assignedTo", "labels", "threadFields"].includes(node.name.value)) {
+            readsRelatedResource = true;
+          }
+        },
+      });
+      if (readsRelatedResource) {
+        return Response.json({ errors: [{ message: "Insufficient permissions to read related resources" }] }, { status: 403 });
+      }
+    }
     const response = responses.shift();
     if (!response) throw new Error("Unexpected API call");
     return response;
@@ -64,6 +82,22 @@ afterEach(() => {
 });
 
 describe("contact and feedback submissions to Plain", () => {
+  test("submits with form-only scopes when generated SDK mutations are forbidden", async () => {
+    restrictRelatedResourceReads = true;
+    const generatedClient = new PlainClient({ apiKey: "plainApiKey_test" });
+    await expect(generatedClient.mutation.upsertCustomer({ input: {
+      identifier: { emailAddress: "test@example.com" },
+      onCreate: { fullName: "Test User", email: { email: "test@example.com", isVerified: false } },
+      onUpdate: {},
+    } })).rejects.toBeInstanceOf(ForbiddenError);
+
+    const response = await POST(formRequest());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(requests).toHaveLength(3);
+    expect(responses).toHaveLength(0);
+  });
+
   for (const mode of ["contact", "feedback"]) {
     test(`${mode} creates a customer and thread with the submitted context`, async () => {
       const response = await POST(formRequest({
@@ -154,6 +188,20 @@ describe("contact and feedback submissions to Plain", () => {
     responses[0] = Response.json({ errors: [{ message: "Private provider detail" }] });
     expect((await POST(formRequest())).status).toBe(502);
     expect(requests).toHaveLength(1);
+  });
+
+  test("logs permission names from HTTP 403 errors without the provider's private details", async () => {
+    responses[0] = Response.json({ errors: [{
+      message: "Missing permission machineUser:read for test@example.com; machineUser:read required",
+    }] }, { status: 403 });
+    expect((await POST(formRequest())).status).toBe(502);
+    expect(errorLog).toHaveBeenCalledWith("Plain form submission failed", {
+      operation: "upsertCustomer",
+      errorType: "ForbiddenError",
+      code: "forbidden",
+      permissions: ["machineUser:read"],
+    });
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("test@example.com");
   });
 
   test("handles network failures without exposing exception details", async () => {

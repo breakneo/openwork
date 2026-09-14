@@ -1,5 +1,6 @@
 import { buildResponseHeaders, jsonResponse, rateLimitFormRequest, validateAntiSpamFields, validateTrustedOrigin, verifyFormBotProtection } from "../_lib/security";
-import { PlainClient } from "@team-plain/graphql";
+import { createPlainFormClient } from "../_lib/plain";
+import { ForbiddenError } from "@team-plain/graphql";
 
 type FeedbackContext = {
   source?: string;
@@ -137,35 +138,31 @@ export async function POST(request: Request) {
 
   let operation = "upsertCustomer";
   try {
-    const plain = new PlainClient({ apiKey });
-    const customerResult = await plain.mutation.upsertCustomer({
-      input: {
-        identifier: { emailAddress: email },
-        onCreate: {
-          fullName: name,
-          email: { email, isVerified: false },
-        },
-        // Public submissions must not overwrite an existing customer's profile.
-        onUpdate: {},
+    const plain = createPlainFormClient(apiKey);
+    const customerResult = await plain.upsertCustomer({
+      identifier: { emailAddress: email },
+      onCreate: {
+        fullName: name,
+        email: { email, isVerified: false },
       },
+      // Public submissions must not overwrite an existing customer's profile.
+      onUpdate: {},
     });
     if (customerResult.error || !customerResult.customer?.id) {
       throw new Error("Plain customer upsert failed", { cause: customerResult.error?.code });
     }
 
     operation = "createThread";
-    const threadResult = await plain.mutation.createThread({
-      input: {
-        customerIdentifier: { customerId: customerResult.customer.id },
-        title: mode === "contact" ? "OpenWork contact message" : "OpenWork app feedback",
-        components: [
-          { componentPlainText: { plainText: message } },
-          { componentPlainText: { plainText: `Submitted by: ${name}\nEmail: ${email}` } },
-          { componentPlainText: {
-            plainText: [diagnosticsSummary, `Submitted: ${submittedAt}`].filter(Boolean).join("\n"),
-          } },
-        ],
-      },
+    const threadResult = await plain.createThread({
+      customerIdentifier: { customerId: customerResult.customer.id },
+      title: mode === "contact" ? "OpenWork contact message" : "OpenWork app feedback",
+      components: [
+        { componentPlainText: { plainText: message } },
+        { componentPlainText: { plainText: `Submitted by: ${name}\nEmail: ${email}` } },
+        { componentPlainText: {
+          plainText: [diagnosticsSummary, `Submitted: ${submittedAt}`].filter(Boolean).join("\n"),
+        } },
+      ],
     });
     if (threadResult.error || !threadResult.thread?.id) {
       throw new Error("Plain thread creation failed", { cause: threadResult.error?.code });
@@ -175,7 +172,11 @@ export async function POST(request: Request) {
     console.error("Plain form submission failed", {
       operation,
       errorType: error instanceof Error ? error.name : "UnknownError",
-      code: error instanceof Error && typeof error.cause === "string" ? error.cause : undefined,
+      code: error instanceof ForbiddenError ? "forbidden"
+        : error instanceof Error && typeof error.cause === "string" ? error.cause : undefined,
+      permissions: error instanceof ForbiddenError
+        ? [...new Set(error.message.match(/\b[a-z][a-zA-Z]*:(?:read|create|edit|update|delete|search)\b/g) ?? [])]
+        : undefined,
     });
     return jsonResponse(request, {
       error: "We couldn't send your message. Please try again or email team@openworklabs.com.",

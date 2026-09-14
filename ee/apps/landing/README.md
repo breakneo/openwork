@@ -20,6 +20,10 @@ Both `/contact` and `/feedback` submit to `/api/app-feedback`. Following
 the server upserts a customer by email and creates a thread with the message,
 submitted name, diagnostic context, and submission time. Existing customer
 profiles are preserved, and new email addresses are marked unverified.
+The SDK transport sends minimal mutations selecting only IDs and error codes.
+Avoid the generated `PlainClient.mutation` helpers here: they also select related
+company, user, and machine-user records and can fail with HTTP 403 when the key
+has only the form's customer/thread permissions.
 Plain automatically derives companies from customer email domains; the form does
 not explicitly create companies or override company assignments.
 
