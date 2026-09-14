@@ -107,14 +107,14 @@ export type SandboxSpec = {
 
 export type SandboxHandle = {
   ref: SandboxRef
+  name?: string
   state: SandboxState
   region: string | null
   /** When `state` was last read from the host; the orchestrator caches on it. */
   observedAt: number
 }
 
-export type ExecSpec = {
-  command: string
+export type ExecSpec = ({ command: string; script?: never } | { script: string; command?: never }) & {
   /** Return once the process is started instead of waiting for exit. */
   detach: boolean
   timeoutMs: number

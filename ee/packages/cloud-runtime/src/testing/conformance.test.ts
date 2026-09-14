@@ -23,7 +23,9 @@ describe("fake provider conformance", () => {
     provider.fake.seed({ idempotencyKey: "list-hidden", state: "running", labels, hidden: true })
     provider.fake.seed({ idempotencyKey: "list-missing", state: "missing", labels })
 
-    expect((await provider.list({ labels })).map((handle) => handle.ref.ref.sandboxId)).toEqual([first.id, second.id])
+    const handles = await provider.list({ labels })
+    expect(handles.map((handle) => handle.ref.ref.sandboxId)).toEqual([first.id, second.id])
+    expect(handles.map((handle) => handle.name)).toEqual([first.spec.idempotencyKey, second.spec.idempotencyKey])
     expect((await provider.list({ idempotencyKey: first.spec.idempotencyKey, labels })).map((handle) => handle.ref.ref.sandboxId)).toEqual([first.id])
     expect(await provider.list({ idempotencyKey: foreignWorker.spec.idempotencyKey, labels })).toEqual([])
     expect(await provider.list({ idempotencyKey: foreignProvider.spec.idempotencyKey, labels })).toEqual([])

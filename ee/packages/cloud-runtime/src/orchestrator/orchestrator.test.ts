@@ -1,11 +1,18 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { RuntimeProviderError } from "../contract/errors"
 import type { ExecSpec } from "../contract/provider"
 import { createFakeProvider, type FakeOperation, type FakeProviderOptions } from "../testing/fake-provider"
 import { createInMemoryRuntimeInstanceStore } from "../testing/in-memory-store"
 import { CloudRuntimeError, isCloudRuntimeInstanceMissingError } from "./errors"
-import { baseInstanceName, currentInstanceName, instanceNameForImageVersion, instanceLookupNames, recoveryInstanceName } from "./names"
+import {
+  baseInstanceName,
+  currentInstanceName,
+  instanceNameForImageVersion,
+  instanceLookupNames,
+  legacyInstanceNamesForLocalMatch,
+  recoveryInstanceName,
+} from "./names"
 import {
   createCloudRuntimeOrchestrator,
   type CloudRuntimeOrchestratorConfig,
@@ -77,7 +84,7 @@ function harness(options: HarnessOptions = {}) {
     onExec: ({ spec }) => {
       execs.push(spec)
       if (spec.detach) return { exitCode: null }
-      if (spec.command.includes("openwork-restore-marker")) {
+      if (spec.command?.includes("openwork-restore-marker")) {
         return { exitCode: options.restoreMarkerVerified === false ? 1 : 0 }
       }
       return { exitCode: 0 }
@@ -112,7 +119,7 @@ function harness(options: HarnessOptions = {}) {
     healthChecks,
     execs,
     warnings,
-    restoreMarkerChecks: () => execs.filter((spec) => !spec.detach && spec.command.includes("openwork-restore-marker")).length,
+    restoreMarkerChecks: () => execs.filter((spec) => !spec.detach && spec.command?.includes("openwork-restore-marker")).length,
     checkpointChecks: () => provider.fake.count("storage.exists"),
     sandboxIdOf: (idempotencyKey: string) => provider.fake.sandbox(idempotencyKey)?.id ?? null,
   }
@@ -203,7 +210,7 @@ describe("Cloud runtime health deadline", () => {
 })
 
 describe("Cloud runtime provisioning adoption", () => {
-  test("adopts the existing instance when create races and the host returns a conflict", async () => {
+  test.each([legacyVersionedName, legacyName])("adopts legacy instance %s through an owner-scoped list after a create conflict", async (name) => {
     const input = provisionInput()
     let existingId = ""
     const h = harness({
@@ -214,10 +221,15 @@ describe("Cloud runtime provisioning adoption", () => {
         }
       },
     })
-    existingId = h.provider.fake.seed({ idempotencyKey: legacyName, state: "stopped", labels: ownerLabels(input), hidden: true }).id
+    existingId = h.provider.fake.seed({ idempotencyKey: name, state: "stopped", labels: ownerLabels(input), hidden: true }).id
+    const find = spyOn(h.provider, "find")
+    const list = spyOn(h.provider, "list")
 
     const result = await h.orchestrator.provision(input)
 
+    const lookupNames = instanceLookupNames(prefix, input, imageVersion)
+    expect(find.mock.calls).toEqual([...lookupNames, ...lookupNames].map((idempotencyKey) => [{ idempotencyKey, labels: ownerLabels(input) }]))
+    expect(list.mock.calls).toEqual([[{ labels: ownerLabels(input) }], [{ labels: ownerLabels(input) }]])
     expect(result.status).toBe("healthy")
     expect(result.imageVersion).toBe(imageVersion)
     expect(result.url).toBe(`http://${existingId}.fake.invalid:8787`)
@@ -226,10 +238,10 @@ describe("Cloud runtime provisioning adoption", () => {
     expect(h.provider.fake.count("destroy")).toBe(0)
     expect(h.healthChecks).toHaveLength(1)
     expect(h.store.upserts).toHaveLength(1)
-    expect(h.store.upserts[0]?.sandbox.ref.sandboxId).toBe(existingId)
+    expect(h.store.upserts[0]?.sandbox).toEqual({ providerId: "fake", ref: { sandboxId: existingId } })
   })
 
-  test("rechecks a create conflict through the host's read-after-write window", async () => {
+  test.each([currentName(provisionInput()), legacyVersionedName, legacyName])("rechecks a create conflict for %s through the host's read-after-write window", async (name) => {
     const input = provisionInput()
     let existingId = ""
     let currentLookups = 0
@@ -242,12 +254,15 @@ describe("Cloud runtime provisioning adoption", () => {
         }
       },
     })
-    existingId = h.provider.fake.seed({ idempotencyKey: currentName(input), state: "running", labels: ownerLabels(input), hidden: true }).id
+    existingId = h.provider.fake.seed({ idempotencyKey: name, state: "running", labels: ownerLabels(input), hidden: true }).id
 
     const result = await h.orchestrator.provision(input)
 
     expect(result.status).toBe("healthy")
     expect(h.provider.fake.count("create")).toBe(1)
+    expect(h.provider.fake.count("list")).toBe(name === currentName(input) ? 6 : 7)
+    expect(h.provider.fake.calls).not.toContain(`find:${legacyVersionedName}`)
+    expect(h.provider.fake.calls).not.toContain(`find:${legacyName}`)
     expect(currentLookups).toBe(7)
     expect(h.sleeps).toEqual([2_000, 2_000, 2_000, 2_000, 2_000])
     expect(h.store.upserts[0]?.sandbox.ref.sandboxId).toBe(existingId)
@@ -268,8 +283,9 @@ describe("Cloud runtime provisioning adoption", () => {
     expect(h.provider.fake.count("create")).toBe(1)
     expect(h.provider.fake.calls.filter((call) => call === `find:${currentName(input)}`)).toHaveLength(7)
     expect(h.provider.fake.calls.filter((call) => call === `find:${baseInstanceName(prefix, input)}`)).toHaveLength(7)
-    expect(h.provider.fake.calls.filter((call) => call === `find:${legacyVersionedName}`)).toHaveLength(7)
-    expect(h.provider.fake.calls.filter((call) => call === `find:${legacyName}`)).toHaveLength(7)
+    expect(h.provider.fake.calls).not.toContain(`find:${legacyVersionedName}`)
+    expect(h.provider.fake.calls).not.toContain(`find:${legacyName}`)
+    expect(h.provider.fake.calls.filter((call) => call.startsWith("list:"))).toEqual(Array(7).fill(`list:${JSON.stringify(ownerLabels(input))}`))
     expect(h.sleeps).toEqual([2_000, 2_000, 2_000, 2_000, 2_000])
     expect(h.store.upserts).toHaveLength(0)
   })
@@ -298,7 +314,17 @@ describe("Cloud runtime provisioning adoption", () => {
       `workers/${input.workerId}/workspace`,
       `workers/${input.workerId}/data`,
     ])
-    expect(created?.execs[0]?.spec.command).toContain("openwork-server --workspace")
+    const bootstrap = created?.execs[0]?.spec
+    expect(bootstrap?.command).toBeUndefined()
+    expect(bootstrap?.script).toStartWith("set -u\n")
+    expect(bootstrap?.script).toContain("openwork-server --workspace")
+    expect(bootstrap?.script).not.toContain("sh -lc")
+    expect(bootstrap).toMatchObject({ detach: true, timeoutMs: config().createTimeoutMs })
+    for (const token of [input.clientToken, input.hostToken, input.activityToken]) {
+      expect(bootstrap?.script).toContain(token)
+      expect(JSON.stringify(created?.spec)).not.toContain(token)
+      expect(JSON.stringify(h.execs.map((spec) => spec.command))).not.toContain(token)
+    }
   })
 
   test("isolates workers sharing the same name and ID prefix while keeping retries idempotent", async () => {
@@ -340,7 +366,8 @@ describe("Cloud runtime provisioning adoption", () => {
         },
       })
       const lookupNames = instanceLookupNames(prefix, input, imageVersion)
-      const existing = lookupNames.map((idempotencyKey) => h.provider.fake.seed({
+      const legacyNames = legacyInstanceNamesForLocalMatch(prefix, input, imageVersion)
+      const existing = [...lookupNames, ...legacyNames].map((idempotencyKey) => h.provider.fake.seed({
         idempotencyKey, state: "running", labels, hidden: hiddenUntilCreate,
       }))
 
@@ -353,13 +380,51 @@ describe("Cloud runtime provisioning adoption", () => {
         }
         expect(sandbox.state).toBe("running")
         expect(sandbox.execs).toHaveLength(0)
-        expect(h.provider.fake.calls.filter((call) => call === `find:${sandbox.spec.idempotencyKey}`)).toHaveLength(7)
+        expect(h.provider.fake.calls.filter((call) => call === `find:${sandbox.spec.idempotencyKey}`)).toHaveLength(lookupNames.includes(sandbox.spec.idempotencyKey) ? 7 : 0)
       }
       expect(h.provider.fake.count("create")).toBe(1)
+      expect(h.provider.fake.calls.filter((call) => call.startsWith("list:"))).toEqual(Array(7).fill(`list:${JSON.stringify(ownerLabels(input))}`))
       expect(h.healthChecks).toHaveLength(0)
       expect(h.store.upserts).toHaveLength(0)
       expect(await h.store.get(input.workerId)).toBeNull()
     }
+  })
+
+  test.each([false, true])("never adopts other image versions or arbitrary owner-labelled names (create conflict: %s)", async (createConflict) => {
+    const input = provisionInput()
+    const h = harness({
+      onOperation: (operation) => {
+        if (createConflict && operation.name === "create") throw conflict()
+      },
+    })
+    const existing = [
+      `${legacyName}-openwork-0-18-7`,
+      instanceNameForImageVersion(prefix, input, previousImageVersion),
+      "unrelated-instance",
+    ].map((idempotencyKey) => h.provider.fake.seed({ idempotencyKey, state: "running", labels: ownerLabels(input) }))
+
+    if (createConflict) {
+      await expect(h.orchestrator.provision(input)).rejects.toThrow("Sandbox with name already exists")
+      expect(h.store.upserts).toHaveLength(0)
+      expect(h.sleeps).toEqual([2_000, 2_000, 2_000, 2_000, 2_000])
+    } else {
+      const result = await h.orchestrator.provision(input)
+      expect(result.status).toBe("healthy")
+      expect(h.store.upserts[0]?.sandbox.ref.sandboxId).toBe(h.sandboxIdOf(currentName(input)))
+    }
+
+    for (const sandbox of existing) {
+      const operations: FakeOperation["name"][] = ["stop", "start", "exec", "endpoint", "destroy"]
+      for (const operation of operations) {
+        expect(h.provider.fake.count(operation, sandbox.id)).toBe(0)
+      }
+      expect(sandbox.state).toBe("running")
+      expect(sandbox.execs).toHaveLength(0)
+    }
+    expect(h.provider.fake.calls.filter((call) => call.startsWith("create:"))).toEqual([`create:${currentName(input)}`])
+    expect(h.provider.fake.calls.filter((call) => call.startsWith("list:"))).toEqual(
+      Array(createConflict ? 7 : 1).fill(`list:${JSON.stringify(ownerLabels(input))}`),
+    )
   })
 
   test("a one-second endpoint is already unsafe after issuance and a delayed health wait", async () => {
@@ -723,46 +788,83 @@ describe("Cloud runtime instance name lookup", () => {
     expect(new Set(names).size).toBe(names.length)
   })
 
-  test("preserves both original legacy computations and their truncation for fallback only", () => {
+  test("keeps lookup names opaque and preserves legacy computations only for local matching", () => {
     const input = provisionInput()
-    expect(instanceLookupNames(prefix, input, imageVersion)).toEqual([currentName(input), baseInstanceName(prefix, input), legacyVersionedName, legacyName])
-    expect(instanceLookupNames(prefix, input, null)).toEqual([baseInstanceName(prefix, input), legacyName])
+    const renamed = { ...input, name: "Private workspace title" }
+    expect(instanceLookupNames(prefix, input, imageVersion)).toEqual([currentName(input), baseInstanceName(prefix, input)])
+    expect(instanceLookupNames(prefix, input, null)).toEqual([baseInstanceName(prefix, input)])
+    expect(instanceLookupNames(prefix, renamed, imageVersion)).toEqual(instanceLookupNames(prefix, input, imageVersion))
+    expect(instanceLookupNames(prefix, renamed, null)).toEqual(instanceLookupNames(prefix, input, null))
+    expect(legacyInstanceNamesForLocalMatch(prefix, input, imageVersion)).toEqual([legacyVersionedName, legacyName])
+    expect(legacyInstanceNamesForLocalMatch(prefix, input, null)).toEqual([legacyName])
     const longPrefix = "p".repeat(100)
-    expect(instanceLookupNames(longPrefix, input, "v".repeat(100)).slice(1)).toEqual([
+    expect(instanceLookupNames(longPrefix, input, "v".repeat(100))).toEqual([
+      instanceNameForImageVersion(longPrefix, input, "v".repeat(100)),
       baseInstanceName(longPrefix, input),
+    ])
+    expect(legacyInstanceNamesForLocalMatch(longPrefix, input, "v".repeat(100))).toEqual([
       `${"p".repeat(38)}-${"v".repeat(24)}`,
       "p".repeat(63),
     ])
   })
 
-  test("checks the current version-qualified name before the legacy base name", async () => {
+  test.each([0, 1, 2, 3])("preserves lookup priority independently of list order (first available candidate: %s)", async (firstAvailable) => {
     const input = provisionInput()
-    const h = harness()
-    const current = h.provider.fake.seed({ idempotencyKey: currentName(input), state: "stopped", labels: ownerLabels(input) })
-    const legacy = h.provider.fake.seed({ idempotencyKey: legacyName, state: "stopped", labels: ownerLabels(input) })
+    const lookupNames = instanceLookupNames(prefix, input, imageVersion)
+    const names = [...lookupNames, ...legacyInstanceNamesForLocalMatch(prefix, input, imageVersion)]
+    for (const createConflict of [false, true]) {
+      const h = harness({
+        onOperation: (operation) => {
+          if (createConflict && operation.name === "create") {
+            for (const sandbox of existing) h.provider.fake.setVisible(sandbox.id, true)
+            throw conflict()
+          }
+        },
+      })
+      const existing = names.slice(firstAvailable).reverse().map((idempotencyKey) => h.provider.fake.seed({
+        idempotencyKey, state: "stopped", labels: ownerLabels(input), hidden: createConflict,
+      }))
 
-    await h.orchestrator.provision(input)
+      await h.orchestrator.provision(input)
 
-    const lookups = h.provider.fake.calls.filter((call) => call.startsWith("find:"))
-    expect(lookups[0]).toBe(`find:${currentName(input)}`)
-    expect(lookups).not.toContain(`find:${legacyName}`)
-    expect(h.store.upserts[0]?.sandbox.ref.sandboxId).toBe(current.id)
-    expect(h.provider.fake.count("start", legacy.id)).toBe(0)
+      const selected = existing.find((sandbox) => sandbox.spec.idempotencyKey === names[firstAvailable])!
+      const expectedLookups = [
+        ...(createConflict ? lookupNames : []),
+        ...lookupNames.slice(0, firstAvailable === 0 ? 1 : 2),
+      ]
+      expect(h.provider.fake.calls.filter((call) => call.startsWith("find:"))).toEqual(expectedLookups.map((name) => `find:${name}`))
+      expect(h.provider.fake.count("list")).toBe((createConflict ? 1 : 0) + (firstAvailable >= 2 ? 1 : 0))
+      expect(h.provider.fake.count("create")).toBe(createConflict ? 1 : 0)
+      expect(h.store.upserts[0]?.sandbox).toEqual({ providerId: "fake", ref: { sandboxId: selected.id } })
+      expect(h.provider.fake.count("start", selected.id)).toBe(1)
+      expect(h.provider.fake.count("destroy")).toBe(0)
+      for (const sandbox of existing.filter((sandbox) => sandbox.id !== selected.id)) {
+        expect(h.provider.fake.count("start", sandbox.id)).toBe(0)
+        expect(sandbox.execs).toHaveLength(0)
+      }
+    }
   })
 
-  test.each([baseInstanceName(prefix, provisionInput()), legacyVersionedName, legacyName])("adopts the labelled owner's unversioned or legacy instance %s", async (name) => {
-    const input = provisionInput()
-    const h = harness()
-    const legacy = h.provider.fake.seed({ idempotencyKey: name, state: "stopped", labels: ownerLabels(input) })
+  test.each([imageVersion, null])("adopts owner-scoped fallback names without transmitting display text (image: %s)", async (version) => {
+    const input = { ...provisionInput(), name: "Private Workspace Title" }
+    const baseName = baseInstanceName(prefix, input)
+    for (const name of [baseName, ...legacyInstanceNamesForLocalMatch(prefix, input, version)]) {
+      const h = harness({ provider: { image: version ? { id: version, version } : null } })
+      const existing = h.provider.fake.seed({ idempotencyKey: name, state: "stopped", labels: ownerLabels(input) })
+      const find = spyOn(h.provider, "find")
+      const list = spyOn(h.provider, "list")
 
-    await h.orchestrator.provision(input)
+      await h.orchestrator.provision(input)
 
-    const lookups = h.provider.fake.calls.filter((call) => call.startsWith("find:"))
-    expect(lookups[0]).toBe(`find:${currentName(input)}`)
-    expect(lookups.at(-1)).toBe(`find:${name}`)
-    expect(h.store.upserts[0]?.sandbox.ref.sandboxId).toBe(legacy.id)
-    expect(h.provider.fake.count("create")).toBe(0)
-    expect(h.provider.fake.count("start", legacy.id)).toBe(1)
+      expect(find.mock.calls).toEqual(instanceLookupNames(prefix, input, version).map((idempotencyKey) => [{ idempotencyKey, labels: ownerLabels(input) }]))
+      expect(list.mock.calls).toEqual(name === baseName ? [] : [[{ labels: ownerLabels(input) }]])
+      const requests = JSON.stringify([...find.mock.calls, ...list.mock.calls])
+      expect(requests).not.toContain(input.name)
+      expect(requests).not.toContain("private-workspace-title")
+      expect(h.store.upserts[0]?.sandbox).toEqual({ providerId: "fake", ref: { sandboxId: existing.id } })
+      expect(h.provider.fake.count("create")).toBe(0)
+      expect(h.provider.fake.count("start", existing.id)).toBe(1)
+    }
   })
 
   test("exposes the current instance name for operator display", () => {

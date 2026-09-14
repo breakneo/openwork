@@ -683,10 +683,6 @@ const remoteSessionSource: CapabilitySource = {
     return action ? { kind: "remoteSession", name, action } : null
   },
   search: async (ctx, query, limit) => {
-    // Remote sessions require an active membership and the organization's
-    // Cloud capability flag: a member of a flag-off org never discovers
-    // these capabilities. Worker provisioning state is checked at execute
-    // time and reported as an actionable needs-setup result.
     if (!ctx.sourceFilter.api || !ctx.member || !ctx.remoteSessionsEnabled) return []
     return searchRemoteSessionCapabilities(query, limit)
   },

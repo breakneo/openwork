@@ -121,6 +121,31 @@ test("first cloud task provisions once over MCP, recovers its workspace, and pre
     });
   }
 
+  function assertPrivateBootstrapTransport() {
+    const bootstraps = witness.commandTransports.filter((entry) => entry.operation === "bootstrap");
+    expect(bootstraps.length).toBeGreaterThan(0);
+    expect(witness.commandTransports.every((entry) => !entry.credentialValuesInCommand)).toBe(true);
+    for (const bootstrap of bootstraps) {
+      expect(bootstrap).toMatchObject({
+        pathOnly: true, rawScript: true, runAsync: true, suppressInputEcho: true,
+        directoryMode: "700", fileMode: "600", selfUnlink: true,
+      });
+      expect([...bootstrap.credentialNames].sort()).toEqual([
+        "DEN_ACTIVITY_HEARTBEAT_TOKEN", "OPENWORK_HOST_TOKEN", "OPENWORK_TOKEN",
+      ]);
+    }
+    for (const launch of witness.fileEvents.filter((entry) => entry.operation === "launch")) {
+      const directory = launch.path.slice(0, launch.path.lastIndexOf("/"));
+      const operations = witness.fileEvents.filter((entry) => entry.sandboxId === launch.sandboxId
+        && (entry.path === launch.path || entry.path === directory));
+      expect(operations.map((entry) => entry.operation)).toEqual([
+        "directory", "upload", "permissions", "launch", "self-unlink",
+      ]);
+    }
+    expect(witness.pendingScriptCount()).toBe(0);
+    return bootstraps.length;
+  }
+
   expect((await call(writeToken, "create", {})).payload.error).toBe("openwork_web_access_required");
   expect(await workers()).toEqual([]);
   expect(witness.sandboxes).toHaveLength(0);
@@ -153,6 +178,7 @@ test("first cloud task provisions once over MCP, recovers its workspace, and pre
 
   witness.ready();
   await eventually(async () => (await workers()).map((entry) => record(entry).status), { within: 60_000, label: "real provisioner records ready after witness health", until: (statuses) => statuses.length === 1 && statuses[0] === "healthy" });
+  assertPrivateBootstrapTransport();
   // The worker's HTTP listener can be healthy before its engine has a URL.
   witness.sessionFailure({ code: "opencode_unconfigured", message: "OpenCode base URL is missing for this workspace" });
   const starting = await call(writeToken, "create", task);
@@ -317,6 +343,9 @@ test("first cloud task provisions once over MCP, recovers its workspace, and pre
   expect(witness.unexpected).toEqual([]);
   await colleagueUnaffected();
   evidence.recordAssertionEvidence("Version recycle verifies restore before retiring the old sandbox", JSON.stringify(recycleEvents) + " Same worker and session survived; checkpoint helpers were disposed and the colleague was unchanged. HTTP witness models checkpoint contents and command results only; it does not execute Linux bootstrap, tar, SQLite, or volume I/O.", true);
+  const privateBootstraps = assertPrivateBootstrapTransport();
+  evidence.recordAssertionEvidence("Bootstrap transport keeps credentials out of command requests",
+    `${privateBootstraps} bootstraps used path-only asynchronous commands after private-directory, upload and permission requests. Credential values remained in raw-script uploads, never command requests; the witness observed the self-unlink prelude. This checks SDK HTTP transport, not Linux execution or actual filesystem permissions.`, true);
 
   await queryDenDatabase(databaseUrl, "UPDATE org_subscriptions SET status = 'canceled' WHERE organization_id = ?", [orgId]);
   expect((await call(writeToken, "create", task)).payload.error).toBe("openwork_web_access_required");

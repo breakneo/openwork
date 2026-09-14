@@ -40,7 +40,9 @@ type FakeSandboxOptions = {
 function fakeSandbox(options: FakeSandboxOptions) {
   let state = options.state ?? "started"
   const calls: string[] = []
-  const commands: Array<{ sessionId: string; command: string; runAsync: boolean; timeout: number | undefined }> = []
+  const commands: Array<{ sessionId: string; command: string; runAsync: boolean; suppressInputEcho?: boolean; timeout: number | undefined }> = []
+  const uploads: Array<{ source: Buffer; path: string; timeout: number | undefined }> = []
+  const files = new Map<string, { mode: string; directory: boolean }>()
   const exitCodes = [...(options.exitCodes ?? [0])]
   const sandbox: DaytonaSandboxClient = {
     get id() {
@@ -79,12 +81,36 @@ function fakeSandbox(options: FakeSandboxOptions) {
       calls.push(`preview:${port}:${expiresInSeconds}`)
       return { url: options.previewUrl ?? `https://${options.id}.preview.example.test` }
     },
+    fs: {
+      async createFolder(path, mode) {
+        calls.push(`mkdir:${path}:${mode}`)
+        files.set(path, { mode, directory: true })
+      },
+      async uploadFile(source, path, timeout) {
+        calls.push(`upload:${path}:${timeout}`)
+        uploads.push({ source, path, timeout })
+        files.set(path, { mode: "644", directory: false })
+      },
+      async setFilePermissions(path, permissions) {
+        calls.push(`chmod:${path}:${permissions.mode}`)
+        const file = files.get(path)
+        if (!file) throw new DaytonaNotFoundError("Staged file missing")
+        if (permissions.mode) file.mode = permissions.mode
+      },
+      async deleteFile(path, recursive) {
+        calls.push(`unlink:${path}:${recursive}`)
+        for (const file of files.keys()) {
+          if (file === path || (recursive && file.startsWith(`${path}/`))) files.delete(file)
+        }
+      },
+    },
     process: {
       async createSession(sessionId) {
         calls.push(`session:${sessionId}`)
       },
       async executeSessionCommand(sessionId, request, timeout) {
-        commands.push({ sessionId, command: request.command, runAsync: request.runAsync, timeout })
+        calls.push(`exec:${sessionId}`)
+        commands.push({ sessionId, ...request, timeout })
         return { cmdId: `cmd_${commands.length}` }
       },
       async getSessionCommand() {
@@ -98,7 +124,7 @@ function fakeSandbox(options: FakeSandboxOptions) {
       },
     },
   }
-  return { sandbox, calls, commands, setState: (next: string) => { state = next } }
+  return { sandbox, calls, commands, uploads, files, setState: (next: string) => { state = next } }
 }
 
 function fakeClient(input: {
@@ -248,17 +274,19 @@ describe("Daytona provider", () => {
   })
 
   test("find by name refreshes state and get returns a fresh handle", async () => {
-    const existing = fakeSandbox({ id: "sbx_1", state: "stopped" })
+    const existing = fakeSandbox({ id: "sbx_1", name: "den-name", state: "stopped" })
     const fake = fakeClient({ sandboxes: { "den-name": existing.sandbox, sbx_1: existing.sandbox } })
     const provider = createDaytonaProvider(config(), { client: fake.client })
 
     const found = await provider.find({ idempotencyKey: "den-name" })
     expect(found?.state).toBe("stopped")
+    expect(found?.name).toBe("den-name")
     expect(existing.calls).toContain("refresh")
 
     existing.setState("started")
     const inspected = await provider.inspect(found!)
     expect(inspected.state).toBe("running")
+    expect(inspected.name).toBe("den-name")
     expect(fake.lookups).toEqual(["den-name"])
     expect(fake.listQueries).toEqual([])
   })
@@ -319,15 +347,18 @@ describe("Daytona provider", () => {
     expect(await createDaytonaProvider(config(), { client: fakeClient({}).client }).find({ labels: { x: "y" } })).toBeNull()
   })
 
-  test("list exhausts the iterator and returns every unique owned sandbox before accepted deletes", async () => {
+  test.each(["worker", "provider"])("list exhausts owned matches and rejects refreshed %s mismatches before accepted deletes", async (mismatch) => {
     const labels = { "openwork.den.provider": "daytona", "openwork.den.worker-id": "worker_1" }
-    const first = fakeSandbox({ id: "sbx_first", labels })
-    const second = fakeSandbox({ id: "sbx_second", labels: { ...labels, extra: "allowed" } })
+    const legacyName = "den-worker-private-workspace-worker-1"
+    const legacyVersionedName = `${legacyName}-openwork-0-18-8`
+    const first = fakeSandbox({ id: "sbx_first", name: legacyName, labels })
+    const second = fakeSandbox({ id: "sbx_second", name: legacyVersionedName, labels: { ...labels, extra: "allowed" } })
     const foreignLabels = { ...labels }
-    const foreign = fakeSandbox({ id: "sbx_foreign", labels: foreignLabels })
+    const foreign = fakeSandbox({ id: "sbx_foreign", name: legacyName, labels: foreignLabels })
     foreign.sandbox.refreshData = async () => {
       foreign.calls.push("refresh")
-      foreignLabels["openwork.den.worker-id"] = "worker_2"
+      if (mismatch === "worker") foreignLabels["openwork.den.worker-id"] = "worker_2"
+      else foreignLabels["openwork.den.provider"] = "other"
     }
     const unlabelled = fakeSandbox({ id: "sbx_unlabelled" })
     const missing = fakeSandbox({ id: "sbx_missing" })
@@ -347,6 +378,7 @@ describe("Daytona provider", () => {
     const handles = await provider.list({ labels })
 
     expect(handles.map((handle) => handle.ref.ref.sandboxId)).toEqual(["sbx_first", "sbx_second"])
+    expect(handles.map((handle) => handle.name)).toEqual([legacyName, legacyVersionedName])
     expect(fake.listQueries).toEqual([{ labels, limit: 100 }])
     expect(fake.listedIds).toEqual(listed.map(({ id }) => id))
     expect(fake.lookups).toEqual(["sbx_first", "sbx_foreign", "sbx_gone", "sbx_unlabelled", "sbx_missing", "sbx_second"])
@@ -560,6 +592,263 @@ describe("Daytona provider", () => {
     expect(sandbox.commands[1]).toMatchObject({ command: "test -e marker", runAsync: false, timeout: 5 })
     expect(await sync.exitCode()).toBe(0)
     expect(await sync.logs()).toEqual({ stdout: "out", stderr: "err" })
+  })
+
+  const credentialTokens = ["client-sentinel-4445", "host-sentinel-4445", "activity-sentinel-4445"]
+  const credentialScript = `set -u\nOPENWORK_TOKEN='${credentialTokens[0]}' OPENWORK_HOST_TOKEN='${credentialTokens[1]}' DEN_ACTIVITY_HEARTBEAT_TOKEN='${credentialTokens[2]}' openwork-server --port 8787`
+
+  test("stages raw scripts privately and retains async session logs and exit polling without credential argv", async () => {
+    const sandbox = fakeSandbox({ id: "sbx_script", exitCodes: [null, 143] })
+    const provider = createDaytonaProvider(config(), {
+      client: fakeClient({ sandboxes: { sbx_script: sandbox.sandbox } }).client,
+      now: () => 1_000,
+      randomSuffix: () => "abcd1234",
+    })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_script" } }))!
+    const exec = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 30_000, sessionId: "openwork-private" })
+    const upload = sandbox.uploads[0]!
+    const directory = upload.path.slice(0, upload.path.lastIndexOf("/"))
+
+    expect(directory).toMatch(/^\/tmp\/openwork-exec-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(Buffer.isBuffer(upload.source)).toBe(true)
+    expect(upload.timeout).toBe(30)
+    expect(upload.source.toString()).toBe(`set +xv\nrm -f -- "$0" || exit 1\nrmdir -- '${directory}' 2>/dev/null || true\n${credentialScript}\n`)
+    expect(sandbox.calls).toEqual([
+      "refresh", `mkdir:${directory}:700`, `upload:${upload.path}:30`, `chmod:${upload.path}:600`,
+      "session:openwork-private", "exec:openwork-private",
+    ])
+    expect(sandbox.files.get(directory)).toEqual({ mode: "700", directory: true })
+    expect(sandbox.files.get(upload.path)).toEqual({ mode: "600", directory: false })
+    expect(sandbox.commands).toEqual([{
+      sessionId: "openwork-private", command: `sh -lc 'exec sh ${upload.path}'`, runAsync: true, suppressInputEcho: true, timeout: 30,
+    }])
+    expect(exec.id).toBe("openwork-private/cmd_1")
+    expect(await exec.exitCode()).toBeNull()
+    expect(await exec.logs()).toEqual({ stdout: "out", stderr: "err" })
+    expect(await exec.exitCode()).toBe(143)
+    expect(sandbox.calls.some((call) => call.startsWith("unlink:"))).toBe(false)
+
+    await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 0 })
+    expect(sandbox.uploads[1]?.path).not.toBe(upload.path)
+    expect(sandbox.uploads[1]?.timeout).toBe(30)
+    for (const token of credentialTokens) {
+      expect(JSON.stringify(sandbox.commands)).not.toContain(token)
+      expect(JSON.stringify(sandbox.calls)).not.toContain(token)
+    }
+  })
+
+  test.each(["upload", "permissions", "session creation"])("sanitizes script %s failures and preserves them when cleanup also fails", async (phase) => {
+    for (const cleanupFails of [false, true]) {
+      const sandbox = fakeSandbox({ id: "sbx_script_failure" })
+      const leaked = Object.assign(new DaytonaRateLimitError(`multipart ${credentialScript}`), { cause: { multipart: credentialScript } })
+      if (phase === "upload") {
+        const upload = sandbox.sandbox.fs.uploadFile
+        sandbox.sandbox.fs.uploadFile = async (source, path, timeout) => { await upload(source, path, timeout); throw leaked }
+      } else if (phase === "permissions") {
+        const permissions = sandbox.sandbox.fs.setFilePermissions
+        sandbox.sandbox.fs.setFilePermissions = async (path, mode) => { await permissions(path, mode); throw leaked }
+      } else {
+        const session = sandbox.sandbox.process.createSession
+        sandbox.sandbox.process.createSession = async (id) => { await session(id); throw leaked }
+      }
+      if (cleanupFails) {
+        sandbox.sandbox.fs.deleteFile = async (path, recursive) => {
+          sandbox.calls.push(`unlink:${path}:${recursive}`)
+          throw new Error(`cleanup ${credentialScript}`, { cause: leaked })
+        }
+      }
+      const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_script_failure: sandbox.sandbox } }).client })
+      const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_script_failure" } }))!
+
+      const failure = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 5_000 }).catch((error: unknown) => error)
+
+      if (!isRuntimeProviderError(failure)) throw new Error("Expected a sanitized provider error")
+      expect(failure.code).toBe("rate_limited")
+      expect(failure.retryable).toBe(phase !== "upload")
+      expect(failure.message).toBe(`Daytona script ${phase} failed (rate_limited)`)
+      expect(failure.cause).toBeUndefined()
+      for (const token of credentialTokens) {
+        expect(`${failure.stack} ${JSON.stringify(failure)}`).not.toContain(token)
+      }
+      const path = sandbox.uploads[0]!.path
+      const directory = path.slice(0, path.lastIndexOf("/"))
+      if (phase === "upload") {
+        expect(sandbox.calls.filter((call) => call.startsWith("unlink:"))).toEqual([`unlink:${path}:false`])
+        expect(sandbox.files.get(directory)).toEqual({ mode: "700", directory: true })
+        expect(sandbox.files.has(path)).toBe(cleanupFails)
+      } else {
+        expect(sandbox.calls.filter((call) => call.startsWith("unlink:"))).toEqual([`unlink:${directory}:true`])
+        expect(sandbox.files.size).toBe(cleanupFails ? 2 : 0)
+      }
+      expect(sandbox.commands).toHaveLength(0)
+    }
+  })
+
+  test("keeps the private parent when a rejected upload writes again after cleanup", async () => {
+    const sandbox = fakeSandbox({ id: "sbx_rejected_upload" })
+    const upload = sandbox.sandbox.fs.uploadFile
+    let finishLateUpload: () => void = () => { throw new Error("Upload was not submitted") }
+    sandbox.sandbox.fs.uploadFile = async (source, path, timeout) => {
+      await upload(source, path, timeout)
+      finishLateUpload = () => {
+        const directory = path.slice(0, path.lastIndexOf("/"))
+        if (!sandbox.files.has(directory)) sandbox.files.set(directory, { mode: "755", directory: true })
+        sandbox.files.set(path, { mode: "644", directory: false })
+      }
+      throw new Error(`read ECONNRESET ${credentialScript}`, { cause: { multipart: credentialScript } })
+    }
+    const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_rejected_upload: sandbox.sandbox } }).client })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_rejected_upload" } }))!
+
+    const failure = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 1_000 }).catch((error: unknown) => error)
+
+    if (!isRuntimeProviderError(failure)) throw new Error("Expected a sanitized provider error")
+    expect(failure.code).toBe("transient")
+    expect(failure.retryable).toBe(false)
+    expect(failure.message).toBe("Daytona script upload failed (transient)")
+    expect(failure.cause).toBeUndefined()
+    const path = sandbox.uploads[0]!.path
+    const directory = path.slice(0, path.lastIndexOf("/"))
+    expect(sandbox.files.has(path)).toBe(false)
+    finishLateUpload()
+    expect(sandbox.files.get(path)).toEqual({ mode: "644", directory: false })
+    expect(sandbox.files.get(directory)).toEqual({ mode: "700", directory: true })
+    expect(sandbox.calls.filter((call) => call.startsWith("unlink:"))).toEqual([`unlink:${path}:false`])
+    expect(sandbox.uploads).toHaveLength(1)
+    expect(sandbox.commands).toHaveLength(0)
+    expect(sandbox.calls.some((call) => call.startsWith("session:"))).toBe(false)
+    for (const token of credentialTokens) expect(`${failure.stack} ${JSON.stringify(failure)} ${JSON.stringify(sandbox.calls)}`).not.toContain(token)
+  })
+
+  test("does not upload or remove an unowned directory when private directory creation fails", async () => {
+    const sandbox = fakeSandbox({ id: "sbx_directory_failure" })
+    sandbox.sandbox.fs.createFolder = async () => { throw new DaytonaConflictError("Directory already exists") }
+    const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_directory_failure: sandbox.sandbox } }).client })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_directory_failure" } }))!
+
+    await expect(provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 1_000 })).rejects.toThrow("Daytona script directory creation failed (conflict)")
+
+    expect(sandbox.uploads).toHaveLength(0)
+    expect(sandbox.commands).toHaveLength(0)
+    expect(sandbox.calls).toEqual(["refresh"])
+  })
+
+  test.each(["directory", "upload", "permissions", "session"])("bounds script %s setup and cleans only after the late operation settles", async (phase) => {
+    const sandbox = fakeSandbox({ id: "sbx_late_setup" })
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => { release = () => resolve() })
+    let pending: Promise<unknown> = Promise.resolve()
+    function hold<T>(operation: () => Promise<T>) {
+      const promise = gate.then(operation)
+      pending = promise
+      return promise
+    }
+    if (phase === "directory") {
+      const create = sandbox.sandbox.fs.createFolder
+      sandbox.sandbox.fs.createFolder = (path, mode) => hold(() => create(path, mode))
+    } else if (phase === "upload") {
+      const upload = sandbox.sandbox.fs.uploadFile
+      sandbox.sandbox.fs.uploadFile = (source, path, timeout) => hold(() => upload(source, path, timeout))
+    } else if (phase === "permissions") {
+      const permissions = sandbox.sandbox.fs.setFilePermissions
+      sandbox.sandbox.fs.setFilePermissions = (path, mode) => hold(() => permissions(path, mode))
+    } else {
+      const session = sandbox.sandbox.process.createSession
+      sandbox.sandbox.process.createSession = (id) => hold(() => session(id))
+    }
+    const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_late_setup: sandbox.sandbox } }).client })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_late_setup" } }))!
+    const startedAt = Date.now()
+
+    const failure = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 20 }).catch((error: unknown) => error)
+
+    expect(isRuntimeProviderError(failure) && failure.code).toBe("timeout")
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(sandbox.commands).toHaveLength(0)
+    expect(sandbox.calls.some((call) => call.startsWith("unlink:"))).toBe(false)
+    release()
+    await pending
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    if (phase === "directory") expect(sandbox.uploads).toHaveLength(0)
+    else {
+      expect(sandbox.uploads[0]!.timeout).toBeGreaterThan(0)
+      expect(sandbox.uploads[0]!.timeout).toBeLessThanOrEqual(0.02)
+    }
+    expect(sandbox.files.size).toBe(0)
+    expect(sandbox.calls.filter((call) => call.startsWith("unlink:"))).toHaveLength(1)
+    expect(sandbox.commands).toHaveLength(0)
+  })
+
+  test("bounds a hung cleanup without replacing the original script upload failure", async () => {
+    const sandbox = fakeSandbox({ id: "sbx_hung_cleanup" })
+    sandbox.sandbox.fs.uploadFile = async () => { throw new DaytonaRateLimitError(`multipart ${credentialScript}`) }
+    let releaseCleanup = () => {}
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    sandbox.sandbox.fs.deleteFile = () => cleanup
+    const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_hung_cleanup: sandbox.sandbox } }).client })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_hung_cleanup" } }))!
+    const startedAt = Date.now()
+
+    const failure = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 20 }).catch((error: unknown) => error)
+
+    expect(isRuntimeProviderError(failure) && failure.code).toBe("rate_limited")
+    expect(isRuntimeProviderError(failure) && failure.message).toBe("Daytona script upload failed (rate_limited)")
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(sandbox.commands).toHaveLength(0)
+    releaseCleanup()
+    await cleanup
+  })
+
+  test("sanitizes SDK launch failures without exposing request bodies or retrying", async () => {
+    const sandbox = fakeSandbox({ id: "sbx_launch_failure" })
+    const launch = sandbox.sandbox.process.executeSessionCommand
+    sandbox.sandbox.process.executeSessionCommand = async (sessionId, request, timeout) => {
+      await launch(sessionId, request, timeout)
+      throw new Error(`read ECONNRESET ${credentialScript}`, { cause: { multipart: credentialScript } })
+    }
+    const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_launch_failure: sandbox.sandbox } }).client })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_launch_failure" } }))!
+
+    const failure = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 1_000 }).catch((error: unknown) => error)
+
+    if (!isRuntimeProviderError(failure)) throw new Error("Expected a sanitized provider error")
+    expect(failure.code).toBe("transient")
+    expect(failure.retryable).toBe(false)
+    expect(failure.cause).toBeUndefined()
+    expect(sandbox.commands).toHaveLength(1)
+    expect(sandbox.calls.some((call) => call.startsWith("unlink:"))).toBe(false)
+    for (const token of credentialTokens) expect(`${failure.stack} ${JSON.stringify(failure)}`).not.toContain(token)
+  })
+
+  test("never retries or eagerly unlinks an ambiguous launch, including a late successful response", async () => {
+    const sandbox = fakeSandbox({ id: "sbx_ambiguous_launch" })
+    let releaseLaunch = () => {}
+    const gate = new Promise<void>((resolve) => { releaseLaunch = resolve })
+    const launch = sandbox.sandbox.process.executeSessionCommand
+    sandbox.sandbox.process.executeSessionCommand = async (sessionId, request, timeout) => {
+      const command = await launch(sessionId, request, timeout)
+      await gate
+      return command
+    }
+    const provider = createDaytonaProvider(config(), { client: fakeClient({ sandboxes: { sbx_ambiguous_launch: sandbox.sandbox } }).client })
+    const handle = (await provider.get({ providerId: "daytona", ref: { sandboxId: "sbx_ambiguous_launch" } }))!
+
+    const failure = await provider.exec(handle, { script: credentialScript, detach: true, timeoutMs: 20 }).catch((error: unknown) => error)
+
+    if (!isRuntimeProviderError(failure)) throw new Error("Expected a sanitized provider error")
+    expect(failure.code).toBe("timeout")
+    expect(failure.retryable).toBe(false)
+    expect(failure.message).toContain("launch outcome is unknown")
+    expect(failure.cause).toBeUndefined()
+    expect(sandbox.commands).toHaveLength(1)
+    expect(sandbox.files.size).toBe(2)
+    releaseLaunch()
+    await gate
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(sandbox.commands).toHaveLength(1)
+    expect(sandbox.files.size).toBe(2)
+    expect(sandbox.calls.some((call) => call.startsWith("unlink:"))).toBe(false)
+    for (const token of credentialTokens) expect(`${failure.stack} ${JSON.stringify(sandbox.commands)}`).not.toContain(token)
   })
 
   test("endpoint caps the signed preview lifetime at 24 hours and reports expiry", async () => {

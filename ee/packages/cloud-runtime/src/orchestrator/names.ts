@@ -64,17 +64,16 @@ export function currentInstanceName(prefix: string, input: InstanceNameInput, ve
   return version ? instanceNameForImageVersion(prefix, input, version) : baseInstanceName(prefix, input)
 }
 
-/** Current name first, then the unversioned name and both legacy forms. */
+/** Opaque idempotency keys that may be sent in provider lookup requests. */
 export function instanceLookupNames(prefix: string, input: InstanceNameInput, version: string | null) {
-  const names: string[] = []
+  return [...new Set([currentInstanceName(prefix, input, version), baseInstanceName(prefix, input)])]
+}
+
+/** Compare only with owner-scoped results in memory; never send these names to a provider. */
+export function legacyInstanceNamesForLocalMatch(prefix: string, input: InstanceNameInput, version: string | null) {
   const legacyBase = legacyBaseInstanceName(prefix, input)
   const legacyVersioned = version ? legacyInstanceNameForImageVersion(prefix, input, version) : legacyBase
-  for (const name of [currentInstanceName(prefix, input, version), baseInstanceName(prefix, input), legacyVersioned, legacyBase]) {
-    if (!names.includes(name)) {
-      names.push(name)
-    }
-  }
-  return names
+  return [...new Set([legacyVersioned, legacyBase])]
 }
 
 export function recoveryInstanceName(prefix: string, input: InstanceNameInput, version: string | null, suffix: string) {

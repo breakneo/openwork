@@ -126,6 +126,7 @@ export function createFakeProvider(options: FakeProviderOptions = {}): FakeProvi
   function handleOf(record: FakeSandboxRecord): SandboxHandle {
     return {
       ref: { providerId, ref: { sandboxId: record.id } },
+      name: record.spec.idempotencyKey,
       state: record.state,
       region: record.region,
       observedAt: now(),

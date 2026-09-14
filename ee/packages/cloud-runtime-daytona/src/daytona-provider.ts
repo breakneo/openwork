@@ -46,9 +46,15 @@ export type DaytonaSandboxClient = {
   stop(timeoutSeconds?: number): Promise<unknown>
   delete(timeoutSeconds?: number): Promise<unknown>
   getSignedPreviewUrl(port: number, expiresInSeconds?: number): Promise<{ url: string }>
+  fs: {
+    createFolder(path: string, mode: string): Promise<unknown>
+    uploadFile(source: Buffer, path: string, timeoutSeconds?: number): Promise<unknown>
+    setFilePermissions(path: string, permissions: { mode?: string; owner?: string; group?: string }): Promise<unknown>
+    deleteFile(path: string, recursive?: boolean): Promise<unknown>
+  }
   process: {
     createSession(sessionId: string): Promise<unknown>
-    executeSessionCommand(sessionId: string, request: { command: string; runAsync: boolean }, timeoutSeconds?: number): Promise<{ cmdId: string }>
+    executeSessionCommand(sessionId: string, request: { command: string; runAsync: boolean; suppressInputEcho?: boolean }, timeoutSeconds?: number): Promise<{ cmdId: string }>
     getSessionCommand(sessionId: string, commandId: string): Promise<{ exitCode?: number | null }>
     getSessionCommandLogs(sessionId: string, commandId: string): Promise<{ stdout?: string | null; stderr?: string | null }>
   }
@@ -141,6 +147,12 @@ function toSandboxClient(sandbox: Sandbox): DaytonaSandboxClient {
     stop: (timeout) => sandbox.stop(timeout),
     delete: (timeout) => sandbox.delete(timeout),
     getSignedPreviewUrl: (port, expiresInSeconds) => sandbox.getSignedPreviewUrl(port, expiresInSeconds),
+    fs: {
+      createFolder: (path, mode) => sandbox.fs.createFolder(path, mode),
+      uploadFile: (source, path, timeout) => sandbox.fs.uploadFile(source, path, timeout),
+      setFilePermissions: (path, permissions) => sandbox.fs.setFilePermissions(path, permissions),
+      deleteFile: (path, recursive) => sandbox.fs.deleteFile(path, recursive),
+    },
     process: {
       createSession: (sessionId) => sandbox.process.createSession(sessionId),
       executeSessionCommand: (sessionId, request, timeout) => sandbox.process.executeSessionCommand(sessionId, request, timeout),
@@ -212,6 +224,7 @@ export function createDaytonaProvider(config: DaytonaProviderConfig, deps: Dayto
     if (state === "missing") forget(sandbox.id)
     return {
       ref: { providerId, ref: { sandboxId: sandbox.id } },
+      name: sandbox.name,
       state,
       region: sandbox.target,
       observedAt: now(),
@@ -319,14 +332,109 @@ export function createDaytonaProvider(config: DaytonaProviderConfig, deps: Dayto
     }
   }
 
+  async function boundedScriptOperation<T>(operation: Promise<T>, timeoutMs: number, onTimeout: () => RuntimeProviderError): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(onTimeout()), timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  async function execScript(sandbox: DaytonaSandboxClient, sessionId: string, spec: ExecSpec & { script: string }) {
+    const directory = `/tmp/openwork-exec-${randomUUID()}`
+    const path = `${directory}/script.sh`
+    const timeoutMs = Number.isFinite(spec.timeoutMs) && spec.timeoutMs > 0 ? spec.timeoutMs : 30_000
+    const deadline = now() + timeoutMs
+    let pending: Promise<unknown> = Promise.resolve()
+    let directoryCreated = false
+    let uploadAttempted = false
+    let uploadAcknowledged = false
+    let launchAttempted = false
+    let phase = "directory creation"
+
+    function timedOut() {
+      return new RuntimeProviderError({
+        providerId,
+        code: "timeout",
+        retryable: !launchAttempted,
+        message: `Timed out during Daytona script ${phase}`,
+      })
+    }
+
+    async function run<T>(operation: (timeoutSeconds: number) => Promise<T>): Promise<T> {
+      const remainingMs = deadline - now()
+      if (remainingMs <= 0) throw timedOut()
+      const promise = operation(remainingMs / 1000)
+      pending = promise
+      return boundedScriptOperation(promise, remainingMs, timedOut)
+    }
+
+    try {
+      await run(async () => {
+        await sandbox.fs.createFolder(directory, "700")
+        directoryCreated = true
+      })
+      phase = "upload"
+      const script = `set +xv\nrm -f -- "$0" || exit 1\nrmdir -- ${shellQuote(directory)} 2>/dev/null || true\n${spec.script}\n`
+      await run(async (timeout) => {
+        uploadAttempted = true
+        await sandbox.fs.uploadFile(Buffer.from(script), path, timeout)
+        uploadAcknowledged = true
+      })
+      phase = "permissions"
+      await run(() => sandbox.fs.setFilePermissions(path, { mode: "600" }))
+      phase = "session creation"
+      await run(() => sandbox.process.createSession(sessionId))
+      phase = "launch"
+      return await run((timeout) => {
+        launchAttempted = true
+        return sandbox.process.executeSessionCommand(sessionId, {
+          command: `sh -lc ${shellQuote(`exec sh ${path}`)}`,
+          runAsync: spec.detach,
+          suppressInputEcho: true,
+        }, timeout)
+      })
+    } catch (error) {
+      const mapped = toRuntimeProviderError(error, providerId)
+      const failure = new RuntimeProviderError({
+        providerId,
+        code: mapped.code,
+        retryable: launchAttempted || (uploadAttempted && !uploadAcknowledged) ? false : mapped.retryable,
+        message: launchAttempted
+          ? `Daytona script launch outcome is unknown (${mapped.code}); inspect the session before retrying`
+          : `Daytona script ${phase} failed (${mapped.code})`,
+      })
+      if (!launchAttempted) {
+        const cleanup = pending.catch(() => undefined).then(async () => {
+          if (!directoryCreated) return
+          if (uploadAttempted && !uploadAcknowledged) await sandbox.fs.deleteFile(path, false)
+          else await sandbox.fs.deleteFile(directory, true)
+        })
+        await boundedScriptOperation(cleanup, Math.min(timeoutMs, 5_000), () => failure).catch(() => undefined)
+      }
+      throw failure
+    }
+  }
+
   async function execOn(sandbox: DaytonaSandboxClient, spec: ExecSpec): Promise<ExecHandle> {
     const sessionId = spec.sessionId ?? `openwork-exec-${randomSuffix()}`
-    await wrap(() => sandbox.process.createSession(sessionId))
-    const command = await wrap(() => sandbox.process.executeSessionCommand(
-      sessionId,
-      { command: spec.command, runAsync: spec.detach },
-      spec.detach ? 0 : seconds(spec.timeoutMs),
-    ))
+    let command: { cmdId: string }
+    if (spec.script === undefined) {
+      await wrap(() => sandbox.process.createSession(sessionId))
+      command = await wrap(() => sandbox.process.executeSessionCommand(
+        sessionId,
+        { command: spec.command, runAsync: spec.detach },
+        spec.detach ? 0 : seconds(spec.timeoutMs),
+      ))
+    } else {
+      command = await execScript(sandbox, sessionId, spec)
+    }
     const handle: ExecHandle = {
       id: `${sessionId}/${command.cmdId}`,
       async exitCode() {

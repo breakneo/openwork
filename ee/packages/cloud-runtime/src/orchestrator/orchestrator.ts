@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import {
   renderCheckpointFlushCommand,
-  renderOpenWorkBootstrapCommand,
+  renderOpenWorkBootstrapScript,
   renderRestoreMarkerExistsCommand,
   type OpenWorkBootstrapConfig,
   type OpenWorkCheckpointConfig,
@@ -22,6 +22,7 @@ import { CloudRuntimeError } from "./errors"
 import {
   currentInstanceName,
   instanceLookupNames,
+  legacyInstanceNamesForLocalMatch,
   recoveryInstanceName,
   workerHint,
   type InstanceNameInput,
@@ -241,16 +242,25 @@ export function createCloudRuntimeOrchestrator(deps: CloudRuntimeOrchestratorDep
     return provider.storage.ensureVolume(config.sharedVolumeName, { timeoutMs: config.createTimeoutMs })
   }
 
-  async function findByName(name: string, workerId: string) {
-    return provider.find({ idempotencyKey: name, labels: labels(workerId) })
+  async function findOwnedInstance(input: InstanceNameInput, version: string | null) {
+    const ownerLabels = labels(input.workerId)
+    for (const name of instanceLookupNames(config.instanceNamePrefix, input, version)) {
+      const handle = await provider.find({ idempotencyKey: name, labels: ownerLabels })
+      if (handle) return handle
+    }
+
+    const handles = await provider.list({ labels: ownerLabels })
+    for (const name of legacyInstanceNamesForLocalMatch(config.instanceNamePrefix, input, version)) {
+      const handle = handles.find((candidate) => candidate.name === name)
+      if (handle) return handle
+    }
+    return null
   }
 
-  async function findAfterCreateConflict(lookupNames: string[], workerId: string) {
+  async function findAfterCreateConflict(input: InstanceNameInput, version: string | null) {
     for (let attempt = 1; attempt <= createConflictLookupMaxAttempts; attempt += 1) {
-      for (const lookupName of lookupNames) {
-        const handle = await findByName(lookupName, workerId)
-        if (handle) return handle
-      }
+      const handle = await findOwnedInstance(input, version)
+      if (handle) return handle
       if (attempt < createConflictLookupMaxAttempts) {
         await sleep(createConflictLookupBackoffMs)
       }
@@ -323,9 +333,9 @@ export function createCloudRuntimeOrchestrator(deps: CloudRuntimeOrchestratorDep
 
   async function startProcess(input: ProvisionInput, handle: SandboxHandle, sessionId: string): Promise<StartedProcess> {
     const exec = await provider.exec(handle, {
-      command: renderOpenWorkBootstrapCommand(bootstrapConfig(input)),
+      script: renderOpenWorkBootstrapScript(bootstrapConfig(input)),
       detach: true,
-      timeoutMs: 0,
+      timeoutMs: config.createTimeoutMs,
       sessionId,
     })
     const ttlSeconds = endpointTtlSeconds()
@@ -502,14 +512,12 @@ export function createCloudRuntimeOrchestrator(deps: CloudRuntimeOrchestratorDep
   }
 
   async function provision(input: ProvisionInput): Promise<ProvisionedInstance> {
-    const name = instanceName(input)
-    const lookupNames = instanceLookupNames(config.instanceNamePrefix, input, currentImageVersion())
+    const version = currentImageVersion()
+    const name = currentInstanceName(config.instanceNamePrefix, input, version)
     const volume = await sharedVolume()
-    for (const lookupName of lookupNames) {
-      const existing = await findByName(lookupName, input.workerId)
-      if (existing) {
-        return adopt(input, existing, volume)
-      }
+    const existing = await findOwnedInstance(input, version)
+    if (existing) {
+      return adopt(input, existing, volume)
     }
 
     let created: SandboxHandle | null = null
@@ -525,7 +533,7 @@ export function createCloudRuntimeOrchestrator(deps: CloudRuntimeOrchestratorDep
       }
 
       if (runtimeProviderErrorCode(error) === "conflict") {
-        const conflictHandle = await findAfterCreateConflict(lookupNames, input.workerId)
+        const conflictHandle = await findAfterCreateConflict(input, version)
         if (conflictHandle) {
           return adopt(input, conflictHandle, volume)
         }

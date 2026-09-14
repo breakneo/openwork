@@ -301,8 +301,3 @@ exit 1
 
   return script
 }
-
-/** `renderOpenWorkBootstrapScript` wrapped for a provider that execs one command line. */
-export function renderOpenWorkBootstrapCommand(config: OpenWorkBootstrapConfig) {
-  return `sh -lc ${shellQuote(renderOpenWorkBootstrapScript(config))}`
-}

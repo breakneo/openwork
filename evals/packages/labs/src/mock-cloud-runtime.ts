@@ -20,6 +20,27 @@ function json(response: ServerResponse, status: number, value: unknown) {
   response.end(JSON.stringify(value));
 }
 
+async function scriptUpload(request: IncomingMessage) {
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) {
+      if (!Buffer.isBuffer(chunk)) throw new Error("Invalid upload bytes");
+      chunks.push(chunk);
+    }
+    const contentType = request.headers["content-type"];
+    if (!contentType?.startsWith("multipart/form-data;")) throw new Error("Missing multipart content type");
+    const form = await new Response(new Uint8Array(Buffer.concat(chunks)), { headers: { "content-type": contentType } }).formData();
+    const path = form.get("files[0].path");
+    const file = form.get("files[0].file");
+    if (typeof path !== "string" || !file || typeof file === "string" || form.has("files[1].path")) {
+      throw new Error("Invalid script upload fields");
+    }
+    return { path, script: await file.text() };
+  } catch {
+    throw new Error("Invalid witness script upload");
+  }
+}
+
 type Session = { id: string; sandboxId: string; title: string; prompts: string[] };
 type Sandbox = {
   id: string; name: string; workerId: string; snapshot: string;
@@ -42,6 +63,16 @@ export async function startCloudRuntimeWitness() {
     sandboxIds?: string[]; cursor?: string | null; nextCursor?: string | null;
   }> = [];
   const commands = new Map<string, { exitCode: number | null }>();
+  const directories = new Map<string, string>();
+  const scripts = new Map<string, { script: string; mode: string | null; directoryMode: string }>();
+  const credentialValues = new Set<string>();
+  const stagingPath = /^\/tmp\/openwork-exec-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/script\.sh)?$/;
+  const fileEvents: Array<{ sandboxId: string; operation: string; path: string; mode?: string }> = [];
+  const commandTransports: Array<{
+    sandboxId: string; operation: string; pathOnly: boolean; rawScript: boolean; runAsync: boolean;
+    credentialValuesInCommand: boolean; credentialNames: string[]; suppressInputEcho: boolean;
+    directoryMode: string | null; fileMode: string | null; selfUnlink: boolean;
+  }> = [];
   const checkpoints = new Map<string, Session[]>();
   const failedRestores = new Set<string>();
   const deletionFaults = new Map<string, "fail" | "retain">();
@@ -71,6 +102,12 @@ export async function startCloudRuntimeWitness() {
     const mount = sandbox.volumes.find((entry) => entry.subpath.endsWith("/data") || entry.subpath.endsWith("/checkpoints"));
     if (!mount) throw new Error("Missing checkpoint mount");
     return `${mount.volumeId}:${mount.subpath.replace(/\/checkpoints$/, "")}/checkpoints`;
+  }
+
+  function scriptCredentials(script: string) {
+    return Array.from(script.matchAll(/\b(OPENWORK_TOKEN|OPENWORK_HOST_TOKEN|DEN_ACTIVITY_HEARTBEAT_TOKEN)='((?:[^']|'"'"')*)'/g), (match) => ({
+      name: match[1], value: match[2].replaceAll("'\"'\"'", "'"),
+    }));
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse) {
@@ -154,6 +191,54 @@ export async function startCloudRuntimeWitness() {
       }
       return json(response, sandbox ? 200 : 404, sandbox ? sandboxDto(sandbox) : { message: "Sandbox not found" });
     }
+    const filesystem = path.match(/^\/toolbox\/([^/]+)\/files(\/folder|\/bulk-upload|\/permissions)?$/);
+    if (filesystem) {
+      const sandbox = sandboxById(filesystem[1]);
+      if (sandbox.state !== "started") return json(response, 404, { message: "Sandbox filesystem unavailable" });
+      const route = filesystem[2] ?? "";
+      if (method === "POST" && route === "/bulk-upload") {
+        const uploaded = await scriptUpload(request);
+        if (!stagingPath.test(uploaded.path) || !uploaded.path.endsWith("/script.sh")) throw new Error("Invalid script staging path");
+        const directory = uploaded.path.slice(0, uploaded.path.lastIndexOf("/"));
+        const directoryMode = directories.get(`${sandbox.id}:${directory}`);
+        if (directoryMode !== "700") throw new Error("Script upload requires a private directory");
+        scripts.set(`${sandbox.id}:${uploaded.path}`, { script: uploaded.script, mode: null, directoryMode });
+        for (const credential of scriptCredentials(uploaded.script)) {
+          if (credential.value) credentialValues.add(credential.value);
+        }
+        fileEvents.push({ sandboxId: sandbox.id, operation: "upload", path: uploaded.path });
+        return json(response, 200, {});
+      }
+      const remotePath = requestUrl.searchParams.get("path");
+      if (!remotePath || !stagingPath.test(remotePath)) throw new Error("Invalid script staging path");
+      const key = `${sandbox.id}:${remotePath}`;
+      const mode = requestUrl.searchParams.get("mode");
+      if (method === "POST" && route === "/folder") {
+        if (mode !== "700" || remotePath.endsWith("/script.sh")) throw new Error("Script staging requires a private directory");
+        if (directories.has(key)) return json(response, 409, { message: "Directory already exists" });
+        directories.set(key, mode);
+        fileEvents.push({ sandboxId: sandbox.id, operation: "directory", path: remotePath, mode });
+        return json(response, 200, {});
+      }
+      if (method === "POST" && route === "/permissions") {
+        const script = scripts.get(key);
+        if (!script) return json(response, 404, { message: "Script not found" });
+        if (mode !== "600") throw new Error("Staged script must be private");
+        script.mode = mode;
+        fileEvents.push({ sandboxId: sandbox.id, operation: "permissions", path: remotePath, mode });
+        return json(response, 200, {});
+      }
+      if (method === "DELETE" && route === "") {
+        if (directories.has(key) && requestUrl.searchParams.get("recursive") !== "true") throw new Error("Directory deletion requires recursive mode");
+        scripts.delete(key);
+        if (requestUrl.searchParams.get("recursive") === "true") {
+          for (const file of scripts.keys()) if (file.startsWith(`${key}/`)) scripts.delete(file);
+          directories.delete(key);
+        }
+        fileEvents.push({ sandboxId: sandbox.id, operation: "delete", path: remotePath });
+        return json(response, 200, {});
+      }
+    }
     const process = path.match(/^\/toolbox\/([^/]+)\/process\/session(.*)$/);
     if (process) {
       const sandbox = sandboxById(process[1]);
@@ -165,12 +250,28 @@ export async function startCloudRuntimeWitness() {
       if (method === "POST" && path.endsWith("/exec")) {
         const input = await body(request);
         const command = String(input.command);
+        const scriptPath = command.match(/^sh -lc 'exec sh (\/tmp\/openwork-exec-[0-9a-f-]+\/script\.sh)'$/)?.[1];
+        const staged = scriptPath ? scripts.get(`${sandbox.id}:${scriptPath}`) : undefined;
+        if (scriptPath && (!stagingPath.test(scriptPath) || !staged)) throw new Error("Staged script missing at launch");
+        if (staged && staged.mode !== "600") throw new Error("Staged script is not private at launch");
+        const directory = scriptPath?.slice(0, scriptPath.lastIndexOf("/"));
+        const prefix = `set +xv\nrm -f -- "$0" || exit 1\nrmdir -- '${directory}' 2>/dev/null || true\n`;
+        const selfUnlink = Boolean(staged?.script.startsWith(prefix));
+        const source = staged?.script ?? command;
+        if (scriptPath) {
+          fileEvents.push({ sandboxId: sandbox.id, operation: "launch", path: scriptPath });
+          if (selfUnlink) {
+            scripts.delete(`${sandbox.id}:${scriptPath}`);
+            directories.delete(`${sandbox.id}:${directory}`);
+            fileEvents.push({ sandboxId: sandbox.id, operation: "self-unlink", path: scriptPath });
+          }
+        }
         let operation: string;
         let exitCode: number | null;
-        if (input.runAsync === true && command.includes("openwork-server")) {
+        if (input.runAsync === true && source.includes("openwork-server")) {
           operation = "bootstrap";
           exitCode = null;
-          const workerId = command.match(/DEN_WORKER_ID=[^a-z0-9]*([a-z0-9_]+)/)?.[1];
+          const workerId = source.match(/DEN_WORKER_ID=[^a-z0-9]*([a-z0-9_]+)/)?.[1];
           if (!workerId) throw new Error("Bootstrap worker identity missing");
           sandbox.bootstrapWorkerIds.push(workerId);
           const checkpoint = checkpoints.get(checkpointKey(sandbox));
@@ -199,6 +300,15 @@ export async function startCloudRuntimeWitness() {
         } else {
           throw new Error(`Unimplemented witness command for ${sandbox.id}`);
         }
+        commandTransports.push({
+          sandboxId: sandbox.id, operation, pathOnly: Boolean(scriptPath), runAsync: input.runAsync === true,
+          rawScript: Boolean(staged && selfUnlink && source.slice(prefix.length).startsWith("set -u\n")),
+          credentialValuesInCommand: Array.from(credentialValues).some((value) => command.includes(value))
+            || /\b(?:OPENWORK_TOKEN|OPENWORK_HOST_TOKEN|DEN_ACTIVITY_HEARTBEAT_TOKEN)=/.test(command),
+          credentialNames: scriptCredentials(source).map((credential) => credential.name),
+          suppressInputEcho: input.suppressInputEcho === true,
+          directoryMode: staged?.directoryMode ?? null, fileMode: staged?.mode ?? null, selfUnlink,
+        });
         const cmdId = `cmd_${commands.size + 1}`;
         commands.set(path.replace(/\/exec$/, `/command/${cmdId}`), { exitCode });
         events.push({ sandboxId: sandbox.id, operation, exitCode });
@@ -260,7 +370,8 @@ export async function startCloudRuntimeWitness() {
   if (!address || typeof address === "string") throw new Error("Cloud witness has no listening address");
   url = `http://127.0.0.1:${address.port}`;
   return {
-    url, sandboxes, events, unexpected, checkpoints, deletionFaults, listedExtras,
+    url, sandboxes, events, unexpected, checkpoints, deletionFaults, listedExtras, fileEvents, commandTransports,
+    pendingScriptCount: () => scripts.size,
     get sessions() { return sandboxes.filter((entry) => entry.state !== "destroyed").flatMap((entry) => entry.sessions); },
     ready(id?: string) {
       if (id) held.delete(id);
