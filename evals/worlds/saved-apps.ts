@@ -209,7 +209,6 @@ export async function cloudDraftRouting(seed: Seed) {
         result: { content: [{ type: "text", text: "Draft ready for Test recipient" }], isError: false } },
       { name: "resolve_recipient", description: "Resolve a draft recipient", inputSchema: schema,
         annotations: { readOnlyHint: true, destructiveHint: false },
-        _meta: { ui: { visibility: ["app"] } },
         result: { content: [{ type: "text", text: "Test recipient resolved" }], structuredContent: { recipient: "Test recipient", id: "synthetic-recipient" }, isError: false } },
     ] }),
     other: seed.mock({ allowUnauthenticatedMcp: true, tools: [

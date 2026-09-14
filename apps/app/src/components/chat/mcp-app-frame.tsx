@@ -716,10 +716,13 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
   // The sandbox view unmounts on every preserved-result change; keep the last
   // measured height here so the rebuilt iframe does not snap back to default.
   const heightRef = useRef(DEFAULT_HEIGHT)
-  const inputArguments = useMemo(
-    () => launch?.arguments ?? (isRecord(part.input) ? part.input : {}),
-    [launch, part.input],
-  )
+  const nextInputArguments = launch?.arguments ?? (isRecord(part.input) ? part.input : {})
+  const nextInputSignature = JSON.stringify(nextInputArguments)
+  const inputCache = useRef({ signature: nextInputSignature, value: nextInputArguments })
+  if (inputCache.current.signature !== nextInputSignature) {
+    inputCache.current = { signature: nextInputSignature, value: nextInputArguments }
+  }
+  const inputArguments = inputCache.current.value
   // Retire the old view in the same commit, before the passive resolution effect runs.
   const resolution = useMemo(() => ({}), [origin, part.toolName, part.toolCallId, result, inputArguments, resolveToken])
   const resolvedFor = useRef<object | null>(null)

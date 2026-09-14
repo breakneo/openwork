@@ -107,7 +107,8 @@ async function startupFixture() {
     now = target
   }
   return {
-    render, frame, notify, advance, bridges, deadlines, timers, container,
+    render, frame, notify, advance, bridges, deadlines, timers, container, client,
+    renderElement: async (element: ReturnType<typeof createElement>) => { await act(async () => root.render(element)) },
     connectSpy, resourceSpy, inputSpy, resultSpy, teardownSpy, closeSpy, errorSpy,
     async dispose() {
       try {
@@ -407,6 +408,72 @@ describe("MCP App resolution", () => {
 })
 
 describe("MCP App iframe policy", () => {
+  test.each(["input", "result", "client", "workspace", "session", "engine", "read-only", "tool-call"])("refreshes the launch and delivery when %s really changes", async change => {
+    const host = await startupFixture()
+    const resolutions: unknown[] = []
+    const releases: unknown[] = []
+    const resolve = async (...args: Parameters<OpenworkServerClient["resolveMcpApp"]>) => {
+      resolutions.push(args)
+      return { app: fixture({ toolName: "render-0", launchId: `launch-${resolutions.length}` }) }
+    }
+    const release = async (...args: Parameters<OpenworkServerClient["releaseMcpApp"]>) => {
+      releases.push(args)
+      return { released: true }
+    }
+    const client = { ...host.client, resolveMcpApp: resolve, releaseMcpApp: release }
+    const replacementClient = { ...client }
+    const input = { query: "initial input" }
+    const result = { content: [{ type: "text", text: "initial result" }], isError: false }
+    const part: DynamicToolUIPart = {
+      type: "dynamic-tool", toolName: "render-0", toolCallId: "launch", state: "output-available",
+      input, output: "initial result", callProviderMetadata: { openwork: { mcpResult: result } },
+    }
+    const nextInput = change === "input" ? { query: "updated input" } : input
+    const nextResult = change === "result" ? { ...result, content: [{ type: "text", text: "updated result" }], isError: true } : result
+    const nextClient = change === "client" ? replacementClient : client
+    const nextWorkspace = change === "workspace" ? "updated-workspace" : "fixture"
+    const nextSession = change === "session" ? "updated-session" : "session_fixture"
+    const nextEngine = change === "engine" ? "v2" : "v1"
+    const render = (updated: boolean) => host.renderElement(createElement(MessageListProvider, {
+      client: updated ? nextClient : client, workspaceId: updated ? nextWorkspace : "fixture",
+      sessionId: updated ? nextSession : "session_fixture", mcpAppEngine: updated ? nextEngine : "v1",
+      readOnly: updated && change === "read-only", showThinking: false, developerMode: false,
+      displaySuggestions: false, providerConnectedCount: 0,
+      dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {},
+      onForkAtMessage: () => {}, onEditUserMessage: () => {},
+      onMcpReconnect: async () => { throw new Error("Unexpected reconnect") },
+      onMcpReopenAuthorization: async () => {}, onMcpRetry: () => {},
+      children: createElement(McpAppFrame, { part: updated ? {
+        ...part, toolCallId: change === "tool-call" ? "updated-call" : part.toolCallId,
+        input: structuredClone(nextInput), callProviderMetadata: { openwork: { mcpResult: structuredClone(nextResult) } },
+      } : part }),
+    }))
+    try {
+      await render(false)
+      const iframe = host.frame(0)
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      await act(async () => { host.bridges[0].oninitialized?.() })
+      expect(host.inputSpy).toHaveBeenLastCalledWith({ arguments: input })
+      expect(host.resultSpy).toHaveBeenLastCalledWith(result)
+      await render(true)
+      expect(host.frame(0) === iframe).toBe(false)
+      expect(resolutions).toHaveLength(2)
+      expect(releases).toEqual([["fixture", "launch-1"]])
+      expect(resolutions[1]).toEqual([nextWorkspace, part.toolName, undefined, {
+        client: nextClient, workspaceId: nextWorkspace, sessionId: nextSession,
+        engine: nextEngine, readOnly: change === "read-only",
+      }])
+      expect(host.teardownSpy).toHaveBeenCalledTimes(1)
+      expect(host.closeSpy).toHaveBeenCalledTimes(1)
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      await act(async () => { host.bridges[0].oninitialized?.(); host.bridges[1].oninitialized?.() })
+      expect(host.inputSpy).toHaveBeenCalledTimes(2)
+      expect(host.resultSpy).toHaveBeenCalledTimes(2)
+      expect(host.inputSpy).toHaveBeenLastCalledWith({ arguments: nextInput })
+      expect(host.resultSpy).toHaveBeenLastCalledWith(nextResult)
+    } finally { await host.dispose() }
+  })
+
   test.each([
     { isError: true, readOnly: false, preview: false, challenge: false },
     { isError: false, readOnly: false, preview: false, challenge: false },
@@ -487,13 +554,13 @@ describe("MCP App iframe policy", () => {
       type: "dynamic-tool", toolName: "fixture_render", toolCallId: "launch", state: "output-available",
       input, output: "Provider fallback", callProviderMetadata: { openwork: { mcpResult: result } },
     }
-    try {
-      await viewTransport.start()
+    const previewOrigin = { client, workspaceId: "fixture", sessionId: null, readOnly: true }
+    const render = async (nextPart = part) => {
       await act(async () => root.render(createElement(WorkspaceProvider, {
         client: null, openworkServerClient: primaryClient, workspaceId: "primary", selectedWorkspaceRoot: "/primary",
         children: preview
           ? createElement(McpAppSandboxView, {
-              origin: { client, workspaceId: "fixture", sessionId: null, readOnly: true },
+              origin: previewOrigin,
               app, toolName: part.toolName, inputArguments: input, result, unavailableNotice: "Unavailable",
             })
           : createElement(MessageListProvider, {
@@ -504,9 +571,14 @@ describe("MCP App iframe policy", () => {
               onForkAtMessage: () => {}, onEditUserMessage: () => {},
               onMcpReconnect: async () => { throw new Error("Unexpected reconnect in protocol fixture") },
               onMcpReopenAuthorization: async () => {}, onMcpRetry: () => {},
-              children: createElement(McpAppFrame, { part }),
+              children: createElement(McpAppFrame, { part: nextPart }),
             }),
       })))
+    }
+    const refresh = () => render({ ...part, input: structuredClone(input), callProviderMetadata: { openwork: { mcpResult: structuredClone(result) } } })
+    try {
+      await viewTransport.start()
+      await render()
       expect(resolutions).toEqual(preview ? [] : [{
         workspaceId: "fixture", name: part.toolName, launch: undefined,
         context: { client, workspaceId: "fixture", sessionId: "session_fixture", engine: "v2", readOnly },
@@ -564,6 +636,10 @@ describe("MCP App iframe policy", () => {
         expect(dialog?.textContent).toContain("read_detail")
         const button = Array.from(dialog?.querySelectorAll("button") ?? []).find(button => button.textContent === (allow ? "Allow once" : "Cancel"))
         if (!button) throw new Error("Missing approval decision")
+        await refresh()
+        expect(document.querySelector('[role="alertdialog"]') === dialog).toBe(true)
+        expect(container.querySelector("iframe") === iframe).toBe(true)
+        expect(toolCalls).toHaveLength(1)
         await act(async () => button.click())
       } else expect(document.querySelector('[role="alertdialog"]')).toBeNull()
       expect(await pendingCall).toMatchObject(
@@ -581,9 +657,24 @@ describe("MCP App iframe policy", () => {
         ...(approved ? { approved: true } : {}),
       } })))
       const callsBeforeDenial = toolCalls.length
-      expect(await request("tools/call", { name: "forbidden_detail", arguments: {} })).toMatchObject(
-        readOnly ? { error: { code: -32601 } } : { error: { message: expect.stringContaining("Forbidden") } },
-      )
+      const denied = await request("tools/call", { name: "forbidden_detail", arguments: {} })
+      if (!("error" in denied)) throw new Error("Expected an SDK error response")
+      if (readOnly) expect(denied.error.code).toBe(-32601)
+      else expect(denied.error.message).toContain("Forbidden")
+      const appDocument = iframe.contentDocument
+      if (!appDocument) throw new Error("Missing fixture app document")
+      appDocument.body.textContent = denied.error.message
+      for (let refreshIndex = 0; refreshIndex < 3; refreshIndex += 1) {
+        await refresh()
+        expect(container.querySelector("iframe") === iframe).toBe(true)
+        expect(iframe.contentDocument).toBe(appDocument)
+        expect(appDocument.body.textContent).toBe(denied.error.message)
+        expect(resolutions).toHaveLength(preview ? 0 : 1)
+        expect(releases).toHaveLength(0)
+        expect(connectSpy).toHaveBeenCalledTimes(1)
+        expect(messages.filter(message => "method" in message && message.method.startsWith("ui/notifications/tool-"))).toEqual(delivered)
+        expect(messages.some(message => "method" in message && message.method === "ui/resource-teardown")).toBe(false)
+      }
       expect(toolCalls).toHaveLength(callsBeforeDenial + (readOnly ? 0 : 1))
       expect(opened).toEqual(readOnly ? [] : ["https://example.com/"])
       if (challenge && !readOnly) {
