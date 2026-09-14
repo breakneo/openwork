@@ -1014,15 +1014,15 @@ importers:
 
   ee/apps/landing:
     dependencies:
-      '@openwork/email':
-        specifier: workspace:*
-        version: link:../../../packages/email
       '@openwork/ui':
         specifier: workspace:*
         version: link:../../../packages/ui
       '@paper-design/shaders-react':
         specifier: 0.0.72
         version: 0.0.72(@types/react@18.2.79)(react@18.2.0)
+      '@team-plain/graphql':
+        specifier: ^3.1.0
+        version: 3.1.0
       botid:
         specifier: ^1.5.11
         version: 1.5.11(next@15.5.24(@opentelemetry/api@1.9.1)(@types/node@20.12.12)(babel-plugin-react-compiler@1.0.0)(react-dom@18.2.0(react@18.2.0))(react@18.2.0))(react@18.2.0)
@@ -2371,6 +2371,11 @@ packages:
 
   '@grammyjs/types@3.28.0':
     resolution: {integrity: sha512-4JvXCdxRZHCje0M4gHzLwtB4bLno3WD28xd8CNfk4POWIu73BFnSvGeW6OQ5gPem4eYTEwkD9yDaXssixl6tMQ==}
+
+  '@graphql-typed-document-node/core@3.2.0':
+    resolution: {integrity: sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ==}
+    peerDependencies:
+      graphql: ^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0
 
   '@grpc/grpc-js@1.14.4':
     resolution: {integrity: sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ==}
@@ -5041,6 +5046,9 @@ packages:
 
   '@tanstack/virtual-core@3.13.23':
     resolution: {integrity: sha512-zSz2Z2HNyLjCplANTDyl3BcdQJc2k1+yyFoKhNRmCr7V7dY8o8q5m8uFTI1/Pg1kL+Hgrz6u3Xo6eFUB7l66cg==}
+
+  '@team-plain/graphql@3.1.0':
+    resolution: {integrity: sha512-Co0CA53T6CzO/KUKWPfiR+NgeNCk2HTVSnQGOSlb5QAHLQ3tHYXOjc3Pu2GaVMGVoeUbV56K260nd05wNEAlBg==}
 
   '@ts-morph/common@0.27.0':
     resolution: {integrity: sha512-Wf29UqxWDpc+i61k3oIOzcUfQt79PIT9y/MWfAGlrkjg6lBC1hwDECLXPVJAhWjiGbfBCxZd65F/LIZF3+jeJQ==}
@@ -11418,6 +11426,10 @@ snapshots:
 
   '@grammyjs/types@3.28.0': {}
 
+  '@graphql-typed-document-node/core@3.2.0(graphql@16.13.2)':
+    dependencies:
+      graphql: 16.13.2
+
   '@grpc/grpc-js@1.14.4':
     dependencies:
       '@grpc/proto-loader': 0.8.0
@@ -14195,6 +14207,11 @@ snapshots:
       react-dom: 19.2.8(react@19.2.8)
 
   '@tanstack/virtual-core@3.13.23': {}
+
+  '@team-plain/graphql@3.1.0':
+    dependencies:
+      '@graphql-typed-document-node/core': 3.2.0(graphql@16.13.2)
+      graphql: 16.13.2
 
   '@ts-morph/common@0.27.0':
     dependencies:

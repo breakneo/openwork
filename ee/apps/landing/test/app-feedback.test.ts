@@ -1,0 +1,179 @@
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+
+const checkBotId = mock(async () => ({ isBot: false }));
+mock.module("botid/server", () => ({ checkBotId }));
+
+const { POST } = await import("../app/api/app-feedback/route");
+const originalApiKey = process.env.PLAIN_API_KEY;
+const originalFetch = globalThis.fetch;
+const fetchMock = spyOn(globalThis, "fetch");
+const errorLog = spyOn(console, "error").mockImplementation(() => {});
+const requests: { url: unknown; options: RequestInit | undefined; body: unknown }[] = [];
+let responses: Response[] = [];
+let requestNumber = 0;
+
+function formRequest(overrides: Record<string, unknown> = {}, origin = "https://openworklabs.com") {
+  return new Request("https://openworklabs.com/api/app-feedback", {
+    method: "POST",
+    headers: {
+      origin,
+      "content-type": "application/json",
+      "x-forwarded-for": `test-${++requestNumber}`,
+    },
+    body: JSON.stringify({
+      name: " Test User ",
+      email: " test@example.com ",
+      message: " Please help with this issue. ",
+      startedAt: Date.now() - 5000,
+      website: "",
+      ...overrides,
+    }),
+  });
+}
+
+function customerResponse(result = "CREATED") {
+  return Response.json({ data: { upsertCustomer: { result, customer: { id: "c_test" }, error: null } } });
+}
+
+beforeEach(() => {
+  process.env.PLAIN_API_KEY = "plainApiKey_test";
+  requests.length = 0;
+  responses = [customerResponse(), Response.json({ data: { createThread: { thread: { id: "t_test" }, error: null } } })];
+  checkBotId.mockResolvedValue({ isBot: false });
+  errorLog.mockClear();
+  fetchMock.mockImplementation(Object.assign(async (url: Parameters<typeof fetch>[0], options?: RequestInit) => {
+    requests.push({
+      url,
+      options,
+      body: typeof options?.body === "string" ? JSON.parse(options.body) : null,
+    });
+    const response = responses.shift();
+    if (!response) throw new Error("Unexpected API call");
+    return response;
+  }, { preconnect: originalFetch.preconnect }));
+});
+
+afterAll(() => {
+  fetchMock.mockRestore();
+  errorLog.mockRestore();
+});
+
+afterEach(() => {
+  if (originalApiKey === undefined) delete process.env.PLAIN_API_KEY;
+  else process.env.PLAIN_API_KEY = originalApiKey;
+});
+
+describe("contact and feedback submissions to Plain", () => {
+  for (const mode of ["contact", "feedback"]) {
+    test(`${mode} creates a customer and thread with the submitted context`, async () => {
+      const response = await POST(formRequest({
+        mode,
+        context: {
+          source: "openwork-app",
+          entrypoint: "/settings",
+          deployment: "desktop",
+          appVersion: "1.0.0",
+          openworkServerVersion: "1.1.0",
+          opencodeVersion: "1.2.0",
+          osName: "macOS",
+          osVersion: "15",
+          platform: "darwin",
+        },
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request.url).toBe("https://core-api.uk.plain.com/graphql/v1");
+        expect(request.options).toMatchObject({ method: "POST", headers: { Authorization: "Bearer plainApiKey_test" } });
+      }
+      expect(requests[0].body).toMatchObject({ variables: { input: {
+        identifier: { emailAddress: "test@example.com" },
+        onCreate: { fullName: "Test User", email: { email: "test@example.com", isVerified: false } },
+        onUpdate: {},
+      } } });
+      expect(requests[1].body).toMatchObject({ variables: { input: {
+        customerIdentifier: { customerId: "c_test" },
+        title: mode === "contact" ? "OpenWork contact message" : "OpenWork app feedback",
+        components: [
+          { componentPlainText: { plainText: "Please help with this issue." } },
+          { componentPlainText: { plainText: "Submitted by: Test User\nEmail: test@example.com" } },
+          { componentPlainText: { plainText: expect.stringMatching(
+            /^Source: openwork-app\nEntrypoint: \/settings\nDeployment: desktop\nApp version: 1.0.0\nOpenWork server: 1.1.0\nOpenCode: 1.2.0\nOS: macOS 15\nPlatform: darwin\nSubmitted: /,
+          ) } },
+        ],
+      } } });
+    });
+  }
+
+  test("reuses an existing customer without changing their profile", async () => {
+    responses[0] = customerResponse("NOOP");
+    expect((await POST(formRequest())).status).toBe(200);
+    expect(requests[0].body).toMatchObject({ variables: { input: { onUpdate: {} } } });
+    expect(requests[1].body).toMatchObject({ variables: { input: { customerIdentifier: { customerId: "c_test" } } } });
+  });
+
+  test("does not report success when Plain is not configured", async () => {
+    delete process.env.PLAIN_API_KEY;
+    expect((await POST(formRequest())).status).toBe(503);
+    expect(requests).toHaveLength(0);
+  });
+
+  for (const operation of ["upsertCustomer", "createThread"]) {
+    test(`handles ${operation} mutation errors without exposing provider details`, async () => {
+      const index = operation === "upsertCustomer" ? 0 : 1;
+      responses[index] = Response.json({ data: { [operation]: {
+        error: { message: "Private provider detail", code: "VALIDATION_ERROR" },
+      } } });
+      const response = await POST(formRequest());
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain("Private provider detail");
+      expect(requests).toHaveLength(index + 1);
+    });
+
+    test(`rejects ${operation} responses missing the created resource`, async () => {
+      const index = operation === "upsertCustomer" ? 0 : 1;
+      responses[index] = Response.json({ data: { [operation]: { error: null } } });
+      expect((await POST(formRequest())).status).toBe(502);
+      expect(requests).toHaveLength(index + 1);
+    });
+  }
+
+  for (const status of [401, 403, 429, 500]) {
+    test(`handles Plain HTTP ${status} errors`, async () => {
+      responses[0] = new Response("Private provider detail", { status });
+      const response = await POST(formRequest());
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain("Private provider detail");
+      expect(requests).toHaveLength(1);
+    });
+  }
+
+  test("handles GraphQL errors returned with HTTP 200", async () => {
+    responses[0] = Response.json({ errors: [{ message: "Private provider detail" }] });
+    expect((await POST(formRequest())).status).toBe(502);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("handles network failures without exposing exception details", async () => {
+    fetchMock.mockRejectedValue(new Error("Private connection detail"));
+    const response = await POST(formRequest());
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain("Private connection detail");
+  });
+
+  test("rejects invalid fields and spam before calling Plain", async () => {
+    for (const invalid of [{ name: "" }, { email: "invalid" }, { message: "" }, { website: "spam" }, { startedAt: Date.now() }]) {
+      expect((await POST(formRequest(invalid))).status).toBe(400);
+    }
+    expect(requests).toHaveLength(0);
+  });
+
+  test("rejects untrusted origins and bots before calling Plain", async () => {
+    expect((await POST(formRequest({}, "https://untrusted.example"))).status).toBe(403);
+    checkBotId.mockResolvedValue({ isBot: true });
+    expect((await POST(formRequest())).status).toBe(403);
+    expect(requests).toHaveLength(0);
+  });
+});
