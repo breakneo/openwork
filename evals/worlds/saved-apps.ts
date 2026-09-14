@@ -125,7 +125,7 @@ export async function isolatedMcpApps(seed: Seed) {
       appHtml: await appHtml(label), result: { content: [{ type: "text", text: `initial-${label}` }], isError: false,
         structuredContent: { serverTools: { provider: label }, schemaGuidance: `provider-${label}` }, _meta: { privateFixture: `view-only-${label}` } } },
     { name: "read_detail", description: "Read this sample's detail", inputSchema: { type: "object", properties: { marker: { type: "string" } } },
-      annotations: { readOnlyHint: true, destructiveHint: false }, _meta: { ui: { resourceUri: `ui://sample-${label}/view.html`, visibility: ["app"] } },
+      annotations: { readOnlyHint: label === "B", destructiveHint: false }, _meta: { ui: { resourceUri: `ui://sample-${label}/view.html`, visibility: ["app"] } },
       result: { content: [{ type: "text", text: `helper-${label}` }], isError: label === "A", _meta: { privateFixture: `helper-only-${label}` } } },
   ];
   const workspacePath = seed.tmpPath("embedded-app-isolation");
@@ -145,7 +145,15 @@ export async function isolatedMcpApps(seed: Seed) {
     },
   });
   const session = await seed.session(app, { title: "Independent embedded apps" });
+  await seed.evalIn(app, () => {
+    document.documentElement.dataset.mcpAppConfirmCalls = "0";
+    window.confirm = () => {
+      document.documentElement.dataset.mcpAppConfirmCalls = String(Number(document.documentElement.dataset.mcpAppConfirmCalls) + 1);
+      return false;
+    };
+  });
   return { app, session, first: app.mocks.first, second: app.mocks.second,
+    nativeConfirmCalls: () => seed.evalIn(app, () => Number(document.documentElement.dataset.mcpAppConfirmCalls)),
     reports: async () => (await inAppDocuments(app, "isolation")).map(value => record(JSON.parse(value))),
   };
 }

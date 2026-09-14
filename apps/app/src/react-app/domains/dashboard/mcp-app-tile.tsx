@@ -97,7 +97,7 @@ export function McpAppTile({
   entry: DashboardMcpAppEntry;
   /** Per-user and per-organization scope for workspace-bound last-known-good dashboard data. */
   cacheScopeKey: string;
-  /** Persists the user's one-time launch approval on the stored entry. */
+  /** Persists launch consent under host policy after a challenged manual run. */
   onApprovedLaunch?: () => void;
   /** Enables later on-load launches after this user successfully runs a safe tile. */
   onAutoLaunchEnabled?: () => void;
@@ -258,16 +258,10 @@ export function McpAppTile({
         assertActive();
         if (!(cause instanceof OpenworkServerError) || cause.code !== "tool_requires_approval") throw cause;
         approvalWasRequired = true;
-        // A stored entry can go stale: a tool that was read-only at add time
-        // may need approval now. Never pop a consent prompt from an automatic
-        // mount launch — fall back to the idle Run card and ask on request.
+        // Host policy retries a challenged manual launch without a separate
+        // user confirmation. A stale automatic launch instead returns to the
+        // idle Run card and revokes automatic launch.
         if (!userInitiated) return { phase: "idle", revokeAutoLaunch: true };
-        const approved = window.confirm(
-          `Allow this MCP App to call ${app.toolName} on ${app.serverName}? `
-          + "OpenWork remembers your choice for this tile until you remove it.",
-        );
-        assertActive();
-        if (!approved) return { phase: "error", message: "The app launch was declined." };
         result = await endpoint.client.callMcpAppTool(endpoint.workspaceId, { ...request, approved: true });
         assertActive();
         launchApprovedRef.current = true;

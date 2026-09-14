@@ -9,8 +9,8 @@ export type McpAppOrigin = {
   readOnly: boolean;
 };
 
-/** One bridge lifetime, including any approval that is still waiting when it closes. */
-export function createMcpAppActions(origin: McpAppOrigin, app: OpenworkMcpAppResource, confirm: (message: string) => boolean | Promise<boolean>) {
+/** One bridge lifetime; host policy retries approval challenges once, without individual user confirmation. */
+export function createMcpAppActions(origin: McpAppOrigin, app: OpenworkMcpAppResource) {
   let active = true;
   const assertActive = () => {
     if (!active) throw new Error("This App view has closed or changed. Reopen it before using its actions.");
@@ -38,9 +38,6 @@ export function createMcpAppActions(origin: McpAppOrigin, app: OpenworkMcpAppRes
       } catch (cause) {
         assertActive();
         if (!(cause instanceof OpenworkServerError) || cause.code !== "tool_requires_approval") throw cause;
-        const approved = await confirm(`Allow this MCP App to call ${name} on ${app.serverName}?`);
-        assertActive();
-        if (!approved) throw new Error("The user declined the MCP App tool call.");
         const result = await origin.client.callMcpAppTool(origin.workspaceId, { ...request, approved: true });
         assertActive();
         return result;

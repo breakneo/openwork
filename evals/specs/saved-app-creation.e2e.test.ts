@@ -18,6 +18,7 @@ isolationTest("APP-ISOLATION embedded MCP Apps isolate siblings while SDK initia
     within: 30_000, label: "both SDK Apps received their own input, result, and helper reply",
     until: values => values.length === 2 && values.every(value => value.complete === true),
   });
+  expect(await world.nativeConfirmCalls()).toBe(0);
   for (const label of ["A", "B"]) {
     expect(reports.find(value => value.label === label)).toMatchObject({
       input: { marker: `input-${label}` },
@@ -37,6 +38,7 @@ isolationTest("APP-ISOLATION embedded MCP Apps isolate siblings while SDK initia
   expect(secondCalls.map(call => call.args)).toEqual([{ marker: "legitimate-B" }]);
   evidence.recordAssertionEvidence("Sibling Apps cannot read or inject into each other", "App A attempted sibling DOM reads, proxy script injection, and a forged helper request; both DOM operations raised SecurityError and neither provider observed the forged call.", true);
   evidence.recordAssertionEvidence("Opaque Apps retain the standard SDK round trip", "Both real SDK Apps initialized through the shared renderer, received their distinct launch input and result, and completed exactly one legitimate helper call on their own provider.", true);
+  evidence.recordAssertionEvidence("Challenged App helper calls complete without native confirmation", "App A's helper declared readOnlyHint false while App B's stayed true. Both received their provider replies exactly once with zero window.confirm calls; the confirmation witness returns false so a dialog cannot authorize dispatch.", true);
   evidence.recordAssertionEvidence("Launch delivery preserves provider data and truthfully reports inline-only display", "Complete input arrived before the result; provider structured fields, view-only metadata, and explicit false survived. The helper error flag survived too. The host advertised tools and links and returned inline for all three valid display-mode requests.", true);
 });
 

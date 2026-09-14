@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useLayoutEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -14,7 +14,7 @@ import type { DashboardMcpAppEntry } from "../src/react-app/domains/dashboard/gr
 // Exercise the mounted tile and real action lifetime without starting an iframe or provider.
 mock.module("@/components/chat/mcp-app-frame", () => ({
   McpAppSandboxView: ({ app, origin }: McpAppSandboxViewProps) => {
-    const actions = useMemo(() => createMcpAppActions(origin, app, () => true), [origin, app]);
+    const actions = useMemo(() => createMcpAppActions(origin, app), [origin, app]);
     const [message, setMessage] = useState("");
     useLayoutEffect(() => () => actions.dispose(), [actions]);
     return <div>
@@ -141,6 +141,94 @@ test.each(["resolve", "wait"])("stops discovery and releases late leases when ow
   })).toBeNull();
   expect(attempts).toBe(1);
   expect(released).toEqual(phase === "resolve" ? ["late-lease"] : []);
+});
+
+test.each(["manual", "automatic", "forbidden", "repeated"])("launch approval policy without native confirmation: %s", async (mode) => {
+  GlobalRegistrator.register({ url: "http://localhost/" });
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const confirmSpy = spyOn(window, "confirm").mockReturnValue(false);
+  const calls: unknown[] = [];
+  let approvedLaunches = 0;
+  let autoLaunchDisabled = 0;
+  let autoLaunchEnabled = 0;
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, launchId: "launch-fixture" } }),
+    callMcpAppTool: async (workspaceId, request) => {
+      calls.push({ workspaceId, request });
+      if (mode === "forbidden") throw new OpenworkServerError(403, "tool_denied", "Forbidden");
+      if (mode === "repeated" || !request.approved) throw new OpenworkServerError(422, "tool_requires_approval", "Approval required");
+      return { content: [] };
+    },
+    releaseMcpApp: async () => ({ released: true }),
+  };
+  const entry: DashboardMcpAppEntry = {
+    kind: "mcp", id: "approval-tile", title: "Fixture", serverName: "fixture", toolName: "render",
+    projectedToolName: "fixture_render", resourceUri: resource.resourceUri,
+    autoLaunch: mode === "automatic", launchArguments: { query: "saved input" },
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const render = () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <McpAppTile entry={entry} cacheScopeKey="approval-cache"
+      onApprovedLaunch={() => { approvedLaunches++; }}
+      onAutoLaunchDisabled={() => { autoLaunchDisabled++; }}
+      onAutoLaunchEnabled={() => { autoLaunchEnabled++; }} />
+  </WorkspaceProvider>);
+  const button = (label: string) => {
+    const found = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+    if (!found) throw new Error(`Missing button ${label}`);
+    return found;
+  };
+  const request = {
+    launchId: "launch-fixture", sessionId: null, serverName: "fixture", name: "render",
+    resourceUri: resource.resourceUri, arguments: entry.launchArguments,
+  };
+  try {
+    await act(async () => render());
+    if (mode !== "automatic") {
+      expect(calls).toEqual([]);
+      await act(async () => button("Run Fixture").click());
+    }
+    const retried = mode === "manual" || mode === "repeated";
+    expect(calls).toEqual((retried ? [false, true] : [false]).map(approved => ({
+      workspaceId: "fixture", request: { ...request, ...(approved ? { approved: true } : {}) },
+    })));
+    expect(approvedLaunches).toBe(mode === "manual" ? 1 : 0);
+    expect(autoLaunchDisabled).toBe(mode === "manual" || mode === "automatic" ? 1 : 0);
+    expect(autoLaunchEnabled).toBe(0);
+    if (mode === "automatic") {
+      expect(button("Run Fixture").disabled).toBe(false);
+      expect(container.querySelector("[data-action-result]")).toBeNull();
+      entry.autoLaunch = false;
+      await act(async () => render());
+      expect(calls).toHaveLength(1);
+      expect(autoLaunchDisabled).toBe(1);
+    } else if (mode === "manual") {
+      expect(container.querySelector("[data-action-result]")).not.toBeNull();
+      entry.launchApproved = true;
+      await act(async () => render());
+      expect(calls).toHaveLength(2);
+      await act(async () => button("Refresh Fixture").click());
+      expect(calls).toEqual([
+        { workspaceId: "fixture", request },
+        { workspaceId: "fixture", request: { ...request, approved: true } },
+        { workspaceId: "fixture", request: { ...request, approved: true } },
+      ]);
+      expect(approvedLaunches).toBe(1);
+      expect(autoLaunchEnabled).toBe(0);
+    } else {
+      expect(container.textContent).toContain(mode === "forbidden" ? "Forbidden" : "Approval required");
+      expect(container.querySelector("[data-action-result]")).toBeNull();
+    }
+    expect(confirmSpy).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    confirmSpy.mockRestore();
+    container.remove();
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+    await GlobalRegistrator.unregister();
+  }
 });
 
 test("a mounted tile retains its lease across fallback refreshes, but releases on owner removal, refresh and unmount", async () => {

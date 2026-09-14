@@ -49,18 +49,20 @@ function fixture(overrides: Partial<OpenworkMcpAppResource> = {}): OpenworkMcpAp
 
 describe("MCP App iframe policy", () => {
   test.each([
-    { isError: true, readOnly: false, preview: false },
-    { isError: false, readOnly: false, preview: false },
-    { isError: undefined, readOnly: false, preview: false },
-    { isError: false, readOnly: true, preview: false },
-    { isError: false, readOnly: true, preview: true },
-  ])("delivers complete launch results and truthful SDK responses (%j)", async ({ isError, readOnly, preview }) => {
+    { isError: true, readOnly: false, preview: false, challenge: false },
+    { isError: false, readOnly: false, preview: false, challenge: false },
+    { isError: undefined, readOnly: false, preview: false, challenge: false },
+    { isError: false, readOnly: false, preview: false, challenge: true },
+    { isError: false, readOnly: true, preview: false, challenge: true },
+    { isError: false, readOnly: true, preview: true, challenge: true },
+  ])("delivers complete launch results and truthful SDK responses without native confirmations (%j)", async ({ isError, readOnly, preview, challenge }) => {
     GlobalRegistrator.register({ url: "http://localhost/", happyDOM: { settings: { disableIframePageLoading: true } } })
     const previousAct = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT")
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true })
     const container = document.body.appendChild(document.createElement("div"))
     const root = createRoot(container)
     const [viewTransport, hostTransport] = InMemoryTransport.createLinkedPair()
+    const confirmSpy = spyOn(window, "confirm").mockReturnValue(false)
     const connect = AppBridge.prototype.connect
     const connectSpy = spyOn(AppBridge.prototype, "connect").mockImplementation(function () {
       return connect.call(this, hostTransport)
@@ -106,7 +108,12 @@ describe("MCP App iframe policy", () => {
         return { app }
       },
       mcpAppSandbox: () => ({ url: "about:blank", expectedOrigin: "https://sandbox.example" }),
-      callMcpAppTool: async (workspaceId, payload) => { toolCalls.push({ workspaceId, payload }); return result },
+      callMcpAppTool: async (workspaceId, payload) => {
+        toolCalls.push({ workspaceId, payload })
+        if (payload.name === "forbidden_detail") throw new OpenworkServerError(403, "tool_denied", "Forbidden")
+        if (challenge && !payload.approved) throw new OpenworkServerError(422, "tool_requires_approval", "Approval required")
+        return result
+      },
       releaseMcpApp: async (workspaceId, launchId) => { releases.push({ workspaceId, launchId }); return { released: true } },
     }
     const primaryClient: OpenworkServerClient = {
@@ -185,10 +192,17 @@ describe("MCP App iframe policy", () => {
       expect(await request("ui/open-link", { url: "file:///not-a-web-link" })).toMatchObject(
         readOnly ? { error: { code: -32601 } } : { result: { isError: true } },
       )
-      expect(toolCalls).toEqual(readOnly ? [] : [{ workspaceId: "fixture", payload: {
+      expect(toolCalls).toEqual(readOnly ? [] : (challenge ? [false, true] : [false]).map(approved => ({ workspaceId: "fixture", payload: {
         launchId: "launch_fixture", sessionId: "session_fixture", engine: "v2",
         serverName: app.serverName, resourceUri: app.resourceUri, name: "read_detail", arguments: {},
-      } }])
+        ...(approved ? { approved: true } : {}),
+      } })))
+      const callsBeforeDenial = toolCalls.length
+      expect(await request("tools/call", { name: "forbidden_detail", arguments: {} })).toMatchObject(
+        readOnly ? { error: { code: -32601 } } : { error: { message: expect.stringContaining("Forbidden") } },
+      )
+      expect(toolCalls).toHaveLength(callsBeforeDenial + (readOnly ? 0 : 1))
+      expect(confirmSpy).not.toHaveBeenCalled()
       expect(opened).toEqual(readOnly ? [] : ["https://example.com/"])
     } finally {
       try {
@@ -196,6 +210,7 @@ describe("MCP App iframe policy", () => {
         expect(messages.some(message => "method" in message && message.method === "ui/resource-teardown")).toBe(true)
         expect(releases).toEqual(readOnly ? [] : [{ workspaceId: "fixture", launchId: "launch_fixture" }])
       } finally {
+        confirmSpy.mockRestore()
         connectSpy.mockRestore()
         await viewTransport.close()
         container.remove()

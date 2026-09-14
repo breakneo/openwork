@@ -299,7 +299,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     const iframe = iframeRef.current
     if (!iframe || !iframe.contentWindow || !openworkServerClient || !workspaceId) return
     let disposed = false
-    const actions = createMcpAppActions(origin, app, (message) => window.confirm(message))
+    const actions = createMcpAppActions(origin, app)
     let lastSizeEventAt = 0
     const startedAt = performance.now()
     const checkpoints: string[] = []
