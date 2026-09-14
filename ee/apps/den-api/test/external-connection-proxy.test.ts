@@ -325,6 +325,8 @@ test("the request handler never enables direct exposure unless the route confirm
 
 test("direct exposure does not change the App host surface", async () => {
   await withClient({ tools: {}, resources: {} }, async (client) => {
+    expect(client.getInstructions()).not.toContain("Fixture MCP")
+    expect(client.getInstructions()).toContain("Omitted UI visibility defaults to model and app")
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
       "search_capabilities",
       "execute_capability",
