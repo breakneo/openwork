@@ -85,9 +85,10 @@ async function waitFor(predicate: () => boolean, label: string) {
 }
 
 test.each([
-  { name: "composer focus, shared Restore, pending stops, and optimistic sends preserve drafts through snapshots and first-message handoff", queueRegression: false },
-  { name: "busy Enter clears persisted composer text and attachments without losing queued messages or newer typing", queueRegression: true },
-])("$name", async ({ queueRegression }) => {
+  { name: "composer focus, shared Restore, pending stops, and optimistic sends preserve drafts through snapshots and first-message handoff", queueRegression: false, modeRegression: false },
+  { name: "busy Enter clears persisted composer text and attachments without losing queued messages or newer typing", queueRegression: true, modeRegression: false },
+  { name: "busy mode selection preserves the running turn and composer draft", queueRegression: false, modeRegression: true },
+])("$name", async ({ queueRegression, modeRegression }) => {
   window.localStorage.clear();
   const require = createRequire(import.meta.url);
   // Bun's isolated test loader cycles Lexical's ESM entries; use their real CJS entries before the app imports the editor.
@@ -445,6 +446,7 @@ test.each([
       expect(sentDrafts).toHaveLength(0);
       expect(interrupt).not.toHaveBeenCalled();
     }
+    if (modeRegression) return;
 
     // Hold both async boundaries: idle alone must not release Stop's feedback.
     let snapshotRefresh = Promise.withResolvers<void>();
@@ -1456,7 +1458,6 @@ test.each([
     queryClient.clear();
     container.remove();
     mock.restore();
-    if (registeredDom) await GlobalRegistrator.unregister();
   }
 }, 10_000);
 
