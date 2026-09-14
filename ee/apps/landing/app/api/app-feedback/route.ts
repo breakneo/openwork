@@ -1,18 +1,7 @@
 import { buildResponseHeaders, jsonResponse, rateLimitFormRequest, validateAntiSpamFields, validateTrustedOrigin, verifyFormBotProtection } from "../_lib/security";
 import { createPlainFormClient } from "../_lib/plain";
 import { ForbiddenError } from "@team-plain/graphql";
-
-type FeedbackContext = {
-  source?: string;
-  entrypoint?: string;
-  deployment?: string;
-  appVersion?: string;
-  openworkServerVersion?: string;
-  opencodeVersion?: string;
-  osName?: string;
-  osVersion?: string;
-  platform?: string;
-};
+import { buildFeedbackThreadFields, type FeedbackContext } from "../../../lib/plain-feedback-fields";
 
 type FeedbackPayload = {
   name?: string;
@@ -156,6 +145,7 @@ export async function POST(request: Request) {
     const threadResult = await plain.createThread({
       customerIdentifier: { customerId: customerResult.customer.id },
       title: mode === "contact" ? "OpenWork contact message" : "OpenWork app feedback",
+      threadFields: buildFeedbackThreadFields({ ...context, mode, submittedAt }),
       components: [
         { componentPlainText: { plainText: message } },
         { componentPlainText: { plainText: `Submitted by: ${name}\nEmail: ${email}` } },

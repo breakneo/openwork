@@ -31,7 +31,7 @@ Before enabling the forms in a deployment:
 
 1. In Plain, open **Settings → Machine Users**, create a machine user, and add
    an API key with `customer:create`, `customer:edit`, `customer:read`,
-   `thread:create`, and `thread:read` permissions.
+   `thread:create`, `thread:read`, and `threadField:create` permissions.
 2. Set `PLAIN_API_KEY` in the landing app's server environment (for local dev,
    use `ee/apps/landing/.env.local`). Never use a `NEXT_PUBLIC_` variable for it.
 3. Configure [email sending](https://www.plain.com/docs/product/channels/email-sending)
@@ -41,6 +41,51 @@ Before enabling the forms in a deployment:
    into Plain.
 4. Submit each form and verify the thread, customer email, diagnostic context,
    and email reply flow in Plain.
+
+#### Structured feedback context
+
+Submissions store the old email template's diagnostic context as
+[Plain thread fields](https://www.plain.com/docs/product/platform/threads/thread-fields),
+alongside the readable context in the first message. Empty or `unknown` values
+are omitted. OS versions and app/server versions stay as text so version numbers
+and release suffixes are preserved. The submission time uses a Date field.
+
+| Input | Plain field key | Type |
+| --- | --- | --- |
+| Form mode | `openwork_form_mode` | Text |
+| Source | `openwork_source` | Text |
+| Entrypoint | `openwork_entrypoint` | Text |
+| Deployment | `openwork_deployment` | Text |
+| App version | `openwork_app_version` | Text |
+| OpenWork server version | `openwork_server_version` | Text |
+| OpenCode version | `openwork_opencode_version` | Text |
+| OS name | `openwork_os_name` | Text |
+| OS version | `openwork_os_version` | Text |
+| Platform | `openwork_platform` | Text |
+| Submitted at | `openwork_submitted_at` | Date |
+
+**Configure the schemas before deploying this change.** Plain rejects thread
+fields whose keys/types do not match the workspace's schemas. Using Node 22.18+
+from `ee/apps/landing`:
+
+1. Preview the definitions with `pnpm plain:setup-fields`. This makes no API calls.
+2. Set `PLAIN_SETUP_API_KEY` in your shell to a key with
+   `threadFieldSchema:read` and `threadFieldSchema:create`, then run
+   `pnpm plain:setup-fields --apply`. Use the same Plain workspace as the form.
+   The command adds missing schemas, skips existing keys with matching types,
+   and stops if an existing key has a different type. It never edits existing
+   schemas and can be rerun after a partial failure.
+3. Add `threadField:create` to the landing app's existing `PLAIN_API_KEY`.
+   Schema-management permissions are only needed for setup.
+4. In Plain's **Settings → Thread fields**, verify the eleven OpenWork fields.
+   They are optional, read-only to support agents, and have AI autofill and
+   inclusion in AI agent context disabled. Values are sent in `createThread`;
+   no extra API calls are made per submission.
+
+The desktop feedback URL already supplies OS and version information when
+available; this change records that submitted context without inferring missing
+values. Name/email remain on the customer and message, and the message body
+remains the thread's first entry. Existing threads are not backfilled.
 
 The forms no longer use Resend, SMTP, or internal feedback recipient overrides.
 Without `PLAIN_API_KEY`, submissions return an unavailable response; this also
