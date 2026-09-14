@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, spyOn, test } from "bun:test"
+import { afterAll, describe, expect, jest, spyOn, test } from "bun:test"
 import { GlobalRegistrator } from "@happy-dom/global-registrator"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
@@ -251,6 +251,158 @@ describe("MCP App startup scheduling", () => {
       expect(host.errorSpy).not.toHaveBeenCalled()
       expect(host.timers.size).toBe(0)
     } finally { finish?.(); await host.dispose() }
+  })
+})
+
+describe("MCP App resolution", () => {
+  test.each(["success", "timeout"])("allows slow discovery for sixty seconds while config keeps ten seconds (%s)", async outcome => {
+    jest.useFakeTimers()
+    const requests: Array<{ signal: AbortSignal; resolve: (response: Response) => void }> = []
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((_input, init) => new Promise<Response>((resolve, reject) => {
+      const signal = init?.signal
+      if (!signal) throw new Error("Missing request AbortSignal")
+      requests.push({ signal, resolve })
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+    }))
+    try {
+      const client = createOpenworkServerClient({ baseUrl: "https://server.example" })
+      let settled = false
+      const resolution = client.resolveMcpApp("fixture", "fixture_render")
+        .then(value => { settled = true; return value }, (cause: unknown) => { settled = true; return cause })
+      const config = client.getConnectState().catch((cause: unknown) => cause)
+      expect(requests).toHaveLength(2)
+      jest.advanceTimersByTime(10_000)
+      expect(await config).toMatchObject({ message: "Request timed out." })
+      expect(requests[1].signal.aborted).toBe(true)
+      expect(requests[0].signal.aborted).toBe(false)
+      expect(settled).toBe(false)
+      jest.advanceTimersByTime(49_999)
+      await Promise.resolve()
+      expect(requests[0].signal.aborted).toBe(false)
+      expect(settled).toBe(false)
+      if (outcome === "success") {
+        requests[0].resolve(Response.json({ app: fixture() }))
+        expect(await resolution).toEqual({ app: fixture() })
+        jest.advanceTimersByTime(60_000)
+        expect(requests[0].signal.aborted).toBe(false)
+      } else {
+        jest.advanceTimersByTime(1)
+        expect(await resolution).toMatchObject({ message: "Request timed out." })
+        expect(requests[0].signal.aborted).toBe(true)
+      }
+      expect(fetchSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      fetchSpy.mockRestore()
+      jest.useRealTimers()
+    }
+  })
+
+  function resolutionFixture(explicit: boolean) {
+    const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT")
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true)
+    const container = document.body.appendChild(document.createElement("div"))
+    const root = createRoot(container)
+    const client = createOpenworkServerClient({ baseUrl: "https://server.example" })
+    const resolveSpy = spyOn(client, "resolveMcpApp").mockResolvedValue({ app: null })
+    const callSpy = spyOn(client, "callMcpAppTool").mockResolvedValue({ content: [] })
+    const releaseSpy = spyOn(client, "releaseMcpApp").mockResolvedValue({ released: true })
+    const sandboxSpy = spyOn(client, "mcpAppSandbox").mockReturnValue({ url: "about:blank", expectedOrigin: "https://sandbox.example", sandbox: "allow-scripts allow-same-origin" })
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {})
+    const providerRetry = jest.fn()
+    const part: DynamicToolUIPart = {
+      type: "dynamic-tool", toolName: "fixture_render", toolCallId: "launch", state: "output-available",
+      input: {}, output: "Provider fallback", callProviderMetadata: { openwork: { mcpResult: {
+        content: [{ type: "text", text: "Provider fallback" }],
+        ...(explicit ? { _meta: { "openwork/mcpApp": {
+          connectionId: "emc_fixture", toolName: "render", resourceUri: "ui://fixture/view.html", arguments: {},
+        } } } : {}),
+      } } },
+    }
+    const render = async () => { await act(async () => root.render(createElement(MessageListProvider, {
+      client, workspaceId: "fixture", sessionId: "session_fixture", mcpAppEngine: "v2",
+      showThinking: false, developerMode: false, displaySuggestions: false, providerConnectedCount: 0,
+      dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {},
+      onForkAtMessage: () => {}, onEditUserMessage: () => {},
+      onMcpReconnect: async () => { throw new Error("Unexpected reconnect") },
+      onMcpReopenAuthorization: async () => {}, onMcpRetry: providerRetry,
+      children: createElement(McpAppFrame, { part }),
+    }))) }
+    return {
+      container, resolveSpy, callSpy, releaseSpy, errorSpy, providerRetry, render,
+      async unmountFrame() { await act(async () => root.render(null)) },
+      async dispose() {
+        try { await act(async () => root.unmount()) } finally {
+          for (const spy of [resolveSpy, callSpy, releaseSpy, sandboxSpy, errorSpy]) spy.mockRestore()
+          container.remove()
+          Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct)
+        }
+      },
+    }
+  }
+
+  test.each([
+    new Error("Request timed out."),
+    new OpenworkServerError(500, "unexpected_failure", "Discovery failed: Bearer fixture-secret"),
+  ])("shows explicit launch failures with sanitized diagnostics and discovery-only Retry (%s)", async cause => {
+    const host = resolutionFixture(true)
+    host.resolveSpy.mockRejectedValueOnce(cause).mockResolvedValue({ app: fixture() })
+    try {
+      await host.render()
+      const status = host.container.querySelector('[role="status"]')
+      expect(status?.textContent).toContain("Interactive view unavailable. The normal tool result is still available.")
+      expect(status?.textContent).toContain(safeMcpAppDiagnosticMessage(cause, "fallback"))
+      expect(status?.textContent).toContain("MCP_APP_RESOURCE_RESOLUTION_FAILED")
+      expect(status?.textContent).toContain("Stage: resource-resolution")
+      expect(status?.textContent).not.toContain("fixture-secret")
+      expect(JSON.stringify(host.errorSpy.mock.calls)).not.toContain("fixture-secret")
+      if (cause instanceof OpenworkServerError) expect(status?.textContent).toContain(`Cause code: ${cause.code}`)
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.container.querySelector("iframe")).toBeNull()
+      const retry = Array.from(host.container.querySelectorAll("button")).find(button => button.textContent === "Retry")
+      if (!retry) throw new Error("Missing resolution Retry")
+      await act(async () => retry.click())
+      expect(host.resolveSpy).toHaveBeenCalledTimes(2)
+      expect(host.resolveSpy.mock.calls[1]).toEqual(host.resolveSpy.mock.calls[0])
+      expect(host.container.querySelector('[role="status"]')).toBeNull()
+      expect(host.container.querySelector("iframe")).not.toBeNull()
+      expect(host.callSpy).not.toHaveBeenCalled()
+      expect(host.providerRetry).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each([
+    new Error("Request timed out."),
+    new OpenworkServerError(500, "unexpected_failure", "Discovery failed"),
+    null,
+  ])("keeps ordinary results silent for unknown errors and null resolution (%s)", async cause => {
+    const host = resolutionFixture(false)
+    if (cause) host.resolveSpy.mockRejectedValue(cause)
+    try {
+      await host.render()
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.container.textContent).toBe("")
+      expect(host.container.querySelector("iframe")).toBeNull()
+      expect(host.errorSpy).not.toHaveBeenCalled()
+      expect(host.callSpy).not.toHaveBeenCalled()
+      expect(host.providerRetry).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test("releases a launch that resolves after its frame unmounts", async () => {
+    const host = resolutionFixture(true)
+    let finish: ((value: { app: OpenworkMcpAppResource }) => void) | undefined
+    host.resolveSpy.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    try {
+      await host.render()
+      await host.unmountFrame()
+      expect(host.releaseSpy).not.toHaveBeenCalled()
+      await act(async () => { finish?.({ app: fixture() }) })
+      expect(host.releaseSpy).toHaveBeenCalledTimes(1)
+      expect(host.releaseSpy).toHaveBeenCalledWith("fixture", "launch_fixture")
+      expect(host.container.querySelector("iframe")).toBeNull()
+      expect(host.callSpy).not.toHaveBeenCalled()
+      expect(host.errorSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
   })
 })
 

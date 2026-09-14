@@ -10,7 +10,7 @@ const draftTest = spec.world(cloudDraftRouting, {
   needs: { commands: ["bun", "pnpm", "opencode"] }, timeout: 600_000,
 });
 
-draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves its recipient without dispatching unknown or cross-server helpers", async ({ world, agent, user, probe, evidence }) => {
+draftTest("APP-DRAFT-ROUTING Cloud SDK draft survives a slow resolve without replaying launch or dispatching unknown or cross-server helpers", async ({ world, agent, user, probe, evidence }) => {
   const sinceIso = new Date().toISOString();
   expect(draftRoutingPrompt).not.toContain(world.connectionId);
   await agent.send(draftRoutingPrompt);
@@ -48,8 +48,13 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves its recipient without disp
     { name: "resolve_recipient", args: { recipient: "Test recipient" } },
   ]);
   expect(await world.den.mocks.other.toolCalls({ sinceIso, atLeast: 0 })).toEqual([]);
+  const resolveDelay = await world.resolveDelay();
+  expect(resolveDelay.delayed).toBeGreaterThan(0);
+  expect(resolveDelay.completed).toBe(resolveDelay.delayed);
+  expect(resolveDelay.aborted).toBe(0);
+  await user.notSee({ text: "Interactive view unavailable. The normal tool result is still available." });
   await user.screenshot();
-  evidence.recordAssertionEvidence("Cloud draft helpers stay on their originating connection", JSON.stringify({ reconciled: world.reconciled, reports, calls: calls.map(call => ({ name: call.name, args: call.args })), otherDispatches: 0 }), true);
+  evidence.recordAssertionEvidence("Cloud draft survives a 12-second resolve without replay and helpers stay on their originating connection", JSON.stringify({ reconciled: world.reconciled, resolveDelay, reports, calls: calls.map(call => ({ name: call.name, args: call.args })), otherDispatches: 0 }), true);
 });
 
 const isolationTest = spec.world(isolatedMcpApps, {

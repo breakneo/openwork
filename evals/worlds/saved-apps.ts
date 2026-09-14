@@ -166,6 +166,12 @@ export async function isolatedMcpApps(seed: Seed) {
   };
 }
 
+declare global {
+  interface Window {
+    __openworkSlowDraftResolve?: { state: { delayed: number; completed: number; aborted: number }; dispose: () => void };
+  }
+}
+
 export async function cloudDraftRouting(seed: Seed) {
   const appRequire = createRequire(new URL("../../apps/app/package.json", import.meta.url));
   const { build } = await import(createRequire(appRequire.resolve("vite")).resolve("esbuild"));
@@ -256,7 +262,54 @@ export async function cloudDraftRouting(seed: Seed) {
       { context: "Reconcile the owned draft host", timeoutMs: 150_000 })).stdout.trim()))
     : await reconcileDraftHost(hostSetup);
   if (record(reconciled).status !== 200 || record(reconciled).phase !== "ready" || record(reconciled).diagnostic !== "ready") throw new Error(`Cloud reconcile failed: ${JSON.stringify(reconciled)}`);
+  await seed.evalIn(app, browserScript((workspaceId, connectionId) => {
+    const originalFetch = window.fetch;
+    const state = { delayed: 0, completed: 0, aborted: 0 };
+    const wrappedFetch: typeof window.fetch = async (...args) => {
+      const [input, init] = args;
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const port = localStorage.getItem("openwork.server.port");
+      if (!port || url.origin !== `http://127.0.0.1:${port}` || method !== "POST"
+        || url.pathname !== `/workspace/${encodeURIComponent(workspaceId)}/mcp-apps/resolve`) return originalFetch.apply(window, args);
+      const raw = typeof init?.body === "string" ? init.body : input instanceof Request ? await input.clone().text() : "";
+      let body: unknown;
+      try { body = JSON.parse(raw); } catch { return originalFetch.apply(window, args); }
+      const launch = body && typeof body === "object" && "launch" in body ? body.launch : null;
+      if (!launch || typeof launch !== "object" || !("connectionId" in launch) || launch.connectionId !== connectionId
+        || !("toolName" in launch) || launch.toolName !== "render_slack_draft") return originalFetch.apply(window, args);
+      state.delayed += 1;
+      const signal = init?.signal !== undefined ? init.signal : input instanceof Request ? input.signal : undefined;
+      try {
+        await new Promise<void>((resolveDelay, rejectDelay) => {
+          const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolveDelay(); }, 12_000);
+          const abort = () => { clearTimeout(timer); rejectDelay(signal?.reason ?? new DOMException("Aborted", "AbortError")); };
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+        const response = await originalFetch.apply(window, args);
+        state.completed += 1;
+        return response;
+      } catch (error) {
+        if (signal?.aborted) state.aborted += 1;
+        throw error;
+      }
+    };
+    window.fetch = wrappedFetch;
+    window.__openworkSlowDraftResolve = {
+      state,
+      dispose: () => { if (window.fetch === wrappedFetch) window.fetch = originalFetch; delete window.__openworkSlowDraftResolve; },
+    };
+  }, [workspace.workspaceId, connection.id]));
   return { app, session, den, connectionId: connection.id, reconciled,
+    resolveDelay: () => seed.evalIn(app, () => {
+      const fault = window.__openworkSlowDraftResolve;
+      if (!fault) throw new Error("Slow draft resolve fault lost its document");
+      return { ...fault.state };
+    }),
+    async [Symbol.asyncDispose]() {
+      await seed.evalIn(app, () => { window.__openworkSlowDraftResolve?.dispose(); });
+    },
     async launchDiagnostics(sinceIso: string) {
       const sanitize = (value: string) => [field(credentials, "token"), field(credentials, "appHostToken")]
         .reduce((text, secret) => text.replaceAll(secret, "[redacted]"), value)

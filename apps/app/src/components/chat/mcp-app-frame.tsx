@@ -759,7 +759,7 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
             retryTimer = window.setTimeout(() => attempt(attemptIndex + 1), retryDelayMs)
             return
           }
-          if (isActionableMcpAppResolutionError(cause)) {
+          if (launch || isActionableMcpAppResolutionError(cause)) {
             const diagnostic: McpAppDiagnostic = {
               code: "MCP_APP_RESOURCE_RESOLUTION_FAILED",
               ...(cause instanceof OpenworkServerError ? { causeCode: cause.code } : {}),
