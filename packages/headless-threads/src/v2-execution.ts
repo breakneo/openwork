@@ -152,6 +152,13 @@ export function projectNativeV2History(history: NativeV2Message[], session: Nati
   return { messages, turnOutcomes, turnErrors, inputSkills, ambiguousTurns: [...ambiguousTurns] };
 }
 
+export function isNativeV2ObservationError(error: unknown): boolean {
+  return error instanceof HeadlessThreadError && error.method === "GET" && (
+    error.code === "observation_unavailable" || error.code === "snapshot_unconfirmed"
+    || (error.code === "request_failed" && (error.status === null || error.status === 408 || error.status === 429 || error.status >= 500))
+  );
+}
+
 export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Options): HeadlessThreadClient {
   const native = createNativeV2Client(options);
   const now = options.now ?? Date.now;
@@ -352,12 +359,22 @@ export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Opti
       terminalError: outcome === "failed" ? value.messages.filter((item) => item.parentId === messageId).at(-1)?.error ?? { name: "native_execution_failed", message: value.native?.turnErrors[messageId ?? ""] ?? "Native execution failed or its turn boundary is ambiguous.", retryable: null, providerError: null } : null,
     });
     for (;;) {
+      if (snapshot && (deadline.aborted || now() - start >= timeoutMs)) return finish(input.signal?.aborted || options.signal?.aborted ? "aborted" : "timeout", snapshot);
       try { snapshot = await getThreadSnapshot(threadId, { signal }); }
       catch (error) {
-        if (!signal.aborted) throw error;
-        // Do not start a second unbounded recovery read after the wait deadline.
-        if (!snapshot) throw error;
-        return finish(input.signal?.aborted || options.signal?.aborted ? "aborted" : "timeout", snapshot);
+        if (input.signal?.aborted || options.signal?.aborted) {
+          if (!snapshot) throw error;
+          return finish("aborted", snapshot);
+        }
+        if (!isNativeV2ObservationError(error) && !(deadline.aborted && error instanceof DOMException && error.name === "TimeoutError")) throw error;
+        snapshot = undefined;
+        const remaining = timeoutMs - (now() - start);
+        if (remaining <= 0 || deadline.aborted) throw new HeadlessThreadError({
+          code: "observation_unavailable", method: "GET", path: `/session/${threadId}`,
+          message: "Native execution status could not be observed in time. Its admission remains recorded; do not resend it.",
+        });
+        await sleep(Math.min(input.pollIntervalMs ?? options.pollIntervalMs ?? 500, remaining));
+        continue;
       }
       polls++;
       const idle = snapshot.status.type === "idle" && snapshot.native?.pendingInputIds.length === 0;

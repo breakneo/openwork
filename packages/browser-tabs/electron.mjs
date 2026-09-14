@@ -1848,7 +1848,6 @@ export function createBrowserPanel({
     ipcMain.on("openwork:webmcp:tools-changed", (event) => {
       const tab = [...browserTabs.values()].find((candidate) => candidate.view.webContents === event.sender);
       if (!tab) return;
-      invalidateWebMcpTab(tab);
       scheduleWebMcpToolCountRefresh(tab.tabId);
     });
   }

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CoworkerSummary, ModelChosenBy, ProviderSyncRun, RuntimeInfo } from "@/lib/bridge";
 import { describeSkippedProvider, type DenSession } from "@/lib/den";
-import { carryVariant, describeModelPick, previewAutomaticChoice, type ModelMode } from "@/lib/model-choice";
+import { carryVariant, describeModelPick, describeModelPreview, previewAutomaticChoice, resolveModelPreview, type ModelChoicePreview, type ModelMode } from "@/lib/model-choice";
 import { effortStopLabel } from "@/lib/effort";
-import type { ModelPurpose } from "@/lib/model-defaults";
+import { DEFAULT_MODEL_DEFAULTS, type ModelPurpose } from "@/lib/model-defaults";
 import { chooseIndexedModel, MODEL_INTELLIGENCE_INDEX, type ModelSelectionPreferences } from "@/lib/model-intelligence";
 import {
   createCoworkerThreads,
@@ -97,6 +97,8 @@ export function ModelPicker({
   catalog: sharedCatalog,
   catalogLoading = false,
   onRefreshCatalog,
+  automaticPreview,
+  previewLoading = false,
 }: {
   runtime: RuntimeInfo;
   session: DenSession | null;
@@ -121,6 +123,8 @@ export function ModelPicker({
   catalog?: EngineModelCatalog;
   catalogLoading?: boolean;
   onRefreshCatalog?: (options: { sync?: boolean }) => Promise<void>;
+  automaticPreview?: ModelChoicePreview;
+  previewLoading?: boolean;
 }) {
   const threads = useMemo(
     () =>
@@ -198,7 +202,7 @@ export function ModelPicker({
   // OpenCode's own catalog is listed, never recommended: say why nothing is recommended without hiding it.
   const onlyUnpromoted = !recommended && catalog.models.some((option) => option.tier === "opencode" && option.toolCall && option.status !== "deprecated");
   const allowsDefault = forWorker || Boolean(defaultPurpose);
-  const defaultLabel = defaultPurpose ? "Automatic (role-appropriate)" : "Use app default";
+  const defaultLabel = defaultPurpose ? AUTOMATIC_LABEL : "Use app default";
   const defaultDescription = defaultPurpose
     ? "Chooses an eligible connected model for this role when needed."
     : "Uses the app default for this Worker's purpose, then role-appropriate Automatic.";
@@ -209,7 +213,14 @@ export function ModelPicker({
 
   const automatic = !allowsDefault && modelMode === "auto";
   const automaticLine = automatic ? describeAutomaticChoice(catalog, value, coworker?.modelSelectionPreferences) : "";
-  const inspected = inspectedId ? catalog.models.find((model) => model.id === inspectedId) : selected;
+  const showPreview = automatic || (allowsDefault && !value);
+  const currentPreview = automaticPreview ?? (automatic && coworker
+    ? resolveModelPreview(catalog, "conversation", DEFAULT_MODEL_DEFAULTS, { ...coworker, model: value, modelVariant, modelMode, useAppModelDefaults: false })
+    : undefined);
+  const previewPending = loading || previewLoading;
+  const currentDescription = previewPending ? "Reading current model choice..." : describeModelPreview(currentPreview);
+  const inspected = inspectedId ? catalog.models.find((model) => model.id === inspectedId)
+    : showPreview && currentPreview?.state === "ready" ? currentPreview.model : selected;
 
   /** Change the main model without changing the person's fixed or Automatic policy. */
   function selectModel(model: EngineModelOption | null) {
@@ -229,7 +240,7 @@ export function ModelPicker({
             <option value="fixed">Use the selected model</option>
             <option value="auto">Automatic for each message</option>
           </select>
-          <p className="mt-1 text-[11px] leading-relaxed text-mist">{automatic ? "Chooses models from the same provider for quick questions or deeper work. Select the main model below." : "Keeps the same model. Choose Automatic if you want the app to select a model for each message."}</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-mist">{automatic ? "Preview for a typical message; the actual model and effort may change with your request. Choices stay within the main provider." : "Keeps the same model. Choose Automatic if you want the app to select a model for each message."}</p>
         </Field>
       ) : null}
       <button
@@ -239,14 +250,14 @@ export function ModelPicker({
         aria-expanded={open}
       >
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-line bg-ink">
-          <StatusDot tone={allowsDefault && !value ? "mist" : selected ? "mint" : "amber"} />
+          <StatusDot tone={showPreview ? previewPending || currentPreview?.state === "context" ? "mist" : currentPreview?.state === "ready" ? "mint" : "amber" : selected ? "mint" : "amber"} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block break-words text-xs font-semibold text-snow" data-testid="model-picker-current">
-            {allowsDefault && !value ? defaultLabel : selected?.modelLabel || value || "Choose a model"}
+            {automatic ? AUTOMATIC_LABEL : allowsDefault && !value ? defaultLabel : selected?.modelLabel || value || "Choose a model"}
           </span>
           <span className="mt-0.5 block break-words text-[11px] leading-relaxed text-mist" data-testid="model-picker-current-detail">
-            {allowsDefault && !value ? defaultDescription : selectedDescription(selected, value)}
+            {showPreview ? currentDescription : selectedDescription(selected, value)}
           </span>
         </span>
         <span className="text-xs text-mist" aria-hidden="true">{open ? "⌃" : "⌄"}</span>
@@ -330,7 +341,7 @@ export function ModelPicker({
               <StatusDot tone={!automatic && !value ? "mint" : "mist"} />
               <span className="min-w-0 flex-1">
                 <span className="block text-xs font-semibold text-snow">{allowsDefault ? defaultLabel : "Use recommended model"}</span>
-                <span className="mt-0.5 block text-[11px] leading-relaxed text-mist">{allowsDefault ? defaultDescription : recommended ? `Select ${recommended.modelLabel} from your connected models. You can change it any time.` : onlyUnpromoted ? "Nothing to recommend yet: sign in to OpenWork or connect an AI provider. Any model listed below can still be chosen." : "No connected model can use tools yet."}</span>
+                <span className="mt-0.5 block text-[11px] leading-relaxed text-mist">{allowsDefault ? !value ? currentDescription : defaultDescription : recommended ? `Select ${recommended.modelLabel} from your connected models. You can change it any time.` : onlyUnpromoted ? "Nothing to recommend yet: sign in to OpenWork or connect an AI provider. Any model listed below can still be chosen." : "No connected model can use tools yet."}</span>
               </span>
             </button>
 
@@ -419,7 +430,7 @@ export function ModelPicker({
         </Field>
       ) : null}
 
-      {!value && modelVariant ? <p className="break-words text-[11px] leading-relaxed text-amber">Saved effort "{modelVariant}" is not used without an explicit model. Choose the default option again to clear it.</p> : null}
+      {!value && modelVariant ? <p className={`break-words text-[11px] leading-relaxed ${defaultPurpose ? "text-mist" : "text-amber"}`}>{defaultPurpose ? `Saved effort "${modelVariant}" overrides Automatic effort when supported; it is not replaced if unavailable.` : `Saved effort "${modelVariant}" is not used without an explicit model. Choose the default option again to clear it.`}</p> : null}
 
       {error ? <ErrorNote>{error}</ErrorNote> : null}
       {lastRunFailed ? (

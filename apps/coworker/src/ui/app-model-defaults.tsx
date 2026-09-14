@@ -3,6 +3,7 @@ import { coworkerBridge, type RuntimeInfo } from "@/lib/bridge";
 import type { DenSession } from "@/lib/den";
 import { DEFAULT_MODEL_DEFAULTS, type ModelDefault, type ModelDefaults, type ModelPurpose } from "@/lib/model-defaults";
 import type { EngineModelCatalog } from "@/lib/threads";
+import { resolveModelPreview } from "@/lib/model-choice";
 import { InlineLoader } from "@/ui/brand";
 import { Button, ErrorNote } from "@/ui/kit";
 import { ModelPicker } from "@/ui/model-picker";
@@ -86,7 +87,8 @@ export function AppModelDefaults({ active, runtime, session, catalog, catalogLoa
             <section key={id} className="min-w-0 rounded-2xl border border-line bg-panel/45 p-4" aria-labelledby={`model-default-${id}`} data-testid={`model-default-${id}`}>
               <h2 id={`model-default-${id}`} className="text-sm font-semibold text-snow">{title}</h2>
               <p className="mb-3 mt-1 text-xs leading-relaxed text-mist">{description}</p>
-              <ModelPicker runtime={runtime} session={session} catalog={catalog} catalogLoading={catalogLoading} onRefreshCatalog={onRefreshCatalog} defaultPurpose={id} value={selection.model} modelVariant={selection.modelVariant} compact onChange={(value) => void choose(id, value)} />
+              <ModelPicker runtime={runtime} session={session} catalog={catalog} catalogLoading={catalogLoading} onRefreshCatalog={onRefreshCatalog} defaultPurpose={id} value={selection.model} modelVariant={selection.modelVariant} compact onChange={(value) => void choose(id, value)}
+                previewLoading={loading} automaticPreview={defaults && catalogLoaded ? resolveModelPreview(catalog, id, defaults) : { state: "context", detail: "The current model choice has not been loaded yet." }} />
             </section>
           );
         })}

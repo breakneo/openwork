@@ -5,6 +5,8 @@ import {
   buildDenAccountUrl,
   parsePastedGrant,
   providerSyncSession,
+  readCloudProviderSyncStatus,
+  describeSkippedProvider,
 } from "./den.ts";
 
 test("account destinations preserve the Den origin and never carry credentials or a proposed offer", () => {
@@ -38,6 +40,20 @@ test("parsePastedGrant accepts this app's deep link, the OpenWork link, and a ra
   assert.equal(parsePastedGrant("opencoworker://something-else?grant=abc123def456"), null);
   assert.equal(parsePastedGrant("short"), null);
   assert.equal(parsePastedGrant(""), null);
+});
+
+test("provider sync status retains ready providers alongside every Gateway setup reason", async (context) => {
+  const reasons = ["missing_credentials", "needs_key", "member_auth_required", "org_credential_missing", "no_accessible_models"] as const;
+  context.mock.method(globalThis, "fetch", async () => Response.json({
+    hasSession: true, lastRun: { at: "2026-09-14T00:00:00Z", status: "applied" }, reloadPending: false,
+    providers: [{ providerId: "ipr_ready", name: "OW OpenAI", source: "openwork_gateway", modelIds: ["gwm_ready"] }],
+    skippedProviders: reasons.map((reason) => ({ providerId: "ipr_partial", name: "Pending set", credentialSetId: "set", reason })),
+  }));
+  const status = await readCloudProviderSyncStatus({ serverUrl: "https://fixture.test", token: "fixture" });
+  assert.deepEqual(status.skippedProviders.map((provider) => provider.reason), reasons);
+  assert.equal(status.providers[0]?.providerId, "ipr_ready");
+  assert.equal(status.skippedProviders[2]?.credentialSetId, "set");
+  for (const reason of reasons) assert.ok(describeSkippedProvider(reason));
 });
 
 test("providerSyncSession hands the embedded server the API origin, token, and organization", () => {

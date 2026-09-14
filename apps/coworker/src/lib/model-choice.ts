@@ -19,10 +19,9 @@
  * policy, leaving heavier work to the existing Worker purpose tool.
  */
 import type { ModelChosenBy } from "./bridge.ts";
-import type { EngineModelCatalog, EngineModelOption } from "./threads.ts";
-import { recommendModel } from "./threads.ts";
-import { DEFAULT_MODEL_DEFAULTS, usesAppConversationDefault, type ModelDefaults } from "./model-defaults.ts";
-import { chooseIndexedFallbackModel, chooseIndexedModel, MODEL_INTELLIGENCE_INDEX, type ModelSelectionDecision, type ModelSelectionOptions, type ModelSelectionPreferences } from "./model-intelligence.ts";
+import { recommendModel, type EngineModelCatalog, type EngineModelOption } from "./threads.ts";
+import { DEFAULT_MODEL_DEFAULTS, usesAppConversationDefault, type ModelDefaults, type ModelPurpose } from "./model-defaults.ts";
+import { chooseIndexedFallbackModel, chooseIndexedModel, chooseAutomaticRoleModel, MODEL_INTELLIGENCE_INDEX, type ModelSelectionDecision, type ModelSelectionOptions, type ModelSelectionPreferences } from "./model-intelligence.ts";
 import { effortForTurn, effortStopOf, laneWithPreference, replyKindForLane } from "./effort.ts";
 export { costsNoMoreThan } from "./model-intelligence.ts";
 
@@ -186,14 +185,15 @@ export function resolveDiscussionModel(
   const messageLane = inherited ? (DEEP_HINTS.test(requestText) ? "deep" : "quick") : laneWithPreference(classifyRequest(requestText), stop);
   const automatic = inherited ? !selected.model : modelModeOf(coworker) === "auto";
   const lane = inherited ? "quick" : automatic ? messageLane : "standard";
-  const standard = inherited ? coworker.model || recommendModel(catalog)?.id : coworker.model;
   const fixedId = selected.model;
   const fixed = automatic ? null : catalog.models.find((model) => model.id === fixedId) ?? null;
   const choice = automatic
-    ? chooseIndexedModel(catalog, lane, { standard, preferences: coworker.modelSelectionPreferences })
+    ? inherited
+      ? chooseAutomaticRoleModel(catalog, "conversation", { standard: coworker.model || undefined, preferences: coworker.modelSelectionPreferences })
+      : chooseIndexedModel(catalog, lane, { standard: coworker.model, preferences: coworker.modelSelectionPreferences })
     : { model: fixed, reason: fixed ? "Kept the exact fixed model; automatic model preferences do not apply." : `The saved model "${fixedId}" is not available. Choose another AI model or connect its provider. No replacement was selected.`, indexVersion: MODEL_INTELLIGENCE_INDEX.version };
   if (!choice.model) return { ...choice, variant: "", lane };
-  const fixedVariant = inherited && automatic ? "" : selected.modelVariant?.trim() ?? "";
+  const fixedVariant = selected.modelVariant?.trim() ?? "";
   if (fixedVariant && !choice.model.variants.includes(fixedVariant)) {
     return { ...choice, model: null, variant: "", lane, reason: `The ${inherited ? "app conversation" : "selected"} model "${choice.model.id}" no longer offers thinking effort "${fixedVariant}". Update ${inherited ? "the app model defaults" : "this coworker's effort setting"}; no different effort was selected.` };
   }
@@ -277,4 +277,51 @@ export function previewAutomaticChoice(catalog: Pick<EngineModelCatalog, "models
     standard: chooseModelForLane(catalog, "standard", { standard, preferences }),
     deep: chooseModelForLane(catalog, "deep", { standard, preferences }),
   };
+}
+
+export type ModelChoicePreview =
+  | { state: "ready"; model: EngineModelOption; variant: string }
+  | { state: "unavailable" | "context"; detail: string };
+
+export function describeModelPreview(preview: ModelChoicePreview | undefined): string {
+  if (!preview) return "Current choice needs model context.";
+  if (preview.state !== "ready") return preview.state === "context" ? preview.detail : `Currently unavailable: ${preview.detail}`;
+  const effort = preview.variant ? ` · ${preview.variant[0]?.toUpperCase()}${preview.variant.slice(1)}` : "";
+  return `Currently: ${preview.model.modelLabel} · ${preview.model.providerLabel}${effort}`;
+}
+
+export function resolveModelPreview(
+  catalog: Pick<EngineModelCatalog, "models">,
+  purpose: ModelPurpose,
+  defaults: ModelDefaults,
+  coworker: Parameters<typeof resolveDiscussionModel>[1] & { thinkingModel?: string; thinkingModelVariant?: string; deliveryModel?: string; deliveryModelVariant?: string } = { model: "" },
+  requestText = "",
+): ModelChoicePreview {
+  if (purpose === "conversation") {
+    const choice = resolveDiscussionModel(catalog, coworker, requestText, defaults);
+    return choice.model ? { state: "ready", model: choice.model, variant: choice.variant } : { state: "unavailable", detail: choice.reason };
+  }
+  const field = purpose === "thinking" ? "thinkingModel" : "deliveryModel";
+  const selected = purpose !== "facilitator" && coworker[field]?.trim()
+    ? { model: coworker[field]?.trim() ?? "", modelVariant: coworker[`${field}Variant`] ?? "" }
+    : defaults[purpose];
+  if (purpose === "facilitator" && !selected.model) return { state: "context", detail: "Chosen when group participants are known; group overrides take priority." };
+  const nativeDefaults = catalog.models.filter((model) => model.isProviderDefault);
+  const standard = coworker.model || (nativeDefaults.length === 1 ? nativeDefaults[0]?.id : undefined);
+  const automatic = !selected.model && purpose !== "facilitator" && usesAppConversationDefault(coworker)
+    ? chooseAutomaticRoleModel(catalog, purpose, { standard, preferences: coworker.modelSelectionPreferences })
+    : null;
+  const choice = selected.model
+    ? { model: catalog.models.find((model) => model.id === selected.model) ?? null, reason: "The saved model is not available from a connected provider." }
+    : automatic ?? chooseIndexedModel(catalog, purpose === "thinking" ? "deep" : "standard", { standard: standard || recommendModel(catalog)?.id, preferences: coworker.modelSelectionPreferences });
+  const model = choice.model;
+  if (!model) return { state: "unavailable", detail: choice.reason };
+  if (purpose !== "facilitator" && (!(model.intelligence ? model.intelligence.tools === true : model.toolCall) || model.status === "deprecated")) return { state: "unavailable", detail: "The selected Worker model does not offer active tool support." };
+  try {
+    const variant = effortForTurn({ kind: purpose === "facilitator" ? "facilitator" : "worker-turn", stop: effortStopOf(coworker.effortPreference),
+      fixedVariant: selected.modelVariant?.trim() || automatic?.variant || "", variants: model.variants });
+    return { state: "ready", model, variant };
+  } catch (error) {
+    return { state: "unavailable", detail: error instanceof Error ? error.message : "The selected effort is unavailable." };
+  }
 }

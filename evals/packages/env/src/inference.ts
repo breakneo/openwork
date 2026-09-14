@@ -9,6 +9,11 @@ import type { Place } from "./place.ts";
 import { ephemeralDatabaseName, localMysqlIsRunning } from "./place.ts";
 import { SkipError } from "./needs.ts";
 
+// Lookup witnesses use purpose-specific 256-bit bearer keys, not password hashing.
+// Keep the algorithms in the product helpers; fixed-vector tests pin their formats.
+export { gatewayBearerKey, gatewayBearerKeyLookupDigest } from "../../../../ee/packages/utils/src/gateway-bearer-key.ts";
+export { inferenceBearerKey, legacyInferenceBearerKeyLookupDigest } from "../../../../ee/packages/utils/src/inference-bearer-key.ts";
+
 const root = fileURLToPath(new URL("../../../..", import.meta.url));
 const encryptionSecret = "local-dev-db-encryption-key-please-change-1234567890";
 const exec = promisify(execFile);
@@ -37,11 +42,12 @@ export async function managedInference(place: Place) {
     const witness = stack.use(await startInferenceWitness());
     const port = await allocateFreePort();
     const child = spawn(process.execPath, ["--conditions=development", "--import", "tsx", "src/server.ts"], {
-      cwd: `${root}/ee/apps/inference`, stdio: ["ignore", "pipe", "pipe"],
+      cwd: `${root}/ee/apps/gateway`, stdio: ["ignore", "pipe", "pipe"],
       env: {
         PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test", OPENWORK_DEV_MODE: "1",
         PORT: String(port), DB_MODE: "mysql", DATABASE_URL: database.url,
         DEN_DB_ENCRYPTION_KEY: encryptionSecret, OPENROUTER_UPSTREAM_URL: witness.url,
+        GATEWAY_EGRESS_ALLOWED_ORIGINS: new URL(witness.url).origin,
         INFERENCE_WEBHOOK_SECRET: "fixture-webhook-secret", INFERENCE_UPSTREAM_TIMEOUT_MS: "1000", INFERENCE_STREAM_IDLE_MS: "1000",
       },
     });

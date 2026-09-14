@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isRunning, toTranscript } from "@openwork/headless-threads/v2";
+import { isNativeV2ObservationError, isRunning, toTranscript } from "@openwork/headless-threads/v2";
 import { hasPendingInteractions, stalledRetry } from "../src/lib/threads.ts";
 import { assertComputerToolContext, COMPUTER_DENY, COMPUTER_STOP_GUIDANCE } from "./computer-control.mjs";
 import { nativeTurnAgent, NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
@@ -236,6 +236,16 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
     entry.coworkerCreatedAt = task.coworkerCreatedAt ?? null;
     return entry;
   }
+  function cancelledExecution(state, input) {
+    const id = input.id ?? collaborationId(input.owner.slug, input.owner.threadId, input.messageId);
+    const existing = state.executions[id];
+    const entry = execution(state, input);
+    if (!existing) {
+      Object.assign(entry, { state: "cancelled", nativeAdmission: "attempted", endedAt: now(), error: "Stopped. Earlier native work is kept and will not be replayed." });
+      Object.assign(state.tasks[entry.taskId], { state: "cancelled", cancelRequested: true, error: entry.error });
+    }
+    return entry;
+  }
   function queueContinuation(state, task) {
     const children = task.dependencies.map((id) => state.tasks[id]);
     if (children.some((child) => child.publicationFailed)) { task.state = "failed"; task.error = "A requested result could not be shown in its group. Retry the follow-up receipt to restore delivery."; return; }
@@ -421,6 +431,15 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       entry = admitted;
       running.ownsNative = true;
       armDeadline();
+      const observe = async (read) => {
+        for (;;) {
+          try { return await withAbort(read(), controller.signal); }
+          catch (error) {
+            if (!native || controller.signal.aborted || !isNativeV2ObservationError(error)) throw error;
+            await withAbort(new Promise((resolve) => setTimeout(resolve, pollMs)), controller.signal);
+          }
+        }
+      };
       let acceptance = entry.acceptance;
       if (present && (native || !entry.retry)) {
         acceptance ??= { threadId: entry.owner.threadId, messageId: entry.messageId, messageCountBefore: 0, alreadyPresent: true, acceptedAt: now() };
@@ -451,17 +470,17 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
           current.context = context ?? null;
         }) }) : send(entry.owner.threadId, { messageId: entry.messageId, prompt: entry.prompt, ...(context ? { context } : {}), ...(entry.model ? { model: entry.model } : {}), agent: entry.agent, signal: controller.signal }));
         acceptance = await withAbort(running.nativeAdmission, AbortSignal.any([controller.signal, AbortSignal.timeout(acceptanceTimeoutMs)]));
-        snapshot = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal: controller.signal }), controller.signal);
         // A freshly accepted turn may still have an idle, unfinished placeholder.
         // Only an already-admitted recovery or a settled observation reconciles it.
         observed = false;
       }
       await change((value) => { value.executions[id].acceptance = acceptance; value.executions[id].retry = false; });
+      snapshot = await observe(() => client.getThreadSnapshot(entry.owner.threadId, { signal: controller.signal }));
       for (;;) {
           if (running.replying) { observed = false; await withAbort(new Promise((resolve) => setTimeout(resolve, pollMs)), controller.signal); continue; }
           if (["group", "consultation"].includes(entry.owner.kind) && client.pendingInteractions && !running.replying) {
             const version = running.interactionVersion;
-            const pending = await pendingFor(entry, client, AbortSignal.any([controller.signal, AbortSignal.timeout(setupTimeoutMs)]), snapshot);
+            const pending = await observe(() => pendingFor(entry, client, AbortSignal.any([controller.signal, AbortSignal.timeout(setupTimeoutMs)]), snapshot));
             entry = await change((state) => {
               const current = state.executions[id];
               if (version !== running.interactionVersion || running.replying || !runnable(state, current)) return current;
@@ -498,7 +517,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
             if (!reply || reply.completedAt === null || reply.error) throw new Error(reply?.error?.message || "The admitted step was interrupted. Its earlier work was kept; review it before continuing.");
             break;
           }
-          const result = await withAbort(client.waitForThread(entry.owner.threadId, { since: acceptance, timeoutMs: 2_000, pollIntervalMs: 400, signal: controller.signal }), controller.signal);
+          const result = await observe(() => client.waitForThread(entry.owner.threadId, { since: acceptance, timeoutMs: 2_000, pollIntervalMs: 400, signal: controller.signal }));
           snapshot = result.snapshot;
           observed = result.outcome === "settled";
           if (result.outcome === "aborted") throw controller.signal.reason ?? new Error("Stopped.");
@@ -674,9 +693,15 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       });
     } catch { /* Read/acceptance APIs still report the in-memory fault when disk is unavailable. */ }
   }
-  function wake() {
-    if (closed || serviceError || timer) return;
-    timer = setTimeout(() => { timer = null; void pump().catch(schedulerFailed).finally(wake); }, pollMs);
+  let wakeRequested = false;
+  function wake(immediate = false) {
+    if (closed || serviceError) return;
+    wakeRequested ||= immediate;
+    if (pumping || (timer && !wakeRequested)) return;
+    if (timer) clearTimeout(timer);
+    const delay = wakeRequested ? 0 : pollMs;
+    wakeRequested = false;
+    timer = setTimeout(() => { timer = null; void pump().catch(schedulerFailed).finally(wake); }, delay);
     timer.unref?.();
   }
   const api = {
@@ -797,8 +822,12 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       } catch (error) { run.waiting = data.executions[executionId]?.state === "waiting-person"; throw error; }
       finally { run.replying = false; wake(); }
     },
-    async submit(input) {
+    async submit(input, isCancelled = () => false) {
       if (closed || serviceError) throw new Error(serviceError || "The collaboration service is closing.");
+      const stoppedBeforeSubmission = (state) => {
+        const pending = state.threads[threadKey(input.owner)]?.pending;
+        return isCancelled() || (input.track === true && input.retryByPerson !== true && pending?.messageId === input.messageId && pending.stoppedAt != null);
+      };
       const requestedId = input.id ?? collaborationId(input.owner.slug, input.owner.threadId, input.messageId);
       let before = input.retry ? await read((state) => state.executions[requestedId]) : null;
       if (before && !sameSkillFields(before, input)) throw new Error("This message ID already records different skill selections. Earlier work will not be replayed.");
@@ -834,6 +863,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
           // is independent; a late Worker result or old cancellation cannot revive it.
           await api.cancel(before.taskId);
           const entry = await change((state) => {
+            if (isCancelled()) throw new Error("The continuation was cancelled before admission.");
             if ((cancelVersions.get(before.taskId) ?? 0) !== cancelVersion + 1) throw new Error("The continuation was cancelled before admission.");
             const prior = state.executions[requestedId];
             if (prior.followUpId) return state.executions[prior.followUpId];
@@ -850,11 +880,13 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
             turns.pending = { messageId: next.messageId, prompt: next.prompt, ...skillFields(next), startedAt: next.createdAt, stoppedAt: null };
             return next;
           });
-          wake();
+          if (isCancelled()) await api.cancel(entry.taskId);
+          else wake();
           return entry;
         }
       }
       const entry = await change((state) => {
+        if (stoppedBeforeSubmission(state)) return cancelledExecution(state, input);
         if (before && (cancelVersions.get(before.taskId) ?? 0) !== cancelVersion) throw new Error("The retry was cancelled before admission.");
         if (input.groupRequestId && state.groups[input.owner.groupId]?.cancelledRequestIds?.includes(input.groupRequestId)) throw new Error("This group turn was stopped.");
         const id = input.id ?? collaborationId(input.owner.slug, input.owner.threadId, input.messageId);
@@ -886,7 +918,8 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
         }
         return entry;
       });
-      wake();
+      if (isCancelled() || entry.state === "cancelled") await api.cancel(entry.taskId);
+      else wake(input.track === true);
       return entry;
     },
     async acceptance(id, { signal, timeoutMs = acceptanceTimeoutMs } = {}) {
@@ -1121,8 +1154,21 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       if (failures.length) throw new AggregateError(failures, `Stopping requested work could not be confirmed: ${failures.map((error) => error.message).join("; ")}. Try Stop again before continuing.`);
     },
     async cancelThread(slug, threadId, messageId) {
-      const entries = await read((state) => Object.values(state.executions).filter((entry) => entry.owner.slug === slug && entry.owner.threadId === threadId && (!messageId || entry.messageId === messageId)));
+      const entries = await change((state) => {
+        const entries = Object.values(state.executions).filter((entry) => entry.owner.slug === slug && entry.owner.threadId === threadId && (!messageId || entry.messageId === messageId));
+        const key = `${slug}:${threadId}`;
+        const pending = state.threads[key]?.pending;
+        const owner = state.owners[key];
+        if (messageId && pending?.messageId === messageId) {
+          pending.stoppedAt ??= now();
+          if (!entries.length && owner && ["private", "assignment"].includes(owner.kind)) {
+            entries.push(cancelledExecution(state, { owner, messageId, prompt: pending.prompt, ...skillFields(pending), track: true }));
+          }
+        }
+        return entries;
+      });
       for (const entry of entries) await api.cancel(entry.taskId);
+      return entries.length > 0;
     },
     async receipts({ slug, threadId, groupId }) {
       return read((state) => Object.values(state.tasks).filter((task) => task.dependencies.length > 0 && (groupId ? task.owner.groupId === groupId : task.owner.slug === slug && task.owner.threadId === threadId)).map((task) => ({ id: task.id, ...(task.owner.eventRunId ? { eventRunId: task.owner.eventRunId } : {}), conversationId: task.owner.conversationId, threadId: task.owner.threadId, messageId: state.executions[task.executionId]?.messageId ?? "", state: task.state, label: task.state === "waiting" ? "Waiting for requested work" : task.state === "resumption-queued" ? "Results ready; follow-up queued" : task.state === "resuming" ? "Following up on the results" : task.state === "succeeded" ? "Follow-up completed" : task.state === "cancelled" ? "Collaboration stopped" : "Collaboration needs attention", error: task.error, dependencies: task.dependencies.map((id) => ({ id, kind: state.tasks[id].kind, label: state.tasks[id].label, state: state.tasks[id].state, groupId: state.tasks[id].groupId ?? "", error: state.tasks[id].error })) })));

@@ -12,13 +12,15 @@ import {
   peekStartingModel,
   previewAutomaticChoice,
   resolveDiscussionModel,
+  resolveModelPreview,
+  describeModelPreview,
   setStartingModel,
   takeStartingModel,
   wasAutoPicked,
 } from "./model-choice.ts";
 import { fixtureCatalog, fixtureProvider } from "./provider-catalog.fixture.ts";
-import { connectedModelCatalog, type EngineModelOption } from "./threads.ts";
-import { chooseIndexedModel, MODEL_INTELLIGENCE_INDEX, modelSelectionDefaults, normalizeModelSelectionPreferences } from "./model-intelligence.ts";
+import { connectedModelCatalog, recommendModel, type EngineModelOption } from "./threads.ts";
+import { chooseIndexedModel, preferredRoleModel, MODEL_INTELLIGENCE_INDEX, modelSelectionDefaults, normalizeModelSelectionPreferences } from "./model-intelligence.ts";
 import { describeTurnFailure } from "./turn-failure.ts";
 import { DEFAULT_MODEL_DEFAULTS } from "./model-defaults.ts";
 
@@ -44,7 +46,7 @@ test("a lane pick never costs more than the standard model: on a provider that m
   ] };
   assert.equal(chooseModelForLane(catalog, "quick", { standard: "opencode/big-pickle" })?.id, "opencode/ling-2.6-flash-free", "the free fast sibling, never the paid haiku");
   assert.equal(chooseModelForLane(catalog, "deep", { standard: "opencode/big-pickle" })?.id, "opencode/big-pickle", "no free deep sibling: the standard model stays; never opus or pro");
-  assert.equal(resolveDiscussionModel(catalog, { model: "opencode/big-pickle", modelChosenBy: "app" }, "Prepare a report").model?.id, "opencode/ling-2.6-flash-free", "inherited speaking stays quick without escalating from free to paid");
+  assert.equal(resolveDiscussionModel(catalog, { model: "opencode/big-pickle", modelChosenBy: "app" }, "Prepare a report").model, null, "inherited speaking never recommends OpenCode or escalates from its free anchor to paid");
   const free = { cost: { input: 0, output: 0 }, knownPrice: true };
   assert.equal(costsNoMoreThan(free, free), true);
   assert.equal(costsNoMoreThan({ cost: { input: 0, output: 0 } }, free), false, "zero without provenance is not free");
@@ -288,6 +290,78 @@ test("discussion resolution shares adjusted message effort across private/group 
       assert.match(choice.reason, /no longer offers thinking effort "high"/);
     }
   }
+});
+
+test("connected role preferences preserve Gateway boundaries, prices and exact choices", () => {
+  const model = (name: string, upstreamModelId: string, price: number) => ({
+    name, upstreamModelId, modelGroupId: "group", credentialSetId: "set", status: "active",
+    cost: { input: price, output: price }, capabilities: { toolcall: true, reasoning: true }, variants: { low: {}, medium: {}, high: {} },
+  });
+  const raw = { connected: ["ipr_fixture"], default: { ipr_fixture: "gwm_astra" }, all: [{ id: "ipr_fixture", name: "OW OpenAI", models: {
+    gwm_astra: model("GPT-6 Astra", "gpt-6-astra", 3),
+    gwm_luna: model("Renamed catalog label", "openai/gpt-5.6-luna", 1),
+  } }] };
+  const catalog = connectedModelCatalog(raw);
+  assert.equal(recommendModel(catalog)?.id, "ipr_fixture/gwm_luna");
+  const owner = { model: "ipr_fixture/gwm_astra", modelChosenBy: "app", modelVariant: "high" };
+  const choose = (current: { models: EngineModelOption[] } = catalog, defaults = DEFAULT_MODEL_DEFAULTS) => resolveDiscussionModel(current, owner, "hello", defaults);
+  assert.equal(choose().model?.id, "ipr_fixture/gwm_luna");
+  assert.equal(choose().variant, "low");
+  const luna = catalog.models.find((model) => model.modelId === "gwm_luna");
+  assert.ok(luna);
+  const legacy = { ...luna, id: "legacy/deepseek", providerId: "legacy", modelId: "deepseek", upstreamModelId: "deepseek", intelligence: undefined, knownPrice: true, cost: { input: 0, output: 0 } };
+  const withLegacy = { models: [...catalog.models, legacy] };
+  const legacyOwner = { ...owner, model: legacy.id };
+  assert.equal(resolveDiscussionModel(withLegacy, legacyOwner, "hello").model?.id, luna.id, "an old automatic provider is not the role-default boundary");
+  assert.equal(resolveDiscussionModel(withLegacy, { ...legacyOwner, useAppModelDefaults: false }, "hello").model?.id, legacy.id);
+  const staleOwner = { ...owner, model: "gone/old-recommendation" };
+  const withoutLuna = { models: catalog.models.filter((model) => model.id !== luna.id) };
+  assert.equal(resolveDiscussionModel(withoutLuna, staleOwner, "hello").model?.id, owner.model, "a stale automatic anchor falls back to current eligible models");
+  assert.equal(resolveDiscussionModel(withoutLuna, { ...staleOwner, modelChosenBy: "person" }, "hello").model, null);
+  const ambiguous = { models: [...catalog.models, { ...luna, id: "ipr_fixture/gwm_alternate", modelId: "gwm_alternate", credentialSetId: "other" }] };
+  assert.equal(preferredRoleModel(ambiguous, "conversation"), null);
+  assert.equal(resolveDiscussionModel(ambiguous, staleOwner, "hello").model, null, "a stale anchor cannot arbitrarily choose between credential sets");
+  assert.equal(resolveDiscussionModel(ambiguous, owner, "hello").model?.id, luna.id, "an existing boundary can retain its constrained fallback");
+  const freeOnly: { models: EngineModelOption[] } = { models: [{ ...luna, id: "openwork-free/openai/gpt-5.6-luna", providerId: "openwork-free", modelId: "openai/gpt-5.6-luna", tier: "free", intelligence: undefined, knownPrice: true, cost: { input: 0, output: 0 } }] };
+  assert.equal(resolveDiscussionModel(freeOnly, staleOwner, "hello").model?.id, freeOnly.models[0]?.id);
+  const effortOnly = { ...DEFAULT_MODEL_DEFAULTS, conversation: { model: "", modelVariant: "medium" } };
+  assert.equal(choose(catalog, effortOnly).variant, "medium");
+  assert.equal(resolveDiscussionModel(catalog, { ...owner, modelChosenBy: "person" }, "hello").model?.id, owner.model);
+  assert.equal(resolveDiscussionModel(catalog, { ...owner, modelChosenBy: "person" }, "hello").variant, "high");
+  const fixed = { ...DEFAULT_MODEL_DEFAULTS, conversation: { model: owner.model, modelVariant: "high" } };
+  assert.equal(choose(catalog, fixed).model?.id, owner.model);
+  assert.equal(choose(catalog, fixed).variant, "high");
+  assert.equal(choose(catalog, { ...fixed, conversation: { model: "gone/exact", modelVariant: "high" } }).model, null);
+  for (const change of [
+    { credentialSetId: "other" }, { modelGroupId: "other" }, { modelGroupId: undefined },
+    { cost: { input: 4, output: 1 } }, { cost: { input: 1, output: 4 } }, { cost: undefined },
+  ]) {
+    const changed = connectedModelCatalog({ ...raw, all: [{ ...raw.all[0]!, models: { ...raw.all[0]!.models, gwm_luna: { ...raw.all[0]!.models.gwm_luna, ...change } } }] });
+    assert.equal(preferredRoleModel(changed, "conversation", { standard: owner.model }), null, JSON.stringify(change));
+    assert.equal(chooseFallbackModel(changed, "quick", { standard: owner.model, exclude: [owner.model] }), null);
+  }
+  assert.equal(preferredRoleModel({ models: catalog.models.map((model) => ({ ...model, upstreamModelId: undefined, modelLabel: "GPT-5.6 Luna" })) }, "conversation"), null);
+  const unavailable = connectedModelCatalog({ ...raw, connected: [] });
+  assert.equal(recommendModel(unavailable), null);
+  assert.equal(choose(unavailable).model, null);
+  const withoutEffort = { models: catalog.models.map((model) => ({ ...model, variants: [] })) };
+  assert.equal(choose(withoutEffort, effortOnly).model, null);
+  const avoided = { ...owner, modelSelectionPreferences: { ...modelSelectionDefaults(), avoided: ["ipr_fixture/gwm_luna"] } };
+  assert.equal(resolveDiscussionModel(catalog, avoided, "hello").model?.id, owner.model);
+  const beforePreview = JSON.stringify({ owner, defaults: DEFAULT_MODEL_DEFAULTS });
+  const conversationPreview = resolveModelPreview(catalog, "conversation", DEFAULT_MODEL_DEFAULTS, owner, "hello");
+  assert.deepEqual(conversationPreview, { state: "ready", model: choose().model, variant: choose().variant });
+  assert.equal(describeModelPreview(conversationPreview), "Currently: Renamed catalog label · OW OpenAI · Low");
+  assert.equal(describeModelPreview(resolveModelPreview(catalog, "thinking", DEFAULT_MODEL_DEFAULTS, owner)), "Currently: GPT-6 Astra · OW OpenAI · Medium");
+  assert.equal(describeModelPreview(resolveModelPreview(catalog, "delivery", DEFAULT_MODEL_DEFAULTS, owner)), "Currently: Renamed catalog label · OW OpenAI · High");
+  assert.equal(describeModelPreview(resolveModelPreview(catalog, "thinking", DEFAULT_MODEL_DEFAULTS, { ...owner, thinkingModel: luna.id, thinkingModelVariant: "low" })), "Currently: Renamed catalog label · OW OpenAI · Low");
+  const exactThinking = { ...DEFAULT_MODEL_DEFAULTS, thinking: { model: owner.model, modelVariant: "high" } };
+  assert.equal(describeModelPreview(resolveModelPreview(catalog, "thinking", exactThinking, owner)), "Currently: GPT-6 Astra · OW OpenAI · High");
+  assert.equal(resolveModelPreview(withoutEffort, "thinking", exactThinking, owner).state, "unavailable");
+  assert.equal(resolveModelPreview(ambiguous, "conversation", DEFAULT_MODEL_DEFAULTS, staleOwner).state, "unavailable");
+  assert.equal(resolveModelPreview(unavailable, "delivery", DEFAULT_MODEL_DEFAULTS, owner).state, "unavailable");
+  assert.equal(resolveModelPreview(catalog, "facilitator", DEFAULT_MODEL_DEFAULTS).state, "context");
+  assert.equal(JSON.stringify({ owner, defaults: DEFAULT_MODEL_DEFAULTS }), beforePreview, "previews never persist Automatic as a fixed choice");
 });
 
 test("fixed discussion models ignore automatic preferences and never replace an exact missing ID; empty records inherit", () => {

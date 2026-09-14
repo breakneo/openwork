@@ -25,6 +25,7 @@ import {
   KEY_ARROW_LEFT_COMMAND,
   KEY_ARROW_RIGHT_COMMAND,
   KEY_BACKSPACE_COMMAND,
+  KEY_DOWN_COMMAND,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
   type SerializedTextNode,
@@ -39,6 +40,7 @@ import { parseConnectSkillToken } from "./connect-skill-token";
 import { encodeConnectorToken, parseConnectorToken } from "./connector-token";
 import { shouldCollapsePastedText, splitPastedText } from "./pasted-text";
 import { insertPastedText } from "./pasted-text-insertion";
+import { lineBoundaryMoveForKey } from "./line-boundary-keys";
 
 type PastedTextToken = { label: string; lines: number; text: string };
 
@@ -57,6 +59,7 @@ type EditorProps = {
   submitDisabled: boolean;
   placeholder: string;
   onChange: (value: string) => void;
+  onMentionQueryChange?: (query: string | null) => void;
   onSubmit: (options: { queue: boolean }) => void | Promise<void>;
   onExpandPastedText?: (label: string) => void;
   onExpandAttachment?: (id: string) => void;
@@ -70,6 +73,7 @@ type EditorProps = {
 
 export type LexicalPromptEditorHandle = {
   insertSkillAtSelection: (skillName: string, skillToken?: string) => void;
+  insertMentionAtSelection: (kind: ComposerMentionKind, value: string) => string | null;
 };
 
 type SerializedComposerMentionNode = Spread<
@@ -878,6 +882,41 @@ function setPrompt(
   }
 }
 
+function mentionAtSelection() {
+  const selection = $getSelection();
+  if (!$isRangeSelection(selection) || !selection.isCollapsed()) return null;
+  let node = selection.anchor.getNode();
+  let end = selection.anchor.offset;
+  if ($isElementNode(node)) {
+    const previous = node.getChildAtIndex(end - 1);
+    if (!$isTextNode(previous)) return null;
+    node = previous;
+    end = node.getTextContentSize();
+  }
+  if (!$isTextNode(node) || isComposerInlineTokenNode(node)) return null;
+  const text = node.getTextContent();
+  const match = text.slice(0, end).match(/(?<!\S)@([^\s@]*)$/);
+  if (!match) return null;
+  const remaining = text.slice(end).match(/^[^\s@]*/)?.[0] ?? "";
+  return { node, start: end - match[0].length, end: end + remaining.length, query: match[1] ?? "" };
+}
+
+function insertMentionAtSelection(kind: ComposerMentionKind, value: string) {
+  const match = mentionAtSelection();
+  if (!match) return false;
+  const end = match.end + (kind !== "agent" && match.node.getTextContent()[match.end] === " " ? 1 : 0);
+  const selection = match.node.select(match.start, end);
+  if (kind === "agent") {
+    selection.removeText();
+    return true;
+  }
+  const mention = $createComposerMentionNode(value, kind);
+  const space = $createTextNode(" ");
+  selection.insertNodes([mention, space]);
+  space.selectEnd();
+  return true;
+}
+
 function appendSkillAtEnd(skillName: string, skillToken?: string) {
   const root = $getRoot();
   const lastChild = root.getLastChild();
@@ -1259,6 +1298,30 @@ function MentionChipNavigationPlugin() {
   return null;
 }
 
+// Home / End move the caret to the line boundary (Shift extends). See
+// lineBoundaryMoveForKey for why Chromium on macOS does not do this itself.
+function LineBoundaryKeysPlugin() {
+  const [editor] = useLexicalComposerContext();
+
+  useEffect(() => {
+    return editor.registerCommand(
+      KEY_DOWN_COMMAND,
+      (event: KeyboardEvent) => {
+        const move = lineBoundaryMoveForKey(event);
+        if (!move) return false;
+        const selection = $getSelection();
+        if (!$isRangeSelection(selection)) return false;
+        event.preventDefault();
+        selection.modify(move.alter, move.backward, "lineboundary");
+        return true;
+      },
+      COMMAND_PRIORITY_HIGH,
+    );
+  }, [editor]);
+
+  return null;
+}
+
 function ImperativeHandlePlugin(props: { editorRef: ForwardedRef<LexicalPromptEditorHandle> }) {
   const [editor] = useLexicalComposerContext();
 
@@ -1266,6 +1329,13 @@ function ImperativeHandlePlugin(props: { editorRef: ForwardedRef<LexicalPromptEd
     insertSkillAtSelection(skillName: string, skillToken?: string) {
       editor.update(() => insertSkillAtSelection(skillName, skillToken));
       editor.focus();
+    },
+    insertMentionAtSelection(kind: ComposerMentionKind, value: string) {
+      let draft: string | null = null;
+      editor.update(() => {
+        if (insertMentionAtSelection(kind, value)) draft = serializePromptFromRoot();
+      }, { discrete: true });
+      return draft;
     },
   }), [editor]);
 
@@ -1321,6 +1391,7 @@ function AttachmentChipPlugin(props: { onRemoveAttachment?: (id: string) => void
 export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorProps>(function LexicalPromptEditor(props, ref) {
   const valueRef = useRef(props.value);
   const onChangeRef = useRef(props.onChange);
+  const onMentionQueryChangeRef = useRef(props.onMentionQueryChange);
 
   useEffect(() => {
     valueRef.current = props.value;
@@ -1328,7 +1399,8 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
 
   useEffect(() => {
     onChangeRef.current = props.onChange;
-  }, [props.onChange]);
+    onMentionQueryChangeRef.current = props.onMentionQueryChange;
+  }, [props.onChange, props.onMentionQueryChange]);
 
   const initialConfig = useMemo(
     () => ({
@@ -1348,6 +1420,7 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
   const syncPromptFromEditorState = useCallback(
     (state: Parameters<NonNullable<React.ComponentProps<typeof OnChangePlugin>["onChange"]>>[0]) => {
       state.read(() => {
+        onMentionQueryChangeRef.current?.(mentionAtSelection()?.query ?? null);
         const next = serializePromptFromRoot();
         if (next === valueRef.current) return;
         valueRef.current = next;
@@ -1398,6 +1471,7 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
         <PastedTextExpandPlugin pastedText={props.pastedText} onExpandPastedText={props.onExpandPastedText} />
         <AttachmentChipPlugin onRemoveAttachment={props.onRemoveAttachment} onExpandAttachment={props.onExpandAttachment} />
         <MentionChipNavigationPlugin />
+        <LineBoundaryKeysPlugin />
         <ImperativeHandlePlugin editorRef={ref} />
       </div>
     </LexicalComposer>

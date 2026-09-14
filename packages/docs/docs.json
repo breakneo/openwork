@@ -101,6 +101,8 @@
             "group": "Install and operate",
             "pages": [
               "start-here/enterprise-desktop-deployment",
+              "self-host/gateway",
+              "self-host/gateway-upgrade",
               "self-host/declarative-configuration",
               "start-here/installer-delivery",
               "start-here/on-prem-branding",
@@ -168,6 +170,13 @@
           "cloud/scim-microsoft-entra",
           "cloud/security-and-operations",
           "cloud/enterprise"
+        ]
+      },
+      {
+        "tab": "AI Gateway",
+        "pages": [
+          "ai-gateway/counting-usage",
+          "ai-gateway/token-costs"
         ]
       },
       {

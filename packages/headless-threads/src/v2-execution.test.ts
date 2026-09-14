@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test, type TestContext } from "node:test";
-import { cancelNativeV2TurnContext, createHeadlessThreadClientV2, createNativeV2Client, nativeV2PartId, nativeV2InputSkillsMatch, projectNativeV2History, type NativeV2Event, type NativeV2Message, type NativeV2Session, type NativeV2Receipt, type NativeV2Permission } from "./v2.ts";
+import { isNativeV2ObservationError, cancelNativeV2TurnContext, createHeadlessThreadClientV2, createNativeV2Client, nativeV2PartId, nativeV2InputSkillsMatch, projectNativeV2History, type NativeV2Event, type NativeV2Message, type NativeV2Session, type NativeV2Receipt, type NativeV2Permission } from "./v2.ts";
 
 const mount = "/workspace/ws_fixture/opencode2/api";
 const sid = "ses_fixture";
@@ -293,6 +293,55 @@ test("native snapshots reconcile delivery overlap without replay and bound persi
   await assert.rejects(observer.getThreadSnapshot(sid), { code: "snapshot_unconfirmed" });
   assert.equal(reads, 3);
   assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 1);
+});
+
+test("native observation failures remain unknown and recover without replay or cancellation", async (t) => {
+  const { client, options, state } = await fixture(t);
+  const since = await client.sendTurn(sid, { messageId: "msg_observation", prompt: "Hello" });
+  let mode = "slow";
+  let activeReads = 0;
+  const observer = createHeadlessThreadClientV2({ ...options, fetch: async (url, init) => {
+    assert.equal(init?.method, "GET");
+    if (new URL(url).pathname.endsWith("/active")) {
+      activeReads++;
+      if (mode === "slow") await new Promise<void>((_, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(signal.reason);
+        else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      if (mode === "unavailable" || mode === "once") {
+        if (mode === "once") mode = "ready";
+        return Response.json({}, { status: 503 });
+      }
+      if (mode === "forbidden") return Response.json({}, { status: 403 });
+      if (mode === "idle-then-unavailable") { mode = "unavailable"; return Response.json({ data: {} }); }
+    }
+    return fetch(url, init);
+  } });
+  for (mode of ["slow", "unavailable"]) {
+    await assert.rejects(observer.waitForThread(sid, { since, timeoutMs: 40, pollIntervalMs: 5 }), (error: unknown) => {
+      assert.equal(isNativeV2ObservationError(error), true);
+      assert.ok(error instanceof Error && "code" in error && error.code === "observation_unavailable");
+      return true;
+    });
+  }
+  state.inbox.push({ id: "msg_pending", sessionID: sid, type: "synthetic", delivery: "queue", timeCreated: 5, payload: { text: "Pending" } });
+  mode = "idle-then-unavailable";
+  await assert.rejects(observer.waitUntilIdle(sid, { timeoutMs: 40, pollIntervalMs: 5 }), { code: "observation_unavailable" });
+  state.inbox = [];
+  mode = "forbidden";
+  const before = activeReads;
+  await assert.rejects(observer.waitForThread(sid, { since, timeoutMs: 500, pollIntervalMs: 5 }), { status: 403 });
+  assert.equal(activeReads, before + 1);
+  mode = "once";
+  assert.equal((await observer.waitForThread(sid, { since, timeoutMs: 1000, pollIntervalMs: 5 })).outcome, "settled");
+  mode = "slow";
+  const controller = new AbortController();
+  const waiting = observer.waitUntilIdle(sid, { timeoutMs: 1000, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(waiting);
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 1);
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/interrupt")).length, 0);
 });
 
 test("context-only recovery cancels only a verified idle host binding, never foreign work", async (t) => {

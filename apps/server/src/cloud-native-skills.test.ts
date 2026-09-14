@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CloudNativeSkillSyncError, cloudNativeSkillId, cloudNativeSkillScopeKey, createCloudNativeSkillSync } from "./cloud-native-skills.js";
 import { isRecord, type McpFetch } from "./connect-mcp-transport.js";
+import { renderOpencodeV2Config } from "./managed-opencode-v2.js";
 
-// Adapted from PR #4881's colocated lifecycle tests; all credentials are fixtures.
 const INDEX_URI = "skill://index.json";
 const BRIEFING_URI = "skill://briefing/SKILL.md";
 const TRIAGE_URI = "skill://support-triage/SKILL.md";
@@ -56,6 +56,7 @@ test("skill IDs and authorization scopes are stable opaque hashes", () => {
   expect(cloudNativeSkillId(BRIEFING_URI)).toBe(`openwork-cloud-${createHash("sha256").update(BRIEFING_URI).digest("hex").slice(0, 16)}`);
   const scope = cloudNativeSkillScopeKey(cloudConfig("fixture-secret"));
   expect(scope).toMatch(/^[0-9a-f]{64}$/);
+  expect(scope).not.toContain("fixture-secret");
   expect(cloudNativeSkillScopeKey(cloudConfig("other"))).not.toBe(scope);
   for (const config of [null, { url: "https://example.test/mcp" }, { ...cloudConfig("t"), enabled: false }, { ...cloudConfig("t"), disabled: true }]) expect(cloudNativeSkillScopeKey(config)).toBeNull();
 });
@@ -102,6 +103,7 @@ test("malformed/partial reads, auth rejection and transport failure clear old sk
       [fakeCloud({ index: indexFor([BRIEFING_URI, TRIAGE_URI]), bodies: { [BRIEFING_URI]: BRIEFING_BODY } }).fetcher, "cloud_skill_body_unavailable"],
       [async () => new Response(null, { status: 401 }), "cloud_skill_session_failed"],
       [async () => { throw new Error("fixture-credential-must-not-escape"); }, "cloud_skill_session_failed"],
+      [async () => { throw new DOMException("Timed out", "TimeoutError"); }, "cloud_skill_session_failed"],
     ];
     for (const [failure, code] of bad) {
       fetcher = good; await sync.sync(); fetcher = failure;
@@ -113,6 +115,21 @@ test("malformed/partial reads, auth rejection and transport failure clear old sk
       expect(registered.at(-1)).toBeNull();
       expect(sync.current()).toEqual({ root: null, skills: [] });
     }
+  });
+});
+
+test("transport recovery does not hide a failed native unregistration", async () => {
+  await withRoot(async (root) => {
+    const cleanupError = new Error("Native unregistration failed");
+    let fetcher: McpFetch = fakeCloud({ index: indexFor([BRIEFING_URI]), bodies: { [BRIEFING_URI]: BRIEFING_BODY } }).fetcher;
+    const sync = createCloudNativeSkillSync({
+      root, fetcher: (url, init) => fetcher(url, init), readCloudConfig: async () => cloudConfig("t"),
+      register: async (directory) => { if (directory === null) throw cleanupError; },
+    });
+    await sync.sync();
+    fetcher = async () => { throw new TypeError("fetch failed"); };
+    await expect(sync.sync()).rejects.toBe(cleanupError);
+    expect(await exists(root)).toBe(false);
   });
 });
 
@@ -158,4 +175,18 @@ test("sign-out during an in-flight resource read discards that generation", asyn
     expect(registered.every((dir) => dir === null)).toBe(true);
     expect(await exists(root)).toBe(false);
   });
+});
+
+test("the generated engine config keeps skill directories across provider rewrites", () => {
+  const skills = ["/state/cloud-skills/abcd"];
+  const first = renderOpencodeV2Config({ providers: [], skills });
+  expect(first.skills).toEqual(skills);
+  const second = renderOpencodeV2Config({
+    providers: [{ id: "p", name: "P", baseUrl: "https://p.test/v1", apiKey: "k", models: [{ id: "m", name: "M" }] }],
+    permissions: [],
+    skills,
+  });
+  expect(second.skills).toEqual(skills);
+  expect(Object.keys(second.providers ?? {})).toEqual(["p"]);
+  expect(renderOpencodeV2Config({ providers: [], skills: [] })).not.toHaveProperty("skills");
 });

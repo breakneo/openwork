@@ -58,6 +58,76 @@ export function normalizeModelIntelligence(raw: unknown, providerId: string, obs
   };
 }
 
+export type ModelCatalogIdentity = { upstreamModelId?: string; modelGroupId?: string; credentialSetId?: string };
+
+export function modelCatalogIdentity(raw: unknown): ModelCatalogIdentity {
+  const value = record(raw);
+  const id = (value: unknown) => typeof value === "string" && value.length <= 256 && /^[A-Za-z0-9._:@+/-]+$/.test(value) ? value : undefined;
+  return {
+    upstreamModelId: id(value.upstreamModelId),
+    modelGroupId: id(value.modelGroupId),
+    credentialSetId: id(value.credentialSetId),
+  };
+}
+
+export function sameModelBoundary(candidate: EngineModelOption, anchor: EngineModelOption): boolean {
+  if (candidate.providerId !== anchor.providerId || candidate.tier !== anchor.tier) return false;
+  if (!/^ipr_/i.test(anchor.providerId)) return true;
+  return Boolean(anchor.modelGroupId && anchor.credentialSetId
+    && candidate.modelGroupId === anchor.modelGroupId && candidate.credentialSetId === anchor.credentialSetId);
+}
+
+export function preferredRoleModel(
+  catalog: { models: EngineModelOption[] },
+  purpose: "conversation" | "delivery" | "thinking",
+  options: ModelSelectionOptions = {},
+): EngineModelOption | null {
+  const preferences = normalizeModelSelectionPreferences(options.preferences);
+  const excluded = new Set([...(options.exclude ?? []), ...preferences.avoided]);
+  const anchor = options.standard === undefined ? undefined : catalog.models.find((model) => model.id === options.standard);
+  if (options.standard !== undefined && (!anchor || !usable(anchor, true) || excluded.has(anchor.id))) return null;
+  const tier = anchor?.tier ?? IMPLICIT_ANCHOR_TIERS.find((tier) => catalog.models.some((model) => model.tier === tier && usable(model) && !excluded.has(model.id)));
+  const wanted = purpose === "thinking" ? "gpt-6-astra" : "gpt-5.6-luna";
+  const pool = catalog.models.filter((model) => {
+    if (model.tier !== tier || model.tier === "opencode" || model.providerId === "opencode" || !usable(model) || excluded.has(model.id)) return false;
+    const gateway = /^ipr_/i.test(model.providerId);
+    const identity = model.upstreamModelId ?? (gateway ? undefined : model.intelligence?.apiModelId ?? model.modelId);
+    if (identity !== wanted && identity !== `openai/${wanted}`) return false;
+    if (gateway && (!model.modelGroupId || !model.credentialSetId)) return false;
+    if (purpose === "thinking" && (!model.variants.includes("medium") || !(model.intelligence?.reasoning ?? model.reasoning))) return false;
+    return !anchor || model.id === anchor.id || (sameModelBoundary(model, anchor) && costsNoMoreThan(model, anchor) && preserves(model, anchor));
+  });
+  const first = pool[0];
+  if (!first || pool.some((model) => !sameModelBoundary(model, first))) return null;
+  return pool.find((model) => model.id === anchor?.id)
+    ?? [...pool].sort((a, b) => Number(b.isProviderDefault) - Number(a.isProviderDefault) || a.id.localeCompare(b.id))[0] ?? null;
+}
+
+export function chooseAutomaticRoleModel(
+  catalog: { models: EngineModelOption[] },
+  purpose: "conversation" | "delivery" | "thinking",
+  options: ModelSelectionOptions = {},
+): ModelSelectionDecision & { variant?: string } {
+  const models = catalog.models.filter((model) => model.providerId !== "opencode" && model.tier !== "opencode");
+  const preferences = normalizeModelSelectionPreferences(options.preferences);
+  const excluded = new Set([...(options.exclude ?? []), ...preferences.avoided]);
+  const preferred = preferredRoleModel({ models }, purpose, { preferences, exclude: [...excluded] });
+  if (preferred) return {
+    model: preferred, reason: `Selected the requested connected ${purpose} default from the current catalog.`,
+    indexVersion: MODEL_INTELLIGENCE_INDEX.version, ...(purpose === "thinking" ? { variant: "medium" } : {}),
+  };
+  const anchor = models.find((model) => model.id === options.standard && usable(model, true) && !excluded.has(model.id));
+  const decision = chooseIndexedModel({ models }, purpose === "thinking" ? "deep" : purpose === "delivery" ? "standard" : "quick", {
+    ...options, standard: anchor?.id,
+  });
+  const selected = decision.model;
+  if (!anchor && selected?.upstreamModelId && models.some((model) => model.upstreamModelId === selected.upstreamModelId
+    && usable(model) && !excluded.has(model.id) && !sameModelBoundary(model, selected))) {
+    return { ...decision, model: null, reason: "Multiple connected credential choices offer this model. Choose an explicit role default; no credential set was selected automatically." };
+  }
+  return decision;
+}
+
 export type ModelSelectionOptions = { standard?: string; exclude?: readonly string[]; preferences?: ModelSelectionPreferences };
 export type ModelSelectionDecision = { model: EngineModelOption | null; reason: string; indexVersion: string };
 type PricedModel = Pick<EngineModelOption, "cost" | "knownPrice" | "intelligence">;
@@ -122,7 +192,7 @@ function choose(catalog: { models: EngineModelOption[] }, lane: ModelLane, optio
     if (excluded.has(model.id)) return false;
     if (model.id === anchor.id) return usable(model, true);
     if (!usable(model)) return false;
-    return model.providerId === anchor.providerId && costsNoMoreThan(model, anchor) && preserves(model, anchor)
+    return sameModelBoundary(model, anchor) && costsNoMoreThan(model, anchor) && preserves(model, anchor)
       // Unknown reasoning never qualifies a substitute for either automatic lane.
       && (policy.reasoning === null || reasoning(model) !== null);
   });

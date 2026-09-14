@@ -1,11 +1,11 @@
-import { useId, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { coworkerBridge, type CoworkerSummary, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
 import type { DenSession } from "@/lib/den";
 import { workerTurnsFor } from "@/lib/effort";
-import { clearAutoPicked } from "@/lib/model-choice";
-import { usesAppConversationDefault } from "@/lib/model-defaults";
+import { clearAutoPicked, describeModelPreview, resolveModelPreview, type ModelChoicePreview } from "@/lib/model-choice";
+import { usesAppConversationDefault, type ModelDefaults, type ModelPurpose } from "@/lib/model-defaults";
 import { normalizeModelSelectionPreferences, type ModelSelectionPreferences } from "@/lib/model-intelligence-index";
-import type { EngineModelCatalog } from "@/lib/threads";
+import { createCoworkerThreads, type EngineModelCatalog } from "@/lib/threads";
 import { EffortDial } from "@/ui/effort-dial";
 import { Button, ErrorNote, Field, inputClass } from "@/ui/kit";
 import { ModelPicker, type ModelSelection } from "@/ui/model-picker";
@@ -70,6 +70,39 @@ export function CoworkerModelSettings({ runtime, session, coworker, onCoworkerCh
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const inheritanceId = useId();
+  const [defaults, setDefaults] = useState<ModelDefaults | null>(null);
+  const [localCatalog, setLocalCatalog] = useState<EngineModelCatalog>({ models: [], connectedProviderIds: [], cloud: null });
+  const [previewLoading, setPreviewLoading] = useState(true);
+  const [previewError, setPreviewError] = useState("");
+  const previewGeneration = useRef(0);
+  const threads = useMemo(() => !catalog && coworker.workspaceId && runtime.engineManaged
+    ? createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: coworker.workspaceId, token: runtime.ownerToken }) : null,
+  [catalog, coworker.workspaceId, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl]);
+  const refreshModelContext = useCallback(async (options: { sync?: boolean } = {}, refreshShared = true) => {
+    const generation = ++previewGeneration.current;
+    setPreviewLoading(true);
+    setPreviewError("");
+    try {
+      if (!onRefreshCatalog && options.sync && session) await onSyncProviders();
+      const [settings, nextCatalog] = await Promise.all([coworkerBridge.settings.get(), onRefreshCatalog ? refreshShared ? onRefreshCatalog(options) : undefined : threads?.listModelCatalog()]);
+      if (generation !== previewGeneration.current) return;
+      setDefaults(settings.modelDefaults);
+      if (nextCatalog) setLocalCatalog(nextCatalog);
+    } catch (cause) {
+      if (generation === previewGeneration.current) setPreviewError(cause instanceof Error ? cause.message : "The current model choice could not be read.");
+    } finally {
+      if (generation === previewGeneration.current) setPreviewLoading(false);
+    }
+  }, [onRefreshCatalog, onSyncProviders, session, threads]);
+  useEffect(() => {
+    void refreshModelContext({}, false);
+    return () => { previewGeneration.current += 1; };
+  }, [refreshModelContext]);
+  const modelCatalog = catalog ?? localCatalog;
+  const preview = (purpose: ModelPurpose): ModelChoicePreview => previewError
+    ? { state: "unavailable", detail: previewError }
+    : defaults ? resolveModelPreview(modelCatalog, purpose, defaults, coworker)
+      : { state: "context", detail: "The current app model defaults have not been loaded yet." };
   async function update(patch: Parameters<typeof coworkerBridge.coworkers.update>[1]) {
     if (saving) return;
     setSaving(true);
@@ -91,7 +124,7 @@ export function CoworkerModelSettings({ runtime, session, coworker, onCoworkerCh
       ? { thinkingModel: selection.model, thinkingModelVariant: selection.modelVariant }
       : { deliveryModel: selection.model, deliveryModelVariant: selection.modelVariant });
   }
-  const pickerProps = { runtime, session, coworker, onSyncProviders, onConnect: onOpenAccount, compact: true, catalog, catalogLoading, onRefreshCatalog };
+  const pickerProps = { runtime, session, coworker, onSyncProviders, onConnect: onOpenAccount, compact: true, catalog: modelCatalog, catalogLoading, previewLoading, onRefreshCatalog: refreshModelContext };
   const preferences = normalizeModelSelectionPreferences(coworker.modelSelectionPreferences);
   const inheritsConversation = usesAppConversationDefault(coworker);
   return (
@@ -115,8 +148,12 @@ export function CoworkerModelSettings({ runtime, session, coworker, onCoworkerCh
           {onOpenModelDefaults ? <button type="button" className="font-medium text-spark hover:underline" onClick={onOpenModelDefaults}>Change app model defaults</button> : "Change shared choices in Settings > Model defaults."}
         </p>
         {inheritsConversation ? (
-          <p className="break-words text-xs leading-relaxed text-mist">Conversations use the app default, including its thinking effort. {coworker.model ? `Saved personal model: ${coworker.model}. Choose Customize to use it again.` : "No personal model is saved yet. Choose Customize to pick one."}</p>
-        ) : <ModelPicker {...pickerProps} value={coworker.model} modelVariant={coworker.modelVariant} chosenBy={coworker.modelChosenBy} modelMode={coworker.modelMode} onChange={(selection) => void update({ ...selection, modelChosenBy: "person", useAppModelDefaults: false })} />}
+          <div className="space-y-1 break-words text-xs leading-relaxed text-mist">
+            <p className="font-semibold text-snow">{defaults && !defaults.conversation.model ? "Automatic" : "App conversation default"}</p>
+            <p data-testid="coworker-automatic-current">{previewLoading || catalogLoading ? "Reading current model choice..." : describeModelPreview(preview("conversation"))}</p>
+            <p>Conversations use the app default, including its thinking effort. {coworker.model ? `Saved personal model: ${coworker.model}. Choose Customize to use it again.` : "No personal model is saved yet. Choose Customize to pick one."}</p>
+          </div>
+        ) : <ModelPicker {...pickerProps} automaticPreview={preview("conversation")} value={coworker.model} modelVariant={coworker.modelVariant} chosenBy={coworker.modelChosenBy} modelMode={coworker.modelMode} onChange={(selection) => void update({ ...selection, modelChosenBy: "person", useAppModelDefaults: false })} />}
         <details className="mt-4 text-xs text-mist" data-testid="model-selection-preferences">
           <summary className="cursor-pointer font-medium text-snow">Automatic preferences: {preferences.priority === "cost" ? "Lower token cost" : preferences.priority === "capability" ? "More documented capacity" : "Balanced"}</summary>
           <ModelPreferences key={`${coworker.slug}:${JSON.stringify(preferences)}`} preferences={preferences} saving={saving} onSave={(modelSelectionPreferences) => void update({ modelSelectionPreferences })} />
@@ -134,13 +171,13 @@ export function CoworkerModelSettings({ runtime, session, coworker, onCoworkerCh
         <div data-testid="thinking-model-settings">
           <h4 className="text-xs font-medium text-snow">Deep thinking model</h4>
           <p className="mb-3 mt-1 text-xs leading-relaxed text-mist">Used when {coworker.name} needs help with an unclear decision before doing the work. Choose a stronger reasoning model for difficult trade-offs, or keep the app default.</p>
-          <ModelPicker {...pickerProps} value={coworker.thinkingModel ?? ""} modelVariant={coworker.thinkingModelVariant ?? ""} onChange={(selection) => void updateWorker("thinking", selection)} forWorker />
+          <ModelPicker {...pickerProps} automaticPreview={preview("thinking")} value={coworker.thinkingModel ?? ""} modelVariant={coworker.thinkingModelVariant ?? ""} onChange={(selection) => void updateWorker("thinking", selection)} forWorker />
           <p className="mt-2 text-[11px] leading-relaxed text-mist">Produces a short decision brief. Two turns by default.</p>
         </div>
         <div data-testid="delivery-model-settings">
           <h4 className="text-xs font-medium text-snow">Delivery model</h4>
           <p className="mb-3 mt-1 text-xs leading-relaxed text-mist">Used to carry out a delegated task and return the result to {coworker.name}. Customize it for the capabilities and known token costs that task needs.</p>
-          <ModelPicker {...pickerProps} value={coworker.deliveryModel ?? ""} modelVariant={coworker.deliveryModelVariant ?? ""} onChange={(selection) => void updateWorker("delivery", selection)} forWorker />
+          <ModelPicker {...pickerProps} automaticPreview={preview("delivery")} value={coworker.deliveryModel ?? ""} modelVariant={coworker.deliveryModelVariant ?? ""} onChange={(selection) => void updateWorker("delivery", selection)} forWorker />
           <p className="mt-2 text-[11px] leading-relaxed text-mist">Up to {workerTurnsFor(coworker.effortPreference)} turns by default, based on the effort setting above.</p>
         </div>
         <details className="text-[11px] leading-relaxed text-mist">

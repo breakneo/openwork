@@ -20,7 +20,7 @@ import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, shell, systemPr
 import { createVoice, installVoicePermissions } from "./voice.mjs";
 import { bindWindowAppearance, windowMaterial } from "./window-appearance.mjs";
 import { globalOpencodeConfigDir, openworkConfigDir } from "@openwork/paths";
-import { createHeadlessThreadClientV2 as createHeadlessThreadClient, createNativeV2Client, createNativeV2Id, toTranscript } from "@openwork/headless-threads/v2";
+import { createHeadlessThreadClientV2 as createHeadlessThreadClient, createNativeV2Client, createNativeV2Id, nativeCatalogProviders, toTranscript } from "@openwork/headless-threads/v2";
 import { configureNativePluginBundles, verifyNativePluginBundles } from "./native-plugin.mjs";
 import { nativeTurnAgent, NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
 import { prepareNativeTurnRoles } from "./turn-roles-plugin.mjs";
@@ -1099,6 +1099,8 @@ async function collaborationClient(slug, { kind = "reply", requestText, model, a
   return client;
 }
 
+const privateTurnIntents = new Map();
+
 async function privateOwner(slug, threadId, kind = "private") {
   const coworker = await getCoworker(coworkersDir, slug);
   const group = (await listGroups(coworkersDir)).find((group) => group.participantThreadIds[slug] === threadId);
@@ -1407,22 +1409,7 @@ async function workerModelProviders(coworker, readDefault = false) {
   const handle = await ensurePlatformServer();
   const native = createNativeV2Client({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
   const [catalog, preferred] = await Promise.all([native.readCatalog(), readDefault ? native.defaultModel() : undefined]);
-  // Worker selection still consumes Provider[]; only native connected evidence
-  // enters that projection, and disabled models never become candidates.
-  const providers = catalog.providers.filter((provider) => catalog.connectedProviderIds.includes(provider.id)).map((provider) => ({
-    id: provider.id, name: provider.name, options: { baseURL: provider.settings?.baseURL },
-    models: Object.fromEntries(catalog.models.filter((model) => model.enabled && model.providerID === provider.id).map((model) => {
-      const price = model.cost.find((cost) => !cost.tier);
-      const modalities = (values) => Object.fromEntries(["text", "image", "audio", "video", "pdf"].map((kind) => [kind, values.some((value) => value === kind || value.startsWith(`${kind}/`))]));
-      return [model.id, {
-        name: model.name, family: model.family, variants: Object.fromEntries(model.variants.map((variant) => [variant.id, {}])),
-        status: model.status, release_date: model.time.released > 0 ? new Date(model.time.released).toISOString().slice(0, 10) : "",
-        ...(price ? { cost: { input: price.input, output: price.output } } : {}), limit: model.limit,
-        api: { npm: model.package ?? provider.package, id: model.modelID },
-        capabilities: { toolcall: model.capabilities.tools, reasoning: model.capabilities.output.includes("reasoning"), input: modalities(model.capabilities.input), output: modalities(model.capabilities.output) },
-      }];
-    })),
-  }));
+  const providers = nativeCatalogProviders(catalog);
   return { providers, default: preferred ? { [preferred.providerID]: preferred.id } : {}, model: preferred ? `${preferred.providerID}/${preferred.id}` : undefined };
 }
 
@@ -2428,13 +2415,33 @@ const commands = {
     await skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).validateSkills(fields, AbortSignal.timeout(30_000));
   },
   "turns.send": async ({ slug, threadId, prompt, messageId, skills, skillSelections, model, retry, retryByPerson, retryLabel, kind }) => {
-    const owner = await privateOwner(slug, threadId, kind === "assignment" ? "assignment" : "private");
-    const entry = await collaboration.submit({ owner, prompt, messageId, skills, skillSelections, model, retry, retryByPerson: retryByPerson === true, retryLabel, track: true });
-    return { ...await collaboration.acceptance(entry.id), prompt: entry.prompt };
+    if ([slug, threadId, messageId].some((value) => typeof value !== "string" || !value.trim() || value.length > 256)) throw new Error("A send requires its exact coworker, thread and message IDs.");
+    const key = JSON.stringify([slug, threadId, messageId]);
+    if (privateTurnIntents.has(key) || privateTurnIntents.size >= 64) throw new Error("A message submission is already pending. Its recorded work is kept; do not resend it.");
+    const intent = { cancelled: false, kind: kind === "assignment" ? "assignment" : "private" };
+    privateTurnIntents.set(key, intent);
+    try {
+      const owner = await privateOwner(slug, threadId, intent.kind);
+      const entry = await collaboration.submit({ owner, prompt, messageId, skills, skillSelections, model, retry, retryByPerson: retryByPerson === true, retryLabel, track: true }, () => intent.cancelled);
+      try { return { ...await collaboration.acceptance(entry.id), prompt: entry.prompt }; }
+      catch (error) {
+        const recorded = await collaboration.read((state) => state.executions[entry.id]);
+        if (recorded?.nativeAdmission === "prepared" && !recorded.acceptance && ["failed", "cancelled"].includes(recorded.state)) {
+          return { rejected: true, messageId: entry.messageId, error: recorded.error || "This message was not submitted. Your draft is kept." };
+        }
+        throw error;
+      }
+    } finally { if (privateTurnIntents.get(key) === intent) privateTurnIntents.delete(key); }
   },
   "turns.cancel": async ({ slug, threadId, messageId }) => {
     if (typeof messageId !== "string" || !messageId.trim()) throw new Error("Stopping a turn requires its exact message ID. Use Computer Stop to revoke the whole discussion.");
-    await collaboration.cancelThread(slug, threadId, messageId);
+    const intent = privateTurnIntents.get(JSON.stringify([slug, threadId, messageId]));
+    if (intent) intent.cancelled = true;
+    const kind = intent?.kind ?? await collaboration.read((state) => state.owners[`${slug}:${threadId}`]?.kind ?? "private");
+    if (!["private", "assignment"].includes(kind)) throw new Error("This turn belongs to another execution surface.");
+    await privateOwner(slug, threadId, kind);
+    const matched = await collaboration.cancelThread(slug, threadId, messageId);
+    if (!matched && !intent) throw new Error("No matching message is on record. Stop is not confirmed; refresh and try again.");
     return { ok: true };
   },
   "templates.sync": async ({ userEmail, automatic = false, installIds = [] }) => {

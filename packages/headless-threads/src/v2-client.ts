@@ -123,7 +123,9 @@ const connection = z.discriminatedUnion("type", [
   z.object({ type: z.literal("credential"), id: z.string().min(1), label: z.string() }),
   z.object({ type: z.literal("env"), name: z.string().min(1) }),
 ]);
+const catalogIdentityID = z.string().max(256).regex(/^[A-Za-z0-9._:@+/-]+$/);
 const catalogModel = model.extend({
+  upstreamModelId: catalogIdentityID.optional(), modelGroupId: catalogIdentityID.optional(), credentialSetId: catalogIdentityID.optional(),
   name: z.string(), modelID: z.string(), family: z.string().optional(), package: z.string().optional(),
   capabilities: z.object({ tools: z.boolean(), input: z.array(z.string()), output: z.array(z.string()) }),
   variants: z.array(z.object({ id: z.string() })), time: z.object({ released: z.number() }),
@@ -183,6 +185,9 @@ export function nativeCatalogProviders(catalog: NativeV2Catalog) {
         const released = new Date(model.time.released);
         return [model.id, {
           name: model.name, family: model.family,
+          ...(model.upstreamModelId ? { upstreamModelId: model.upstreamModelId } : {}),
+          ...(model.modelGroupId ? { modelGroupId: model.modelGroupId } : {}),
+          ...(model.credentialSetId ? { credentialSetId: model.credentialSetId } : {}),
           variants: Object.fromEntries(model.variants.map((variant) => [variant.id, {}])),
           status: model.status,
           release_date: model.time.released > 0 && Number.isFinite(released.getTime()) ? released.toISOString().slice(0, 10) : "",

@@ -5,11 +5,19 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
-import { CloudNativeSkillSyncError, cloudNativeSkillScopeKey, createCloudNativeSkillSync, EMPTY_CLOUD_NATIVE_SKILL_STATE } from "./cloud-native-skills.js";
 import { waitForNativeOpenWorkV2Skills } from "./opencode-v2-instructions.js";
+import {
+  CloudNativeSkillSyncError,
+  cloudNativeSkillScopeKey,
+  createCloudNativeSkillSync,
+  EMPTY_CLOUD_NATIVE_SKILL_STATE,
+  type CloudNativeSkillState,
+  type CloudNativeSkillSyncCode,
+} from "./cloud-native-skills.js";
 import {
   createManagedOpencodeV2Server,
   installOpencodeV2Binary,
+  nativeCatalogModelMetadata,
   type ManagedOpencodeV2Server,
   type OpencodeV2ProviderSpec,
 } from "./managed-opencode-v2.js";
@@ -30,6 +38,8 @@ import type { ServerConfig } from "./types.js";
 
 const PREVIEW_STATE_FILE = "engine-v2-preview.json";
 const UNSET_API_KEY = "openwork-engine-v2-preview-unset";
+/** Reserved Connect MCP name; kept in sync with OPENWORK_CLOUD_MCP_NAME in cloud-mcp-health.ts. */
+const OPENWORK_CLOUD_MCP_NAME = "openwork-cloud";
 // A cold sidecar can return HTTP 503 while its model catalog initializes for 17–20 seconds.
 const CATALOG_MIRROR_TIMEOUT_MS = 60_000;
 
@@ -65,8 +75,11 @@ export interface EngineV2Preview {
   setEnabled(enabled: boolean): Promise<EngineV2PreviewStatus>;
   setChatRouting(chatRouting: boolean): Promise<EngineV2PreviewStatus>;
   connection(): { url: string; username: string; password: string } | undefined;
+  modelMetadata?(providerID: string, modelID: string): ReturnType<typeof nativeCatalogModelMetadata>;
   ensureWorkspaceReady(directory: string): Promise<void>;
   syncWorkspaceMcp(workspaceId: string, directory: string, forceNames?: string[]): Promise<void>;
+  /** Fresh materialization of authorized Cloud skills as native skills. `failure` is set when they failed closed (cleared) for this admission. */
+  syncCloudSkills(): Promise<{ root: string; state: CloudNativeSkillState; failure?: CloudNativeSkillSyncCode }>;
   /** One serialized fresh Cloud read + native readiness barrier for discovery/admission. */
   assertNativeSkillsScope(expectedScope: string | null): Promise<void>;
   withNativeSkills<T>(directory: string, use: (catalog: Awaited<ReturnType<typeof waitForNativeOpenWorkV2Skills>>, assertCurrent: () => Promise<void>) => Promise<T>, expectedScope?: string | null): Promise<T>;
@@ -345,14 +358,27 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
   const mcpWorkspaces = new Map<string, string>();
   const cloudSkillsRoot = join(rootDir, "cloud-skills");
   let skillAdmissions: Promise<unknown> = Promise.resolve();
-  const cloudSkills = mandatory ? createCloudNativeSkillSync({
+  const cloudSkills = createCloudNativeSkillSync({
     root: cloudSkillsRoot,
-    readCloudConfig: () => readGlobalRuntimeMcpConfig(config, "openwork-cloud"),
+    readCloudConfig: () => readGlobalRuntimeMcpConfig(config, OPENWORK_CLOUD_MCP_NAME),
     register: async (directory) => {
-      if (!sidecar?.isAlive()) throw new CloudNativeSkillSyncError("cloud_skill_engine_unavailable", "OpenCode v2 is not running");
-      await sidecar.setSkills(directory ? [directory] : []);
+      const active = sidecar;
+      if (!active) throw new CloudNativeSkillSyncError("cloud_skill_engine_unavailable", "OpenCode v2 is not running");
+      await active.setSkills(directory ? [directory] : []);
     },
-  }) : undefined;
+  });
+
+  async function syncCloudSkills(): Promise<{ root: string; state: CloudNativeSkillState; failure?: CloudNativeSkillSyncCode }> {
+    if (!sidecar) throw new CloudNativeSkillSyncError("cloud_skill_engine_unavailable", "OpenCode v2 is not running");
+    try {
+      return { root: cloudSkillsRoot, state: await cloudSkills.sync() };
+    } catch (error) {
+      if (!(error instanceof CloudNativeSkillSyncError)) throw error;
+      // Skills fail closed, the conversation does not: sync() already cleared
+      // and unregistered the root, so the caller admits without Cloud skills.
+      return { root: cloudSkillsRoot, state: EMPTY_CLOUD_NATIVE_SKILL_STATE, failure: error.code };
+    }
+  }
 
   async function assertNativeSkillsScope(expectedScope: string | null): Promise<void> {
     if (!mandatory || expectedScope === null) return;
@@ -598,7 +624,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     if (!enabled || !allowRunning) return;
     await mkdir(workspaceDir, { recursive: true });
     // No stale private files from an earlier process become visible at boot.
-    await cloudSkills?.reset();
+    await cloudSkills.reset();
     const opencodeModelsUrl = await resolveOpencodeModelsUrl({ env: config.opencodeV2?.env ?? process.env });
     const managed = await createManagedOpencodeV2Server({
       bin: resolved.bin,
@@ -606,6 +632,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       cwd: mandatory ? workspaceDir : undefined,
       config: config.opencodeV2?.config,
       nativeSkills: mandatory,
+      nativeCatalogMetadata: mandatory,
       bootTimeoutMs: config.opencodeV2?.bootTimeoutMs,
       expectedVersion: mandatory || config.opencodeV2?.version !== undefined ? resolveOpencodeV2Version(config.opencodeV2?.version) : undefined,
       env: {
@@ -632,7 +659,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         if (runtimeDbPath(writeConfig) !== runtimeDbPath(config)) return;
         const global = isEngineGlobalRuntimeConfigId(workspaceId);
         if (global) scheduleMirror();
-        if (global && cloudSkills) void cloudSkills.reconcileScope().catch(() => {
+        if (global) void cloudSkills.reconcileScope().catch(() => {
           // No provider payload, URL, or credential-bearing error is logged.
           if (sidecar) lastError = "Cloud skill scope could not be cleared";
         });
@@ -805,6 +832,11 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
   }
   if (!options.deferStart) void startWhenReady().catch(recordStartError);
   return { start: startWhenReady, refresh,
+    modelMetadata: (providerID, modelID) => {
+      if (!mandatory || !running || !sidecar?.isAlive() || mirrorInFlight || mirrorError) return {};
+      const model = mirroredSpecs.find((spec) => spec.id === providerID)?.models.find((model) => model.id === modelID);
+      return model?.config ? nativeCatalogModelMetadata(model.config) : {};
+    },
     request: (directory, path, init = {}) => {
       if (!sidecar?.isAlive()) throw new Error("OpenCode v2 is not running");
       return sidecar.fetchJson(path, { ...init, directory, timeoutMs: init.timeoutMs ?? 10_000 });
@@ -813,5 +845,5 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       const managed = sidecar;
       return { pid: managed?.childPid ?? null, isAlive: () => managed?.isAlive() === true };
     },
-    status, setEnabled, setChatRouting, connection, ensureWorkspaceReady, syncWorkspaceMcp, assertNativeSkillsScope, withNativeSkills, stop };
+    status, setEnabled, setChatRouting, connection, ensureWorkspaceReady, syncWorkspaceMcp, syncCloudSkills, assertNativeSkillsScope, withNativeSkills, stop };
 }

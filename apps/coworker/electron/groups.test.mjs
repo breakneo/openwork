@@ -8,6 +8,7 @@ import { marked } from "marked";
 import { z } from "zod";
 import { createCollaboration, nativeMessageId, withAbort } from "./collaboration.mjs";
 import { nativeTurnAgent } from "./native-turns.mjs";
+import { HeadlessThreadError } from "@openwork/headless-threads/v2";
 import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS, EVENT_REMINDER_LEAD_MS } from "./activity-inbox.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
@@ -487,6 +488,206 @@ test("Activity parsing failures never fail private completion or group publicati
       });
       assert.deepEqual(await service.listActivity(), before, "a recording failure leaves the index intact");
     } finally { await groups.stop(); await service.stop(); parser.mock.restore(); }
+  });
+});
+
+test("turn submission exposes only definitive never-attempted rejection, not admission uncertainty", async () => {
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  const prefix = '  "turns.send": ';
+  const start = source.indexOf(prefix) + prefix.length;
+  const end = source.indexOf('\n  },\n  "turns.cancel"', start);
+  assert.ok(start >= prefix.length && end > start);
+  for (const phase of ["prepared", "attempted", undefined]) {
+    for (const state of ["failed", "running", "cancelled"]) {
+      const entry = { id: "exec_fixture", messageId: "msg_fixture", prompt: "Hello", nativeAdmission: phase, state, error: "Fixture rejection" };
+      const send = runInNewContext(`(${source.slice(start, end)}\n})`, {
+        privateTurnIntents: new Map(), privateOwner: async () => ({}), collaboration: {
+          submit: async () => entry,
+          acceptance: async () => { throw new Error("Admission unconfirmed"); },
+          read: async (read) => read({ executions: { [entry.id]: entry } }),
+        },
+      });
+      const result = send({ slug: "fixture", threadId: "ses_fixture", messageId: "msg_fixture", prompt: "Hello" });
+      if (phase === "prepared" && state !== "running") assert.deepEqual(JSON.parse(JSON.stringify(await result)), { rejected: true, messageId: "msg_fixture", error: "Fixture rejection" });
+      else await assert.rejects(result, /Admission unconfirmed/);
+    }
+  }
+  const privateTurnIntents = new Map();
+  const release = Promise.withResolvers();
+  let ownershipCalls = 0;
+  const send = runInNewContext(`(${source.slice(start, end)}\n})`, {
+    privateTurnIntents, privateOwner: async () => { ownershipCalls++; await release.promise; throw new Error("Owner rejected"); },
+  });
+  const input = { slug: "fixture", threadId: "ses_fixture", prompt: "Hello" };
+  const pending = Array.from({ length: 64 }, (_, index) => assert.rejects(send({ ...input, messageId: `msg_${index}` }), /Owner rejected/));
+  await assert.rejects(send({ ...input, messageId: "msg_0" }), /already pending/);
+  await assert.rejects(send({ ...input, messageId: "msg_overflow" }), /already pending/);
+  assert.equal(ownershipCalls, 64);
+  release.resolve(); await Promise.all(pending);
+  assert.equal(privateTurnIntents.size, 0);
+});
+
+test("foreground submission wakes dispatch without waiting for the periodic tick", async () => {
+  await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 60_000 });
+    try {
+      await service.start();
+      const input = { owner: { slug: "scout", threadId: "ses_foreground", conversationId: "ses_foreground", kind: "private" }, messageId: "msg_foreground", prompt: "Hello", track: true };
+      const [first, duplicate] = await Promise.all([service.submit(input), service.submit(input)]);
+      assert.equal(first.id, duplicate.id);
+      await eventually(() => fixture.requests.length === 1);
+      const acceptance = await service.acceptance(first.id);
+      assert.equal(acceptance.messageId, input.messageId);
+      assert.equal(fixture.requests.length, 1);
+      assert.deepEqual(fixture.aborted, []);
+    } finally { await service.stop(); }
+  });
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  const start = source.indexOf('  "turns.send": ');
+  const end = source.indexOf('  "templates.sync": ', start);
+  assert.ok(start > 0 && end > start);
+  for (const gate of ["ownership", "submit", "commit", "before-send"]) await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 5 });
+    const owner = { slug: "scout", threadId: "ses_fenced", conversationId: "ses_fenced", kind: "private" };
+    const input = { slug: owner.slug, threadId: owner.threadId, messageId: "msg_fenced", prompt: "Hello", kind: "discussion" };
+    await service.registerOwner(owner);
+    const release = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    const privateTurnIntents = new Map();
+    let ownershipCalls = 0;
+    const commands = runInNewContext(`({${source.slice(start, end)}})`, {
+      privateTurnIntents,
+      privateOwner: async (slug, threadId, kind) => {
+        ownershipCalls++;
+        if (gate === "ownership" && ownershipCalls === 1) { entered.resolve(); await release.promise; }
+        if (threadId === "ses_forbidden") throw new Error("Foreign native scope");
+        return service.registerOwner({ slug, threadId, conversationId: threadId, kind });
+      },
+      collaboration: { ...service, submit: async (...args) => {
+        if (gate === "submit") { entered.resolve(); await release.promise; }
+        return service.submit(...args);
+      } },
+    });
+    let blocking;
+    try {
+      if (gate === "before-send") {
+        await service.updateThread(owner.slug, owner.threadId, { pending: null, next: [] }, { pending: { messageId: input.messageId, prompt: input.prompt, startedAt: 1, stoppedAt: null }, next: [] });
+        assert.equal((await commands["turns.cancel"](input)).ok, true);
+      }
+      const sending = assert.rejects(commands["turns.send"](input), /Stopped/);
+      if (gate === "commit") {
+        blocking = service.change(async () => { entered.resolve(); await release.promise; });
+      }
+      if (gate !== "before-send") {
+        await entered.promise;
+        const stopping = commands["turns.cancel"](input);
+        assert.equal(privateTurnIntents.values().next().value.cancelled, true);
+        release.resolve();
+        assert.equal((await stopping).ok, true);
+      }
+      await sending;
+      assert.ok(ownershipCalls >= 2);
+      assert.equal(privateTurnIntents.size, 0);
+      assert.equal(fixture.requests.length, 0);
+      const cancelled = await service.read((state) => Object.values(state.executions).find((entry) => entry.messageId === input.messageId));
+      assert.equal(cancelled.state, "cancelled");
+      assert.equal(cancelled.nativeAdmission, "attempted");
+      assert.ok(cancelled.nativeStoppedAt);
+      await assert.rejects(commands["turns.send"](input), /Stopped/);
+      assert.equal(fixture.requests.length, 0);
+      const others = [{ ...input, messageId: "msg_other" }, { ...input, threadId: "ses_other" }];
+      await Promise.all(others.map((next) => commands["turns.send"](next)));
+      assert.deepEqual(fixture.requests.map((request) => [request.threadId, request.messageId]).sort(), others.map((request) => [request.threadId, request.messageId]).sort());
+      assert.deepEqual(fixture.aborted, []);
+      await assert.rejects(commands["turns.cancel"]({ ...input, messageId: "msg_unknown" }), /No matching message/);
+      await assert.rejects(commands["turns.send"]({ ...input, threadId: "ses_forbidden" }), /Foreign native scope/);
+      assert.equal(privateTurnIntents.size, 0);
+    } finally { release.resolve(); await blocking; await service.stop(); }
+  });
+  await withHome(async (home) => {
+    const fixture = nativeFixture();
+    let refuseStop = true;
+    const service = createCollaboration({ directory: home, pollMs: 5, clientFor: async (slug) => {
+      const client = await fixture.clientFor(slug);
+      return { ...client, abortThread: (...args) => refuseStop ? { accepted: false } : client.abortThread(...args) };
+    } });
+    const input = { slug: "scout", threadId: "ses_existing", messageId: "msg_existing", prompt: "Hello" };
+    const owner = { slug: input.slug, threadId: input.threadId, conversationId: input.threadId, kind: "private" };
+    const commands = runInNewContext(`({${source.slice(start, end)}})`, {
+      privateTurnIntents: new Map(), collaboration: service, privateOwner: () => service.registerOwner(owner),
+    });
+    try {
+      await service.registerOwner(owner);
+      await service.updateThread(input.slug, input.threadId, { pending: null, next: [] }, { pending: { messageId: input.messageId, prompt: input.prompt, stoppedAt: null, startedAt: 1 }, next: [] });
+      fixture.histories.set(input.threadId, [{ id: input.messageId, role: "user", parts: [] }]);
+      fixture.held.add(input.threadId);
+      await assert.rejects(commands["turns.cancel"](input), /not confirmed/);
+      assert.equal(fixture.held.has(input.threadId), true);
+      assert.deepEqual(fixture.aborted, []);
+      refuseStop = false;
+      assert.equal((await commands["turns.cancel"](input)).ok, true);
+      assert.deepEqual(fixture.aborted, [input.threadId]);
+      assert.equal(fixture.requests.length, 0);
+    } finally { await service.stop(); }
+  });
+});
+
+test("native collaboration preserves accepted turns through unavailable observations and honors Stop and deadlines", async () => {
+  for (const action of ["recover", "cancel", "deadline", "forbidden"]) await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const owner = { slug: "scout", threadId: "ses_observation", conversationId: "ses_observation", kind: "private" };
+    const messageId = "msg_observation";
+    let unavailable = true;
+    let failedSnapshot = false;
+    let waits = 0;
+    const project = (snapshot) => ({ ...snapshot, native: {
+      engine: "v2", pendingInputIds: [], ambiguousTurns: [],
+      turnOutcomes: unavailable ? {} : { [messageId]: "succeeded" },
+    } });
+    const service = createCollaboration({ directory: home, pollMs: 5, stepTimeoutMs: action === "deadline" ? 150 : 3000,
+      clientFor: async (slug) => {
+        const client = await fixture.clientFor(slug);
+        return { ...client,
+          getThreadSnapshot: async (...args) => {
+            if (fixture.requests.length && !failedSnapshot) {
+              failedSnapshot = true;
+              throw new HeadlessThreadError({ code: "request_failed", method: "GET", path: "/session/active", status: 503, message: "Fixture unavailable" });
+            }
+            return project(await client.getThreadSnapshot(...args));
+          },
+          waitForThread: async (...args) => {
+            waits++;
+            if (unavailable) throw new HeadlessThreadError({ code: action === "forbidden" ? "request_failed" : "observation_unavailable", method: "GET", path: "/session/active", ...(action === "forbidden" ? { status: 403 } : {}), message: "Fixture observation failed" });
+            const result = await client.waitForThread(...args);
+            return { ...result, snapshot: project(result.snapshot) };
+          },
+        };
+      },
+    });
+    try {
+      const entry = await service.submit({ owner, messageId, prompt: "Hello", track: true });
+      await service.acceptance(entry.id);
+      await eventually(() => waits > 0);
+      if (action === "recover" || action === "cancel") {
+        assert.equal((await service.read((state) => state.executions[entry.id])).state, "running");
+        assert.deepEqual(fixture.aborted, []);
+      }
+      if (action === "recover") {
+        unavailable = false;
+        await eventually(async () => (await service.read((state) => state.executions[entry.id])).state === "succeeded");
+        assert.deepEqual(fixture.aborted, []);
+      } else if (action === "cancel") {
+        await service.cancelThread(owner.slug, owner.threadId, messageId);
+        assert.equal((await service.read((state) => state.executions[entry.id])).state, "cancelled");
+      } else {
+        await eventually(async () => (await service.read((state) => state.executions[entry.id])).state === "failed");
+        if (action === "forbidden") assert.equal(waits, 1);
+      }
+      if (action !== "recover") await eventually(() => fixture.aborted.length === 1);
+      assert.equal(fixture.requests.length, 1);
+    } finally { await service.stop(); }
   });
 });
 

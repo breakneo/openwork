@@ -56,6 +56,8 @@ export function LiveRow({ coworker, phase = "thinking", step = null, stepCall = 
   const tool = observation.tool ? executionMetadata(observation.tool) : null;
   const label = status === "tool" && tool ? `${EXECUTION_KINDS[tool.kind]}: ${EXECUTION_STATES[tool.status]}` : PROGRESS_STATES[status];
   const note = progressNote ?? observation.note;
+  const noteText = progressNoteText(observation, note);
+  const duplicateUnavailable = status === "unknown" && noteText === `${label}.`;
 
   useEffect(() => { setOpen(false); }, [observation.executionId, hidden]);
 
@@ -83,7 +85,7 @@ export function LiveRow({ coworker, phase = "thinking", step = null, stepCall = 
             {typing ? <span className="flex shrink-0 items-center gap-[3px]" aria-hidden="true">{[0, 1, 2].map((index) => <span key={index} className="typing-dot size-[4px] rounded-full bg-mist/80" style={{ animationDelay: `${index * 160}ms` }} />)}</span> : status === "tool" ? <ToolIcon className="size-3 shrink-0 motion-safe:animate-pulse" /> : null}
             {typing ? null : <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>}
           </button>
-          {long || quiet ? <p className="mt-1 text-[11px] leading-relaxed [overflow-wrap:anywhere]" data-testid="coworker-still-working">{progressNoteText(observation, note)}</p> : null}
+          {(long || quiet) && !duplicateUnavailable ? <p className="mt-1 text-[11px] leading-relaxed [overflow-wrap:anywhere]" data-testid="coworker-still-working">{noteText}</p> : null}
           {long && !terminal && onStop ? <button type="button" className="mt-1 rounded text-[11px] text-snow/80 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ready/50" data-testid="coworker-turn-choice" data-choice="stop" onClick={onStop}>Stop</button> : null}
         </div>
       </div>
