@@ -82,7 +82,7 @@ import { resolveCollectibleOpenTarget } from "../artifacts/resolve-open-target";
 import type { OpenTargetOptions } from "@/lib/target-provider";
 import { SidePanel } from "../panel/side-panel";
 import { getSidePanelSessionKey } from "../panel/side-panel-session";
-import { useCreateTab } from "../panel/use-side-panel-tabs";
+import { useCreateTab, useSelectTab } from "../panel/use-side-panel-tabs";
 import { TerminalDock } from "../terminal/terminal-dock";
 import { useActivePanelTab, usePanelTabStore, useSessionPanelState } from "../panel/panel-tab-store";
 import { useWorkspaceShellLayout } from "../../../shell/workspace-shell-layout";
@@ -458,7 +458,6 @@ export function SessionPage(props: SessionPageProps) {
     state.sidePanelState[sidePanelSessionKey] ?? null
   ));
   const setSidePanelState = useUiStateStore((state) => state.setSidePanelState);
-  const toggleSidePanelState = useUiStateStore((state) => state.toggleSidePanelState);
   const openTab = usePanelTabStore((state) => state.openTab);
   const closeTab = usePanelTabStore((state) => state.closeTab);
   const selectTab = usePanelTabStore((state) => state.selectTab);
@@ -483,6 +482,9 @@ export function SessionPage(props: SessionPageProps) {
   const activeSidePanel = sessionSidePanel;
   const sidePanelOpen = activeSidePanel !== null;
   const panelRailActive = activeSidePanel === "panel";
+  const browserRailActive = panelRailActive && activePanelTab?.type === "browser";
+  const filesRailActive = panelRailActive && activePanelTab?.type !== "browser";
+  const selectBrowserTab = useSelectTab();
   const showCloudSignIn = shellConfig.cloudSignin && !denAuth.isSignedIn && denAuth.status !== "checking";
   const openCloudSignIn = useCallback(() => {
     const baseUrl = readDenBootstrapConfig().baseUrl;
@@ -584,10 +586,6 @@ export function SessionPage(props: SessionPageProps) {
   const setCurrentSidePanel = useCallback((panel: SidePanelItem | null) => {
     setSidePanelState(sidePanelSessionKey, panel);
   }, [setSidePanelState, sidePanelSessionKey]);
-
-  const toggleCurrentSidePanel = useCallback((panel: SidePanelItem) => {
-    toggleSidePanelState(sidePanelSessionKey, panel);
-  }, [sidePanelSessionKey, toggleSidePanelState]);
 
   // Which conversation's browser tabs may take the screen. Every other
   // conversation's tabs keep loading silently in the background.
@@ -772,11 +770,17 @@ export function SessionPage(props: SessionPageProps) {
     setCurrentSidePanel("panel");
   }, [setCurrentSidePanel]);
   const openBrowserRailPane = useCallback(() => {
-    if (!hasBrowserTabs) return;
-    // Opening the browser pane should land on a usable page, not an empty
-    // panel that forces the user to click "+".
-    toggleCurrentSidePanel("panel");
-  }, [hasBrowserTabs, toggleCurrentSidePanel]);
+    if (browserRailActive) {
+      closeRightPane();
+      return;
+    }
+    const browserTab = activePanelTab?.type === "browser"
+      ? activePanelTab
+      : sessionPanelState.tabs.find((tab) => tab.type === "browser");
+    if (!browserTab) return;
+    selectBrowserTab(sidePanelSessionKey, browserTab.id);
+    setCurrentSidePanel("panel");
+  }, [activePanelTab, browserRailActive, closeRightPane, selectBrowserTab, sessionPanelState.tabs, setCurrentSidePanel, sidePanelSessionKey]);
   const openBrowserUrlControlAction = useMemo<OpenworkControlAction>(() => ({
     id: "browser.open_url",
     label: "Open URL in built-in browser",
@@ -861,6 +865,10 @@ export function SessionPage(props: SessionPageProps) {
   useControlAction(setBrowserProxyControlAction);
   const openArtifactRailPane = useCallback(() => {
     if (!hasArtifactTargets) {
+      const documentTab = activePanelTab?.type !== "browser" && activePanelTab
+        ? activePanelTab
+        : sessionPanelState.tabs.find((tab) => tab.type !== "browser");
+      selectTab(sidePanelSessionKey, documentTab?.id ?? null);
       setCurrentSidePanel("panel");
       return;
     }
@@ -888,14 +896,8 @@ export function SessionPage(props: SessionPageProps) {
       selectTab(props.selectedSessionId, tabToSelect);
     }
 
-    if (panelRailActive && activeTab?.type === "artifact") {
-      toggleCurrentSidePanel("panel");
-      return;
-    }
-    if (!panelRailActive) {
-      toggleCurrentSidePanel("panel");
-    }
-  }, [artifactFileTargets, hasArtifactTargets, openTab, panelRailActive, props.selectedSessionId, selectTab, sessionPanelState, setCurrentSidePanel, toggleCurrentSidePanel]);
+    setCurrentSidePanel("panel");
+  }, [activePanelTab, artifactFileTargets, hasArtifactTargets, openTab, props.selectedSessionId, selectTab, sessionPanelState, setCurrentSidePanel, sidePanelSessionKey]);
   const removeAccessibleTarget = useCallback((target: OpenTarget) => {
     const nextHiddenIds = new Set(hiddenAccessibleTargetIds);
     nextHiddenIds.add(target.id);
@@ -1986,12 +1988,12 @@ export function SessionPage(props: SessionPageProps) {
                 size="icon-sm"
                 className={cn(
                   "rounded-xl transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
-                  panelRailActive && hasBrowserTabs && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                  browserRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
                 )}
                 onClick={openBrowserRailPane}
                 title={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
                 aria-label={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
-                aria-pressed={panelRailActive && hasBrowserTabs}
+                aria-pressed={browserRailActive}
                 disabled={!hasBrowserTabs}
               >
                 <Globe size={15} />
@@ -2002,12 +2004,12 @@ export function SessionPage(props: SessionPageProps) {
               size="icon-sm"
               className={cn(
                 "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
-                panelRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                filesRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
               )}
-              onClick={panelRailActive ? closeRightPane : openArtifactRailPane}
+              onClick={filesRailActive ? closeRightPane : openArtifactRailPane}
               title={`Files (${artifactTargetCount})`}
               aria-label={`Files (${artifactTargetCount})`}
-              aria-pressed={panelRailActive}
+              aria-pressed={filesRailActive}
             >
               <FileText size={15} />
               {artifactTargetCount > 0 ? (
