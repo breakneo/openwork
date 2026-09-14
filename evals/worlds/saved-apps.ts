@@ -163,8 +163,10 @@ export async function cloudDraftRouting(seed: Seed) {
       const report = { input: null, result: null, helper: null, rejected: [], complete: false };
       const publish = () => { document.body.dataset.isolationReport = JSON.stringify(report); };
       app.ontoolinput = ({ arguments: args }) => { report.input = args; publish(); };
-      app.ontoolresult = result => { report.result = result; publish(); };
-      document.querySelector("button").onclick = async () => {
+      app.ontoolresult = async result => {
+        if (report.result !== null) return;
+        report.result = result;
+        publish();
         try {
           report.helper = await app.callServerTool({ name: "resolve_recipient", arguments: { recipient: "Test recipient" } });
           for (const name of ["unknown_helper", "other_server_helper"]) {
@@ -176,10 +178,10 @@ export async function cloudDraftRouting(seed: Seed) {
         } catch (error) { report.error = error.message; }
         publish();
       };
-      app.connect().then(() => { document.querySelector("button").disabled = false; }).catch(error => { report.error = error.message; publish(); });
+      app.connect().catch(error => { report.error = error.message; publish(); });
     ` }, bundle: true, write: false, format: "iife", platform: "browser", minify: true,
   });
-  const appHtml = `<!doctype html><html><head><title>Slack draft review</title><style>body{font:16px system-ui;padding:24px;color:#182331}button{padding:10px 16px}blockquote{padding:16px;background:#f0f4f8}</style></head><body><h1>Slack draft review</h1><h2>To: Test recipient</h2><blockquote>The review is ready.</blockquote><button disabled>Resolve recipient</button><p>Draft only. Nothing sent.</p><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body></html>`;
+  const appHtml = `<!doctype html><html><head><title>Slack draft review</title><style>body{font:16px system-ui;padding:24px;color:#182331}blockquote{padding:16px;background:#f0f4f8}</style></head><body><h1>Slack draft review</h1><h2>To: Test recipient</h2><blockquote>The review is ready.</blockquote><p>Draft only. Nothing sent.</p><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body></html>`;
   const schema = { type: "object", properties: { recipient: { type: "string" } }, required: ["recipient"] };
   const den = await seed.den({ org: { name: `Draft routing ${Date.now()}` }, mocks: {
     slack: seed.mock({ allowUnauthenticatedMcp: true, tools: [
@@ -192,6 +194,8 @@ export async function cloudDraftRouting(seed: Seed) {
         result: { content: [{ type: "text", text: "Test recipient resolved" }], structuredContent: { recipient: "Test recipient", id: "synthetic-recipient" }, isError: false } },
     ] }),
     other: seed.mock({ allowUnauthenticatedMcp: true, tools: [
+      { name: "resolve_recipient", description: "Same-named helper on another server", inputSchema: schema,
+        _meta: { ui: { visibility: ["app"] } }, result: { content: [], structuredContent: { id: "wrong-server-recipient" } } },
       { name: "other_server_helper", description: "Helper belonging to another server", inputSchema: schema,
         _meta: { ui: { visibility: ["app"] } }, result: { content: [{ type: "text", text: "Must not dispatch" }] } },
     ] }),
@@ -266,7 +270,6 @@ export async function cloudDraftRouting(seed: Seed) {
         modelResults: requests.map(request => ({ kind: request.kind, toolName: request.toolName, toolResultCodes: request.toolResultCodes })),
       };
     },
-    resolveRecipient: () => inAppDocuments(app, "details"),
     reports: async () => (await inAppDocuments(app, "isolation")).map(value => record(JSON.parse(value))),
   };
 }

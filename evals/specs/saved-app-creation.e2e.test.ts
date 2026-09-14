@@ -26,14 +26,17 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves its recipient without disp
   try {
     const launches = await world.den.mocks.slack.toolCalls({ name: "render_slack_draft", sinceIso, atLeast: 0 });
     expect(launches.map(call => call.args), "The gateway must dispatch the originating provider launch before SDK rendering").toEqual([{ recipient: "Test recipient" }]);
-    await probe.eventually(() => world.reports(), { within: 30_000, label: "SDK draft received launch result", until: values => values.some(value => value.result !== null) });
+    const launched = await probe.eventually(() => world.reports(), { within: 30_000, label: "SDK draft received launch result", until: values => values.some(value => value.result !== null) });
+    expect(launched).toHaveLength(1);
+    expect(launched[0]).toMatchObject({ input: { recipient: "Test recipient" }, result: {
+      content: [{ type: "text", text: "Draft ready for Test recipient" }], isError: false,
+    } });
   } catch (error) {
     const diagnostics = await world.launchDiagnostics(sinceIso);
     evidence.recordAssertionEvidence("Synthetic draft launch failure diagnostics", JSON.stringify(diagnostics), false);
     await user.screenshot();
     throw error;
   }
-  await world.resolveRecipient();
   const reports = await probe.eventually(() => world.reports(), { within: 30_000, label: "SDK recipient resolution and rejected helpers", until: values => values.some(value => value.complete === true) });
   expect(reports).toHaveLength(1);
   expect(reports[0]).toMatchObject({ input: { recipient: "Test recipient" }, helper: { isError: false, structuredContent: { recipient: "Test recipient", id: "synthetic-recipient" } }, complete: true });

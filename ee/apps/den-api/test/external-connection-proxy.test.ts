@@ -411,7 +411,7 @@ test("a healthy native MCP App preserves its resource and same-server app-visibl
   })
 })
 
-test("explicit app-visible unbound helpers stay private and dispatch only on their connection", async () => {
+test("explicit app-visible unbound helpers stay out of ordinary tools/list and dispatch directly only on their connection", async () => {
   const helper: Tool = {
     name: "update_fixture_draft",
     inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
@@ -449,6 +449,38 @@ test("explicit app-visible unbound helpers stay private and dispatch only on the
     await expect(client.callTool({ name: helper.name, arguments: {} })).rejects.toThrow("not available on the MCP Apps endpoint")
   }, { ...overrides, listTools: async () => [] }, true, { ...connection, id: "emc_other_fixture" })
   expect(calls).toHaveLength(1)
+})
+
+test.each([
+  { visibility: undefined, allowed: false },
+  { visibility: [], allowed: false },
+  { visibility: ["model"], allowed: false },
+  { visibility: "app", allowed: false },
+  { visibility: ["app", "unknown"], allowed: false },
+  { visibility: ["app"], allowed: true },
+  { visibility: ["model", "app"], allowed: true },
+])("unbound helper requires valid explicit app visibility: %j", async ({ visibility, allowed }) => {
+  const helper: Tool = {
+    name: "resolve_fixture_recipient",
+    inputSchema: { type: "object" },
+    _meta: { ui: visibility === undefined ? {} : { visibility } },
+  }
+  let calls = 0
+  await withClient({ tools: {}, resources: {} }, async (client) => {
+    const tools = (await client.listTools()).tools
+    expect(tools.some(tool => tool.name === helper.name)).toBe(allowed)
+    expect((await client.listResources()).resources).toEqual([])
+    if (allowed) {
+      expect(tools.find(tool => tool.name === helper.name)?._meta).toEqual({ ui: { visibility: ["app"] } })
+      expect(await client.callTool({ name: helper.name, arguments: {} })).toMatchObject({ structuredContent: { resolved: true } })
+    } else {
+      await expect(client.callTool({ name: helper.name, arguments: {} })).rejects.toThrow("not available on the MCP Apps endpoint")
+    }
+  }, {
+    listTools: async () => [helper],
+    callTool: async () => { calls += 1; return { content: [], structuredContent: { resolved: true } } },
+  })
+  expect(calls).toBe(allowed ? 1 : 0)
 })
 
 test("unbound App helpers retain write scope and live tool policy enforcement", async () => {
