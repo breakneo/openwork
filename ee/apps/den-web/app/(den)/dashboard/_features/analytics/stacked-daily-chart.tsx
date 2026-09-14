@@ -2,18 +2,10 @@
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../../_components/ui/tooltip";
 import { formatWeekLabel } from "./trend-chart";
+import { assignSeriesColors } from "./series-colors";
 
 type DailyStack = { date: string; total: number | null; values: Record<string, number | null> };
 type StackSeries = { id: string; label: string };
-
-function seriesColor(id: string) {
-  let hash = 2166136261;
-  for (let index = 0; index < id.length; index += 1) {
-    hash = Math.imul(hash ^ id.charCodeAt(index), 16777619) >>> 0;
-  }
-  // Identity-derived hues do not shift when series are filtered or reordered.
-  return `hsl(${((hash * 137.508) % 360).toFixed(2)} ${60 + ((hash >>> 8) % 16)}% ${38 + ((hash >>> 16) % 12)}%)`;
-}
 
 function axisLabel(value: number) {
   const format = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
@@ -28,15 +20,17 @@ export function formatUsageCost(microUsd: number) {
   }).format(microUsd / 1_000_000);
 }
 
-export function StackedDailyChart({ daily, series, emptyLabel, valueLabel = "Reported tokens", valueFormat = "tokens" }: {
+export function StackedDailyChart({ daily, series, colors, emptyLabel, valueLabel = "Reported tokens", valueFormat = "tokens" }: {
   daily: DailyStack[];
   series: StackSeries[];
+  colors?: ReadonlyMap<string, string>;
   emptyLabel: string;
   valueLabel?: string;
   valueFormat?: "tokens" | "usd";
 }) {
   const max = daily.reduce((largest, day) => Math.max(largest, day.total ?? 0), 0);
-  const stacks = [...series].sort((a, b) => a.id.localeCompare(b.id)).map((entry) => ({ ...entry, color: seriesColor(entry.id) }));
+  const assignedColors = assignSeriesColors(series.map((entry) => entry.id), colors);
+  const stacks = [...series].sort((a, b) => a.id.localeCompare(b.id)).map((entry) => ({ ...entry, color: assignedColors.get(entry.id) }));
   const formatValue = (value: number | null) => value === null ? "Unknown" : valueFormat === "usd" ? formatUsageCost(value) : value.toLocaleString();
   const formatAxis = valueFormat === "usd" ? formatUsageCost : axisLabel;
 

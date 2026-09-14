@@ -173,6 +173,12 @@
         ]
       },
       {
+        "tab": "AI Gateway",
+        "pages": [
+          "ai-gateway/counting-usage"
+        ]
+      },
+      {
         "tab": "API",
         "openapi": "/openapi.json"
       },

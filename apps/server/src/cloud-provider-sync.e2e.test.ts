@@ -1000,7 +1000,7 @@ describe("cloud provider sync gateway", () => {
         options: { baseURL: gatewayBaseUrl },
       },
       models: [{
-        id: modelId, name: "Claude Sonnet", config: { id: modelId, name: "Claude Sonnet" },
+        id: modelId, name: "Claude Sonnet", config: { id: modelId, name: "Claude Sonnet", headers: { "x-openwork-gateway-request-model": modelId } },
         upstreamModelId: "claude-sonnet",
         modelGroupId: `gmg_${groupSuffix}`, modelGroupName: "Team models",
         credentialSetId: `gcs_${setSuffix}`, credentialSetName: "Organization key",
@@ -1093,7 +1093,7 @@ describe("cloud provider sync gateway", () => {
     expect(gatewayRuntime.name).toBe("Team Anthropic");
     expect(gatewayRuntime.npm).toBe("@ai-sdk/anthropic");
     expect(gatewayRuntime.api).toBe(gatewayBaseUrl);
-    expect(gatewayRuntime.models).toEqual({ [modelId]: { id: modelId, name: "Claude Sonnet" } });
+    expect(gatewayRuntime.models).toEqual({ [modelId]: { id: modelId, name: "Claude Sonnet", headers: { "x-openwork-gateway-request-model": modelId } } });
     expect(expectRecord(gatewayRuntime.options, "gateway options").baseURL).toBe(gatewayBaseUrl);
     expect(JSON.stringify(gatewayRuntime)).not.toContain(gatewayKey);
     const storedEnv = await env.list();
