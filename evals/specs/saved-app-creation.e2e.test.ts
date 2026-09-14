@@ -572,6 +572,44 @@ test("create, preview, save and reopen an app without changing already-open resu
   const cleanupPrivate = await seed.api(world.den.admin, `/v1/artifact-views/${privateAppId}/retire`, { method: "POST" });
   expect(cleanupPrivate.response.status, cleanupPrivate.text).toBe(200);
 
+  await step("ENG-100 schema-mismatch warning hands off an unsent update prompt without changing the saved app", async () => {
+    const saved = await readApp();
+    const savedView = record(saved.view);
+    expect(savedView.activeRevisionId).toBe(optOutRevision);
+    const appsBefore = record((await probe.api(world.den.admin, "/v1/apps")).body).items;
+    const viewsBefore = record((await probe.api(world.den.admin, viewsPath)).body).items;
+    const previewNotice = "The workflow’s results have changed. Ask OpenWork to update this app to match.";
+    const body = { ...saved, html: null, payload: null, previewNotice };
+    try {
+      await world.proxy.faults.status(`/v1/apps/${appId}`, 200, { times: 100, body });
+      await world.proxy.faults.status(`/api/den/v1/apps/${appId}`, 200, { times: 100, body });
+      await world.open("/dashboard");
+      await user.reload();
+      await user.see({ text: previewNotice }, { timeoutMs: 30_000 });
+      expect((await world.proxy.requestLog()).some((request) => request.path.endsWith(`/v1/apps/${appId}`) && request.faulted)).toBe(true);
+      await user.click({ role: "button", label: "Update app" });
+      const composer = await probe.eventually(() => probe.composer(), {
+        within: 30_000, label: "existing app update prompt ready for review",
+        until: (value) => value.composerEditable && value.draftText.includes(`artifactViewId: ${appId}, configObjectId: ${world.configObjectId})`),
+      });
+      expect(composer.draftText).toContain("Preserve the existing artifactViewId and configObjectId");
+      expect(composer.draftText).toContain("do not recreate the app or workflow");
+      expect(composer.draftText).toContain("explicitly choose Save");
+      expect(composer.draftText).toContain("Do not autoactivate the draft or change the active revision without my explicit Save");
+      expect(composer).toMatchObject({ runTaskVisible: true, userMessageCount: 0, assistantMessageCount: 0 });
+      const after = record((await readApp()).view);
+      expect(after.activeRevisionId).toBe(savedView.activeRevisionId);
+      expect(after.revisions).toEqual(savedView.revisions);
+      expect(record((await probe.api(world.den.admin, "/v1/apps")).body).items).toEqual(appsBefore);
+      expect(record((await probe.api(world.den.admin, viewsPath)).body).items).toEqual(viewsBefore);
+    } finally {
+      await world.resetProxy();
+      await world.open("/dashboard");
+      await user.reload();
+    }
+  });
+  evidence.recordAssertionEvidence("ENG-100 schema-mismatch recovery opens an unsent update conversation", "A fault-injected saved-app detail displayed the schema-mismatch warning. Update app seeded the exact app and workflow IDs with preserve and explicit Save intent; no messages were submitted, and direct API reads retained the active revision, revisions, saved apps, and workflow views. This covers the UI handoff only, not actual schema evolution or a compiler rebuild.", true);
+
   const beforeDelete = await readWorkflow();
   const beforeDeleteSnapshots = (await probe.api(world.den.admin, `/v1/workflows/${world.configObjectId}/snapshots`)).body;
   await step("an admin cancels deletion in the app and confirms it on the dashboard", async () => {

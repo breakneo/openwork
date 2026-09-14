@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { AppActionsMenu } from "./app-actions-menu";
+import { AppActionsMenu, getAppUpdatePrompt } from "./app-actions-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk }: Ap
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
   const ask = async (prompt: string) => {
-    if (!onAsk) return;
+    if (!onAsk || asking) return;
     setAsking(true); setAskError(null);
     try { await onAsk(prompt); }
     catch (cause) { setAskError(cause instanceof Error ? cause.message : "Could not open a conversation. Try again."); }
@@ -39,6 +39,8 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk }: Ap
     },
   });
   const app = query.data;
+  const updatePrompt = getAppUpdatePrompt(app);
+  const onUpdate = onAsk && updatePrompt ? () => void ask(updatePrompt) : undefined;
   const revision = app?.revision;
   const saved = Boolean(revision && app?.view.activeRevisionId === revision.id);
   const save = useMutation({
@@ -73,7 +75,7 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk }: Ap
           setName(app.view.title); setUseInWorkflow(app.view.activeRevisionId ? app.view.useInWorkflow !== false : true); setSaveOpen(true); save.reset();
         }}>{app.view.activeRevisionId ? "Save changes" : "Save"}</Button> : null}
         <AppActionsMenu appId={appId} title={app.view.title} canDelete={app.canManage && app.view.status !== "retired"}
-          busy={asking} onDeleted={onClose ?? (() => navigate("/dashboard"))}
+          busy={asking} onUpdate={onUpdate} onDeleted={onClose ?? (() => navigate("/dashboard"))}
           onRun={onAsk && saved ? () => void ask(`Run my saved app “${app.view.title}” using its existing workflow “${app.workflowTitle}”. Ask for any inputs you need, then show the new results in the saved app.`) : undefined}
           onEdit={onAsk && app.canManage ? () => void ask(`Help me improve my saved app “${app.view.title}”. Read its existing app source and workflow “${app.workflowTitle}”, ask what I want to change, and show a draft preview for me to save.`) : undefined} />
         {onClose ? <Button variant="ghost" size="icon-sm" className="text-muted-foreground" onClick={onClose} aria-label="Close app"><X className="size-4" /></Button> : null}
@@ -83,7 +85,10 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk }: Ap
       {askError ? <p role="alert" className="text-sm text-destructive">{askError}</p> : null}
       {confirmation ? <p role="status" className="rounded-lg bg-muted p-3 text-sm">{confirmation}</p> : null}
       <p className="text-xs text-muted-foreground">{saved ? "Workflow results" : "Preview"} · Changes inside this view stay in the preview.</p>
-      {app.html && app.payload && revision ? <GeneratedAppPreview html={app.html} payload={app.payload} title={app.view.title} revision={revision} /> : <p role="status" className="text-sm text-muted-foreground">{app.previewNotice}</p>}
+      {app.html && app.payload && revision ? <GeneratedAppPreview html={app.html} payload={app.payload} title={app.view.title} revision={revision} /> : <div className="flex flex-wrap items-center gap-3">
+        <p role="status" className="text-sm text-muted-foreground">{app.previewNotice}</p>
+        {onUpdate ? <Button variant="outline" size="sm" disabled={asking} onClick={onUpdate}>{asking ? "Opening conversation…" : "Update app"}</Button> : null}
+      </div>}
       {!saved ? <p className="text-xs text-muted-foreground">Your draft is kept. Ask for changes in the conversation, then save the app to use it again.</p> : null}
     </div>
     <Dialog open={saveOpen} onOpenChange={(open) => { if (!save.isPending) setSaveOpen(open); }}>
