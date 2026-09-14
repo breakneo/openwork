@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { browserScript, type Surface } from "@openwork/cdp";
+import { addInitScript, browserScript, type Surface } from "@openwork/cdp";
 import type { Seed } from "@openwork/env";
 import type { MockMcpTool } from "@openwork/labs";
 import { go, runWorkflow, saveWorkflow, waitFor } from "@openwork/behaviors";
@@ -104,6 +104,7 @@ export async function isolatedMcpApps(seed: Seed) {
               report.forgedMessages += 1;
             }
           }
+          publish();
           try {
             const resultFromHelper = await app.callServerTool({ name: "read_detail", arguments: { marker: "legitimate-" + label } });
             report.helper = resultFromHelper;
@@ -145,16 +146,20 @@ export async function isolatedMcpApps(seed: Seed) {
     },
   });
   const session = await seed.session(app, { title: "Independent embedded apps" });
-  await seed.evalIn(app, () => {
-    document.documentElement.dataset.mcpAppConfirmCalls = "0";
+  const observeNativeConfirm = browserScript(() => {
+    if (window !== window.top) return;
+    sessionStorage.setItem("mcpAppConfirmCalls", sessionStorage.getItem("mcpAppConfirmCalls") ?? "0");
     window.confirm = () => {
-      document.documentElement.dataset.mcpAppConfirmCalls = String(Number(document.documentElement.dataset.mcpAppConfirmCalls) + 1);
+      sessionStorage.setItem("mcpAppConfirmCalls", String(Number(sessionStorage.getItem("mcpAppConfirmCalls")) + 1));
       return false;
     };
-  });
+  }, []);
+  const confirmRegistration = await addInitScript(app.client, observeNativeConfirm);
+  await evaluate(app.client, observeNativeConfirm);
   return { app, session, first: app.mocks.first, second: app.mocks.second,
-    nativeConfirmCalls: () => seed.evalIn(app, () => Number(document.documentElement.dataset.mcpAppConfirmCalls)),
+    nativeConfirmCalls: () => seed.evalIn(app, () => Number(sessionStorage.getItem("mcpAppConfirmCalls") ?? "NaN")),
     reports: async () => (await inAppDocuments(app, "isolation")).map(value => record(JSON.parse(value))),
+    [Symbol.asyncDispose]: () => confirmRegistration.dispose(),
   };
 }
 

@@ -21,6 +21,7 @@ import {
 } from "@/app/lib/openwork-server"
 import { useMessageList } from "./message-list-provider"
 import { createMcpAppActions, type McpAppOrigin } from "./mcp-app-origin"
+import { useMcpAppApproval } from "./use-mcp-app-approval"
 import { cn } from "@/lib/utils"
 import {
   formatMcpAppDiagnostic,
@@ -283,6 +284,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
   const openworkServerClient = origin.client
   const workspaceId = origin.workspaceId
   const readOnly = origin.readOnly
+  const { requestApproval, approvalDialog } = useMcpAppApproval()
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [height, setHeightState] = useState(initialHeight ?? DEFAULT_HEIGHT)
   const [error, setError] = useState<McpAppDiagnostic | null>(null)
@@ -299,7 +301,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     const iframe = iframeRef.current
     if (!iframe || !iframe.contentWindow || !openworkServerClient || !workspaceId) return
     let disposed = false
-    const actions = createMcpAppActions(origin, app)
+    const actions = createMcpAppActions(origin, app, requestApproval)
     let lastSizeEventAt = 0
     const startedAt = performance.now()
     const checkpoints: string[] = []
@@ -577,7 +579,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
         new Promise<void>((resolve) => window.setTimeout(resolve, 500)),
       ]).catch(() => undefined).finally(() => bridge.close().catch(() => undefined))
     }
-  }, [app, inputArguments, openworkServerClient, result, toolName, workspaceId, readOnly, origin])
+  }, [app, inputArguments, openworkServerClient, result, toolName, workspaceId, readOnly, origin, requestApproval])
 
   if (error) return <McpAppDiagnosticNotice error={error} notice={unavailableNotice} />
   return (
@@ -588,6 +590,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       )}
       data-mcp-app-resource={app.resourceUri}
     >
+      {approvalDialog}
       <iframe
         ref={iframeRef}
         title={`${toolName} interactive view`}

@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test"
+import { afterAll, describe, expect, spyOn, test } from "bun:test"
 import { GlobalRegistrator } from "@happy-dom/global-registrator"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
@@ -6,9 +6,6 @@ import { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js"
 import type { DynamicToolUIPart } from "ai"
-import { ConnectionCard } from "../src/components/chat/connection-card"
-import { MessageListProvider } from "../src/components/chat/message-list-provider"
-import { WorkspaceProvider } from "../src/react-app/shell/workspace-provider"
 
 import {
   createOpenworkServerClient,
@@ -18,7 +15,13 @@ import {
   type OpenworkServerClient,
 } from "../src/app/lib/openwork-server"
 import { formatMcpAppDiagnostic, safeMcpAppDiagnosticMessage } from "../src/components/chat/mcp-app-diagnostics"
-import {
+
+GlobalRegistrator.register({ url: "http://localhost/", happyDOM: { settings: { disableIframePageLoading: true } } })
+afterAll(() => GlobalRegistrator.unregister())
+const { ConnectionCard } = await import("../src/components/chat/connection-card")
+const { MessageListProvider } = await import("../src/components/chat/message-list-provider")
+const { WorkspaceProvider } = await import("../src/react-app/shell/workspace-provider")
+const {
   buildMcpAppCsp,
   connectorCatalogFromPart,
   hasPreservedMcpAppResult,
@@ -27,7 +30,7 @@ import {
   McpAppFrame,
   McpAppSandboxView,
   secureMcpAppHtml,
-} from "../src/components/chat/mcp-app-frame"
+} = await import("../src/components/chat/mcp-app-frame")
 
 function fixture(overrides: Partial<OpenworkMcpAppResource> = {}): OpenworkMcpAppResource {
   return {
@@ -55,8 +58,7 @@ describe("MCP App iframe policy", () => {
     { isError: false, readOnly: false, preview: false, challenge: true },
     { isError: false, readOnly: true, preview: false, challenge: true },
     { isError: false, readOnly: true, preview: true, challenge: true },
-  ])("delivers complete launch results and truthful SDK responses without native confirmations (%j)", async ({ isError, readOnly, preview, challenge }) => {
-    GlobalRegistrator.register({ url: "http://localhost/", happyDOM: { settings: { disableIframePageLoading: true } } })
+  ].flatMap(entry => (entry.challenge && !entry.readOnly ? [true, false] : [true]).map(allow => ({ ...entry, allow }))))("delivers complete launch results and truthful SDK responses without native confirmations (%j)", async ({ isError, readOnly, preview, challenge, allow }) => {
     const previousAct = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT")
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true })
     const container = document.body.appendChild(document.createElement("div"))
@@ -78,13 +80,14 @@ describe("MCP App iframe policy", () => {
     }
     let id = 0
     const request = async (method: string, params: Record<string, unknown> = {}) => {
+      const requestId = ++id
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
         const response = new Promise<JSONRPCMessage>((resolve, reject) => {
-          reply = resolve
+          reply = message => { if ("id" in message && message.id === requestId) resolve(message) }
           timer = setTimeout(() => reject(new Error(`No response to ${method}`)), 1_000)
         })
-        await viewTransport.send({ jsonrpc: "2.0", id: ++id, method, params })
+        await viewTransport.send({ jsonrpc: "2.0", id: requestId, method, params })
         return await response
       } finally { clearTimeout(timer); reply = undefined }
     }
@@ -183,8 +186,20 @@ describe("MCP App iframe policy", () => {
       ] satisfies Array<[string, Record<string, unknown>]>) {
         expect(await request(method, params)).toMatchObject({ error: { code: -32601 } })
       }
-      expect(await request("tools/call", { name: "read_detail", arguments: {} })).toMatchObject(
-        readOnly ? { error: { code: -32601 } } : { result },
+      let pendingCall: Promise<JSONRPCMessage> | undefined
+      await act(async () => { pendingCall = request("tools/call", { name: "read_detail", arguments: {} }) })
+      if (challenge && !readOnly) {
+        expect(toolCalls).toHaveLength(1)
+        const dialog = document.querySelector('[role="alertdialog"]')
+        expect(dialog?.textContent).toContain("Allow App action?")
+        expect(dialog?.textContent).toContain("fixture")
+        expect(dialog?.textContent).toContain("read_detail")
+        const button = Array.from(dialog?.querySelectorAll("button") ?? []).find(button => button.textContent === (allow ? "Allow once" : "Cancel"))
+        if (!button) throw new Error("Missing approval decision")
+        await act(async () => button.click())
+      } else expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+      expect(await pendingCall).toMatchObject(
+        readOnly ? { error: { code: -32601 } } : challenge && !allow ? { error: { message: expect.stringContaining("cancelled") } } : { result },
       )
       expect(await request("ui/open-link", { url: "https://example.com/" })).toMatchObject(
         readOnly ? { error: { code: -32601 } } : { result: {} },
@@ -192,7 +207,7 @@ describe("MCP App iframe policy", () => {
       expect(await request("ui/open-link", { url: "file:///not-a-web-link" })).toMatchObject(
         readOnly ? { error: { code: -32601 } } : { result: { isError: true } },
       )
-      expect(toolCalls).toEqual(readOnly ? [] : (challenge ? [false, true] : [false]).map(approved => ({ workspaceId: "fixture", payload: {
+      expect(toolCalls).toEqual(readOnly ? [] : (challenge && allow ? [false, true] : [false]).map(approved => ({ workspaceId: "fixture", payload: {
         launchId: "launch_fixture", sessionId: "session_fixture", engine: "v2",
         serverName: app.serverName, resourceUri: app.resourceUri, name: "read_detail", arguments: {},
         ...(approved ? { approved: true } : {}),
@@ -202,8 +217,22 @@ describe("MCP App iframe policy", () => {
         readOnly ? { error: { code: -32601 } } : { error: { message: expect.stringContaining("Forbidden") } },
       )
       expect(toolCalls).toHaveLength(callsBeforeDenial + (readOnly ? 0 : 1))
-      expect(confirmSpy).not.toHaveBeenCalled()
       expect(opened).toEqual(readOnly ? [] : ["https://example.com/"])
+      if (challenge && !readOnly) {
+        const callsBeforeReplacement = toolCalls.length
+        await act(async () => { await viewTransport.send({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name: "write_detail", arguments: { value: "old scope" } } }) })
+        const staleAllow = document.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-action"]')
+        expect(staleAllow).not.toBeNull()
+        expect(toolCalls).toHaveLength(callsBeforeReplacement + 1)
+        await act(async () => root.render(allow ? createElement(McpAppSandboxView, {
+          origin: { client, workspaceId: "other-workspace", sessionId: "other-session", readOnly: true },
+          app, toolName: part.toolName, inputArguments: input, result, unavailableNotice: "Unavailable",
+        }) : null))
+        await act(async () => staleAllow?.click())
+        expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+        expect(toolCalls).toHaveLength(callsBeforeReplacement + 1)
+      }
+      expect(confirmSpy).not.toHaveBeenCalled()
     } finally {
       try {
         await act(async () => root.unmount())
@@ -216,7 +245,6 @@ describe("MCP App iframe policy", () => {
         container.remove()
         if (previousAct) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct)
         else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT")
-        await GlobalRegistrator.unregister()
       }
     }
   })

@@ -8,6 +8,8 @@ import {
   type OpenworkServerClient,
 } from "@/app/lib/openwork-server";
 import { McpAppSandboxView, type PreservedMcpAppResult } from "@/components/chat/mcp-app-frame";
+import { snapshotMcpAppArguments } from "@/components/chat/mcp-app-origin";
+import { useMcpAppApproval } from "@/components/chat/use-mcp-app-approval";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/react-app/shell/workspace-provider";
@@ -89,7 +91,6 @@ function freshnessLabel(cachedAt: number): string {
 export function McpAppTile({
   entry,
   cacheScopeKey,
-  onApprovedLaunch,
   onAutoLaunchEnabled,
   onAutoLaunchDisabled,
   fallbackEndpoints,
@@ -97,7 +98,6 @@ export function McpAppTile({
   entry: DashboardMcpAppEntry;
   /** Per-user and per-organization scope for workspace-bound last-known-good dashboard data. */
   cacheScopeKey: string;
-  /** Persists launch consent under host policy after a challenged manual run. */
   onApprovedLaunch?: () => void;
   /** Enables later on-load launches after this user successfully runs a safe tile. */
   onAutoLaunchEnabled?: () => void;
@@ -106,6 +106,7 @@ export function McpAppTile({
   /** Other workspace runtimes to try when the primary one cannot resolve the app. */
   fallbackEndpoints?: DashboardLaunchEndpoint[];
 }) {
+  const { requestApproval, approvalDialog } = useMcpAppApproval();
   const workspace = useWorkspace();
   const { openworkServerClient, workspaceId } = workspace;
   // Provider annotations are not an authorization boundary. A safe-looking
@@ -143,12 +144,8 @@ export function McpAppTile({
   stateRef.current = state;
   const lastRefreshAtRef = useRef(cachedEndpoint ? cached?.cachedAt ?? 0 : 0);
   const userInitiatedNonceRef = useRef<number | null>(null);
-  // Read consent through refs so persisting it after the first approval does
-  // not re-run the launch effect and duplicate a write-tool call.
   const launchApprovedRef = useRef(entry.launchApproved === true);
   launchApprovedRef.current = entry.launchApproved === true;
-  const onApprovedLaunchRef = useRef(onApprovedLaunch);
-  onApprovedLaunchRef.current = onApprovedLaunch;
   const onAutoLaunchEnabledRef = useRef(onAutoLaunchEnabled);
   onAutoLaunchEnabledRef.current = onAutoLaunchEnabled;
   const onAutoLaunchDisabledRef = useRef(onAutoLaunchDisabled);
@@ -157,7 +154,7 @@ export function McpAppTile({
   // reuses the same in-flight promise; a null promise marks a settled nonce so
   // later re-renders cannot repeat an already-executed data-modifying call.
   const launchRef = useRef<{ nonce: number; promise: Promise<TileState> | null } | null>(null);
-  const lifetime = useMemo(() => ({ active: true }), [cacheScopeKey, entry.id, entry.projectedToolName, entry.connectionId, entry.serverName, entry.toolName, entry.resourceUri, launchArguments, nonce]);
+  const lifetime = useMemo(() => ({ active: true, controller: new AbortController() }), [cacheScopeKey, entry.id, entry.projectedToolName, entry.connectionId, entry.serverName, entry.toolName, entry.resourceUri, launchArguments, nonce]);
   const endpointsRef = useRef(launchEndpoints);
   const ownedLaunches = useRef(new Map<string, DashboardLaunchEndpoint>());
   const releaseLaunches = () => {
@@ -166,13 +163,15 @@ export function McpAppTile({
   };
   useLayoutEffect(() => {
     lifetime.active = true;
-    return () => { lifetime.active = false; releaseLaunches(); };
+    lifetime.controller = new AbortController();
+    return () => { lifetime.active = false; lifetime.controller.abort(); releaseLaunches(); };
   }, [lifetime]);
   useLayoutEffect(() => {
     endpointsRef.current = launchEndpoints;
     for (const [id, owner] of ownedLaunches.current) {
       if (launchEndpoints.some(endpoint => endpoint.client === owner.client && endpoint.workspaceId === owner.workspaceId)) continue;
       lifetime.active = false;
+      lifetime.controller.abort();
       void owner.client.releaseMcpApp(owner.workspaceId, id).catch(() => undefined);
       ownedLaunches.current.delete(id);
       setState(current => current.phase === "ready" ? { ...current, app: { ...current.app, launchId: undefined } } : current);
@@ -203,12 +202,14 @@ export function McpAppTile({
       return;
     }
     const userInitiated = userInitiatedNonceRef.current === nonce;
+    const signal = lifetime.controller.signal;
     const assertActive = () => {
-      if (!lifetime.active || launchRef.current?.nonce !== nonce) throw new Error("This App launch has closed or changed. Run the tile again.");
+      if (signal.aborted || !lifetime.active || launchRef.current?.nonce !== nonce) throw new Error("This App launch has closed or changed. Run the tile again.");
     };
-    const endpointIsActive = (endpoint: DashboardLaunchEndpoint) => lifetime.active
+    const endpointIsActive = (endpoint: DashboardLaunchEndpoint) => !signal.aborted && lifetime.active
       && endpointsRef.current.some(current => current.client === endpoint.client && current.workspaceId === endpoint.workspaceId);
     const promise = currentLaunch?.promise ?? (async (): Promise<TileState> => {
+      const argumentsSnapshot = snapshotMcpAppArguments(launchArguments);
       // Connect app-host apps resolve through their connection reference; the
       // host revalidates the live UI binding before returning the resource.
       const launch = entry.connectionId
@@ -244,7 +245,7 @@ export function McpAppTile({
         serverName: app.serverName,
         name: app.toolName,
         resourceUri: app.resourceUri,
-        arguments: launchArguments,
+        arguments: argumentsSnapshot,
         ...(dashboardTileLaunchIsApproved(
           entry.organizationAutoLaunch === true,
           launchApprovedRef.current,
@@ -258,15 +259,14 @@ export function McpAppTile({
         assertActive();
         if (!(cause instanceof OpenworkServerError) || cause.code !== "tool_requires_approval") throw cause;
         approvalWasRequired = true;
-        // Host policy retries a challenged manual launch without a separate
-        // user confirmation. A stale automatic launch instead returns to the
-        // idle Run card and revokes automatic launch.
         if (!userInitiated) return { phase: "idle", revokeAutoLaunch: true };
+        const allowed = await requestApproval({ serverName: request.serverName, toolName: request.name, arguments: argumentsSnapshot }, signal);
+        assertActive();
+        if (!endpointIsActive(endpoint)) throw new Error("This App launch has closed or changed. Run the tile again.");
+        if (!allowed) return { phase: "idle", revokeAutoLaunch: true };
+        onAutoLaunchDisabledRef.current?.();
         result = await endpoint.client.callMcpAppTool(endpoint.workspaceId, { ...request, approved: true });
         assertActive();
-        launchApprovedRef.current = true;
-        onApprovedLaunchRef.current?.();
-        onAutoLaunchDisabledRef.current?.();
       }
       assertActive();
       if (result.isError) {
@@ -357,7 +357,7 @@ export function McpAppTile({
     return () => {
       cancelled = true;
     };
-  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, manualLaunch, nonce, started, lifetime]);
+  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, manualLaunch, nonce, started, lifetime, requestApproval]);
 
   useEffect(() => {
     if (manualLaunch) return;
@@ -436,6 +436,7 @@ export function McpAppTile({
       onRefresh={run}
       refreshing={refreshState === "refreshing"}
     >
+      {approvalDialog}
       {state.phase === "idle" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 py-6 text-center">
           <Play className="size-6 text-muted-foreground" aria-hidden />
