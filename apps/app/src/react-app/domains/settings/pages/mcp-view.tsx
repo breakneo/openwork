@@ -557,7 +557,7 @@ export function McpView(props: McpViewProps) {
     <LibraryAddControl
       kinds={libraryAddKindsForFilter("all")}
       connectorCues={connectorCues}
-      variant="ghost"
+      variant="default"
       pending={denAuth.status === "checking"}
       disabledReason={addDisabledReason}
       label={t("extensions.add_to_library")}
