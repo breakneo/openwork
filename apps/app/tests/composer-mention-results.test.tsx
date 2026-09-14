@@ -346,6 +346,28 @@ test("file values keep their encoding and later mention tokens intact", async ()
   } finally { await composer.close(); }
 });
 
+for (const newTask of [false, true]) {
+  test(`${newTask ? "new-task" : "session composer"} email text after @openwork does not become a file mention query`, async () => {
+    const composer = await mounted({ draft: "@openwork ", newTask });
+    try {
+      for (const character of "person@notes") await composer.type(character);
+      expect(composer.draft()).toBe("@openwork person@notes");
+      expect(composer.labels()).toEqual([]);
+      expect(composer.queries).toEqual([]);
+      expect(composer.selectedAgent).not.toHaveBeenCalled();
+      expect(composer.sent).not.toHaveBeenCalled();
+      await composer.type(" @notes");
+      expect(composer.queries.at(-1)).toBe("notes");
+      expect(composer.labels().some((label) => label.startsWith("@notes.md"))).toBe(true);
+      await composer.press("Tab");
+      expect(composer.draft()).toBe("@openwork person@notes @notes.md ");
+      expect(composer.tokenTitles()).toContain("@notes.md");
+      expect(composer.selectedAgent).not.toHaveBeenCalled();
+      expect(composer.sent).not.toHaveBeenCalled();
+    } finally { await composer.close(); }
+  });
+}
+
 test("ordinary text after an existing semantic app mention does not reopen suggestions", async () => {
   const composer = await mounted({ draft: "@OpenWork ", mentions: { OpenWork: "app" }, apps: ["OpenWork"] });
   try {
