@@ -16,7 +16,7 @@ import {
 } from "../src/app/lib/openwork-server"
 import { formatMcpAppDiagnostic, safeMcpAppDiagnosticMessage } from "../src/components/chat/mcp-app-diagnostics"
 
-GlobalRegistrator.register({ url: "http://localhost/", happyDOM: { settings: { disableIframePageLoading: true } } })
+GlobalRegistrator.register({ url: "https://web.example/" })
 afterAll(() => GlobalRegistrator.unregister())
 const { ConnectionCard } = await import("../src/components/chat/connection-card")
 const { MessageListProvider } = await import("../src/components/chat/message-list-provider")
@@ -78,7 +78,7 @@ async function startupFixture() {
   const removeListenerSpy = spyOn(window, "removeEventListener")
   const client: OpenworkServerClient = {
     ...createOpenworkServerClient({ baseUrl: "http://localhost:1" }),
-    mcpAppSandbox: app => ({ url: `about:blank#${app.toolName}`, expectedOrigin: "https://sandbox.example" }),
+    mcpAppSandbox: app => ({ url: `about:blank#${app.toolName}`, expectedOrigin: "https://sandbox.example", sandbox: "allow-scripts allow-same-origin" }),
   }
   const views = Array.from({ length: 6 }, (_, index) => createElement(McpAppSandboxView, {
     key: index,
@@ -262,7 +262,7 @@ describe("MCP App iframe policy", () => {
     { isError: false, readOnly: false, preview: false, challenge: true },
     { isError: false, readOnly: true, preview: false, challenge: true },
     { isError: false, readOnly: true, preview: true, challenge: true },
-  ].flatMap(entry => (entry.challenge && !entry.readOnly ? [true, false] : [true]).map(allow => ({ ...entry, allow }))))("delivers complete launch results and truthful SDK responses without native confirmations (%j)", async ({ isError, readOnly, preview, challenge, allow }) => {
+  ].flatMap(entry => (entry.challenge && !entry.readOnly ? [true, false] : [true]).map(allow => ({ ...entry, allow }))).flatMap(entry => [false, true].map(sameOrigin => ({ ...entry, sameOrigin }))))("delivers complete launch results and truthful SDK responses without native confirmations (%j)", async ({ isError, readOnly, preview, challenge, allow, sameOrigin }) => {
     const previousAct = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT")
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true })
     const container = document.body.appendChild(document.createElement("div"))
@@ -308,13 +308,15 @@ describe("MCP App iframe policy", () => {
     const opened: string[] = []
     Reflect.set(window, "__OPENWORK_ELECTRON__", { shell: { openExternal: async (url: string) => { opened.push(url); return { ok: true } } } })
     const app = fixture({ launchId: readOnly ? undefined : "launch_fixture" })
+    const sandboxClient = createOpenworkServerClient({ baseUrl: sameOrigin ? window.location.origin : "https://sandbox.example" })
     const client: OpenworkServerClient = {
-      ...createOpenworkServerClient({ baseUrl: "http://localhost:1" }),
+      ...sandboxClient,
+      // Exercise real policy selection without asking Happy DOM to fetch a page.
+      mcpAppSandbox: (...args) => ({ ...sandboxClient.mcpAppSandbox(...args), url: "about:blank" }),
       resolveMcpApp: async (workspaceId, name, launch, context) => {
         resolutions.push({ workspaceId, name, launch, context })
         return { app }
       },
-      mcpAppSandbox: () => ({ url: "about:blank", expectedOrigin: "https://sandbox.example" }),
       callMcpAppTool: async (workspaceId, payload) => {
         toolCalls.push({ workspaceId, payload })
         if (payload.name === "forbidden_detail") throw new OpenworkServerError(403, "tool_denied", "Forbidden")
@@ -359,8 +361,18 @@ describe("MCP App iframe policy", () => {
       }])
       const iframe = container.querySelector("iframe")
       if (!iframe?.contentWindow) throw new Error("Missing fixture iframe")
+      expect(iframe.getAttribute("sandbox")).toBe(sameOrigin ? "allow-scripts" : "allow-scripts allow-same-origin")
+      expect(iframe.src).toBe("about:blank")
+      const expectedOrigin = sameOrigin ? "null" : "https://sandbox.example"
+      // An opaque origin is not an identity: only this proxy window may handshake.
+      for (const [source, origin] of [[window, expectedOrigin], [iframe.contentWindow, window.location.origin]] satisfies Array<[Window, string]>) {
+        await act(async () => window.dispatchEvent(new MessageEvent("message", {
+          source, origin, data: { method: "ui/notifications/sandbox-proxy-ready" },
+        })))
+      }
+      expect(connectSpy).not.toHaveBeenCalled()
       await act(async () => window.dispatchEvent(new MessageEvent("message", {
-        source: iframe.contentWindow, origin: "https://sandbox.example",
+        source: iframe.contentWindow, origin: expectedOrigin,
         data: { method: "ui/notifications/sandbox-proxy-ready" },
       })))
       const initialized = await request("ui/initialize", {
@@ -514,6 +526,23 @@ describe("MCP App iframe policy", () => {
       resourceUri: "ui://openwork/artifacts/atlas/views/1/index.html",
       arguments: { input: { query: "migration" } },
     })
+  })
+
+  test.each([
+    ["https://web.example", "https://web.example", "https://web.example", "null", "allow-scripts"],
+    ["https://web.example/api/openwork", "https://web.example", "https://web.example", "null", "allow-scripts"],
+    ["https://worker.example", "https://web.example", "https://worker.example", "https://worker.example", "allow-scripts allow-same-origin"],
+    ["http://localhost:4321", "http://localhost:4321", "http://127.0.0.1:4321", "http://127.0.0.1:4321", "allow-scripts allow-same-origin"],
+    ["http://127.0.0.1:4321", "http://127.0.0.1:4321", "http://localhost:4321", "http://localhost:4321", "allow-scripts allow-same-origin"],
+    ["http://localhost:4321", "file://", "http://localhost:4321", "http://localhost:4321", "allow-scripts allow-same-origin"],
+  ])("isolates sandbox delivery for %s hosted at %s", (baseUrl, hostOrigin, urlOrigin, expectedOrigin, sandboxFlags) => {
+    const client = createOpenworkServerClient({ baseUrl, token: "private-client-token", hostToken: "private-host-token" })
+    const sandbox = client.mcpAppSandbox(fixture(), hostOrigin)
+    expect(new URL(sandbox.url).origin).toBe(urlOrigin)
+    expect(sandbox.expectedOrigin).toBe(expectedOrigin)
+    expect(sandbox.sandbox).toBe(sandboxFlags)
+    expect(sandbox.url).not.toContain("private-")
+    expect(new URL(sandbox.url).searchParams.get("hostOrigin")).toBe(normalizeMcpAppHostOrigin(hostOrigin))
   })
 
   test("uses the opaque message origin for packaged file hosts", () => {

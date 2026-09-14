@@ -632,6 +632,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       releaseStartup = release
       navigationStarted = true
       checkpoint("sandbox-navigation-started")
+      iframe.setAttribute("sandbox", sandbox.sandbox)
       iframe.src = sandbox.url
       sandboxReadyTimer = window.setTimeout(() => {
         fail(
@@ -663,7 +664,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       <iframe
         ref={iframeRef}
         title={`${toolName} interactive view`}
-        sandbox="allow-scripts allow-same-origin"
+        sandbox="allow-scripts"
         referrerPolicy="no-referrer"
         className="block w-full border-0 bg-transparent"
         style={{ height }}
