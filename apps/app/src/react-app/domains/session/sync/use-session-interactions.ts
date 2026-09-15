@@ -120,10 +120,11 @@ function createInteractionHydration(client: Client, workspaceId: string, session
   const native = isOpencodeV2Client(client);
   let disposed = false;
   let activeReads = 0;
-  let legacy: { controller: AbortController; pending: boolean; snapshot?: PermissionSnapshot } | undefined;
+  let legacy: { controller: AbortController; pending: boolean; failed?: boolean; snapshot?: PermissionSnapshot } | undefined;
   let questions: {
     controller: AbortController;
     pending: boolean;
+    failed?: boolean;
     snapshot?: { startedAt: number; items: Parameters<typeof seedQuestionState>[2] };
   } | undefined;
 
@@ -156,11 +157,12 @@ function createInteractionHydration(client: Client, workspaceId: string, session
     ], { snapshotStartedAt });
   };
 
-  const refreshShared = () => {
-    if (!native && !legacy?.pending) {
+  const refreshShared = (failedOnly = false) => {
+    if (!native && !legacy?.pending && (!failedOnly || legacy?.failed)) {
       const startedAt = Date.now();
       const read: NonNullable<typeof legacy> = { controller: new AbortController(), pending: true, snapshot: legacy?.snapshot };
       legacy = read;
+      for (const child of children.values()) child.legacy = read;
       void (async () => {
         try {
           const items = unwrap(await client.permission.list({ directory }, { signal: read.controller.signal }));
@@ -168,12 +170,13 @@ function createInteractionHydration(client: Client, workspaceId: string, session
           read.snapshot = { items, startedAt };
           for (const [id, child] of children) if (child.legacy === read) publishPermission(id, child);
         } catch {
+          if (!disposed && !read.controller.signal.aborted) read.failed = true;
         } finally {
           read.pending = false;
         }
       })();
     }
-    if (!questions?.pending) {
+    if (!questions?.pending && (!failedOnly || questions?.failed)) {
       const startedAt = Date.now();
       const read: NonNullable<typeof questions> = { controller: new AbortController(), pending: true, snapshot: questions?.snapshot };
       questions = read;
@@ -184,6 +187,7 @@ function createInteractionHydration(client: Client, workspaceId: string, session
           read.snapshot = { items, startedAt };
           for (const id of children.keys()) publishQuestions(id);
         } catch {
+          if (!disposed && !read.controller.signal.aborted) read.failed = true;
         } finally {
           read.pending = false;
         }
@@ -254,6 +258,10 @@ function createInteractionHydration(client: Client, workspaceId: string, session
         child.controller.abort();
         child.release?.();
       }
+      // A newly discovered child can already be waiting on a request whose
+      // event was missed. Recover failed shared reads, retaining successful
+      // snapshots and sharing any retry already in flight across additions.
+      if (ids.some((id) => !children.has(id))) refreshShared(true);
       for (const id of ids) {
         if (children.has(id)) continue;
         const child = newChild();

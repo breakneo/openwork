@@ -747,6 +747,80 @@ describe("incremental interaction hydration", () => {
     });
   }
 
+  for (const native of [false, true]) {
+    test(`${native ? "v2" : "v1"} child discovery recovers failed shared reads without repeating sibling reads`, async () => {
+      await withInteractionHydration(async () => Response.json({ data: [] }), async ({ client, render, container }) => {
+        if (!client) throw new Error("Missing hydration client");
+        const heldQuestions = Promise.withResolvers<Awaited<ReturnType<typeof client.question.list>>>();
+        const heldPermissions = Promise.withResolvers<Awaited<ReturnType<typeof client.permission.list>>>();
+        const questionReads = spyOn(client.question, "list")
+          .mockRejectedValueOnce(new Error("Temporarily unavailable"))
+          .mockImplementation(() => heldQuestions.promise);
+        const legacyReads = spyOn(client.permission, "list")
+          .mockRejectedValueOnce(new Error("Temporarily unavailable"))
+          .mockImplementation(() => heldPermissions.promise);
+        const scopedReads = spyOn(client.v2.session.permission, "list");
+        const response = { request: new Request("http://localhost/fixture"), response: Response.json([]) };
+        try {
+          await render({ interactionSessionIds: ["session-child"] });
+          expect(questionReads).toHaveBeenCalledTimes(1);
+          expect(legacyReads).toHaveBeenCalledTimes(native ? 0 : 1);
+          await render({ interactionSessionIds: ["session-child"] });
+          expect(questionReads).toHaveBeenCalledTimes(1);
+          await render({ interactionSessionIds: ["session-child", "session-b"] });
+          expect(questionReads).toHaveBeenCalledTimes(2);
+          expect(legacyReads).toHaveBeenCalledTimes(native ? 0 : 2);
+          await render({ interactionSessionIds: ["session-child", "session-b", "child-1"] });
+          expect(questionReads).toHaveBeenCalledTimes(2);
+          expect(legacyReads).toHaveBeenCalledTimes(native ? 0 : 2);
+          expect(scopedReads.mock.calls.map(([input]) => input.sessionID))
+            .toEqual(["session-a", "session-child", "session-b", "child-1"]);
+          await act(async () => {
+            heldQuestions.resolve({ ...response, data: [question("recovered-question", "session-b"), question("unrelated", "untracked")] });
+            heldPermissions.resolve({ ...response, data: [permission("recovered-approval", "session-child")] });
+          });
+          expect(container.textContent).toBe(native ? "recovered-question" : "recovered-approval, recovered-question");
+          expect(getReactQueryClient().getQueryData(questionKey("workspace-a", "session-b")))
+            .toMatchObject([{ id: "recovered-question" }]);
+          expect(getReactQueryClient().getQueryData(questionKey("workspace-a", "untracked"))).toBeUndefined();
+          if (!native) expect(getReactQueryClient().getQueryData(permissionKey("workspace-a", "session-child")))
+            .toMatchObject([{ id: "recovered-approval" }]);
+          await render({ interactionSessionIds: ["session-child", "session-b", "child-1", "child-2"] });
+          expect(questionReads).toHaveBeenCalledTimes(2);
+          expect(legacyReads).toHaveBeenCalledTimes(native ? 0 : 2);
+          expect(scopedReads).toHaveBeenCalledTimes(5);
+        } finally {
+          heldQuestions.resolve({ ...response, data: [] });
+          heldPermissions.resolve({ ...response, data: [] });
+          questionReads.mockRestore();
+          legacyReads.mockRestore();
+          scopedReads.mockRestore();
+        }
+      }, { interactions: true, native });
+    });
+  }
+
+  test("child discovery retries a failed question refresh without refetching successful legacy permissions", async () => {
+    let questionReads = 0;
+    await withInteractionHydration(async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path.includes("/api/session/")) return Response.json({ data: [] });
+      if (path.endsWith("/permission")) return Response.json([]);
+      questionReads += 1;
+      if (questionReads === 2) return Response.json({ message: "Unavailable" }, { status: 503 });
+      return Response.json(questionReads === 1 ? [] : [question("recovered", "session-b")]);
+    }, async ({ render, calls, container }) => {
+      await render();
+      await act(async () => { window.dispatchEvent(new Event("focus")); });
+      expect(questionReads).toBe(2);
+      const legacyReads = calls.filter((request) => new URL(request.url).pathname === "/opencode/permission").length;
+      await render({ interactionSessionIds: ["session-b"] });
+      expect(questionReads).toBe(3);
+      expect(container.textContent).toBe("recovered");
+      expect(calls.filter((request) => new URL(request.url).pathname === "/opencode/permission")).toHaveLength(legacyReads);
+    }, { interactions: true });
+  });
+
   test("cold permission reads are capped at four with the selected session first", async () => {
     const held = new Map<string, ReturnType<typeof Promise.withResolvers<Response>>>();
     let active = 0;
