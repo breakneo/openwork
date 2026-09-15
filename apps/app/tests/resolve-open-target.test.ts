@@ -4,6 +4,7 @@ import type { OpenTarget } from "../src/react-app/domains/session/artifacts/open
 import {
   isWorkspaceContainedArtifactTarget,
   localArtifactPath,
+  nativeFileAction,
   resolveCollectibleOpenTarget,
 } from "../src/react-app/domains/session/artifacts/resolve-open-target";
 
@@ -40,6 +41,20 @@ describe("on-demand artifact target resolution", () => {
   ])("rejects unsafe relative native path %s", (path) => {
     expect(localArtifactPath("/workspace", path)).toBeNull();
     expect(localArtifactPath("C:\\Work", path)).toBeNull();
+  });
+
+  test("only workspace files may be handed to the default application", () => {
+    expect(nativeFileAction("/workspace", "images/Result.png")).toEqual({ path: "/workspace/images/Result.png", action: "open" });
+    expect(nativeFileAction("/workspace/", "/workspace/out/Report.pdf")).toEqual({ path: "/workspace/out/Report.pdf", action: "open" });
+    expect(nativeFileAction("C:\\Work", "c:/Work/images/Result.png")).toEqual({ path: "c:/Work/images/Result.png", action: "open" });
+    expect(nativeFileAction("/workspace", "images/Result.png", { reveal: true })).toEqual({ path: "/workspace/images/Result.png", action: "reveal" });
+    // Paths outside the workspace are located in the file manager, never launched.
+    for (const value of ["/tmp/Fresh Start.png", "/workspace-other/Result.png", "/Applications/Utilities/run.command", "file:///Users/me/script.sh", "/workspace/../Result.png"]) {
+      expect(nativeFileAction("/workspace", value)?.action).toBe("reveal");
+    }
+    expect(nativeFileAction("C:\\Work", "D:\\Work\\Result.png")).toEqual({ path: "D:\\Work\\Result.png", action: "reveal" });
+    expect(nativeFileAction("/workspace", "https://example.com/run.sh")).toBeNull();
+    expect(nativeFileAction(undefined, "/tmp/Result.png")).toEqual({ path: "/tmp/Result.png", action: "reveal" });
   });
 
   test("accepts verified files even when they need the default application", async () => {

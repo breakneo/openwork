@@ -79,7 +79,7 @@ import {
 
 import { isElectronRuntime } from "../../../../app/utils";
 import { isCollectibleArtifactTarget, isLocalhostBrowserTarget, isOpenableFileTarget, type OpenTarget } from "../artifacts/open-target";
-import { localArtifactPath, resolveCollectibleOpenTarget } from "../artifacts/resolve-open-target";
+import { nativeFileAction, resolveCollectibleOpenTarget } from "../artifacts/resolve-open-target";
 import type { OpenTargetOptions } from "@/lib/target-provider";
 import { SidePanel } from "../panel/side-panel";
 import { getSidePanelSessionKey } from "../panel/side-panel-session";
@@ -686,12 +686,13 @@ export function SessionPage(props: SessionPageProps) {
     };
     const canOpenLocally = runtime.workspaceType !== "remote" && isElectronRuntime() && !options?.auto;
     const openLocalFile = (fileTarget: OpenTarget) => {
-      const path = localArtifactPath(runtime.workspaceRoot, fileTarget.value);
-      if (!path) {
+      // Files outside the workspace are revealed, never launched; see nativeFileAction.
+      const native = nativeFileAction(runtime.workspaceRoot, fileTarget.value, options);
+      if (!native) {
         reportOpenError(new Error("This is not a local file path."));
         return;
       }
-      void (options?.reveal ? revealDesktopItemInDir(path) : openDesktopPath(path)).catch(reportOpenError);
+      void (native.action === "reveal" ? revealDesktopItemInDir(native.path) : openDesktopPath(native.path)).catch(reportOpenError);
     };
 
     // A person's explicit native open is not a workspace preview request.

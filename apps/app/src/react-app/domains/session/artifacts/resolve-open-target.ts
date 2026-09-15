@@ -45,6 +45,40 @@ export function localArtifactPath(root: string | null | undefined, value: string
   return `${base.replace(/[/\\]+$/, "")}/${path}`;
 }
 
+/** Compare locations only; the literal path handed to the desktop is never rewritten. */
+function isWorkspaceContainedPath(root: string | null | undefined, path: string): boolean {
+  const base = root?.trim();
+  if (!base) return false;
+  const normalize = (value: string) => value
+    .replace(/[\\]+/g, "/")
+    .replace(/\/+$/, "")
+    .replace(/^[A-Za-z]:/, (drive) => drive.toLowerCase());
+  const container = normalize(base);
+  const candidate = normalize(path);
+  // A dot segment can leave the workspace after the prefix matches; never treat it as inside.
+  if (candidate.split("/").some((segment) => /^\.{1,2}\s*$/.test(segment))) return false;
+  if (!container) return candidate.startsWith("/");
+  return candidate === container || candidate.startsWith(`${container}/`);
+}
+
+export type NativeFileAction = { path: string; action: "open" | "reveal" };
+
+/**
+ * Decide what an explicit native action may do with a referenced path. Only files inside
+ * the workspace are handed to their default application. Anything else is shown in the
+ * file manager and never launched, so a referenced path cannot start a program.
+ */
+export function nativeFileAction(
+  root: string | null | undefined,
+  value: string,
+  options?: { reveal?: boolean },
+): NativeFileAction | null {
+  const path = localArtifactPath(root, value);
+  if (!path) return null;
+  if (options?.reveal || !isWorkspaceContainedPath(root, path)) return { path, action: "reveal" };
+  return { path, action: "open" };
+}
+
 export async function resolveCollectibleOpenTarget(
   client: ArtifactTargetResolver,
   workspaceId: string,
