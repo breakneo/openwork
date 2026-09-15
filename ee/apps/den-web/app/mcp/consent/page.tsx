@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { TemporaryAuthNotice } from "../../(den)/_components/temporary-auth-notice";
-import { denApiCredentials, denApiEndpoint } from "../../(den)/_lib/den-api-origin";
+import { denApiCredentials, denBrowserEndpoint } from "../../(den)/_lib/den-api-origin";
 import { getRuntimeConfig } from "../../(den)/_lib/runtime-config";
 import { McpConsentPermissions } from "../consent-permissions";
 
@@ -14,7 +14,7 @@ function getErrorMessage(payload: unknown, fallback: string) {
 
 async function submitConsent(accept: boolean, oauthQuery: string, scope: string) {
   await getRuntimeConfig();
-  const endpoint = denApiEndpoint("/api/auth/oauth2/consent");
+  const endpoint = denBrowserEndpoint("/api/auth/oauth2/consent");
   const response = await fetch(endpoint, {
     method: "POST",
     credentials: denApiCredentials(endpoint),

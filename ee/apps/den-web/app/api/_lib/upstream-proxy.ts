@@ -69,6 +69,7 @@ const DEFAULT_REQUEST_BODY_MAX_BYTES = 32 * 1024 * 1024;
  * allowlist, because that is where sessions are actually established.
  */
 const DEN_API_ROUTE_PREFIX = "/api/den";
+const BROWSER_API_ROUTE_PREFIX = "/api/browser/v1";
 const DEFAULT_CLOUD_INSTANCE_ORIGIN_SUFFIXES = [".daytonaproxy01.net"];
 const CORS_ALLOW_HEADERS = "authorization,content-type,x-openwork-org-id,x-openwork-legacy-org-id,x-request-id,accept";
 const CORS_ALLOW_METHODS = "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS";
@@ -158,6 +159,31 @@ function requestPublicOrigin(request: NextRequest): URL {
   }
 
   return requestUrl;
+}
+
+function isSameOriginBrowserRequest(request: NextRequest): boolean {
+  const site = request.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") return false;
+
+  const origin = request.headers.get("origin");
+  if (origin !== null) return origin === requestPublicOrigin(request).origin;
+  // Browsers omit Origin for same-origin reads, but writes must prove the
+  // exact web origin. A sibling site's cookies are not authority to mutate Den.
+  return request.method === "GET" || request.method === "HEAD";
+}
+
+function isBrowserApiTarget(base: string, targetUrl: string, targetPath: string): boolean {
+  try {
+    if (!targetPath || targetPath.split("/").some((segment) => {
+      const decoded = decodeURIComponent(segment);
+      return decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\") || decoded.includes("\0");
+    })) return false;
+    const expected = new URL(joinBaseUrl(base, "v1"));
+    const target = new URL(targetUrl);
+    return target.origin === expected.origin && target.pathname.startsWith(`${expected.pathname.replace(/\/+$/, "")}/`);
+  } catch {
+    return false;
+  }
 }
 
 function normalizePathPrefix(value: string): string {
@@ -257,7 +283,7 @@ async function cloneRequestHeaders(
     // Bearer-only for reflected instance origins - see the note above
     // isCloudInstanceOrigin. This is what makes reflection safe.
     if (stripCookies && name.toLowerCase() === "cookie") return;
-    if (routePrefix === "/api/auth" && name.toLowerCase() === "cookie") {
+    if ((routePrefix === "/api/auth" || routePrefix === BROWSER_API_ROUTE_PREFIX) && name.toLowerCase() === "cookie") {
       const authCookies = value
         .split(";")
         .map((cookie) => cookie.trim())
@@ -634,6 +660,10 @@ export async function proxyUpstream(
 ): Promise<Response> {
   const startedAtMs = Date.now();
   const referenceId = requestReference(request);
+  const browserSession = options.routePrefix === BROWSER_API_ROUTE_PREFIX;
+  if (browserSession && !isSameOriginBrowserRequest(request)) {
+    return Response.json({ error: "forbidden_origin" }, { status: 403 });
+  }
   const apiBase = readBaseUrlEnv(process.env, "DEN_API_BASE");
   if (!apiBase) {
     denWebLogger.error("den-web upstream proxy misconfigured", {
@@ -646,6 +676,12 @@ export async function proxyUpstream(
       status: 503,
       headers: { "content-type": "application/json" },
     });
+  }
+
+  const targetPath = getTargetPath(request, segments, options.routePrefix);
+  const targetUrl = buildTargetUrl(apiBase, request, targetPath, options.upstreamPathPrefix);
+  if (browserSession && !isBrowserApiTarget(apiBase, targetUrl, targetPath)) {
+    return Response.json({ error: "invalid_api_path" }, { status: 400 });
   }
 
   const instanceOrigin = reflectsCloudInstanceOrigin(request, options)
@@ -706,8 +742,6 @@ export async function proxyUpstream(
     });
   }
 
-  const targetPath = getTargetPath(request, segments, options.routePrefix);
-  const targetUrl = buildTargetUrl(apiBase, request, targetPath, options.upstreamPathPrefix);
   const requestHeaders = await cloneRequestHeaders(
     request,
     options.routePrefix,
@@ -727,6 +761,7 @@ export async function proxyUpstream(
         headers: requestHeaders,
         body: bodyRead.body,
         redirect: "manual",
+        ...(browserSession ? { cache: "no-store" } : {}),
         signal: upstreamAbort.signal,
       });
     } catch (error) {

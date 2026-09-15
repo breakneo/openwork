@@ -114,7 +114,7 @@ const consentPages = [
   { name: "organization selection", page: McpSelectOrganizationPage, route: "select-organization", button: null, path: "/v1/me/orgs" },
 ];
 
-test.each(consentPages)("fresh $name waits for the configured API origin before sending a request", async ({ page, route, button, path }) => {
+test.each(consentPages)("fresh $name waits for runtime configuration and keeps the web session cookie", async ({ page, route, button, path }) => {
   const apiOrigin = "https://api-portal.example.test";
   GlobalRegistrator.register({ url: `https://portal.example.test/mcp/${route}?client_id=test-client&scope=mcp%3Aread` });
   const previousActEnvironment = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
@@ -149,7 +149,7 @@ test.each(consentPages)("fresh $name waits for the configured API origin before 
     await act(async () => { resolveConfig({ ...runtime.EMPTY_RUNTIME_CONFIG, denApiUrl: apiOrigin }); });
 
     expect(fetchRequest).toHaveBeenCalledTimes(1);
-    expect(fetchRequest).toHaveBeenCalledWith(`${apiOrigin}${path}`, expect.objectContaining({
+    expect(fetchRequest).toHaveBeenCalledWith(path.startsWith("/api/auth/") ? path : `/api/browser${path}`, expect.objectContaining({
       credentials: "include",
       method: button ? "POST" : "GET",
     }));
