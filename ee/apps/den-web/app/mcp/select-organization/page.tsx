@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { TemporaryAuthNotice } from "../../(den)/_components/temporary-auth-notice";
 import { denApiCredentials, denApiEndpoint } from "../../(den)/_lib/den-api-origin";
+import { getRuntimeConfig } from "../../(den)/_lib/runtime-config";
 import { useOrgListWindow } from "../../(den)/_lib/use-org-list-window";
 import { McpConsentPermissions } from "../consent-permissions";
 
@@ -43,6 +44,7 @@ function getErrorMessage(payload: unknown, fallback: string) {
 }
 
 async function requestJson(path: string, init?: RequestInit) {
+  await getRuntimeConfig();
   const endpoint = denApiEndpoint(path);
   const response = await fetch(endpoint, {
     credentials: denApiCredentials(endpoint),
