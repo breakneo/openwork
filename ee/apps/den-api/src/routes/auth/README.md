@@ -111,7 +111,10 @@ can fail before the API validates the connector. The event and stdout diagnostic
 include a templated path, method, body size, elapsed time, hashed request ID,
 allowlisted error name/cause code/failure class, and `has_expect` /
 `expect_100_continue` booleans. No raw exception, headers, payload, or query is
-captured. The proxy does not remove `Expect` or change forwarding behavior.
+captured. These booleans describe the forwarded headers, not the incoming request.
+The proxy strips `Expect` after reading the incoming body, because Node/undici
+fetch rejects the client's `100-continue` handshake header. Body bytes and
+upstream responses (including 409 conflicts) are preserved.
 
 Sentry error reports are capped at five per minute per runtime; safe stdout
 diagnostics are not capped. Deployment quotas and delivery failures can also

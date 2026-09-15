@@ -16,7 +16,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
-const REQUEST_ONLY_HEADERS = new Set(["host", "content-length"]);
+// The incoming body is fully read before forwarding. Do not repeat the client's
+// 100-continue handshake: Node/undici fetch rejects an explicit Expect header.
+const REQUEST_ONLY_HEADERS = new Set(["host", "content-length", "expect"]);
 const RESPONSE_ONLY_HEADERS = new Set(["content-length", "content-encoding"]);
 const SPOOFABLE_FORWARDING_HEADERS = new Set(["forwarded", "x-forwarded-host", "x-forwarded-prefix", "x-forwarded-proto"]);
 const LOCATION_BASED_HEADERS = new Set(["content-location", "link", "location", "refresh"]);
