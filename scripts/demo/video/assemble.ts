@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { journeyBuildKind, manifestSchema, matchesVideoFormat, releaseReceiptSchema, videoFormat } from './manifest.ts';
 import type { RenderScene } from './manifest.ts';
+import { validateCompletion, verifyCompletedMedia } from './completion.ts';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const reports = resolve(root, '../../../reports/demo');
@@ -49,7 +50,7 @@ async function localFile(base: string, path: string) {
 
 async function main() {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('pnpm assemble --manifest <sanitized.json> [--validate-only]\nEach present C/D lane must contain A and B. C accepts clip/png; D accepts png only. Media must be under reports/demo/eng105-proof, or the explicitly authorized ENG105_CAPTURE_ROOT. Every scene requires release {buildKind, desktopVersion, desktopTag, releaseSha, lane, denBuildIdentity, evidencePath}. The local JSON receipt must contain those identity fields plus member (no evidencePath), matching exactly. buildKind is release-source, packaged-release, or development. release-source pins v0.18.46/a0d6bd1de8debf4f09d22b8538e124b2ff45b339 and is explicitly not a packaged binary. Outputs stay in ignored reports/demo/eng-105-2026-09-15/runs/. No export. See manifest.template.json; replace placeholders and attest actualCapture/sanitized only after review. Requires ffmpeg and ffprobe on PATH.');
+    console.log('pnpm assemble --manifest <sanitized.json> [--validate-only]\nSet progress explicitly to partial or complete. Complete requires completion {runId, runName, runnerReceiptPath, claimsReceiptPath, bindingReceiptPath}: finalized C test-run.json, all canonical ten Passed claims, and owner binding with exit0/1 passed/0 failed/0 skipped, matching run/gitSHA/file hashes and approved media hashes. No complete mode from subset scenes. Each present C/D lane must contain A and B. C accepts clip/png; D accepts png only. Media must be under reports/demo/eng105-proof, or the explicitly authorized ENG105_CAPTURE_ROOT. Every scene requires release {buildKind, desktopVersion, desktopTag, releaseSha, lane, denBuildIdentity, evidencePath}. The local JSON receipt must contain those identity fields plus member (no evidencePath), matching exactly. buildKind is release-source, packaged-release, or development. release-source pins v0.18.46/a0d6bd1de8debf4f09d22b8538e124b2ff45b339 and is explicitly not a packaged binary. Outputs stay in ignored reports/demo/eng-105-2026-09-15/runs/. No export. See manifest.template.json; replace placeholders and attest actualCapture/sanitized only after review. Requires ffmpeg and ffprobe on PATH.');
     return;
   }
   if (args[0] !== '--manifest' || !args[1] || args.length > 3 || (args[2] && args[2] !== '--validate-only')) {
@@ -62,6 +63,24 @@ async function main() {
   if ((await stat(input)).size > 262144) throw new Error('Manifest exceeds 256 KiB');
   const source = await readFile(input, 'utf8');
   const manifest = manifestSchema.parse(JSON.parse(source));
+  let completionEvidence: ReturnType<typeof validateCompletion> | undefined;
+  let completionHashes: { runnerSha256: string; claimsSha256: string; bindingSha256: string } | undefined;
+  if (manifest.progress === 'complete') {
+    const config = manifest.completion;
+    if (!config) throw new Error('Complete mode requires finalized C evidence');
+    const runnerPath = await localFile(dirname(input), config.runnerReceiptPath);
+    if (basename(runnerPath) !== 'test-run.json') throw new Error('Use the canonical finalized C test-run.json');
+    const claimsPath = await localFile(dirname(input), config.claimsReceiptPath);
+    const bindingPath = await localFile(dirname(input), config.bindingReceiptPath);
+    for (const path of [runnerPath, claimsPath, bindingPath]) {
+      if ((await stat(path)).size > 32 * 1024 * 1024) throw new Error('Completion evidence exceeds 32 MiB');
+    }
+    completionHashes = { runnerSha256: await hash(runnerPath), claimsSha256: await hash(claimsPath), bindingSha256: await hash(bindingPath) };
+    completionEvidence = validateCompletion({
+      runner: JSON.parse(await readFile(runnerPath, 'utf8')), claims: JSON.parse(await readFile(claimsPath, 'utf8')),
+      binding: JSON.parse(await readFile(bindingPath, 'utf8')), ...completionHashes, runId: config.runId, runName: config.runName,
+    });
+  }
   const allowedCaptureRoot = await realpath(captureRoot);
   const checked = [];
   for (const [index, scene] of manifest.scenes.entries()) {
@@ -96,7 +115,27 @@ async function main() {
     const evidence = scene.assertion.evidencePath
       ? await localFile(dirname(input), scene.assertion.evidencePath) : undefined;
     if (evidence && !(await stat(evidence)).size) throw new Error('Assertion evidence file is empty');
-    checked.push({ scene, path, frames, releaseEvidenceSha256, sourceId: `source-${index + 1}`, sha256: await hash(path),
+    const sourceSha256 = await hash(path);
+    if (completionEvidence && completionHashes) {
+      const { claims, binding } = completionEvidence;
+      if (scene.release.buildKind !== claims.buildKind || scene.release.desktopVersion !== claims.desktopVersion
+        || scene.release.desktopTag !== claims.desktopTag || scene.release.releaseSha !== claims.releaseSha
+        || scene.release.lane !== claims.lane || scene.release.denBuildIdentity !== claims.denBuildIdentity) {
+        throw new Error('Scene release provenance does not match the finalized C claims run');
+      }
+      if (!evidence || ![completionHashes.runnerSha256, completionHashes.claimsSha256].includes(await hash(evidence))) {
+        throw new Error('Complete scene assertions must reference the exact finalized C runner or claims receipt');
+      }
+      let derivedReceipt: unknown;
+      if (scene.kind === 'clip') {
+        if (!scene.captureReceiptPath) throw new Error('Complete CDP clip requires its source hash-chain receipt');
+        const capturePath = await localFile(dirname(input), scene.captureReceiptPath);
+        if ((await stat(capturePath)).size > 8 * 1024 * 1024) throw new Error('Capture receipt exceeds 8 MiB');
+        derivedReceipt = JSON.parse(await readFile(capturePath, 'utf8'));
+      }
+      verifyCompletedMedia(binding, { kind: scene.kind, sha256: sourceSha256, derivedReceipt });
+    }
+    checked.push({ scene, path, frames, releaseEvidenceSha256, sourceId: `source-${index + 1}`, sha256: sourceSha256,
       evidenceSha256: evidence ? await hash(evidence) : null });
   }
   if (args[2] === '--validate-only') {
@@ -133,7 +172,11 @@ async function main() {
       assetSha256: await hash(normalized), evidenceSha256: item.evidenceSha256,
       releaseEvidenceSha256: item.releaseEvidenceSha256 });
   }
-  const receipt = { version: 1, status: 'prepared-not-rendered', ...videoFormat,
+  const receipt = { version: 1, status: 'prepared-not-rendered', progress: manifest.progress, ...videoFormat,
+    completion: completionEvidence ? { runId: completionEvidence.binding.runId, runName: completionEvidence.runner.name,
+      closedAt: completionEvidence.runner.closedAt, gitSha: completionEvidence.runner.gitSha,
+      outcome: completionEvidence.runner.outcome, claimIds: completionEvidence.claims.claims.map((claim) => claim.claim),
+      ...completionHashes } : null,
     inputManifestSha256: createHash('sha256').update(source).digest('hex'),
     provenance: 'Operator-attested actual captures and sanitization. Assembler does not verify test assertions or detect secrets in pixels.',
     scenes: receipts };
@@ -146,10 +189,10 @@ async function main() {
   for (const variant of ['C', 'D']) {
     const selected = scenes.filter((scene) => scene.variant === variant);
     if (!selected.length) continue;
-    const inputProps = { scenes: selected };
+    const inputProps = { scenes: selected, progress: manifest.progress };
     const composition = await selectComposition({ serveUrl, id: 'ENG105', inputProps });
     const journey = journeyBuildKind(selected.map((scene) => scene.release));
-    const file = `ENG105-${variant}-${journey}.mp4`;
+    const file = `ENG105-${variant}-${journey}-${manifest.progress.toUpperCase()}.mp4`;
     const output = join(work, file);
     await renderMedia({ serveUrl, composition, inputProps, codec: 'h264', outputLocation: output,
       pixelFormat: 'yuv420p', crf: 18, concurrency: 1, muted: true, overwrite: false });

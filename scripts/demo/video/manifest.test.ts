@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { buildLabel, journeyBuildKind, manifestSchema, matchesVideoFormat, releaseReceiptSchema, releaseSourcePin, videoFormat } from './manifest.ts';
+import { buildLabel, journeyBuildKind, manifestSchema, matchesVideoFormat, progressHeading, releaseReceiptSchema, releaseSourcePin, videoFormat } from './manifest.ts';
 
 // Schema-only input fixtures: never rendered or presented as capture evidence.
 function input() {
   return {
     version: 1,
     sanitized: true,
+    progress: 'partial',
     scenes: ['A', 'B'].map((member) => ({
       variant: 'D', member, kind: 'png', path: 'schema-only.png', actualCapture: true,
       durationSeconds: 10, startSeconds: 0, caption: 'Schema fixture', observed: 'Not capture evidence',
@@ -18,6 +19,14 @@ function input() {
     })),
   };
 }
+
+test('explicit progress never upgrades subset scenes or leaks the partial heading into complete mode', () => {
+  assert.equal(progressHeading('partial'), 'PARTIAL PROGRESS — NOT A FULL PASS');
+  assert.equal(progressHeading('complete').includes('PARTIAL'), false);
+  const subset = input();
+  subset.progress = 'complete';
+  assert.equal(manifestSchema.safeParse(subset).success, false);
+});
 
 test('fixed readable canvas and output geometry guard agree', () => {
   assert.deepEqual(videoFormat, { width: 2560, height: 1920, fps: 30 });

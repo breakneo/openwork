@@ -55,14 +55,29 @@ export function journeyBuildKind(identities: ReleaseIdentity[]) {
 
 export const releaseReceiptSchema = releaseIdentity.extend({ member: z.enum(['A', 'B']) }).strict().superRefine(checkRelease);
 
+export function progressHeading(progress: 'partial' | 'complete') {
+  return progress === 'complete'
+    ? 'COMPLETE JOURNEY — FINALIZED C EVIDENCE VERIFIED'
+    : 'PARTIAL PROGRESS — NOT A FULL PASS';
+}
+
 export const manifestSchema = z.object({
   version: z.literal(1),
   sanitized: z.literal(true),
+  progress: z.enum(['partial', 'complete']),
+  completion: z.object({
+    runId: z.string().trim().min(1),
+    runName: z.string().trim().min(1),
+    bindingReceiptPath: z.string().trim().min(1),
+    runnerReceiptPath: z.string().trim().min(1),
+    claimsReceiptPath: z.string().trim().min(1),
+  }).strict().optional(),
   scenes: z.array(z.object({
     variant: z.enum(['C', 'D']),
     member: z.enum(['A', 'B']),
     kind: z.enum(['clip', 'png']),
     path: z.string().min(1),
+    captureReceiptPath: z.string().min(1).optional(),
     actualCapture: z.literal(true),
     durationSeconds: z.number().min(1).max(180),
     startSeconds: z.number().min(0).default(0),
@@ -76,6 +91,12 @@ export const manifestSchema = z.object({
     }).strict(),
   }).strict()).min(2).max(120),
 }).strict().superRefine((manifest, ctx) => {
+  if (manifest.progress === 'complete' && !manifest.completion) {
+    ctx.addIssue({ code: 'custom', message: 'Complete mode requires finalized C runner and all required claims evidence, not subset scenes' });
+  }
+  if (manifest.progress === 'partial' && manifest.completion) {
+    ctx.addIssue({ code: 'custom', message: 'Partial mode must not carry a completion declaration' });
+  }
   for (const variant of ['C', 'D']) {
     const scenes = manifest.scenes.filter((scene) => scene.variant === variant);
     if (!scenes.length) continue;
@@ -87,6 +108,9 @@ export const manifestSchema = z.object({
     }
   }
   for (const scene of manifest.scenes) {
+    if (manifest.progress === 'complete' && (scene.assertion.state !== 'passed' || scene.release.buildKind === 'development')) {
+      ctx.addIssue({ code: 'custom', message: 'Complete scenes require passing evidence and approved release provenance' });
+    }
     if (scene.variant === 'D' && scene.kind !== 'png') {
       ctx.addIssue({ code: 'custom', message: 'D requires actual PNG captures rendered with Remotion' });
     }
@@ -100,10 +124,10 @@ export const manifestSchema = z.object({
 });
 
 export type Manifest = z.infer<typeof manifestSchema>;
-export type RenderScene = Omit<Manifest['scenes'][number], 'path' | 'assertion' | 'release'> & {
+export type RenderScene = Omit<Manifest['scenes'][number], 'path' | 'assertion' | 'release' | 'captureReceiptPath'> & {
   release: Omit<Manifest['scenes'][number]['release'], 'evidencePath'>;
   asset: string;
   frames: number;
   assertion: { state: Manifest['scenes'][number]['assertion']['state'] };
 };
-export type VideoProps = { scenes: RenderScene[] };
+export type VideoProps = { scenes: RenderScene[]; progress: 'partial' | 'complete' };
