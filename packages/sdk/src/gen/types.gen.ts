@@ -7465,7 +7465,17 @@ export type SaveWorkflowData = {
     pluginId?: string;
     name: string;
     description?: string;
-    code: string;
+    /**
+     * Exact tested source. Required without receiptId; if both are supplied it must byte-match the retained source.
+     */
+    code?: string;
+    /**
+     * Successful authoring receipt from this caller within 15 minutes. Encrypted source retention is shared across replicas when Redis is configured, otherwise process-local. If unavailable, retest or omit receiptId and supply the exact source.
+     */
+    receiptId?: string;
+    /**
+     * Must match the tested input when receiptId is supplied. Forbidden for live authoring receipts.
+     */
     currentInput?: unknown;
     inputSchema?: unknown;
     /**
@@ -8956,6 +8966,8 @@ export type PostV1WorkflowsByConfigObjectIdRunData = {
     pluginId: string;
     configObjectVersionId: string;
     input?: unknown;
+    mode?: "adhoc" | "live";
+    timeZone?: string;
   };
   path: {
     configObjectId: string;
@@ -8980,6 +8992,10 @@ export type PostV1WorkflowsByConfigObjectIdRunResponses = {
    */
   200: {
     status: "succeeded";
+    executionType: "saved-workflow";
+    mode: "adhoc" | "live";
+    fetchedAt: string;
+    timeZone?: string;
     value: unknown;
     markdown: string;
     receiptId: string | null;

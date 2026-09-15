@@ -71,6 +71,27 @@ jobs:
       - name: Check journey selection, reporting, and alerts
         run: node --test evals/scripts/journey-ci.test.mjs evals/scripts/flake-report.test.mjs
 
+  workflow-authoring:
+    needs: classify-changes
+    if: needs.classify-changes.outputs.lane == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-tests
+      - name: Verify immutable runtime and authoring contracts
+        run: pnpm --filter @openwork/codemode test && pnpm --filter @openwork-ee/den-api test:authoring
+      - name: Verify shared encrypted receipt retention against Redis
+        env:
+          WORKFLOW_AUTHORING_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: pnpm --filter @openwork-ee/den-api exec bun test --conditions development test/workflow-authoring-retention.redis.test.ts
+
   openwork-tests-build:
     needs: classify-changes
     if: needs.classify-changes.outputs.lane == 'full'
