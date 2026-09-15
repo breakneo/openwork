@@ -77,6 +77,35 @@ async function clickTarget(surface: Surface, target: { role?: string; label?: st
   if (!point) throw new Error("Control not visible for trusted pointer input");
   await clickAt(surface, point);
 }
+async function allowClockSaveDialog(surface: Surface, serverName: string) {
+  const url = surface.client.webSocketDebuggerUrl;
+  if (!url) throw new Error("Missing owned desktop CDP socket");
+  const socket = new WebSocket(url);
+  const expected = `Allow this MCP App to call save_preferences on ${serverName}?`;
+  const observed: { expected: boolean; accepted: boolean }[] = [];
+  let approved = 0;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { socket.close(); reject(new Error("Native-dialog observer setup timed out")); }, 10_000);
+    socket.onopen = () => socket.send(JSON.stringify({ id: 1, method: "Page.enable" }));
+    socket.onerror = () => { clearTimeout(timer); reject(new Error("Native-dialog observer disconnected")); };
+    socket.onmessage = event => {
+      const message = object(JSON.parse(String(event.data)));
+      if (message.id === 1) { clearTimeout(timer); resolve(); }
+      if (message.method === "Page.javascriptDialogOpening") {
+        const params = object(message.params);
+        const matches = params.type === "confirm" && params.message === expected;
+        observed.push({ expected: matches, accepted: false });
+        if (matches) socket.send(JSON.stringify({ id: 2, method: "Page.handleJavaScriptDialog", params: { accept: true } }));
+      }
+      if (message.id === 2 && !message.error) {
+        approved += 1;
+        const last = observed.at(-1);
+        if (last) last.accepted = true;
+      }
+    };
+  });
+  return { observed, approved: () => approved, [Symbol.asyncDispose]: async () => socket.close() };
+}
 async function frame(surface: Surface, title: string): Promise<Surface & AsyncDisposable> {
   return eventually(async () => {
     // The released host nests srcdoc inside its sandbox proxy rather than
@@ -203,6 +232,12 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   const home = registration("acme-home-demo");
   const clocks = registration("world-clocks-demo");
   const calendar = registration("personal-calendar-demo");
+  const calendarConfiguration = object(await api(den.admin, orgId, `/v1/mcp-connections/${calendar.id}`));
+  expect(calendarConfiguration.requestedScopes).toEqual(["calendar:read"]);
+  await writeFile(`${reportDirectory}calendar-auth-contract.json`, JSON.stringify({
+    authType: calendarConfiguration.authType, credentialMode: calendarConfiguration.credentialMode,
+    requestedScopes: calendarConfiguration.requestedScopes,
+  }, null, 2));
   const alexBrowser = stack.use(await chrome({ name: "eng105-alex-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
   const jordanBrowser = stack.use(await chrome({ name: "eng105-jordan-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
   expect(alexBrowser.handle.cdpUrl).not.toBe(jordanBrowser.handle.cdpUrl);
@@ -338,6 +373,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   }
 
   await using clockFrame = await frame(alex, "World Clocks");
+  await using clockApproval = await allowClockSaveDialog(alex, text(clockApp, "serverName"));
   await clickTarget(clockFrame, { role: "button", label: "Edit" });
   const existingCities = await evalIn(clockFrame, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()));
   const addedCity = ["Tokyo", "Paris", "Berlin", "Toronto", "Mumbai", "Cape Town"].find(city => !existingCities.includes(city));
@@ -350,6 +386,9 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     "Clocks shown includes the added city").toBe(existingCities.length + 1);
   await waitFor(clockFrame, () => /Saved \(shared with everyone\)|Saved to your account/.test(document.body.innerText),
     { timeoutMs: 30_000, label: "save_preferences completed, not merely Done" });
+  expect(clockApproval.observed.every(dialog => dialog.expected)).toBe(true);
+  expect(clockApproval.approved(), "Released host requires explicit write-helper confirmation").toBeGreaterThan(0);
+  evidence.recordAssertionEvidence("Accepted only the real native confirmation for this Clock save_preferences call", JSON.stringify(clockApproval.observed), true);
   await checkpoint(alex, "11-world-clocks-edit-saved");
   await clickTarget(clockFrame, { role: "button", label: "Done" });
   await refresh(alex, text(clockApp, "title"));
