@@ -1260,8 +1260,10 @@ describe("cloud provider sync gateway", () => {
       expect(JSON.stringify(denTraffic)).not.toContain(localSecret);
       expect(engineAuth.get(provider.id)).toBe(localSecret);
       expect((await env.list()).find((entry) => entry.key === credentialKey)?.value).toBe(localSecret);
-      expect(await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__"))
-        .toEqual({ providerIds: [provider.id], envHashes });
+      const ownership = await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__");
+      expect(ownership.providerIds).toEqual([provider.id]);
+      expect(ownership.envHashes).toEqual(envHashes);
+      expect(JSON.stringify(ownership)).not.toContain(localSecret);
     };
     const expectRetired = async () => {
       expect(sync.status().providers).toEqual([]);
