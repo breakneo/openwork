@@ -752,6 +752,8 @@ export type OpenworkCloudMcpHealth = {
   connectCatalogEnabled: boolean;
   /** Local private credential readiness, not provider health. Older servers omit it. */
   appHostAuthorizationReady?: boolean | null;
+  connectCatalogDiagnostic?: "ready" | "empty" | "missing_app_host_auth" | "untrusted_origin"
+    | "invalid_catalog" | "invalid_proxy_descriptor" | "discovery_unavailable";
   workspace: {
     id: string;
     type: string;
@@ -2102,6 +2104,12 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
           body: payload,
           timeoutMs: timeouts.cloudMcpReconcile,
         },
+      ),
+    refreshOpenworkCloudMcpCatalog: (workspaceId: string, providerModel?: OpenworkCloudMcpProviderModelContext) =>
+      requestJson<OpenworkCloudMcpHealth>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/mcp/openwork-cloud/reconcile`,
+        { token, hostToken, method: "POST", body: { mode: "refresh_catalog", ...providerModel }, timeoutMs: timeouts.cloudMcpReconcile },
       ),
     refreshOpenworkCloudMcpEngine: (
       workspaceId: string,
