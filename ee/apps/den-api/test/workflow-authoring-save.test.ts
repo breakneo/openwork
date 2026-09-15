@@ -349,6 +349,8 @@ test("code-only saves cannot promote live receipts with changed or omitted input
 
 for (const code of [
   'const apiKey = ("synthetic-literal-credential"); return null',
+  'const apiKey = ("synthetic-literal-credential" + ""); return null',
+  'const apiKey = ("" + "synthetic-literal-credential"); return null',
   'const apiKey /* name */ = /* value */ ("synthetic-literal-credential"); return null',
   'return { apiKey: /* value */ ("synthetic-literal-credential") }',
   'const headers = {}; headers["apiKey"] = ("synthetic-literal-credential"); return headers',

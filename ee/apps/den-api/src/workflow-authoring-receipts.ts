@@ -135,13 +135,15 @@ function credentialTarget(node: ts.Node): boolean {
   return false
 }
 
-function credentialLiteral(node: ts.Expression): boolean {
+function credentialLiteral(node: ts.Expression): string | undefined {
   if (ts.isParenthesizedExpression(node)) return credentialLiteral(node.expression)
-  if (ts.isStringLiteralLike(node)) return node.text.length > 0
+  if (ts.isStringLiteralLike(node)) return node.text
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    return credentialLiteral(node.left) && credentialLiteral(node.right)
+    const left = credentialLiteral(node.left)
+    const right = credentialLiteral(node.right)
+    if (left !== undefined && right !== undefined) return left + right
   }
-  return false
+  return undefined
 }
 
 function containsCredentialAssignment(node: ts.Node): boolean {

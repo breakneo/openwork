@@ -116,6 +116,7 @@ test("live provenance retains only an immutable generated runtime and verifies i
 for (const code of [
   'return "sk-"',
   "return input.apiKey",
+  'const apiKey = ("" + ""); return null',
   "const token = input.token; return await tools.den.read({ token })",
   "return { token: input.token, password: input.password }",
   "const apiKey = (input.apiKey); return { apiKey }",
@@ -142,6 +143,9 @@ const secretSources = [
   'return { ["apiKey"]: ("synthetic-literal-credential") }',
   'const { apiKey = ("synthetic-literal-credential") } = input; return apiKey',
   'const apiKey = ("synthetic-literal-" + "credential"); return apiKey',
+  'const apiKey = ("synthetic-literal-credential" + ""); return null',
+  'const apiKey = ("" + "synthetic-literal-credential"); return null',
+  'const apiKey = (("" + "synthetic-literal-credential") + ""); return null',
   'return { "access_token": "synthetic-credential" }',
   'const clientSecret = `synthetic-credential`; return null',
   'const sessionToken = "synthetic-credential"; return null',
