@@ -1,4 +1,4 @@
-import { beforeAll, expect, mock, spyOn, test } from "bun:test"
+import { afterAll, beforeAll, expect, mock, spyOn, test } from "bun:test"
 import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import type { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js"
 import type { ExternalMcpConnectionRow } from "../src/capability-sources/external-mcp-connections.js"
@@ -29,6 +29,13 @@ let parseNativeCapabilityName: typeof import("../src/mcp/native-capabilities.js"
 
 beforeAll(async () => {
   seedRequiredEnv()
+  mock.module("../src/db.js", () => ({
+    db: {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+      insert: () => ({ values: () => ({ execute: async () => undefined }) }),
+      transaction: async () => null,
+    },
+  }))
   const codemodeTools = await import("../src/mcp/codemode-tools.js")
   const capabilityRegistry = await import("../src/mcp/capability-registry.js")
   const nativeCapabilities = await import("../src/mcp/native-capabilities.js")
@@ -45,6 +52,8 @@ beforeAll(async () => {
   stripUndefinedEntries = codemodeTools.stripUndefinedEntries
   parseNativeCapabilityName = nativeCapabilities.parseNativeCapabilityName
 })
+
+afterAll(() => mock.restore())
 
 test("sanitizes connection names into interpreter-safe namespaces", () => {
   expect(sanitizeNamespaceSegment("Acme Drive")).toBe("acme_drive")
