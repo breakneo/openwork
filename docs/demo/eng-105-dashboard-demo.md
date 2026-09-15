@@ -13,8 +13,13 @@ The required seeded topology cannot inject release images or use Daytona placeme
 ```sh
 pnpm install --frozen-lockfile
 pnpm --dir evals install --frozen-lockfile
+pnpm --filter @openwork/types build
+pnpm --filter @openwork-ee/den-db build
+pnpm --filter @openwork/email build
 pnpm world up acme-demo-eng105 --detach
 ```
+
+The three package builds are required on a fresh checkout (installing dependencies alone does not create `@openwork/email/dist/index.js`). A local MySQL test service must also be available at `127.0.0.1:3306`; if none is running, `pnpm dev:den:mysql` starts the repository's development service. Do not restart or replace an existing service.
 
 For automated execution, launch long boot/test/render commands detached or in an owned background process with a log and exit receipt; poll in short calls. Do not kill or attach to another session's processes. Keep the world alive for the operator run, and stop only your world with `pnpm world down acme-demo-eng105` afterward.
 
