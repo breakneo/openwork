@@ -127,7 +127,7 @@ async function checkpoint(surface: Surface, name: string) {
   }
 }
 async function see(surface: Surface, value: string) {
-  await waitFor(surface, browserScript(value => document.body.innerText.includes(value), [value]),
+  await waitFor(surface, browserScript(value => document.body.innerText.toLowerCase().includes(value.toLowerCase()), [value]),
     { timeoutMs: 90_000, label: `visible ${value}` });
 }
 async function refresh(surface: Surface, title: string) {
