@@ -8,7 +8,7 @@ export function connectionMcpSetupUrl(publicApiUrl: string, connectionId: string
   if (!publicApiUrl.trim() || !connectionId.trim()) return null;
   try {
     const url = new URL(publicApiUrl.trim());
-    if ((url.protocol !== "https:" && url.protocol !== "http:")
+    if (url.protocol !== "https:"
       || url.username || url.password || url.search || url.hash
       || /\/api\/den(?:\/|$)/.test(url.pathname)) return null;
     url.pathname = `${url.pathname.replace(/\/+$/, "")}/mcp/agent/connections/${encodeURIComponent(connectionId)}`;

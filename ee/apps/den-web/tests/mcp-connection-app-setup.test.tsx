@@ -116,7 +116,8 @@ test("organization policy blocks the setup block even for a saved exposed connec
   expect(container.innerHTML).toBe("");
 });
 
-test.each(["", "invalid", "/api/den", "https://app.example.test/api/den/", "ftp://api.example.test", "https://user:secret@api.example.test", "https://api.example.test?token=secret", "https://api.example.test#fragment"])("unavailable or unsafe public base %s cannot be copied or suggest setup is ready", async (base) => {
+test.each(["", "invalid", "/api/den", "https://app.example.test/api/den/", "ftp://api.example.test", "http://api.example.test", "http://localhost:8790", "http://[::1]:8790", "https://user:secret@api.example.test", "https://api.example.test?token=secret", "https://api.example.test#fragment"])("unavailable or unsafe public base %s cannot be copied or suggest setup is ready", async (base) => {
+  expect(connectionMcpSetupUrl(base, connection.id)).toBeNull();
   await render({ publicApiUrl: base });
   expect(container.textContent).toContain("Public MCP URL unavailable");
   expect(container.querySelector("button")?.disabled).toBe(true);
