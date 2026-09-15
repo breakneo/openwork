@@ -92,6 +92,7 @@ import {
   mapDesktopWorkspace,
   mergeRouteWorkspaces,
   orderRouteWorkspaces,
+  startSidebarTask,
   TASK_CREATE_RETRY_DELAYS_MS,
   toSessionGroups,
   withTransientEngineRetry,
@@ -3589,22 +3590,21 @@ export function SessionRoute() {
         },
         onPrefetchSession: handlePrefetchSession,
         onCreateTaskInWorkspace: (workspaceId, groupId) => {
-          const { focusedPane, secondary } = useWorkbenchStore.getState();
-          const hasWorkspaceError = Boolean(errorsByWorkspaceId[workspaceId]?.trim())
-            || workspaceConnectionStateById[workspaceId]?.status === "error";
-          if (!groupId && !hasWorkspaceError && !(focusedPane === "secondary" && secondary)) {
-            // The empty composer creates its session on submit. Opening it must
-            // not wait for an engine request, especially on a cold v2 runtime.
-            setLegacySelectedWorkspaceId(workspaceId);
-            writeActiveWorkspaceId(workspaceId);
-            navigateToWorkspaceSession(workspaceId);
-            focusPromptSoon();
-            return;
-          }
-          void handleCreateTaskInWorkspace(workspaceId).then((sessionId) => {
-            if (sessionId && groupId) {
-              sessionManagementStore.getState().assignGroup(workspaceId, sessionId, groupId);
-            }
+          void startSidebarTask({
+            workspaceId,
+            groupId,
+            hasWorkspaceError: Boolean(errorsByWorkspaceId[workspaceId]?.trim())
+              || workspaceConnectionStateById[workspaceId]?.status === "error",
+            openEmptyComposer: (id) => {
+              setLegacySelectedWorkspaceId(id);
+              writeActiveWorkspaceId(id);
+              navigateToWorkspaceSession(id);
+              focusPromptSoon();
+            },
+            createTask: handleCreateTaskInWorkspaceWithOpenMode,
+            assignGroup: (id, sessionId, targetGroupId) => {
+              sessionManagementStore.getState().assignGroup(id, sessionId, targetGroupId);
+            },
           });
         },
         onCreateSplitTaskInWorkspace: (workspaceId) => {
