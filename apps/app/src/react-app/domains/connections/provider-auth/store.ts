@@ -665,12 +665,14 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
 
   const writeWorkspaceOpenworkConfigRecord = async (
     config: Record<string, unknown>,
+    isCurrent = () => true,
   ) => {
     const root = options.selectedWorkspaceRoot().trim();
     const isLocalWorkspace =
       options.selectedWorkspaceDisplay().workspaceType === "local";
     const { openworkClient, openworkWorkspaceId, hasOpenworkTarget, canUseOpenworkServer } =
       await resolveOpenworkConfigTarget("write");
+    if (!isCurrent()) return false;
 
     if (canUseOpenworkServer && openworkClient && openworkWorkspaceId) {
       await openworkClient.patchConfig(openworkWorkspaceId, { openwork: config });
@@ -697,6 +699,13 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
 
     return false;
   };
+
+  const cloudImportWorkspaceKey = () => JSON.stringify([
+    currentWorkspaceKey(),
+    options.selectedWorkspaceDisplay().workspaceType,
+    options.providerBaseUrl(),
+    options.openworkServer.getSnapshot().openworkServerClient?.baseUrl,
+  ]);
 
   const refreshImportedCloudProviders = async (refreshOptions?: { strict?: boolean }) => {
     try {
@@ -725,9 +734,32 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       if (state.cloudProviderServerSync !== null) {
         setStateField("cloudProviderServerSync", null);
       }
+      const generation = cloudOrgProvidersGeneration;
+      const contextKey = getCloudProviderSyncContextKey();
+      const workspaceKey = cloudImportWorkspaceKey();
       const config = await readWorkspaceOpenworkConfigRecord();
       const cloudImports = readWorkspaceCloudImports(config);
       const next = cloudImports.providers;
+      if (
+        disposed || generation !== cloudOrgProvidersGeneration ||
+        contextKey !== getCloudProviderSyncContextKey() || workspaceKey !== cloudImportWorkspaceKey()
+      ) {
+        const cleanupGeneration = cloudOrgProvidersGeneration;
+        const isCurrent = () => !disposed && cleanupGeneration === cloudOrgProvidersGeneration &&
+          workspaceKey === cloudImportWorkspaceKey() && !readDenSettings().authToken?.trim() && !serverHandlesProviderSync();
+        for (const importedProvider of Object.values(next)) {
+          if (!isCurrent()) break;
+          await removeCloudProviderInternal(importedProvider.cloudProviderId, {
+            silent: true, importedProvider, isCurrent,
+          }).catch(() => undefined);
+          if (!isCurrent()) break;
+          removeProviderFromState(importedProvider.providerId);
+          if (readStoredDefaultModel().providerID === importedProvider.providerId) {
+            writeStoredDefaultModel(DEFAULT_MODEL);
+          }
+        }
+        return state.importedCloudProviders;
+      }
       // Guard: don't overwrite non-empty import state with an empty read.
       // This prevents a transient server unavailability (e.g. during engine
       // restart) from clearing a just-completed import from the badge.
@@ -748,8 +780,10 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
 
   const persistImportedCloudProviders = async (
     nextProviders: Record<string, CloudImportedProvider>,
+    isCurrent = () => true,
   ) => {
     const config = await readWorkspaceOpenworkConfigRecord();
+    if (!isCurrent()) return;
     const cloudImports = readWorkspaceCloudImports(config);
     const nextCloudImports = {
       ...cloudImports,
@@ -758,7 +792,8 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     const nextConfig = withWorkspaceCloudImports(config, {
       ...nextCloudImports,
     });
-    const persisted = await writeWorkspaceOpenworkConfigRecord(nextConfig);
+    const persisted = await writeWorkspaceOpenworkConfigRecord(nextConfig, isCurrent);
+    if (!isCurrent()) return;
     if (!persisted) {
       throw new Error(
         "OpenWork server unavailable. Connect to manage imported cloud providers.",
@@ -789,12 +824,13 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     return null;
   };
 
-  const writeProjectConfigFile = async (content: string) => {
+  const writeProjectConfigFile = async (content: string, isCurrent = () => true) => {
     const root = options.selectedWorkspaceRoot().trim();
     const isLocalWorkspace =
       options.selectedWorkspaceDisplay().workspaceType === "local";
     const { openworkClient, openworkWorkspaceId, hasOpenworkTarget, canUseOpenworkServer } =
       await resolveOpenworkConfigTarget("write");
+    if (!isCurrent()) return false;
 
     if (canUseOpenworkServer && openworkClient && openworkWorkspaceId) {
       const result = await openworkClient.writeOpencodeConfigFile(
@@ -829,9 +865,10 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
    * values upsert, explicit `null` deletes — per-key on the server, so there
    * is no read-modify-write race and no edit of the user's opencode.jsonc.
    */
-  const patchRuntimeProviders = async (update: Record<string, unknown>) => {
+  const patchRuntimeProviders = async (update: Record<string, unknown>, isCurrent = () => true) => {
     const { openworkClient, openworkWorkspaceId, canUseOpenworkServer } =
       await resolveOpenworkConfigTarget("write");
+    if (!isCurrent()) return;
     if (!canUseOpenworkServer || !openworkClient || !openworkWorkspaceId) {
       throw new Error("OpenWork server unavailable. Connect to manage cloud providers.");
     }
@@ -867,7 +904,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
    * into the project opencode.jsonc. Strip them so the runtime entry is the
    * single owner (and stale blocks from older builds stop shadowing state).
    */
-  const stripLegacyCloudProviderBlocks = async (providerIds: Array<string | null | undefined>) => {
+  const stripLegacyCloudProviderBlocks = async (providerIds: Array<string | null | undefined>, isCurrent = () => true) => {
     const ids = [...new Set(providerIds.flatMap((id) => (id?.trim() ? [id.trim()] : [])))];
     if (ids.length === 0) return;
     try {
@@ -877,7 +914,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
           next = formatConfigWithoutCloudProvider(next, id, options.disabledProviders());
         }
         return next;
-      });
+      }, undefined, isCurrent);
     } catch {
       // Legacy cleanup only — the runtime entry already owns the provider.
     }
@@ -886,8 +923,10 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   const updateProjectConfigFile = async (
     updater: (raw: string) => string,
     fallbackUpdate?: (config: Record<string, unknown>) => Record<string, unknown>,
+    isCurrent = () => true,
   ) => {
     const configFile = await readProjectConfigFile() as { content?: string } | null;
+    if (!isCurrent()) return false;
     if (configFile) {
       const raw = configFile.content?.trim()
         ? configFile.content
@@ -896,8 +935,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       if (configsAreSemanticallyEqual(raw, next)) {
         return false;
       }
-      await writeProjectConfigFile(next);
-      return true;
+      return await writeProjectConfigFile(next, isCurrent);
     }
 
     if (!fallbackUpdate) {
@@ -1917,12 +1955,17 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
 
   async function removeCloudProviderInternal(
     cloudProviderId: string,
-    optionsArg?: { silent?: boolean },
+    optionsArg?: { silent?: boolean; importedProvider?: CloudImportedProvider; isCurrent?: () => boolean },
   ) {
+    const isCurrent = optionsArg?.isCurrent ?? (() => true);
+    const assertCurrent = () => {
+      if (!isCurrent()) throw new Error("Cloud provider cleanup context changed.");
+    };
+    assertCurrent();
     if (!optionsArg?.silent) {
       setStateField("providerAuthError", null);
     }
-    const imported = state.importedCloudProviders[cloudProviderId];
+    const imported = optionsArg?.importedProvider ?? state.importedCloudProviders[cloudProviderId];
     if (!imported) {
       throw new Error("This cloud provider has not been imported into the workspace.");
     }
@@ -1939,12 +1982,16 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       // Runtime-managed: delete the provider entry via the server's per-key
       // merge (`null` deletes), then strip any legacy opencode.jsonc block
       // left by pre-runtime builds. Both are idempotent.
-      await patchRuntimeProviders({ [imported.providerId]: null });
-      await stripLegacyCloudProviderBlocks([imported.providerId]);
+      assertCurrent();
+      await patchRuntimeProviders({ [imported.providerId]: null }, isCurrent);
+      assertCurrent();
+      await stripLegacyCloudProviderBlocks([imported.providerId], isCurrent);
+      assertCurrent();
 
       const nextImportedProviders = { ...state.importedCloudProviders };
       delete nextImportedProviders[cloudProviderId];
-      await persistImportedCloudProviders(nextImportedProviders);
+      await persistImportedCloudProviders(nextImportedProviders, isCurrent);
+      assertCurrent();
 
       options.setDisabledProviders(
         options.disabledProviders().filter((id) => id !== imported.providerId),
@@ -2505,9 +2552,11 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
           void runCloudProviderSync("sign_in");
         } else {
           invalidateDenSessionDelivery();
-          const logoutProviderIds = [...new Set(options.providerConnectedIds())].filter(
-            (providerId) => providerId.trim().toLowerCase() !== DESKTOP_RESTRICTION_OPENCODE_PROVIDER_ID,
-          );
+          const connectedProviderIdsBeforeLogout = options.providerConnectedIds();
+          const logoutProviderIds = [...new Set([
+            ...Object.values(state.importedCloudProviders).map((provider) => provider.providerId),
+            ...state.cloudOrgProviders.map(getCloudManagedProviderId),
+          ])];
           // Account-scoped catalog state must disappear synchronously. Config
           // and credential cleanup continues below without leaving stale
           // models visible while those best-effort operations finish.
@@ -2531,8 +2580,13 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
             lastSyncError: {},
           }));
           if (serverHandlesProviderSync()) {
+            const workspaceKey = currentWorkspaceKey();
+            const generation = cloudOrgProvidersGeneration;
+            const isCurrent = () => !disposed && generation === cloudOrgProvidersGeneration && workspaceKey === currentWorkspaceKey();
+            setStateField("importedCloudProviders", {});
             void (async () => {
-              await options.openworkServer.getSnapshot().openworkServerClient?.deleteDenSession().catch(() => undefined);
+              const cleared = await options.openworkServer.getSnapshot().openworkServerClient?.deleteDenSession().then(() => true, () => false);
+              if (!isCurrent()) return;
               // The server removes cloud-owned environment entries from disk,
               // but a running OpenCode child retains its spawn environment.
               // Explicit desktop sign-out must replace that process so an
@@ -2540,7 +2594,19 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
               if (isDesktopRuntime()) {
                 await engineRestart({}).catch(() => undefined);
               }
+              if (!cleared) return;
+              const providers = await refreshProviders({ force: true }, isCurrent);
+              const defaultProviderId = readStoredDefaultModel().providerID;
+              if (
+                providers &&
+                connectedProviderIdsBeforeLogout.includes(defaultProviderId) &&
+                isCloudManagedProviderKey(defaultProviderId) &&
+                !providers.connected.includes(defaultProviderId)
+              ) {
+                writeStoredDefaultModel(DEFAULT_MODEL);
+              }
             })();
+            return;
           }
           // Sign-out: remove all cloud-imported providers from the workspace
           // Capture the full import records BEFORE clearing state
@@ -2550,15 +2616,6 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
           // Best-effort cleanup: remove each cloud provider from opencode.jsonc
           // BEFORE clearing state so removeCloudProviderInternal can find the records
           void (async () => {
-            for (const providerId of logoutProviderIds) {
-              try {
-                await removeProviderAuthCredentials(providerId);
-              } catch {
-                // Providers backed exclusively by the environment have no
-                // stored credential to remove. Their environment remains
-                // operator-owned and is not mutated by account logout.
-              }
-            }
             for (const cloudId of importedIds) {
               try {
                 await removeCloudProviderInternal(cloudId, { silent: true });
@@ -2627,7 +2684,20 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     // first launch before a workspace exists (workspace sync still handles
     // credential materialization once a workspace is selected).
     void refreshCloudOrgProviders().catch(() => undefined);
+    const importRefreshGeneration = cloudOrgProvidersGeneration;
+    const importRefreshContextKey = getCloudProviderSyncContextKey();
+    const importRefreshWorkspaceKey = cloudImportWorkspaceKey();
     void refreshImportedCloudProviders().then((imported) => {
+      if (
+        disposed || importRefreshGeneration !== cloudOrgProvidersGeneration ||
+        importRefreshContextKey !== getCloudProviderSyncContextKey() || importRefreshWorkspaceKey !== cloudImportWorkspaceKey()
+      ) return;
+      if (serverHandlesProviderSync()) {
+        if (!readDenSettings().authToken?.trim()) {
+          void options.openworkServer.getSnapshot().openworkServerClient?.deleteDenSession().catch(() => undefined);
+        }
+        return;
+      }
       // Startup cleanup: if no auth token, remove any cloud providers that
       // were left behind. Handles orphans from a previous sign-out that
       // didn't clean up (e.g. crash, force-quit, external edit).
