@@ -121,6 +121,11 @@ function dashboardEntryIdentity(entry: DashboardMcpAppEntry, signature: string) 
   return JSON.stringify([entry.id, entry.connectionId, entry.serverName, entry.toolName, entry.resourceUri, entry.projectedToolName, signature]);
 }
 
+/** The same workspace on the same server keeps its live view when the route rebuilds its client object. */
+function sameLaunchEndpoint(left: DashboardLaunchEndpoint, right: DashboardLaunchEndpoint) {
+  return left.workspaceId === right.workspaceId && (left.client === right.client || left.client.baseUrl === right.client.baseUrl);
+}
+
 function appMatchesEntry(app: OpenworkMcpAppResource, entry: DashboardMcpAppEntry) {
   return app.serverName === entry.serverName && app.toolName === entry.toolName && app.resourceUri === entry.resourceUri;
 }
@@ -197,7 +202,7 @@ function McpAppTileContent({
     ...(openworkServerClient && workspaceId ? [{ client: openworkServerClient, workspaceId }] : []),
     ...(fallbackEndpoints ?? []),
   ].filter((endpoint, index, all) => (
-    all.findIndex((other) => other.workspaceId === endpoint.workspaceId && other.client === endpoint.client) === index
+    all.findIndex((other) => sameLaunchEndpoint(other, endpoint)) === index
   )), [fallbackEndpoints, openworkServerClient, workspaceId]);
   // Cached app HTML is interactive, so it follows the same per-user launch
   // consent as a live call and never mounts on a first visit.
@@ -316,7 +321,7 @@ function McpAppTileContent({
     updateRefresh("idle");
   }, [policySignature, clearDocument, releaseLaunches, updateRefresh]);
   useLayoutEffect(() => {
-    const contains = (owner: DashboardLaunchEndpoint) => launchEndpoints.some(endpoint => endpoint.client === owner.client && endpoint.workspaceId === owner.workspaceId);
+    const contains = (owner: DashboardLaunchEndpoint) => launchEndpoints.some(endpoint => sameLaunchEndpoint(endpoint, owner));
     const current = stateRef.current;
     const attempt = launchRef.current;
     const ownerRemoved = current.phase === "ready" && !contains(current.endpoint);
@@ -346,7 +351,7 @@ function McpAppTileContent({
       if (!isCurrent()) throw new Error("This App launch has closed or changed. Run the tile again.");
     };
     const endpointIsActive = (endpoint: DashboardLaunchEndpoint) => isCurrent()
-      && endpointsRef.current.some(current => current.client === endpoint.client && current.workspaceId === endpoint.workspaceId);
+      && endpointsRef.current.some(current => sameLaunchEndpoint(current, endpoint));
     const discardInvalidDocument = () => {
       const current = stateRef.current;
       if (current.phase === "ready" && (!current.lifetime.active || current.lifetime.failed || current.argumentsSignature !== argumentsSignature || !appMatchesEntry(current.app, entry)
@@ -527,7 +532,10 @@ function McpAppTileContent({
         return;
       }
       const current = stateRef.current;
-      if (invalidatesTileDocument(cause) || current.phase !== "ready" || !current.lifetime.active || current.lifetime.failed) {
+      // A saved, still-valid view survives a transient failure; only an
+      // authority, policy or resource problem removes it.
+      if (invalidatesTileDocument(cause) || current.phase !== "ready" || !current.lifetime.active || current.lifetime.failed
+        || current.argumentsSignature !== argumentsSignature || !appMatchesEntry(current.app, entry)) {
         clearDocument({ phase: "error", message: cause instanceof Error && cause.message ? cause.message : "The app could not be launched." });
         releaseLaunches();
       }
@@ -557,7 +565,7 @@ function McpAppTileContent({
 
   const run = () => requestRefresh(true);
   const interactiveEndpoint = state.phase === "ready" && state.argumentsSignature === argumentsSignature && appMatchesEntry(state.app, entry)
-    && launchEndpoints.some((endpoint) => endpoint.workspaceId === state.endpoint.workspaceId && endpoint.client === state.endpoint.client)
+    && launchEndpoints.some((endpoint) => sameLaunchEndpoint(endpoint, state.endpoint))
     ? state.endpoint
     : null;
   const origin = state.phase === "ready" && interactiveEndpoint ? state.origin : null;
@@ -637,7 +645,7 @@ function McpAppTileContent({
         ) : null}
         {state.phase === "ready" && measuredGeometryIdentity === geometryIdentity ? (
           origin ?
-            <div style={{ visibility: awaitingReady ? "hidden" : undefined }} aria-hidden={awaitingReady || undefined}>
+            <div inert={awaitingReady || undefined} aria-hidden={awaitingReady || undefined}>
               <McpAppSandboxView
                 origin={origin}
                 key={state.lifetime.id}

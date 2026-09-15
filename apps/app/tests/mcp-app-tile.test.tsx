@@ -1494,8 +1494,16 @@ test.each([undefined, 560])("loading reserves geometry until document readiness,
     await act(async () => pending.resolve({ content: [] }));
     expect(sandboxView?.initialHeight).toBe(knownHeight);
     expect(host.container.querySelector("[data-dashboard-loading]")).not.toBeNull();
-    expect(host.container.querySelector<HTMLElement>("[data-sandbox-view]")?.parentElement?.style.visibility).toBe("hidden");
+    const view = host.container.querySelector<HTMLElement>("[data-sandbox-view]");
+    const surface = view?.parentElement;
+    // The overlay covers startup without hiding the embedded browsing context.
+    expect(surface?.style.visibility).toBe("");
+    expect(surface?.hasAttribute("inert")).toBe(true);
+    expect(surface?.getAttribute("aria-hidden")).toBe("true");
     await act(async () => sandboxView?.onReady?.());
+    expect(host.container.querySelector("[data-sandbox-view]")).toBe(view);
+    expect(surface?.hasAttribute("inert")).toBe(false);
+    expect(surface?.hasAttribute("aria-hidden")).toBe(false);
     expect(host.container.querySelector("[data-dashboard-tile]")).toBe(outer);
     expect(outer?.getAttribute("aria-busy")).toBe("false");
     expect(outer?.style.minHeight).toBe("");
