@@ -477,7 +477,6 @@ export function SessionPage(props: SessionPageProps) {
   const artifactFileTargets = useMemo(() => accessibleTargets.filter(isCollectibleArtifactTarget), [accessibleTargets]);
   const artifactTargetCount = artifactFileTargets.length;
   const hasArtifactTargets = artifactTargetCount > 0;
-  const hasBrowserTabs = sessionPanelState.tabs.some((tab) => tab.type === "browser");
   const activeSidePanel = sessionSidePanel;
   const sidePanelOpen = activeSidePanel !== null;
   const panelRailActive = activeSidePanel === "panel";
@@ -793,10 +792,17 @@ export function SessionPage(props: SessionPageProps) {
     const browserTab = activePanelTab?.type === "browser"
       ? activePanelTab
       : sessionPanelState.tabs.find((tab) => tab.type === "browser");
-    if (!browserTab) return;
+    if (!browserTab) {
+      // No page yet: the rail still opens the browser. The new tab is owned by
+      // this panel (same owner the panel's own "New tab" button uses), and the
+      // main process answers with panel-opened, which selects it here.
+      void createBrowserTab(undefined, sidePanelSessionKey);
+      setCurrentSidePanel("panel");
+      return;
+    }
     selectBrowserTab(sidePanelSessionKey, browserTab.id);
     setCurrentSidePanel("panel");
-  }, [activePanelTab, browserRailActive, closeRightPane, selectBrowserTab, sessionPanelState.tabs, setCurrentSidePanel, sidePanelSessionKey]);
+  }, [activePanelTab, browserRailActive, closeRightPane, createBrowserTab, selectBrowserTab, sessionPanelState.tabs, setCurrentSidePanel, sidePanelSessionKey]);
   const openBrowserUrlControlAction = useMemo<OpenworkControlAction>(() => ({
     id: "browser.open_url",
     label: "Open URL in built-in browser",
@@ -1979,14 +1985,13 @@ export function SessionPage(props: SessionPageProps) {
                 variant="ghost"
                 size="icon-sm"
                 className={cn(
-                  "rounded-xl transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
+                  "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
                   browserRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
                 )}
                 onClick={openBrowserRailPane}
-                title={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
-                aria-label={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
+                title="Browser"
+                aria-label="Browser"
                 aria-pressed={browserRailActive}
-                disabled={!hasBrowserTabs}
               >
                 <Globe size={15} />
               </Button>
