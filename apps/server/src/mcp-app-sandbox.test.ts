@@ -105,7 +105,7 @@ function sandboxProxy(hostOrigin: string) {
   });
   const bootstrap = () => {
     const child = inner.contentWindow;
-    const script = inner.srcdoc.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    const script = inner.srcdoc.match(/<script>([\s\S]*?)<\/script>/i)?.[1];
     if (!script) throw new Error("Missing interaction bootstrap");
     const window = Object.assign(new NativeEventTarget(), {
       parent: {
@@ -249,6 +249,18 @@ describe("MCP Apps sandbox proxy policy", () => {
     app.bootstrap();
     app.flush();
     expect(app.downstream).toEqual([]);
+  });
+
+  test("the fixture extracts uppercase script tags", () => {
+    const app = sandboxProxy("https://host.example");
+    app.assign();
+    app.inner.srcdoc = app.inner.srcdoc.replace("<script>", "<SCRIPT>").replace("</script>", "</SCRIPT>");
+    const capture = app.bootstrap();
+    app.flush();
+    capture.click();
+    app.call(1);
+    app.flush();
+    expectApproval(app, 1, true);
   });
 
   test("overwrites forged metadata without a channel and preserves other metadata", () => {
