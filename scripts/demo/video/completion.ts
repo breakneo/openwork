@@ -19,16 +19,27 @@ const runnerSchema = z.object({
   name: z.string().min(1), dir: z.string().min(1), gitSha: z.string().regex(/^[a-f0-9]{40}$/),
   createdAt: z.iso.datetime(), closedAt: z.iso.datetime(), outcome: z.literal('passed'),
   summary: z.object({
-    ok: z.literal(true), failedArtifacts: z.literal(0), failedExpectations: z.literal(0),
+    // Testkit includes supplementary captures in summary.ok, not only assertions.
+    // A false summary is accepted below only when exactly explained by unjudged captures.
+    ok: z.boolean(), totalArtifacts: z.number().int().positive(), unvalidatedArtifacts: z.number().int().nonnegative(),
+    failedArtifacts: z.literal(0), failedExpectations: z.literal(0),
     pendingArtifacts: z.literal(0), pendingJudgments: z.literal(0), passedExpectations: z.number().int().positive(),
   }).passthrough(),
-  steps: z.array(z.object({ name: z.string(), ok: z.literal(true) }).passthrough()).min(1),
+  steps: z.array(z.object({ name: z.string(), ok: z.literal(true) }).passthrough()),
   artifacts: z.array(z.object({
     ok: z.union([z.literal(true), z.null()]),
     results: z.array(z.object({ passed: z.literal(true) }).passthrough()),
     judgments: z.array(z.object({ state: z.literal('passed') }).passthrough()),
   }).passthrough()),
-}).passthrough().refine((run) => Date.parse(run.closedAt) >= Date.parse(run.createdAt), 'C runner is not finalized');
+}).passthrough().refine((run) => Date.parse(run.closedAt) >= Date.parse(run.createdAt), 'C runner is not finalized')
+  .refine((run) => {
+    const supplementary = run.artifacts.filter((artifact) => artifact.ok === null);
+    return supplementary.every((artifact) => artifact.results.length === 0 && artifact.judgments.length === 0)
+      && run.summary.totalArtifacts === run.artifacts.length
+      && run.summary.unvalidatedArtifacts === supplementary.length
+      && run.summary.ok === (supplementary.length === 0)
+      && run.summary.passedExpectations === run.artifacts.reduce((count, artifact) => count + artifact.results.length, 0);
+  }, 'Runner summary must exactly match passing assertions and supplementary unjudged captures');
 
 const claimsSchema = z.object({
   buildKind: z.enum(['release-source', 'packaged-release']),

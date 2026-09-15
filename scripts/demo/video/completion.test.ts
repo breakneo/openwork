@@ -9,7 +9,7 @@ function fixture() {
     runId: 'schema-only-run', runName: 'schema-only-test', runnerSha256: '2'.repeat(64), claimsSha256: '3'.repeat(64),
     runner: { name: 'schema-only-test', dir: '/schema-only/schema-only-run', gitSha,
       createdAt: '2026-09-15T01:00:00.000Z', closedAt: '2026-09-15T01:01:00.000Z', outcome: 'passed',
-      summary: { ok: true, failedArtifacts: 0, failedExpectations: 0, pendingArtifacts: 0, pendingJudgments: 0, passedExpectations: 10 },
+      summary: { ok: true, totalArtifacts: 1, unvalidatedArtifacts: 0, failedArtifacts: 0, failedExpectations: 0, pendingArtifacts: 0, pendingJudgments: 0, passedExpectations: 1 },
       steps: [{ name: 'Schema step', ok: true }],
       artifacts: [{ ok: true, results: [{ passed: true }], judgments: [{ state: 'passed' }] }],
     },
@@ -48,6 +48,27 @@ test('canonical ten claims need finalized runner and exact run/hash binding', ()
     const value = fixture(); mutate(value);
     assert.throws(() => validateCompletion(value));
   }
+});
+
+test('completed assertion-only runners may include unjudged supplementary captures without rewriting evidence', () => {
+  const base = fixture();
+  const value = { ...base, runner: { ...base.runner, steps: [],
+    summary: { ...base.runner.summary, ok: false, totalArtifacts: 2, unvalidatedArtifacts: 1 },
+    artifacts: [...base.runner.artifacts, { ok: null, results: [], judgments: [] }],
+  } };
+  assert.equal(validateCompletion(value).runner.outcome, 'passed');
+  assert.throws(() => validateCompletion({ ...value, runner: { ...value.runner, outcome: 'failed' } }));
+  for (const summary of [
+    { ...value.runner.summary, unvalidatedArtifacts: 0 },
+    { ...value.runner.summary, totalArtifacts: 3 },
+    { ...value.runner.summary, passedExpectations: 0 },
+    { ...value.runner.summary, passedExpectations: 2 },
+    { ...value.runner.summary, pendingJudgments: 1 },
+    { ...value.runner.summary, failedArtifacts: 1 },
+  ]) assert.throws(() => validateCompletion({ ...value, runner: { ...value.runner, summary } }));
+  assert.throws(() => validateCompletion({ ...value, runner: { ...value.runner,
+    artifacts: [...base.runner.artifacts, { ok: null, results: [{ passed: true }], judgments: [] }],
+  } }));
 });
 
 test('subset, duplicate, failed, blocked, empty-detail and unknown claims never authorize complete mode', () => {
