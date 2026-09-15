@@ -180,22 +180,20 @@ async function refresh(surface: Surface, title: string) {
 
 interface CalendarView { name: string; identity: string; generation: number; meetings: string[]; instanceId: string; generatedAt: string }
 async function calendarView(surface: Surface): Promise<CalendarView> {
-  return eventually(async () => {
-    // These selectors inspect visible UI supplied by the real provider, not an
-    // injected test report or an API-only payload.
-    const result = await evalIn(surface, () => ({
-      name: document.querySelector('[data-testid="calendar-name"]')?.textContent?.trim() ?? "",
-      identity: document.querySelector('[data-testid="calendar-identity"]')?.textContent?.trim() ?? "",
-      generation: Number(document.querySelector('[data-testid="calendar-generation"]')?.textContent?.match(/\d+/)?.[0]),
-      meetings: [...document.querySelectorAll('[data-testid="calendar-meeting-title"]')].map(node => node.textContent?.trim() ?? ""),
-      instanceId: document.querySelector('[data-testid="calendar-instance-id"]')?.textContent?.trim() ?? "",
-      generatedAt: document.querySelector('[data-testid="calendar-generated-at"]')?.textContent?.trim() ?? "",
-    }));
-    if (!result.name || !result.identity || !result.instanceId || !Number.isFinite(Date.parse(result.generatedAt)) || !Number.isFinite(result.generation) || !result.meetings.length) {
-      throw new Error("Calendar must visibly render its name, fingerprint, generation, and meetings");
-    }
-    return result;
-  }, { within: 60_000, intervalMs: 1_000, label: "visible authenticated calendar" });
+  // Read this exact child context without the generic Surface auto-healing to
+  // the desktop root. The caller reacquires a fresh child on every retry.
+  const result = await evaluate(surface.client, () => ({
+    name: document.querySelector('[data-testid="calendar-name"]')?.textContent?.trim() ?? "",
+    identity: document.querySelector('[data-testid="calendar-identity"]')?.textContent?.trim() ?? "",
+    generation: Number(document.querySelector('[data-testid="calendar-generation"]')?.textContent?.match(/\d+/)?.[0]),
+    meetings: [...document.querySelectorAll('[data-testid="calendar-meeting-title"]')].map(node => node.textContent?.trim() ?? ""),
+    instanceId: document.querySelector('[data-testid="calendar-instance-id"]')?.textContent?.trim() ?? "",
+    generatedAt: document.querySelector('[data-testid="calendar-generated-at"]')?.textContent?.trim() ?? "",
+  }));
+  if (!result.name || !result.identity || !result.instanceId || !Number.isFinite(Date.parse(result.generatedAt)) || !Number.isFinite(result.generation) || !result.meetings.length) {
+    throw new Error(`Calendar UI fields incomplete: ${JSON.stringify(result)}`);
+  }
+  return result;
 }
 
 // Explicitly opt in when running. Missing opt-in is an error, not a green skip.
@@ -436,10 +434,10 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   const jordanConnected = await claim("Jordan personal OAuth through separate Your Connections", async () => {
     await yourCalendar(jordanBrowser, jordanSession, "09-jordan"); return true;
   });
-  const readCalendar = async (surface: Surface) => {
+  const readCalendar = (surface: Surface) => eventually(async () => {
     await using view = await frame(surface, "Personal Calendar");
     return calendarView(view);
-  };
+  }, { within: 60_000, intervalMs: 1_000, label: "current Calendar child has rendered personal fields" });
   const renderCalendar = async (surface: Surface, connected: boolean | undefined, member: string) => {
     if (!calendarApp || !connected) throw new Error(`Blocked: ${member} Calendar prerequisites incomplete`);
     const shared = array(await api(jordanSession, orgId, "/v1/me/dashboards"), "items").find(item => item.id === dashboardId);
@@ -449,6 +447,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));
     await revealApp(surface, text(calendarApp, "title"));
     const result = await readCalendar(surface);
+    await revealApp(surface, text(calendarApp, "title"));
     await checkpoint(surface, `10-${member}-personal-calendar`);
     return result;
   };
@@ -501,9 +500,15 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await checkpoint(alex, "12-world-clocks-edit-saved");
     await clickTarget(clockFrame, { role: "button", label: "Done" });
     await refresh(alex, text(clockApp, "title"));
+    const persisted = await eventually(async () => {
+      await using current = await frame(alex, "World Clocks");
+      return evaluate(current.client, () => ({
+        cities: [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()),
+        receipt: document.querySelector(".wc-footer")?.textContent?.trim(),
+      }));
+    }, { within: 60_000, intervalMs: 1_000, until: result => result.cities.includes(city), label: "fresh Clock result retains the saved city" });
+    expect(persisted.cities).toContain(city);
     await using fresh = await frame(alex, "World Clocks");
-    await see(fresh, city);
-    expect(await evalIn(fresh, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()))).toContain(city);
     await evalIn(fresh, browserScript(city => [...document.querySelectorAll(".wc-card__city")]
       .find(node => node.textContent?.trim() === city)?.closest(".wc-card")?.scrollIntoView({ block: "center" }), [city]));
     await checkpoint(alex, "13-world-clocks-fresh-tool-persisted");
