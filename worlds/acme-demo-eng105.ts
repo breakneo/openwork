@@ -68,7 +68,7 @@ export async function bootAcmeDemoEng105(
   const orgId = required(Reflect.get(org.body, "organization"), "id");
   const headers = { ...auth, "x-openwork-org-id": orgId };
 
-  const email = "jordan.eng105@acme.example";
+  const email = `jordan@${den.admin.email.split("@")[1]}`;
   const password = "Eng105-Jordan-Demo-Only!";
   const invite = await denFetch(den.ref, "/v1/invitations", {
     method: "POST", headers, body: JSON.stringify({ email, role: "member" }),
