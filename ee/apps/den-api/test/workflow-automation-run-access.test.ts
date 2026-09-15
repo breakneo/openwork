@@ -429,7 +429,7 @@ describe("live generated apps and personal receipts", () => {
     expect(detail.latestSnapshot?.status).toBe("failed")
   })
 
-  test("saved legacy apps cannot load another member's receipt", async () => {
+  test("snapshot app previews allow another member's legacy receipt but never their live receipt", async () => {
     const seeded = await seedWorkflowWithViewer()
     await prepareLiveWorkflow(seeded)
     const owner = await workflows.executeLiveArtifactWorkflow({
@@ -455,6 +455,22 @@ describe("live generated apps and personal receipts", () => {
       build_diagnostics: [], compiler_name: "test", compiler_version: "1", react_version: "19",
     })
     const { getSavedApp } = await import("../src/saved-apps.js")
+    const { executeWorkflow } = await import("../src/mcp/workflow-service.js")
+    const legacy = await executeWorkflow({
+      database: db, organizationId: seeded.organizationId, orgMembershipId: seeded.ownerMemberId,
+      pluginId: seeded.pluginId, configObjectId: seeded.configObjectId,
+      configObjectVersionId: seeded.configObjectVersionId,
+      normalizedPayloadJson: { language: "codemode-js", requiredCapabilities: [], outputSchema: liveOutputSchema },
+      code: 'return { report: "published snapshot" }', validateOutput: true,
+      buildTools: async () => ({ tools: {}, manifest: [] }),
+    })
+    if (!legacy.ok || !legacy.receiptId) throw new Error("expected legacy snapshot")
+    for (let read = 0; read < 2; read += 1) {
+      const shared = await getSavedApp({ context: seeded.viewerContext, appId, receiptId: legacy.receiptId })
+      expect(shared.payload?.artifact.receiptId).toBe(legacy.receiptId)
+      expect(shared.payload?.data).toEqual({ report: "published snapshot" })
+      expect(shared.html).toBe("<html></html>")
+    }
     const foreign = await getSavedApp({ context: seeded.viewerContext, appId, receiptId: owner.receiptId })
     expect(foreign.payload).toBeNull()
     expect(JSON.stringify(foreign)).not.toContain(seeded.ownerMemberId)
