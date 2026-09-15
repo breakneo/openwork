@@ -264,6 +264,26 @@ test("returns actionable tool errors for missing schemas and failed builds", asy
   })
 })
 
+const draftDataModes: Array<GeneratedArtifactView["dataMode"]> = ["live", "snapshot", undefined]
+
+test.each(draftDataModes)("%s draft metadata preserves compatible desktop preview arguments", async (dataMode) => {
+  await withClient(async (client) => {
+    const saved = await client.callTool({
+      name: "save_artifact_view",
+      arguments: { configObjectId, title: view.title, reactSource: "export default function View() { return <div /> }" },
+    })
+    expect(saved.isError).not.toBe(true)
+    expect(saved._meta?.["openwork/appDraft"]).toEqual({
+      appId: viewId,
+      revisionId: draftRevisionId,
+      title: view.title,
+      ...(dataMode === "live" ? {} : { receiptId: payload.artifact.receiptId }),
+    })
+  }, {
+    save: async () => ({ ...view, dataMode }),
+  })
+})
+
 test("live run, render and preview fetch as the caller with strict runtime inputs", async () => {
   const requests: Array<Parameters<Parameters<typeof registerAgentGeneratedArtifactViews>[0]["loadData"]>[0]> = []
   await withClient(async (client) => {

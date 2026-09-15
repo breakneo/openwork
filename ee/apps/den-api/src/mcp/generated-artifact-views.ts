@@ -309,7 +309,7 @@ export function registerAgentGeneratedArtifactViews(input: {
         _meta: { "openwork/appDraft": {
           appId: view.id,
           revisionId: revision.id,
-          receiptId: preview.payload.artifact.receiptId,
+          ...(view.dataMode === "live" ? {} : { receiptId: preview.payload.artifact.receiptId }),
           title: view.title,
         } },
       }
