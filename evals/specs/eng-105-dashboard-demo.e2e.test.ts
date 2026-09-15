@@ -160,6 +160,15 @@ async function see(surface: Surface, value: string) {
   await waitFor(surface, browserScript(value => document.body.innerText.toLowerCase().includes(value.toLowerCase()), [value]),
     { timeoutMs: 90_000, label: `visible ${value}` });
 }
+async function revealApp(surface: Surface, title: string) {
+  await waitFor(surface, browserScript(title => {
+    const button = [...document.querySelectorAll("button")].find(button => button.getAttribute("aria-label") === `Refresh ${title}`);
+    const tile = button?.closest("[data-dashboard-entry]");
+    if (!tile) return false;
+    tile.scrollIntoView({ block: "start" });
+    return true;
+  }, [title]), { timeoutMs: 60_000, label: `scroll ${title} into the real desktop viewport` });
+}
 async function refresh(surface: Surface, title: string) {
   const calls = () => evalIn(surface, () => performance.getEntriesByType("resource")
     .filter(entry => new URL(entry.name).pathname.endsWith("/mcp-apps/call")).length);
@@ -219,7 +228,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   expect(registrations).toHaveLength(3);
   expect(registrations.every(receipt => receipt.ok && receipt.connectionId)).toBe(true);
   await writeFile(`${reportDirectory}world-sanitized.json`, JSON.stringify({
-    ...provenance, denWeb: den.ref.webUrl, denApi: den.ref.apiUrl,
+    ...provenance, mcpUrls: world.mcpUrls, denWeb: den.ref.webUrl, denApi: den.ref.apiUrl,
     alexCdp: alex.handle.cdpUrl, jordanCdp: jordan.handle.cdpUrl,
     alexEmail: den.admin.email, jordanEmail: jordanSession.email, orgId, registrations,
   }, null, 2));
@@ -270,11 +279,15 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await clickTarget(browser, { testId: `connect-my-mcp-account-${calendar.id}` });
     // The real OAuth popup follows the AS's auto-approve redirect. We neither
     // manufacture a code/callback nor copy Alex's authorization to Jordan.
-    await eventually(async () => array(await api(session, orgId, "/v1/mcp-connections?scope=usable"), "connections")
-      .find(connection => connection.id === calendar.id), {
-      within: 120_000, intervalMs: 2_000, label: `${prefix} OAuth completed`,
-      until: connection => connection?.connectedForMe === true && connection.needsReconnect !== true,
-    });
+    const outcome = await eventually(async () => {
+      const connection = array(await api(session, orgId, "/v1/mcp-connections?scope=usable"), "connections")
+        .find(connection => connection.id === calendar.id);
+      const failure = await evalIn(browser, () => document.body.innerText.match(/Could not connect[^\n]+/)?.[0] ?? null);
+      return { connected: connection?.connectedForMe === true && connection.needsReconnect !== true, failure };
+    }, { within: 120_000, intervalMs: 2_000, label: `${prefix} visible OAuth outcome`,
+      until: result => result.connected || result.failure !== null });
+    if (outcome.failure) throw new Error(`Your Connections → Connect: ${outcome.failure}`);
+    expect(outcome.connected).toBe(true);
     await see(browser, "Connected as you");
     await checkpoint(browser, `${prefix}-your-connections-connected`);
   };
@@ -434,6 +447,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await reload(surface);
     await see(surface, boardName);
     await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));
+    await revealApp(surface, text(calendarApp, "title"));
     const result = await readCalendar(surface);
     await checkpoint(surface, `10-${member}-personal-calendar`);
     return result;
@@ -466,6 +480,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     });
   }
   const addedCity = await claim("World Clocks edit, native save confirmation, and fresh-tool persistence", async () => {
+    await revealApp(alex, text(clockApp, "title"));
     await using clockFrame = await frame(alex, "World Clocks");
     await using clockApproval = await allowClockSaveDialog(alex, text(clockApp, "serverName"));
     await clickTarget(clockFrame, { role: "button", label: "Edit" });
