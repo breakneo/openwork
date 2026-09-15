@@ -62,6 +62,9 @@ function prepareAction(id, action) {
   if (element?.disabled || element?.getAttribute("aria-disabled") === "true") throw new Error("element_disabled");
   if (action.type === "key" && state.activeElement !== document.activeElement) throw new Error("stale_observation");
   if (action.type === "key" && document.activeElement?.matches('input[type="password"],input[type="file"],input[autocomplete="one-time-code"]')) throw new Error("sign_in_required");
+  // These native controls cannot host a shadow root. A frame, custom editor or
+  // generic container can conceal a different focused descendant during review.
+  if (action.type === "key" && !["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(document.activeElement?.tagName)) throw new Error("unverifiable_focus");
   let x = action.x, y = action.y;
   if (element) {
     const rect = element.getBoundingClientRect();
@@ -417,7 +420,8 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         let point;
         try { point = await isolated(tab.view.webContents, prepareAction, observed.id, action); }
         catch (error) {
-          const code = ["stale_observation", "stale_element", "sign_in_required", "element_disabled", "element_outside_viewport", "element_obscured", "not_editable", "outside_viewport"].find((item) => String(error?.message).includes(item));
+          const code = ["stale_observation", "stale_element", "sign_in_required", "unverifiable_focus", "element_disabled", "element_outside_viewport", "element_obscured", "not_editable", "outside_viewport"].find((item) => String(error?.message).includes(item));
+          if (code === "unverifiable_focus") fail(code, "Keyboard input requires a directly focused native page control. Take over for embedded or custom editors.");
           if (code) fail(code, code === "sign_in_required" ? "Take over and sign in directly in the browser, then resume." : "The observed control is no longer ready. Observe again before choosing an action.");
           throw error;
         }

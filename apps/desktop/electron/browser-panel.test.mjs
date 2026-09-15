@@ -2622,6 +2622,28 @@ test("approval cannot authorize a changed document, layout, focus, image, target
   panel.destroy();
 });
 
+test("approved keys refuse frame and shadow-capable focus hosts even when the host identity stays unchanged", async () => {
+  const { invoke, panel, views, approve } = createPanel();
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://inputs.example/" } });
+  await flush(); approve();
+  const { tabId } = await opening;
+  const page = mockPage(views()[0].webContents);
+  for (const tagName of ["IFRAME", "FRAME", "DIV", "SPAN", "BODY", "CUSTOM-EDITOR"]) {
+    page.element.tagName = tagName;
+    const observed = await panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId } });
+    const pending = panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId: observed.observationId, action: { type: "key", key: "Enter" } } });
+    await flush();
+    assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval?.title, "Allow browser action?");
+    approve();
+    const result = await pending;
+    assert.equal(result.code, "unverifiable_focus", tagName);
+    assert.equal(result.dispatched, false, tagName);
+    assert.deepEqual(page.inputs, [], "an unchanged host does not prove a stable focused descendant");
+  }
+  panel.destroy();
+});
+
 test("hidden, paused and timed-out input approvals send no events and reject late acceptance", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
   for (const ending of ["hide", "pause", "timeout"]) {

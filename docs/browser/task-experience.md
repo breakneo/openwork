@@ -62,7 +62,11 @@ starts. One action's approval wait is excluded from its remaining age budget,
 without renewing the stored observation or extending the operation timeout.
 After approval the host rechecks observation identity, document, URL, policy,
 DOM changes, viewport, scroll and target readiness. Key input also requires the
-same focused element. Coordinate clicks require an image scaled to the page
+same directly focused native input, textarea, select, button or link. Keyboard
+input to frames, shadow hosts and generic/custom editors is refused because their
+actual focused descendant cannot be verified; the person must take over. This
+includes closed shadow roots, which cannot be detected from a host's `shadowRoot`.
+Coordinate clicks require an image scaled to the page
 viewport and recheck its pixels before dispatch. The reviewed action payload is
 copied before waiting and never replaced silently. Actions consume their
 observation before dispatch; failure or cancellation clears it. Timeouts and
