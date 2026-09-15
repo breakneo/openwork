@@ -43,3 +43,14 @@ Fork **(b)** was selected after exact CLI error `Error: The specified scope does
 5. Consider the app-only helper-binding host improvement above as a separate product task, not part of this demo PR.
 
 Dropped forks: two-button identity picker, shared Calendar credentials, generated Workflow snapshots, another Daytona topology, and public Calendar publication. The independent reviewer uses the approved org-default GPT-family model with variant low because Astra cannot be identified without `models.list` (#4955); no obsolete local provider ID is reused.
+
+## Morning decision — option 1 chosen; supersedes the Clock limitation above
+
+**2026-09-15: Vercel private Blob selected and deployed. Existing demo checklist: 10/10 COMPLETE.** This resolves option E above without creating another user journey; persistent-host alternatives were not built because Blob passed the requested durable-storage proof.
+
+- External app signed/DCO commit `786599f7ea1119d202904407931d54add8cbf053`; legacy subtree `fdf63090dbb79c15e9e806105eb8d35fbee79439`; rollback tag `pre-blob-store`. Private deterministic keys, overwrite enabled, uncached reads; Blob > file > memory. 110 tests passed; Betterleaks external diff 0.
+- Production shared preferences survived a forced second Vercel deployment, with fresh `{}` returning `storeKind: blob`. Existing one-shot released-host spec then retained newly added Paris: exit 0, 1 passed/0 failed/0 skipped, all ten claim groups Passed on `2db17ef65`. [Published evidence](https://github.com/different-ai/openwork/pull/5017#issuecomment-5680351059).
+- New C 48s / D 50s COMPLETE films use only `reports/demo/eng105-proof/2026-09-15T12-38-23.971Z/` captures, original finalized runner hash, and owner/media bindings. [Players and detailed receipts](https://github.com/different-ai/openwork/pull/5017#issuecomment-5680490215). Prior PARTIALs unchanged.
+- Assembler-only compatibility patch `5a22a0bfaa06467b27c66d3e208e5ee74dac17bd` is signed/DCO and pushed. It handles passing assertion-only runners with unjudged supplementary PNGs using exact count consistency; 13 tooling tests/typecheck/lint pass. No journey spec, product source, runner or claim bytes changed; runtime proof remains bound to `2db17ef65`. Latest Warden review is Incomplete (missing OpenAI credentials), not clear.
+- Existing scope limits remain: header Refresh, not desktop restart; no new Jordan Clock assertion; Calendar is synthetic with instance-local counters. Earlier independent D and setup outcomes remain historical, not relabeled.
+- World ports 8790/3005 were stopped and verified free, then explicitly handed to `ses_f5af41ac6ffeA3cEsvzkvTE91T` for its authorized per-user Home proof. That lane owns boot/leave-alive; this Blob lane will not restart it. Audit handled copying COMPLETE films into the protected main checkout.
