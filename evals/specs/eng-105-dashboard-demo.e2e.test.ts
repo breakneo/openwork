@@ -242,6 +242,15 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   const jordanBrowser = stack.use(await chrome({ name: "eng105-jordan-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
   expect(alexBrowser.handle.cdpUrl).not.toBe(jordanBrowser.handle.cdpUrl);
 
+  const claimResults: { claim: string; status: "Passed" | "Failed" | "Blocked"; detail: string }[] = [];
+  const writeClaims = async () => {
+    await writeFile(`${reportDirectory}claims.json`, JSON.stringify({ ...provenance, claims: claimResults }, null, 2));
+    if (process.env.ENG105_EXPORT_DIR) {
+      const directory = `${process.env.ENG105_EXPORT_DIR}/${runName}`;
+      await mkdir(directory, { recursive: true });
+      await writeFile(`${directory}/claims.json`, JSON.stringify({ ...provenance, claims: claimResults }, null, 2));
+    }
+  };
   try {
   const signIn = async (browser: Surface, session: DenSession) => {
     await navigate(browser.client, den.ref.webUrl);
@@ -372,88 +381,126 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await checkpoint(surface, `07-${label}-shared-dashboard`);
   }
 
-  await using clockFrame = await frame(alex, "World Clocks");
-  await using clockApproval = await allowClockSaveDialog(alex, text(clockApp, "serverName"));
-  await clickTarget(clockFrame, { role: "button", label: "Edit" });
-  const existingCities = await evalIn(clockFrame, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()));
-  const addedCity = ["Tokyo", "Paris", "Berlin", "Toronto", "Mumbai", "Cape Town"].find(city => !existingCities.includes(city));
-  if (!addedCity) throw new Error("No unused demo city remains; do not claim a no-op edit as persistence proof");
-  await clickTarget(clockFrame, { role: "combobox", label: "Add a city" });
-  await fill(clockFrame, '[role="combobox"]', addedCity);
-  await clickTarget(clockFrame, { role: "option", label: new RegExp(addedCity) });
-  await see(clockFrame, addedCity);
-  expect(await evalIn(clockFrame, () => Number(document.querySelector<HTMLSelectElement>("#wc-limit")?.value)),
-    "Clocks shown includes the added city").toBe(existingCities.length + 1);
-  await waitFor(clockFrame, () => /Saved \(shared with everyone\)|Saved to your account/.test(document.body.innerText),
-    { timeoutMs: 30_000, label: "save_preferences completed, not merely Done" });
-  expect(clockApproval.observed.every(dialog => dialog.expected)).toBe(true);
-  expect(clockApproval.approved(), "Released host requires explicit write-helper confirmation").toBeGreaterThan(0);
-  evidence.recordAssertionEvidence("Accepted only the real native confirmation for this Clock save_preferences call", JSON.stringify(clockApproval.observed), true);
-  await checkpoint(alex, "11-world-clocks-edit-saved");
-  await clickTarget(clockFrame, { role: "button", label: "Done" });
-  await refresh(alex, text(clockApp, "title"));
-  await using freshClocks = await frame(alex, "World Clocks");
-  await see(freshClocks, addedCity);
-  expect(await evalIn(freshClocks, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()))).toContain(addedCity);
-  await checkpoint(alex, "12-world-clocks-fresh-tool-persisted");
-  expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
-  evidence.recordAssertionEvidence("World Clocks city edit persists through host Refresh using {}, not cold-start durability", `${addedCity} remains visible after save_preferences acknowledgement and fresh show_world_clocks launch; dashboard launch arguments remain unchanged.`, true);
-  // Calendar is deliberately last: an unavailable provider cannot erase the
-  // real Home/Clocks observations, but still prevents an overall Passed verdict.
-  await yourCalendar(alexBrowser, den.admin, "13-alex");
-  const calendarApps = await catalog(calendar.id);
-  expect(calendarApps).toHaveLength(1);
-  const calendarApp = calendarApps[0];
-  expect(calendarApp.toolName).toBe("show_calendar");
-  expect(calendarApp.resourceUri).toBe("ui://personal-calendar/mcp-app.html");
-  await navigate(alexBrowser.client, new URL(`/dashboard/dashboards/${dashboardId}`, den.ref.webUrl).href);
-  await see(alexBrowser, "Who sees this dashboard");
-  await addApp({ name: "Personal Calendar", app: calendarApp }, 2);
-  elements = array(object(await readBoard()).item, "elements");
-  expect(elements).toHaveLength(3);
-  expect(elements.every(element => element.organizationAutoLaunch === true && element.launchArguments === undefined)).toBe(true);
-  await yourCalendar(jordanBrowser, jordanSession, "14-jordan");
-  const shared = array(await api(jordanSession, orgId, "/v1/me/dashboards"), "items").find(item => item.id === dashboardId);
-  expect(shared?.elements).toEqual(elements);
-  for (const surface of [alex, jordan]) {
-    await reload(surface);
-    await see(surface, boardName);
-    await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));
-  }
+  claimResults.push({ claim: "Den Add, auto-run, named sharing, both Home/Clocks desktops", status: "Passed", detail: "Real UI and persisted reference assertions completed" });
+  const claim = async <T>(name: string, action: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      const result = await action();
+      claimResults.push({ claim: name, status: "Passed", detail: "All observable assertions completed" });
+      await writeClaims();
+      return result;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown claim failure";
+      claimResults.push({ claim: name, status: detail.startsWith("Blocked:") ? "Blocked" : "Failed", detail });
+      evidence.recordAssertionEvidence(name, detail, false);
+      for (const [surface, actor] of [[alex, "alex"], [jordan, "jordan"], [alexBrowser, "alex-den"], [jordanBrowser, "jordan-den"]] satisfies [Surface, string][]) {
+        const safe = await evalIn(surface, () => !document.querySelector('input[type="password"]') && !/[?&](code|token|state)=/.test(location.search)).catch(() => false);
+        if (safe) await checkpoint(surface, `claim-${claimResults.length}-failed-${actor}`).catch(() => undefined);
+      }
+      await writeClaims();
+      return undefined;
+    }
+  };
+  await writeClaims();
+  // Independent member consent and Clock claims always run; a red claim cannot
+  // conceal another member's result, and final aggregation forbids partial green.
+  const alexConnected = await claim("Alex personal OAuth through Your Connections", async () => {
+    await yourCalendar(alexBrowser, den.admin, "08-alex"); return true;
+  });
+  const calendarApp = await claim("Calendar added through Den UI with default arguments", async () => {
+    if (!alexConnected) throw new Error("Blocked: Alex OAuth did not complete");
+    const apps = await catalog(calendar.id);
+    const app = apps.find(app => app.toolName === "show_calendar");
+    if (!app) throw new Error("Missing show_calendar App");
+    expect(app.resourceUri).toBe("ui://personal-calendar/mcp-app.html");
+    await navigate(alexBrowser.client, new URL(`/dashboard/dashboards/${dashboardId}`, den.ref.webUrl).href);
+    await see(alexBrowser, "Who sees this dashboard");
+    await addApp({ name: "Personal Calendar", app }, 2);
+    elements = array(object(await readBoard()).item, "elements");
+    expect(elements).toHaveLength(3);
+    expect(elements.every(element => element.organizationAutoLaunch === true && element.launchArguments === undefined)).toBe(true);
+    return app;
+  });
+  const jordanConnected = await claim("Jordan personal OAuth through separate Your Connections", async () => {
+    await yourCalendar(jordanBrowser, jordanSession, "09-jordan"); return true;
+  });
   const readCalendar = async (surface: Surface) => {
     await using view = await frame(surface, "Personal Calendar");
     return calendarView(view);
   };
-  const a = await readCalendar(alex);
-  const j = await readCalendar(jordan);
-  expect(a.name).not.toBe(j.name);
-  expect(a.identity).not.toBe(j.identity);
-  expect(a.meetings).not.toEqual(j.meetings);
-  await checkpoint(alex, "15-alex-personal-calendar");
-  await checkpoint(jordan, "16-jordan-different-personal-calendar");
+  const renderCalendar = async (surface: Surface, connected: boolean | undefined, member: string) => {
+    if (!calendarApp || !connected) throw new Error(`Blocked: ${member} Calendar prerequisites incomplete`);
+    const shared = array(await api(jordanSession, orgId, "/v1/me/dashboards"), "items").find(item => item.id === dashboardId);
+    expect(shared?.elements).toEqual(elements);
+    await reload(surface);
+    await see(surface, boardName);
+    await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));
+    const result = await readCalendar(surface);
+    await checkpoint(surface, `10-${member}-personal-calendar`);
+    return result;
+  };
+  const a = await claim("Alex real Calendar renders personal identity and meetings", () => renderCalendar(alex, alexConnected, "alex"));
+  const j = await claim("Jordan real shared Calendar renders personal identity and meetings", () => renderCalendar(jordan, jordanConnected, "jordan"));
+  await claim("Calendar member identities and meeting sets are different", async () => {
+    if (!a || !j) throw new Error("Blocked: both personal calendars must render before comparison");
+    expect(a.name).not.toBe(j.name); expect(a.identity).not.toBe(j.identity); expect(a.meetings).not.toEqual(j.meetings);
+    evidence.recordAssertionEvidence("Same shared Calendar uses separate member identities", JSON.stringify({ alex: a, jordan: j }), true);
+    return true;
+  });
   const refreshed: CalendarView[] = [];
-  for (const [surface, before, member] of [[alex, a, "alex"], [jordan, j, "jordan"]] satisfies [Surface, CalendarView, string][]) {
-    await refresh(surface, text(calendarApp, "title"));
-    const after = await eventually(() => readCalendar(surface), {
-      within: 90_000, until: view => Date.parse(view.generatedAt) > Date.parse(before.generatedAt),
-      label: `${member} Refresh executes a newly generated tool result`,
+  for (const [surface, before, member] of [[alex, a, "alex"], [jordan, j, "jordan"]] satisfies [Surface, CalendarView | undefined, string][]) {
+    await claim(`${member} Calendar Refresh makes a new default tool invocation`, async () => {
+      if (!before || !calendarApp) throw new Error(`Blocked: ${member} Calendar did not render`);
+      await refresh(surface, text(calendarApp, "title"));
+      const after = await eventually(() => readCalendar(surface), {
+        within: 90_000, until: view => Date.parse(view.generatedAt) > Date.parse(before.generatedAt), label: `${member} new tool result`,
+      });
+      expect(after.name).toBe(before.name); expect(after.identity).toBe(before.identity); expect(after.meetings).toEqual(before.meetings);
+      if (after.instanceId === before.instanceId) expect(after.generation).toBeGreaterThan(before.generation);
+      else {
+        expect(after.generation).toBeGreaterThanOrEqual(1);
+        evidence.recordAssertionEvidence("Calendar generation reset across provider instances: disclosed demo limitation", JSON.stringify({ member, before, after }), true);
+      }
+      refreshed.push(after);
+      await checkpoint(surface, `11-${member}-calendar-refreshed`);
+      return after;
     });
-    expect(after.name).toBe(before.name);
-    expect(after.identity).toBe(before.identity);
-    expect(after.meetings).toEqual(before.meetings);
-    if (after.instanceId === before.instanceId) expect(after.generation).toBeGreaterThan(before.generation);
-    else {
-      expect(after.generation).toBeGreaterThanOrEqual(1);
-      evidence.recordAssertionEvidence("Calendar process changed: generation reset is a disclosed demo limitation", JSON.stringify({ member, before, after }), true);
-    }
-    refreshed.push(after);
-    await checkpoint(surface, `17-${member}-calendar-refreshed`);
   }
-  expect(refreshed[0].identity).not.toBe(refreshed[1].identity);
-  expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
-  evidence.recordAssertionEvidence("Separate OAuth members render different names and meetings; Refresh keeps identity and advances generation within the same instance using default {}", JSON.stringify({ alex: a, jordan: j, refreshed }), true);
+  const addedCity = await claim("World Clocks edit, native save confirmation, and fresh-tool persistence", async () => {
+    await using clockFrame = await frame(alex, "World Clocks");
+    await using clockApproval = await allowClockSaveDialog(alex, text(clockApp, "serverName"));
+    await clickTarget(clockFrame, { role: "button", label: "Edit" });
+    const existing = await evalIn(clockFrame, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()));
+    const city = ["Tokyo", "Paris", "Berlin", "Toronto", "Mumbai", "Cape Town"].find(city => !existing.includes(city));
+    if (!city) throw new Error("No unused demo city remains; a no-op is not persistence proof");
+    await clickTarget(clockFrame, { role: "combobox", label: "Add a city" });
+    await fill(clockFrame, '[role="combobox"]', city);
+    await clickTarget(clockFrame, { role: "option", label: new RegExp(city) });
+    await see(clockFrame, city);
+    expect(await evalIn(clockFrame, () => Number(document.querySelector<HTMLSelectElement>("#wc-limit")?.value))).toBe(existing.length + 1);
+    await waitFor(clockFrame, () => /Saved \(shared with everyone\)|Saved to your account/.test(document.body.innerText),
+      { timeoutMs: 30_000, label: "save_preferences acknowledged" });
+    expect(clockApproval.observed.every(dialog => dialog.expected)).toBe(true);
+    expect(clockApproval.approved(), "Real released-host write confirmation").toBeGreaterThan(0);
+    evidence.recordAssertionEvidence("Accepted the exact native Clock save confirmation", JSON.stringify(clockApproval.observed), true);
+    await checkpoint(alex, "12-world-clocks-edit-saved");
+    await clickTarget(clockFrame, { role: "button", label: "Done" });
+    await refresh(alex, text(clockApp, "title"));
+    await using fresh = await frame(alex, "World Clocks");
+    await see(fresh, city);
+    expect(await evalIn(fresh, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()))).toContain(city);
+    await checkpoint(alex, "13-world-clocks-fresh-tool-persisted");
+    expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
+    return city;
+  });
   await writeFile(`${reportDirectory}observations.json`, JSON.stringify({ dashboardId, alex: a, jordan: j, refreshed, clockCity: addedCity, ...provenance }, null, 2));
+  await writeClaims();
+  expect(claimResults.filter(result => result.status !== "Passed"), JSON.stringify(claimResults)).toEqual([]);
   } catch (error) {
+    if (claimResults.length === 0) {
+      claimResults.push({ claim: "Required Den setup/Home sharing", status: "Failed", detail: error instanceof Error ? error.message : "Unknown setup failure" });
+      claimResults.push({ claim: "Calendar and Clock phases", status: "Blocked", detail: "Required shared dashboard setup did not finish" });
+      await writeClaims();
+    }
     for (const [surface, name] of [[alex, "failed-alex-desktop"], [jordan, "failed-jordan-desktop"], [alexBrowser, "failed-alex-den-web"], [jordanBrowser, "failed-jordan-den-web"]] satisfies [Surface, string][]) {
       // Never photograph the authentication form or OAuth authorization URL.
       const safe = await evalIn(surface, () => !document.querySelector('input[type="password"]')
