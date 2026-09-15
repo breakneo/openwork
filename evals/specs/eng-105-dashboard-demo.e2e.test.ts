@@ -53,16 +53,17 @@ async function api(session: DenSession, orgId: string, path: string) {
   expect(result.response.status, `GET ${path}`).toBe(200);
   return result.body;
 }
-async function clickTarget(surface: Surface, target: { role?: string; label?: string | RegExp; testId?: string }) {
+async function clickTarget(surface: Surface, target: { role?: string; label?: string | RegExp; testId?: string; rowTitle?: string }) {
   const expression = target.label instanceof RegExp ? target.label.source : null;
   const flags = target.label instanceof RegExp ? target.label.flags : "";
   const exact = typeof target.label === "string" ? target.label : "";
-  const point = await eventually(() => evalIn(surface, browserScript((role, testId, exact, expression, flags) => {
+  const point = await eventually(() => evalIn(surface, browserScript((role, testId, exact, expression, flags, rowTitle) => {
     const selector = testId ? `[data-testid="${testId}"]` : role === "button" ? 'button,[role="button"]' : `[role="${role}"]`;
     const found = [...document.querySelectorAll<HTMLElement>(selector)].find(element => {
       const label = (element.getAttribute("aria-label") || (element instanceof HTMLInputElement ? [...element.labels ?? []].map(label => label.textContent).join(" ") : "") || element.textContent || "").trim();
       const box = element.getBoundingClientRect();
-      return box.width > 0 && box.height > 0 && !element.hasAttribute("disabled") && element.getAttribute("aria-disabled") !== "true"
+      return (!rowTitle || element.parentElement?.querySelector("p")?.textContent?.trim() === rowTitle)
+        && box.width > 0 && box.height > 0 && !element.hasAttribute("disabled") && element.getAttribute("aria-disabled") !== "true"
         && (testId || (expression ? new RegExp(expression, flags).test(label) : label === exact));
     });
     if (!found) return null;
@@ -71,7 +72,7 @@ async function clickTarget(surface: Surface, target: { role?: string; label?: st
     const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     const hit = document.elementFromPoint(point.x, point.y);
     return hit && (hit === found || found.contains(hit)) ? point : null;
-  }, [target.role ?? "", target.testId ?? "", exact, expression, flags])),
+  }, [target.role ?? "", target.testId ?? "", exact, expression, flags, target.rowTitle ?? ""])),
   { within: 60_000, until: point => point !== null, label: `clickable ${target.testId ?? String(target.label)}` });
   if (!point) throw new Error("Control not visible for trusted pointer input");
   await clickAt(surface, point);
@@ -267,9 +268,10 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await see(alexBrowser, text(entry.app, "title"));
     // Default {} is intentional: no explicit city list or identity overrides.
     expect(entry.app.requiresInput, "Demo launch requires no identity/city input").not.toBe(true);
-    await clickTarget(alexBrowser, { role: "button", label: "Add" });
+    await clickTarget(alexBrowser, { role: "button", label: "Add", rowTitle: text(entry.app, "title") });
     await eventually(async () => array(object(await readBoard()).item, "elements").length,
       { within: 30_000, until: count => count === index + 1, label: "UI Add persisted" });
+    expect(array(object(await readBoard()).item, "elements")[index]?.toolName).toBe(entry.app.toolName);
     await clickTarget(alexBrowser, { role: "button", label: "Done" });
     await clickTarget(alexBrowser, { role: "switch", label: `Run ${text(entry.app, "title")} automatically, even if it modifies data` });
     await eventually(async () => array(object(await readBoard()).item, "elements")[index]?.organizationAutoLaunch,
