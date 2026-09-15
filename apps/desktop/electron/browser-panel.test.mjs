@@ -2333,7 +2333,7 @@ test("canceling a grant waiter fences late acceptance without reviving or revoki
   controller.abort();
   for (const result of await Promise.all([pending, sibling])) assert.equal(result.ok, false);
   assert.equal(invoke("openwork:browser:approve", first.tabId, approval.id, true), false);
-  assert.ok(views().every(view => !view.webContents.destinations.includes("https://destination.example/")));
+  assert.ok(views().every(view => view.webContents.destinations.every(url => url !== "https://destination.example/")));
   hold = false;
   const fresh = navigate(second.tabId);
   await flush();
