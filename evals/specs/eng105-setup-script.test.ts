@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { needs, test } from "@openwork/testkit";
+import { sanitizedLiveProofEnvironment } from "./eng105-live-environment.ts";
 
 const script = fileURLToPath(new URL("../../scripts/demo/setup-eng105-den.sh", import.meta.url));
 const prefix = "exp-eng105-test-";
@@ -18,6 +19,29 @@ const calendar = `${prefix}personal-calendar-demo`;
 const keys = [home, clocks, calendar];
 const byKey = "/v1/mcp-connections/by-key/";
 const listPath = "/v1/mcp-connections?scope=manageable";
+
+test("ENG105 live child environment excludes inherited shell startup hooks", async ({ evidence }) => {
+  const source = {
+    PATH: process.env.PATH,
+    DEN_API_KEY: apiKey,
+    BASH_ENV: "synthetic-startup-hook",
+    ENV: "synthetic-env-hook",
+    PROMPT_COMMAND: "synthetic-prompt-hook",
+    SHELLOPTS: "xtrace",
+    PS4: "synthetic-trace-prefix",
+  };
+  const childEnvironment = sanitizedLiveProofEnvironment(source);
+  for (const name of ["BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELLOPTS", "PS4"]) {
+    assert.equal(Object.hasOwn(childEnvironment, name), false);
+  }
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(process.execPath, ["-e", "const names=['BASH_ENV','ENV','PROMPT_COMMAND','SHELLOPTS','PS4'];console.log(JSON.stringify({present:names.filter(name=>Object.hasOwn(process.env,name)),hasCredential:Boolean(process.env.DEN_API_KEY)}))"],
+      { env: childEnvironment, encoding: "utf8" }, (error, result) => error ? reject(error) : resolve(result));
+  });
+  assert.deepEqual(JSON.parse(stdout), { present: [], hasCredential: true });
+  assert.equal(source.BASH_ENV, "synthetic-startup-hook", "The parent environment is not mutated");
+  evidence.recordAssertionEvidence("Live child receives no shell startup hooks", "Observed child environment contains none of BASH_ENV, ENV, PROMPT_COMMAND, SHELLOPTS or PS4; a synthetic credential is retained without printing its value.", true);
+});
 
 interface Connection {
   id: string;

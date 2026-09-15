@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { needs, test } from "@openwork/testkit";
+import { sanitizedLiveProofEnvironment } from "./eng105-live-environment.ts";
 
 // Explicitly authorized, opt-in boundary proof. No UI, DB, seed, or duplicate PUTs.
 // Credentials stay in the child environment; only the setup script emits receipts.
@@ -30,7 +31,7 @@ test("ENG105 authorized live setup verifies API configuration and removes only o
   await mkdir(output, { recursive: true, mode: 0o700 });
   const run = async (phase: string, args: string[]) => {
     const result = await new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve, reject) => {
-      execFile("bash", [script, ...args], { env: process.env, timeout: 600_000, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
+      execFile("bash", [script, ...args], { env: sanitizedLiveProofEnvironment(process.env), timeout: 600_000, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
         if (!error) resolve({ exitCode: 0, stdout, stderr });
         else if (!error.killed && typeof error.code === "number") resolve({ exitCode: error.code, stdout, stderr });
         else reject(new Error(`Live setup ${phase} did not return; inspect owned resources before any retry`));
