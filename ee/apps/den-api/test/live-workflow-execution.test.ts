@@ -98,6 +98,20 @@ test("normal explicit runs retain write authority while Automations and live run
   expect((await executeWorkflow({ ...input, readOnly: false, automationRunId: createDenTypeId("automationRun"), buildTools })).ok).toBe(false)
 })
 
+test("live provenance overrides a snapshot source on success and preflight failure", async () => {
+  const { input, receipts } = fixture()
+  const receiptSource = `plugin:${input.pluginId}:${input.configObjectId}`
+  for (const buildTools of [
+    async () => built(() => Effect.succeed({ actor: "caller" })),
+    async () => ({ tools: {}, manifest: [] }),
+  ]) {
+    await executeWorkflow({ ...input, receiptSource, buildTools })
+    expect(receipts.at(-1)?.source).toBe(`live:${receiptSource}`)
+  }
+  await executeWorkflow({ ...input, readOnly: false, buildTools: async () => built(() => Effect.succeed({ actor: "caller" })) })
+  expect(receipts.at(-1)?.source).toBe(receiptSource)
+})
+
 test("provider connection errors retain their actionable card", async () => {
   const { input } = fixture()
   const connectionStatus = {

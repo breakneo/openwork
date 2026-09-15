@@ -80,7 +80,9 @@ export async function executeWorkflow(input: {
   const scriptInputDigest = artifactDigest(normalizedScriptInput)
   const inputSchemaDigest = optionalArtifactDigest(parsed.payload.inputSchema)
   const outputSchemaDigest = optionalArtifactDigest(parsed.payload.outputSchema)
-  const receiptSource = input.receiptSource ?? `plugin:${input.pluginId}:${input.configObjectId}`
+  const receiptSource = input.readOnly
+    ? `live:plugin:${input.pluginId}:${input.configObjectId}`
+    : input.receiptSource ?? `plugin:${input.pluginId}:${input.configObjectId}`
   const recordPreflightFailure = (errorKind: string, errorMessage: string) => {
     const now = new Date()
     return recordWorkflowRun(input.database, {

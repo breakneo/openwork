@@ -298,6 +298,58 @@ function actorTools(memberId: string, readOnly = true): BuiltCodemodeTools {
 }
 
 describe("live generated apps and personal receipts", () => {
+  test("published workflow snapshot reads retain other members' explicit runs but exclude live provenance", async () => {
+    const seeded = await seedWorkflowWithViewer()
+    await prepareLiveWorkflow(seeded)
+    const { executeWorkflow } = await import("../src/mcp/workflow-service.js")
+    const snapshot = await executeWorkflow({
+      database: db, organizationId: seeded.organizationId, orgMembershipId: seeded.ownerMemberId,
+      pluginId: seeded.pluginId, configObjectId: seeded.configObjectId,
+      configObjectVersionId: seeded.configObjectVersionId,
+      normalizedPayloadJson: { language: "codemode-js", requiredCapabilities: [], outputSchema: liveOutputSchema },
+      code: 'return { report: "shared snapshot" }', validateOutput: true,
+      buildTools: async () => ({ tools: {}, manifest: [] }),
+    })
+    if (!snapshot.ok || !snapshot.receiptId) throw new Error("expected legacy snapshot")
+    const live = await workflows.executeLiveArtifactWorkflow({
+      context: seeded.ownerContext, configObjectId: seeded.configObjectId,
+      expectedOutputSchemaDigest: artifactDigest(liveOutputSchema),
+      buildTools: async () => actorTools(seeded.ownerMemberId),
+    })
+    if (!live.ok || !live.receiptId) throw new Error("expected live result")
+    const query = { context: seeded.viewerContext, configObjectId: seeded.configObjectId }
+    for (let read = 0; read < 2; read += 1) {
+      const detail = await workflows.getWorkflowDetail(query)
+      expect(detail.latestSnapshot?.receiptId).toBe(snapshot.receiptId)
+      expect(detail.latestSuccessfulSnapshot?.receiptId).toBe(snapshot.receiptId)
+      expect(JSON.stringify(detail)).not.toContain(live.receiptId)
+      expect((await workflows.listWorkflowSnapshots(query)).items.map((row) => row.receiptId)).toEqual([snapshot.receiptId])
+      expect((await workflows.getWorkflowSnapshot({ ...query, receiptId: snapshot.receiptId }))?.value).toEqual({ report: "shared snapshot" })
+      expect(await workflows.getWorkflowSnapshot({ ...query, receiptId: live.receiptId })).toBeNull()
+    }
+    const { saveArtifactViewRevision } = await import("../src/artifact-views.js")
+    const { getSavedApp } = await import("../src/saved-apps.js")
+    const view = await saveArtifactViewRevision({
+      context: seeded.ownerContext, configObjectId: seeded.configObjectId,
+      title: "Live isolation", reactSource: "export default function App() { return <div>Live</div> }",
+    })
+    const load = { context: seeded.viewerContext, appId: view.id, revisionId: view.revisions[0]?.id }
+    for (const receiptId of [snapshot.receiptId, live.receiptId]) {
+      await expect(getSavedApp({ ...load, receiptId })).rejects.toThrow("artifact_view_live_receipt_override_denied")
+    }
+    const missing = await getSavedApp({ ...load, buildTools: async () => ({ tools: {}, manifest: [] }) })
+    expect(missing.payload).toBeNull()
+    expect(missing.runError).toMatchObject({ error: "capability_unavailable" })
+    expect(JSON.stringify(missing)).not.toContain("shared snapshot")
+    for (let read = 0; read < 2; read += 1) {
+      const fresh = await getSavedApp({ ...load, buildTools: async () => actorTools(seeded.viewerMemberId) })
+      expect(fresh.payload?.data).toMatchObject({ actor: seeded.viewerMemberId })
+      expect(JSON.stringify(fresh.payload)).not.toContain(seeded.ownerMemberId)
+    }
+    await db.update(WorkflowRunTable).set({ source: "unrecognized" }).where(eq(WorkflowRunTable.id, snapshot.receiptId))
+    expect(await workflows.getWorkflowSnapshot({ ...query, receiptId: snapshot.receiptId })).toBeNull()
+  })
+
   test("viewer runs the saved current code with their own tools; exact, list and detail receipts stay private", async () => {
     const seeded = await seedWorkflowWithViewer()
     await prepareLiveWorkflow(seeded)
