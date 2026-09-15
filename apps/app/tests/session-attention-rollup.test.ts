@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { UIMessage } from "ai";
+import { currentLocale, setLocale, t } from "../src/i18n";
 import { createSessionChildIdsSelector, useSessionActivityStore, type SessionActivityStatus } from "../src/react-app/domains/session/status/session-activity-store";
 import { createWorkspaceSessionAttentionSelector, selectSessionAttention, sessionAttentionLabel, sessionAttentionSidebarStatus } from "../src/react-app/domains/session/status/session-attention";
 import { listControlSessions } from "../src/react-app/domains/session/control/list-control-sessions";
@@ -47,6 +48,35 @@ describe("descendant attention inventory", () => {
   beforeEach(() => {
     useSessionActivityStore.setState({ recordsByWorkspaceId: {}, statusesByWorkspaceId: {}, waitingByWorkspaceId: {} });
     for (const session of sessions) useSessionActivityStore.getState().setRunStatus(workspaceId, session.id, "idle");
+  });
+
+  test("locale changes refresh cached fallback titles without changing attention state", () => {
+    const previousLocale = currentLocale();
+    const select = createWorkspaceSessionAttentionSelector();
+    const inventory = [parent, { ...child, title: "" }];
+    const inputs = {
+      statuses: { [parent.id]: "idle", [child.id]: "waiting" } satisfies Record<string, SessionActivityStatus>,
+      waiting: { [child.id]: "question" } satisfies Record<string, "question">,
+    };
+    try {
+      setLocale("en");
+      const english = select(inventory, inputs);
+      expect(select(inventory, inputs)).toBe(english);
+      expect(english.get(parent.id)?.blockedBy?.title).toBe(t("session.default_title"));
+      setLocale("fr");
+      const french = select(inventory, inputs);
+      expect(french).not.toBe(english);
+      expect(select(inventory, inputs)).toBe(french);
+      const blockedBy = french.get(parent.id)?.blockedBy;
+      expect(blockedBy?.title).toBe(t("session.default_title"));
+      expect(blockedBy?.title).not.toBe(english.get(parent.id)?.blockedBy?.title);
+      if (!blockedBy) throw new Error("Expected a pending child question");
+      expect(sessionAttentionLabel(blockedBy)).toBe(`${t("session.subagent_question_pending")}: ${t("session.default_title")}`);
+      expect(french.get(parent.id)?.descendantActivity).toEqual(english.get(parent.id)?.descendantActivity);
+      expect(french.get(parent.id)?.status).toBe("waiting");
+    } finally {
+      setLocale(previousLocale);
+    }
   });
 
   test("progress, timestamps, and unrelated records preserve relationship and attention identity", () => {

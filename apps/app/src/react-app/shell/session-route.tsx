@@ -73,7 +73,7 @@ import {
   resolveModelDisplayName,
   safeStringify,
 } from "@/app/utils";
-import { t } from "@/i18n";
+import { currentLocale, t } from "@/i18n";
 import {
   type RouteWorkspace,
   type RouteSession,
@@ -841,6 +841,7 @@ export function SessionRoute() {
     }
   }, [seedWorkspaceActivitySessions, workspaceSessionGroups]);
 
+  const attentionLocale = currentLocale();
   const sidebarSessionAttention = useMemo(() => {
     const statusById: Record<string, string> = {};
     const labelById: Record<string, string> = {};
@@ -866,7 +867,7 @@ export function SessionRoute() {
       }
     }
     return { statusById, labelById, sourceById };
-  }, [selectWorkspaceAttention, sessionActivityByWorkspaceId, sessionWaitingByWorkspaceId, sessionChildIdsByWorkspaceId, workspaceSessionGroups]);
+  }, [attentionLocale, selectWorkspaceAttention, sessionActivityByWorkspaceId, sessionWaitingByWorkspaceId, sessionChildIdsByWorkspaceId, workspaceSessionGroups]);
   const sidebarSessionStatusById = sidebarSessionAttention.statusById;
 
   const sidebarActiveWorkspaceId = useMemo(() => {

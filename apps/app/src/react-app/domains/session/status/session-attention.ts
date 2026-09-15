@@ -1,6 +1,6 @@
 import type { OpenworkSessionActivityInventory } from "@openwork/types/openwork-affordance";
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
-import { t } from "../../../../i18n";
+import { currentLocale, t } from "../../../../i18n";
 import type { SessionActivityStatus, SessionChildIds, SessionWaitingKind } from "./session-activity-store";
 
 type AttentionSession = {
@@ -93,11 +93,14 @@ type WorkspaceAttentionInputs = {
 export function createWorkspaceSessionAttentionSelector() {
   const cache = new WeakMap<readonly AttentionSession[], {
     inputs: WorkspaceAttentionInputs;
+    locale: ReturnType<typeof currentLocale>;
     attention: Map<string, SessionAttention>;
   }>();
   return (sessions: readonly AttentionSession[], inputs: WorkspaceAttentionInputs) => {
+    const locale = currentLocale();
     const previous = cache.get(sessions);
     if (previous
+      && previous.locale === locale
       && previous.inputs.statuses === inputs.statuses
       && previous.inputs.waiting === inputs.waiting
       && previous.inputs.childIds === inputs.childIds
@@ -110,7 +113,7 @@ export function createWorkspaceSessionAttentionSelector() {
       (id) => inputs.serverWaiting?.[id] ?? inputs.waiting?.[id],
       (id) => [...inputs.childIds?.[id] ?? [], ...inputs.serverChildIds?.[id] ?? []],
     );
-    cache.set(sessions, { inputs, attention });
+    cache.set(sessions, { inputs, locale, attention });
     return attention;
   };
 }
