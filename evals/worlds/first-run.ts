@@ -1,5 +1,6 @@
 import { browserScript, listTargets } from "@openwork/cdp";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +23,8 @@ import {
 import { startEgressLab, startMockMcp } from "@openwork/labs";
 import { diagnoseEgressLabProduct } from "@openwork/behaviors";
 import { configureProvider } from "./chat.ts";
+import { sessionlessTransition } from "./sessionless-transition.ts";
+import { close, listen, readBody, sendJson, sendMockError } from "./openwork-server-cli.ts";
 import { matchVerdictExpectations } from "@openwork/matchers";
 import {
   assignPluginToMarketplace,
@@ -193,12 +196,15 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
   const nonce = `${Date.now().toString(36)}-${process.pid}`;
   const prompt = `Summarize this workspace in one sentence. FIRST-SEND-${nonce}`;
   const reply = `Workspace summary finished ${nonce}.`;
-  await using setup = new AsyncDisposableStack();
-  const mock = setup.use(await startMockMcp({
-    port: await allocateFreePort(),
+  const mockBoot = seed.mock({
+    isolatedProcessEnv: true,
     agentWorkloads: [{ promptMarker: prompt, latestUserTurn: true, finalReply: reply, steps: [] }],
-  }));
-  const { app, workspace, workspacePath } = await workspaceWorld(seed);
+  });
+  const workspacePath = seed.tmpPath("sessionless-first-send");
+  const app = await seed.appWeb({ name: "sessionless-first-send", workspacePath, headless: true, mocks: { agent: mockBoot } });
+  const mock = app.mocks.agent;
+  if (!mock) throw new Error("Missing first-send model witness");
+  const workspace = await seed.workspace(app, workspacePath);
   const documentStartedAt = await evalIn(app, () => performance.timeOrigin);
   await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, {
     provider: {
@@ -209,14 +215,11 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
         models: { [modelId]: { name: "First send model" } },
       },
     },
-  });
-  // configureProvider schedules a reload; its readiness probe can still run in
-  // the old document. Never type the test prompt into that departing composer.
+  }, engine);
   await waitForBehavior(app, browserScript((startedAt) => performance.timeOrigin !== startedAt
     && Boolean(window.__openworkControl), [documentStartedAt]), {
     timeoutMs: 60_000, label: "provider-configured replacement document mounted",
   });
-  const resources = setup.move();
   const mount = `/workspace/${encodeURIComponent(workspace.workspaceId)}`;
   return {
     app,
@@ -225,6 +228,26 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
     engine,
     prompt,
     reply,
+    transition: (evidenceDirectory: string) => sessionlessTransition(seed, app, workspace.workspaceId, engine, evidenceDirectory),
+    route: () => seed.evalIn(app, () => location.hash || `#${location.pathname}`),
+    recovery: () => seed.evalIn(app, () => {
+      const restore = [...document.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.includes("Clear the current draft to restore the unsent message"));
+      return {
+        error: document.querySelector('[role="alert"]')?.textContent ?? "",
+        starting: Boolean(document.querySelector('[data-loading-message="starting"]')),
+        restoreVisible: Boolean(restore), restoreDisabled: restore?.disabled ?? false,
+      };
+    }),
+    requests: async () => (await mock.agentRequests({ promptMarker: prompt })).filter((request) => request.kind === "final"),
+    readNative: (path: string) => seed.evalIn(app, browserScript(async (path) => {
+      const response = await fetch("http://127.0.0.1:" + localStorage.getItem("openwork.server.port") + path, {
+        headers: { Authorization: "Bearer " + localStorage.getItem("openwork.server.token") },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const body: unknown = await response.json();
+      return { status: response.status, body };
+    }, [path]), { awaitPromise: true, timeoutMs: 20_000 }),
     sessionlessRoute: `#/workspace/${workspace.workspaceId}/session`,
     /** Engine-native message list for one session, on the selected engine's mount. */
     messagesPath: (sessionId: string) => engine === "v2"
@@ -233,7 +256,6 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
     /** Engine-native session list on the selected engine's mount. */
     sessionsPath: engine === "v2" ? `${mount}/opencode2/api/session` : `${mount}/opencode/session?limit=100`,
     openNewTask: () => go(app, `/workspace/${workspace.workspaceId}/session`),
-    [Symbol.asyncDispose]: () => resources.disposeAsync(),
   };
 }
 
@@ -253,6 +275,91 @@ export async function parentChildPermissionWorld(seed: Seed) {
     throw new Error(`Child permission seed failed: ${JSON.stringify(seeded)}`);
   }
   return base;
+}
+
+export async function parentChildHeldToolWorld(seed: Seed, { place }: { place: Place }) {
+  if (place.kind !== "local") throw new SkipError("The held MCP response witness needs local placement (--local).");
+  const engine = resolveEvalEngine();
+  const providerId = "descendant-mock";
+  const modelId = "descendant-model";
+  const delegationTool = engine === "v2" ? "subagent" : "task";
+  const toolName = "descendant_hold";
+  const marker = `descendant-${Date.now()}-${process.pid}`;
+  const prompt = "Delegate preparing an isolated investigation, then confirm it is ready.";
+  const childPrompt = "Prepare the isolated investigation.";
+  const followup = "Run the held investigation tool, then report its result.";
+  const reply = "The delegated investigation is ready.";
+  const toolReply = `Investigation released ${marker}.`;
+  await using setup = new AsyncDisposableStack();
+  const mock = setup.use(await startMockMcp({
+    port: await allocateFreePort(), isolatedProcessEnv: true, allowUnauthenticatedMcp: true,
+    tools: [{ name: "hold", description: "Run the held investigation", inputSchema: {
+      type: "object", properties: { marker: { type: "string" } }, required: ["marker"],
+    }, result: { content: [{ type: "text", text: toolReply }] } }],
+    agentWorkloads: [
+      { promptMarker: prompt, latestUserTurn: true, finalReply: reply, steps: [{ tool: delegationTool, arguments: {
+        description: "Prepare isolated investigation", prompt: childPrompt,
+        ...(engine === "v2" ? { agent: "general", background: false } : { subagent_type: "general" }),
+      } }] },
+      { promptMarker: childPrompt, latestUserTurn: true, finalReply: "Investigation prepared.", steps: [] },
+      { promptMarker: followup, latestUserTurn: true, finalReply: toolReply, finalReplyFrom: "last-tool-text",
+        steps: [{ tool: toolName, arguments: { marker } }] },
+    ],
+  }));
+  const gate = Promise.withResolvers<void>();
+  const state = { held: 0, released: false, timedOut: false, delivered: 0 };
+  const release = () => { state.released = true; gate.resolve(); };
+  const proxy = createServer(async (request, response) => {
+    try {
+      if (request.method !== "POST") return sendJson(response, 405, {});
+      const raw = await readBody(request);
+      const body: unknown = JSON.parse(raw);
+      const held = isRecord(body) && body.method === "tools/call" && isRecord(body.params)
+        && body.params.name === "hold" && isRecord(body.params.arguments) && body.params.arguments.marker === marker;
+      const upstream = await fetch(mock.mcpUrl, {
+        method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: raw, signal: AbortSignal.timeout(15_000),
+      });
+      const text = await upstream.text();
+      if (held) {
+        state.held += 1;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([gate.promise, new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              state.timedOut = true;
+              reject(new Error("Descendant MCP response was not explicitly released"));
+            }, 90_000);
+          })]);
+        } finally { clearTimeout(timer); }
+      }
+      response.writeHead(upstream.status, Object.fromEntries(upstream.headers));
+      response.end(text);
+      if (held) state.delivered += 1;
+    } catch (error) { sendMockError(response, error); }
+  });
+  const mcpUrl = await listen(proxy);
+  setup.defer(async () => { release(); await close(proxy); });
+  const app = await seed.desktop({ name: "descendant-held-tool" });
+  const workspace = await seed.workspace(app, seed.tmpPath("descendant-held-tool"), { create: true });
+  await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, {
+    permission: { task: "allow", "descendant_*": "allow" },
+    mcp: { descendant: { type: "remote", url: mcpUrl, enabled: true, oauth: false, timeout: 120_000 } },
+    provider: { [providerId]: { npm: "@ai-sdk/openai-compatible", name: "Descendant mock",
+      options: { baseURL: `${mock.url}/v1`, apiKey: "sk-descendant-fixture" },
+      models: { [modelId]: { name: "Descendant model" } },
+    } },
+  }, engine);
+  const session = await seed.session(app, { title: "Idle parent with delegated work" });
+  const resources = setup.move();
+  return {
+    app, workspace, session, engine, delegationTool, toolName, marker, prompt, followup, reply, toolReply, mock,
+    mount: `/workspace/${encodeURIComponent(workspace.workspaceId)}/${engine === "v2" ? "opencode2/api" : "opencode"}`,
+    promptBody: engine === "v2" ? { text: followup }
+      : { model: { providerID: providerId, modelID: modelId }, parts: [{ type: "text", text: followup }] },
+    heldTool: () => ({ ...state }), release,
+    [Symbol.asyncDispose]: () => resources.disposeAsync(),
+  };
 }
 
 export async function scopedPermissionRefreshWorld(seed: Seed) {
@@ -347,12 +454,22 @@ export async function scopedPermissionRefreshWorld(seed: Seed) {
 }
 
 export async function artifactCodeBrowserWorld(seed: Seed) {
+  const tableMarkdown = [
+    "# Table interactions",
+    "",
+    "| Name | Details |",
+    "| --- | --- |",
+    "| First row | [Documentation](https://example.com/docs) |",
+    `| Second row | ${"wide-column-".repeat(40)} |`,
+    "",
+    "After the table",
+  ].join("\n");
   const base = await workspaceWorld(seed);
   const [session] = await seed.sessions(base.app, ["Artifact code browser proof"]);
   if (!session) throw new Error("Could not seed the artifact code browser session.");
   await go(base.app, `/workspace/${base.workspace.workspaceId}/session/${session.sessionId}`);
   // TODO(primitive): write workspace files through the local server fixture.
-  const wrote = await seed.evalIn(base.app, browserScript(async (workspaceId) => {
+  const wrote = await seed.evalIn(base.app, browserScript(async (workspaceId, tableMarkdown) => {
     const port = localStorage.getItem("openwork.server.port");
     const token = localStorage.getItem("openwork.server.token");
     if (!port || !token) return false;
@@ -368,9 +485,10 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
       write("restricted/hidden-proof.ts", "export const restricted = true;"),
       write("src/openwork-artifact-proof.ts", "export const artifactEditor = true;\n"),
       write("config/openwork-artifact-settings.json", "{\"artifactEditor\":true}\n"),
+      write("docs/table-interactions.md", tableMarkdown),
     ]);
     return responses.every((response) => response.ok);
-  }, [base.workspace.workspaceId]), { awaitPromise: true });
+  }, [base.workspace.workspaceId, tableMarkdown]), { awaitPromise: true });
   if (wrote !== true) throw new Error("Could not seed artifact code files.");
   // TODO(primitive): open an initial built-in browser artifact tab.
   await seed.evalIn(base.app, () => (window.__openworkControl.execute("browser.open_url", { url: "about:blank" })), { awaitPromise: true });
@@ -384,6 +502,7 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
   if (!isRecord(tabs) || tabs.ok !== true) throw new Error(`Could not seed artifact tabs: ${JSON.stringify(tabs)}`);
   return {
     ...base,
+    tableMarkdown,
     async visibleArtifactCode() {
       return seed.evalIn(base.app, () => {
         const root = document.querySelector<HTMLElement>("[data-artifact-code-view]");
@@ -1010,7 +1129,7 @@ export async function toolTesterWorld(seed: Seed) {
   const web = await seed.web({
     den,
     signedInAs: "admin",
-    startPath: "/dashboard/mcp-connections",
+    startPath: "/dashboard/mcp-connections/configured",
     headless: true,
     viewport: { width: 1440, height: 1000 },
   });

@@ -18,6 +18,8 @@ import {
   type EnginePoolConnection,
   type EngineEventProxyLease,
   type EngineSpawnTemplate,
+  rolloverOutcomeApplied,
+  type RolloverOutcome,
   type RolloverReason,
 } from "./engine-pool.js";
 import { withEngineDirectoryFence } from "./engine-directory-fence.js";
@@ -35,6 +37,7 @@ import { addPlugin, listPlugins, normalizePluginSpec, removePlugin } from "./plu
 import { sanitizePortableOpencodeConfig } from "./portable-opencode.js";
 import { addMcp, listMcp, removeMcp, setMcpEnabled } from "./mcp.js";
 import { buildOpenWorkV2Instructions, waitForOpenWorkV2Skills, OPENWORK_V2_INSTRUCTION_KEY } from "./opencode-v2-instructions.js";
+import { CLOUD_NATIVE_SKILL_ID_PREFIX, CloudNativeSkillSyncError } from "./cloud-native-skills.js";
 import {
   callMcpAppTool,
   listMcpAppCatalog,
@@ -886,10 +889,17 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           }
           proxyService = "opencode";
           proxyBaseUrl = connection.url;
-          await engineV2Preview.ensureWorkspaceReady(workspace.path);
-          // Reconcile through v2's runtime MCP API before the next call. The
-          // ordinary connection routes remain authoritative; v1 is untouched.
-          await engineV2Preview.syncWorkspaceMcp(workspace.id, workspace.path);
+          // Only exact native history reads may skip execution readiness. Keep
+          // IDs literal (no encoded separators or route-prefix matches), and
+          // still verify session ownership in proxyOpencodeV2Request below.
+          const isSessionHistoryRead = request.method === "GET"
+            && /^\/opencode2\/api\/session\/ses_[A-Za-z0-9_-]+(?:\/message(?:\/msg_[A-Za-z0-9_-]+)?)?$/.test(mount.restPath);
+          if (!isSessionHistoryRead) {
+            await engineV2Preview.ensureWorkspaceReady(workspace.path);
+            // Reconcile through v2's runtime MCP API before execution admission.
+            // The ordinary connection routes remain authoritative.
+            await engineV2Preview.syncWorkspaceMcp(workspace.id, workspace.path);
+          }
           const send = () => proxyOpencodeV2Request({
             config,
             request,
@@ -897,6 +907,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
             workspace,
             proxyPath: mount.restPath,
             connection,
+            syncCloudSkills: engineV2Preview.syncCloudSkills,
+            actor,
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined,
           });
           const response = taskRecovery ? await taskRecovery.forward(workspace, "v2", mount.restPath, request, send) : await send();
@@ -1128,13 +1140,15 @@ function buildOpencodeProxyUrl(baseUrl: string, path: string, search: string) {
   return target.toString();
 }
 
-async function proxyOpencodeV2Request(input: {
+export async function proxyOpencodeV2Request(input: {
+  actor: Actor;
   config: ServerConfig;
   request: Request;
   url: URL;
   workspace: WorkspaceInfo;
   proxyPath: string;
   connection: { url: string; username: string; password: string };
+  syncCloudSkills: EngineV2Preview["syncCloudSkills"];
   recoverySignal?: AbortSignal;
 }): Promise<Response> {
   const method = input.request.method.toUpperCase();
@@ -1215,13 +1229,28 @@ async function proxyOpencodeV2Request(input: {
     const mcpPayload: unknown = mcpResponse.ok ? await mcpResponse.json() : null;
     const connectReady = isRecord(mcpPayload) && Array.isArray(mcpPayload.data) && mcpPayload.data.some((entry) =>
       isRecord(entry) && entry.name === "openwork-cloud" && isRecord(entry.status) && entry.status.status === "connected");
+    // Authorized organization skills are materialized fresh as native skills
+    // on every admission. Skills fail closed, the conversation does not: any
+    // Cloud auth/transport failure has already cleared and unregistered the
+    // materialized root, so the prompt is admitted without Cloud skills and the
+    // waiter below confirms none remain in the native registry.
+    let cloudSkills: Awaited<ReturnType<EngineV2Preview["syncCloudSkills"]>>;
+    try {
+      cloudSkills = await input.syncCloudSkills();
+    } catch (error) {
+      if (error instanceof CloudNativeSkillSyncError) throw new ApiError(502, error.code, error.message);
+      throw new ApiError(502, "cloud_skill_sync_failed", "OpenWork Cloud skills could not be synchronized");
+    }
+    if (cloudSkills.failure) {
+      console.warn(`[openwork-server] Cloud skills unavailable for this turn (${cloudSkills.failure}); admitting without Cloud skills`);
+    }
     const skillUrl = new URL(target);
     skillUrl.pathname = "/api/skill";
     await waitForOpenWorkV2Skills(input.workspace.path, async () => {
       const response = await loopbackFetch(skillUrl.toString(), { headers: internalHeaders, signal: AbortSignal.timeout(5_000) });
       if (!response.ok) throw new ApiError(502, "engine_skill_sync_failed", "Native skills are unavailable");
       return response.json();
-    });
+    }, cloudSkills);
     const value = buildOpenWorkV2Instructions(connectReady);
     const instructionUrl = new URL(target);
     instructionUrl.pathname = `/api/session/${encodeURIComponent(sessionId)}/instructions/entries/${OPENWORK_V2_INSTRUCTION_KEY}`;
@@ -1251,6 +1280,23 @@ async function proxyOpencodeV2Request(input: {
     headers.set("content-type", "application/json");
   }
   const response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
+  if (method === "GET" && /^\/api\/skill(?:\/|$)/.test(decodeURIComponent(forwardedPath))
+    && input.actor.scope !== "owner" && response.ok) {
+    // A shared client token is not authorization to bulk-read the owner's Cloud
+    // instructions. Keep metadata for selection, just like the Connect catalog;
+    // bodies and private materialization paths stay on the owner/engine side.
+    // Internal watcher/admission reads above deliberately do not use this projection.
+    const payload: unknown = await response.json();
+    const raw = isRecord(payload) && "data" in payload ? payload.data : payload;
+    const publicSkill = (value: unknown) => {
+      if (!isRecord(value) || typeof value.id !== "string") {
+        throw new ApiError(502, "invalid_engine_response", "Invalid skill metadata");
+      }
+      if (!value.id.startsWith(CLOUD_NATIVE_SKILL_ID_PREFIX)) return value;
+      return Object.fromEntries(Object.entries(value).filter(([key]) => ["id", "name", "description", "slash"].includes(key)));
+    };
+    return jsonResponse({ data: Array.isArray(raw) ? raw.map(publicSkill) : publicSkill(raw) });
+  }
   if (method === "GET" && /^\/api\/provider(?:\/|$)/.test(decodeURIComponent(forwardedPath)) && response.ok) {
     // Provider.Info includes request settings/headers, which may contain the
     // mirrored server-owned key. Clients only need public catalog metadata.
@@ -2279,9 +2325,24 @@ function createRoutes(
   // the established busy deferral.
   const applyManagedProviderReload = async (workspace: WorkspaceInfo): Promise<"reloaded" | "deferred"> => {
     const reloadDeferred = await shouldDeferInPlaceEngineReload(config, workspace, engineHasActiveSessions);
-    if (!reloadDeferred) await reloadOpencodeEngine(config, workspace, engineMcpServerState, { reason: "managed_provider_reload" });
-    if (reloadDeferred) cloudProviderSync.markReloadPending();
-    return reloadDeferred ? "deferred" : "reloaded";
+    if (reloadDeferred) {
+      cloudProviderSync.markReloadPending();
+      return "deferred";
+    }
+    // A key-only rotation through this route never shows in the pool's
+    // config fingerprint, so an unforced request would be skipped and the
+    // engine would keep serving the previous credential while the route
+    // answered "reloaded". Force the standby path, mirroring cloud sync, and
+    // only report "reloaded" once the engine actually read the change.
+    const outcome = await reloadOpencodeEngine(config, workspace, engineMcpServerState, {
+      reason: "managed_provider_reload",
+      forceStandby: true,
+    });
+    if (rolloverOutcomeApplied(outcome)) return "reloaded";
+    // Parked or skipped inside the pool: keep it owed so the sync retry
+    // path lands it instead of the caller believing it is done.
+    cloudProviderSync.markReloadPending();
+    return "deferred";
   };
   registerCoreRoutes({
     routes,
@@ -2937,6 +2998,22 @@ function createRoutes(
     return jsonResponse(await cloudProviderSync.run(typeof body.reason === "string" ? body.reason : undefined));
   });
 
+  addRoute(routes, "POST", "/cloud-provider-sync/providers/:id/oauth/start", "host-token", async (ctx) => {
+    ensureWritable(config);
+    const origin = ctx.request.headers.get("origin");
+    if (origin && origin !== new URL(ctx.request.url).origin && !config.corsOrigins.includes("*") && !config.corsOrigins.includes(origin)) {
+      throw new ApiError(403, "invalid_origin", "This origin cannot start provider authorization");
+    }
+    if (ctx.request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
+      throw new ApiError(415, "invalid_content_type", "A JSON request is required");
+    }
+    const body = await readJsonBody(ctx.request);
+    if (typeof body.orgId !== "string" || (body.credentialSetId !== undefined && typeof body.credentialSetId !== "string") || Object.keys(body).some((key) => key !== "orgId" && key !== "credentialSetId")) {
+      throw new ApiError(400, "invalid_payload", "Only the active orgId and optional credentialSetId are accepted");
+    }
+    return jsonResponse(await cloudProviderSync.startProviderOAuth(ctx.params.id, body.orgId, body.credentialSetId));
+  });
+
   addRoute(routes, "GET", "/managed-policy", "client", async () =>
     jsonResponse({ policy: await managedDesktopPolicy(config).current() }));
   addRoute(routes, "POST", "/managed-policy/evaluate", "policy", async (ctx) => {
@@ -3232,8 +3309,9 @@ function createRoutes(
     readJsonBody,
     requireClientScope,
     resolveWorkspace,
-    reloadOpencodeEngine: (routeConfig, workspace) =>
-      reloadOpencodeEngine(routeConfig, workspace, engineMcpServerState, { reason: "operation_route" }),
+    reloadOpencodeEngine: async (routeConfig, workspace) => {
+      await reloadOpencodeEngine(routeConfig, workspace, engineMcpServerState, { reason: "operation_route" });
+    },
   });
 
   registerUiControlRoutes({ routes, jsonResponse, readJsonBody, requireClientScope });
@@ -4564,18 +4642,20 @@ async function reloadOpencodeEngine(
   workspace: WorkspaceInfo,
   serverState?: EngineMcpServerState,
   options?: { awaitPostRefreshSync?: boolean; forceStandby?: boolean; reason?: RolloverReason },
-): Promise<void> {
+): Promise<RolloverOutcome> {
   const pool = enginePoolForConfig(config);
   if (pool) {
-    await pool.requestRollover({
+    // The outcome is the caller's proof: only an applied action means the
+    // engine now reads the requested config and credentials.
+    return pool.requestRollover({
       reason: options?.reason ?? "engine_reload",
       workspace,
       awaitPostRefreshSync: options?.awaitPostRefreshSync,
       forceStandby: options?.forceStandby,
     });
-    return;
   }
   await reloadOpencodeEngineInPlace(config, workspace, serverState, options);
+  return { action: "reloaded_in_place" };
 }
 
 async function reloadOpencodeEngineInPlace(
@@ -5365,6 +5445,13 @@ export function createEnginePoolForConfig(input: {
           "provider.auth.skipped": result.skipped.length,
           "provider.auth.failed": result.failed.length,
         });
+        // A generation missing even one managed credential must not be
+        // promoted: the pool keeps the live engine and the caller retries.
+        if (result.failed.length > 0) {
+          throw new Error(
+            `Managed provider credential seed failed for ${result.failed.map((entry) => entry.providerId).join(", ")}`,
+          );
+        }
       },
       writeRuntimeConfigFile: (poolConfig) => writeOpenworkRuntimeConfigFile(poolConfig),
       registerTrusted: (poolConfig, generation) => registerTrustedOpencodeProcess(poolConfig, generation),

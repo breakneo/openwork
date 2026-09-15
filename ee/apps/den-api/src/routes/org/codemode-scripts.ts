@@ -1,3 +1,5 @@
+import { liveArtifactConnectionFailure } from "../../mcp/capability-registry.js"
+import { artifactRunInputSchema } from "../../artifact-runtime.js"
 import type { Hono } from "hono"
 import { describeRoute } from "hono-openapi"
 import { z } from "zod"
@@ -227,7 +229,7 @@ export function registerOrgWorkflowRoutes<T extends { Variables: OrgRouteVariabl
     })
     const buildTools = () => buildCapabilityToolTree(capabilityContext)
     const actorContext = { organizationContext: context, memberTeams: teams, session: c.get("session") }
-    return { context, member, actorContext, buildTools }
+    return { context, member, actorContext, buildTools, describeUnavailable: (missing: readonly { capabilityName: string }[]) => liveArtifactConnectionFailure(capabilityContext, missing) }
   }
 
   app.get(
@@ -360,18 +362,19 @@ export function registerOrgWorkflowRoutes<T extends { Variables: OrgRouteVariabl
     "/v1/apps/:appId",
     describeRoute({
       tags: ["Apps"], summary: "Open an app or an exact draft preview",
-      description: "Returns the app with the compiled HTML of one revision and the artifact payload it should render. Without revisionId the active saved revision is used; pass revisionId to preview an exact draft revision instead. The data comes from the Workflow's latest successful snapshot, or from the snapshot named by receiptId. When the revision has not finished building, no readable successful result exists, or the result's output schema no longer matches the revision, html and payload are null and previewNotice explains why.",
+      description: "Returns the app with the compiled HTML of one revision and the artifact payload it should render. Without revisionId the active saved revision is used; pass revisionId to preview an exact draft revision instead. Live apps execute the current saved Workflow as the caller with optional IANA timeZone (UTC by default); receiptId is forbidden for live apps. Legacy snapshots use only the caller's receipts. When the revision has not finished building, no readable successful result exists, or the result's output schema no longer matches the revision, html and payload are null and previewNotice explains why.",
       responses: {
         200: jsonResponse("App preview returned.", savedAppDetailSchema),
       },
     }),
     orgMemberRoute(),
-    queryValidator(z.object({ revisionId: z.string().trim().min(1).max(160).optional(), receiptId: z.string().trim().min(1).max(160).optional() })),
+    queryValidator(artifactRunInputSchema.extend({ revisionId: z.string().trim().min(1).max(160).optional(), receiptId: z.string().trim().min(1).max(160).optional() })),
     async (c) => {
       if (!env.generatedArtifactViewsEnabled) return c.json({ error: "artifact_view_not_found" }, 404)
       try {
-        const { actorContext } = await contextFor(c)
-        return c.json(await getSavedApp({ context: actorContext, appId: c.req.param("appId"), ...c.req.valid("query") }))
+        const { actorContext, buildTools, describeUnavailable } = await contextFor(c)
+        c.header("Cache-Control", "private, no-store")
+        return c.json(await getSavedApp({ context: actorContext, buildTools, describeUnavailable, appId: c.req.param("appId"), ...c.req.valid("query") }))
       } catch (error) {
         const failure = appRouteFailure(error)
         return c.json(failure.body, failure.status)

@@ -1,9 +1,50 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { openworkFeatureContributionSchema } from "@openwork/types/openwork-provider";
 
-import { buildOpenworkProviderContributions } from "./openwork-provider-adapters.js";
+import { buildOpenworkProviderContributions, sessionAffordanceArgsSchemas } from "./openwork-provider-adapters.js";
+
+function stringMaxima(schema: unknown): number[] {
+  if (schema instanceof z.ZodString) {
+    return (schema._def.checks ?? []).flatMap((check) => {
+      const def = check._zod.def;
+      return def.check === "max_length" && "maximum" in def && typeof def.maximum === "number" ? [def.maximum] : [];
+    });
+  }
+  if (schema instanceof z.ZodObject) return Object.values(schema.shape).flatMap(stringMaxima);
+  if (schema instanceof z.ZodArray) return stringMaxima(schema.element);
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodDefault) return stringMaxima(schema.unwrap());
+  if (schema instanceof z.ZodPipe) return stringMaxima(schema.in);
+  if (schema instanceof z.ZodUnion) return schema.options.flatMap(stringMaxima);
+  return [];
+}
 
 describe("OpenWork provider adapters", () => {
+  test("every session affordance advertises exactly the arguments its schema accepts", () => {
+    const sessions = buildOpenworkProviderContributions([]).find((contribution) => contribution.featureId === "sessions");
+    const affordances = sessions?.affordances ?? [];
+
+    // A schema key the descriptor omits is invisible to agents (they cannot
+    // know it exists); an advertised argument the schema drops is silently
+    // ignored. Both are drift, so the sets must be equal in both directions.
+    expect(affordances.map((affordance) => affordance.id).sort()).toEqual(Object.keys(sessionAffordanceArgsSchemas).sort());
+    for (const [id, schema] of Object.entries(sessionAffordanceArgsSchemas)) {
+      const advertised = affordances.find((affordance) => affordance.id === id)?.arguments.map((argument) => argument.name).sort();
+      expect({ id, advertised }).toEqual({ id, advertised: Object.keys(schema.shape).sort() });
+      for (const [name, field] of Object.entries(schema.shape)) {
+        const description = affordances.find((affordance) => affordance.id === id)?.arguments.find((argument) => argument.name === name)?.description;
+        for (const maximum of stringMaxima(field)) expect(description).toContain(String(maximum));
+      }
+    }
+  });
+
+  test("the bound walker reaches nested and optional strings, including transformed inputs", () => {
+    expect(stringMaxima(sessionAffordanceArgsSchemas["session.create"].shape.sessions)).toEqual([100_000, 60]);
+    expect(stringMaxima(z.object({ entries: z.array(z.object({ label: z.string().max(17).transform((value) => value).optional() })) }))).toEqual([17]);
+    const create = buildOpenworkProviderContributions([]).flatMap((entry) => entry.affordances).find((entry) => entry.id === "session.create");
+    expect(create?.arguments.find((argument) => argument.name === "sessions")?.description).toContain("title (≤120 chars, longer is clipped)");
+  });
+
   test("normalizes sessions and extensions into semantic contributions", () => {
     const contributions = buildOpenworkProviderContributions([]);
 
@@ -20,9 +61,41 @@ describe("OpenWork provider adapters", () => {
       effects: { data: "read", ui: "none", external: false },
       executor: { kind: "openwork" },
     });
+    // Talking to a session is a server command addressed by id: it declares
+    // no UI effect, so agents never need session.open + composer.* for it.
+    const send = contributions.flatMap((contribution) => contribution.affordances)
+      .find((affordance) => affordance.id === "session.send");
+    expect(send).toMatchObject({
+      kind: "command",
+      provider: { id: "openwork-server", kind: "builtin" },
+      effects: { data: "write", ui: "none", external: false },
+      executor: { kind: "openwork" },
+    });
+    expect(send?.arguments.map((argument) => [argument.name, argument.required])).toEqual([
+      ["sessionId", true],
+      ["text", true],
+      ["workspaceId", false],
+      ["reveal", false],
+    ]);
     for (const contribution of contributions) {
       expect(openworkFeatureContributionSchema.safeParse(contribution).success).toBe(true);
     }
+  });
+
+  test("tells agents that sessions carry a model and that session.create takes one", () => {
+    const affordances = buildOpenworkProviderContributions([]).flatMap((contribution) => contribution.affordances);
+    const read = affordances.find((affordance) => affordance.id === "session.read");
+    const create = affordances.find((affordance) => affordance.id === "session.create");
+
+    // openwork_context is the only place an agent learns the result shape.
+    expect(read?.description).toContain("`model`");
+    expect(read?.description).toContain("variant");
+    expect(create?.arguments.map((argument) => [argument.name, argument.type, argument.required])).toEqual([
+      ["sessions", "array", true],
+      ["workspaceId", "string", false],
+      ["model", "object", false],
+    ]);
+    expect(create?.arguments.find((argument) => argument.name === "model")?.description).toContain("variant");
   });
 
   test("keeps known Connect skills direct and search available for unknown capabilities", () => {

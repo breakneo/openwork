@@ -124,7 +124,6 @@ import {
   partitionArchivedSessions,
   workspaceKindLabel,
   workspaceLabel,
-  workspaceConversationCount,
 } from "./utils";
 import type { FlattenedSessionRow, GlobalArchivedSessionEntry, SessionListItem } from "./utils";
 import {
@@ -147,7 +146,6 @@ import {
 } from "./sidebar-lanes";
 import { WorkspaceAvatarPicker } from "./workspace-avatar-picker";
 import { isSameWorkbenchSession, useWorkbenchStore, workbenchSessionKey } from "../chat/workbench-store";
-import { useNewTaskDraftState, useSessionDraftState } from "../sync/draft-store";
 import { SidebarDestination } from "./sidebar-destination";
 import { SessionTitle } from "./session-title";
 
@@ -227,6 +225,9 @@ interface SessionStatusIndicatorProps {
   status?: string;
   isActiveWork: boolean;
   isUnread: boolean;
+  /** Names the delegated child asking, e.g. "Needs permission: Audit four open PRs". */
+  attentionLabel?: string;
+  attentionSource?: "child" | "descendant";
 }
 
 function ShowMoreSessionsButton({
@@ -251,7 +252,7 @@ function ShowMoreSessionsButton({
 }
 
 /** Activity and outcomes share the fixed glyph slot before the session title. */
-function SessionStatusIndicator({ status, isActiveWork, isUnread }: SessionStatusIndicatorProps) {
+function SessionStatusIndicator({ status, isActiveWork, isUnread, attentionLabel, attentionSource }: SessionStatusIndicatorProps) {
   return (
     <SidebarGlyphSlot>
       {isActiveWork ? (
@@ -259,21 +260,23 @@ function SessionStatusIndicator({ status, isActiveWork, isUnread }: SessionStatu
           ? getSessionActivityStatusLabel(status)
           : t("workspace_list.session_streaming")} />
       ) : (
-        <SessionOutcomeIndicator status={status} isUnread={isUnread} />
+        <SessionOutcomeIndicator status={status} isUnread={isUnread} attentionLabel={attentionLabel} attentionSource={attentionSource} />
       )}
     </SidebarGlyphSlot>
   );
 }
 
 /** Orange = needs you, green = unread result, none = read/idle. */
-function SessionOutcomeIndicator({ status, isUnread }: { status?: string; isUnread: boolean }) {
+function SessionOutcomeIndicator({ status, isUnread, attentionLabel, attentionSource }: Omit<SessionStatusIndicatorProps, "isActiveWork">) {
   if (isNeedsAttentionSessionStatus(status)) {
-    const title = isSessionActivityStatus(status)
-      ? getSessionActivityStatusLabel(status)
-      : t("workspace_list.session_needs_attention");
+    const title = attentionLabel
+      ?? (isSessionActivityStatus(status)
+        ? getSessionActivityStatusLabel(status)
+        : t("workspace_list.session_needs_attention"));
     return (
       <span
         data-session-attention-indicator
+        data-session-attention-source={attentionSource ?? "self"}
         className="size-2 shrink-0 rounded-full"
         style={{ backgroundColor: OUTCOME_DOT_NEEDS_ACTION }}
         title={title}
@@ -760,7 +763,13 @@ function SessionSideChatControl({ workspaceId, sessionId, title }: {
       }}
     >
       {isActiveWork || isNeedsAttentionSessionStatus(status) || isUnread
-        ? <SessionStatusIndicator status={status} isActiveWork={isActiveWork} isUnread={isUnread} />
+        ? <SessionStatusIndicator
+            status={status}
+            isActiveWork={isActiveWork}
+            isUnread={isUnread}
+            attentionLabel={sideChat ? ctx.sessionAttentionLabelById?.[sideChat.sessionId] : undefined}
+            attentionSource={sideChat ? ctx.sessionAttentionSourceById?.[sideChat.sessionId] : undefined}
+          />
         : <Plus className="size-3" />}
       {sideChat ? <span>{t("session_management.split_view")}</span> : null}
     </button>
@@ -775,11 +784,11 @@ export type AppSidebarProps = {
   selectedSessionId: string | null;
   showSessionActions?: boolean;
   sessionStatusById?: Record<string, string>;
+  sessionAttentionLabelById?: Record<string, string>;
+  sessionAttentionSourceById?: Record<string, "child" | "descendant">;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
   newTaskDisabled: boolean;
-  /** Account/organization scope of persisted composer drafts; null while unverified. */
-  newTaskDraftScope?: string | null;
   onSelectWorkspace: (workspaceId: string) => Promise<boolean> | boolean | void;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
   onPrefetchSession?: (workspaceId: string, sessionId: string) => void | (() => void);
@@ -890,8 +899,9 @@ export function AppSidebar(props: AppSidebarProps) {
     developerMode: props.developerMode,
     showSessionActions: props.showSessionActions,
     sessionStatusById: props.sessionStatusById,
+    sessionAttentionLabelById: props.sessionAttentionLabelById,
+    sessionAttentionSourceById: props.sessionAttentionSourceById,
     newTaskDisabled: props.newTaskDisabled,
-    newTaskDraftScope: props.newTaskDraftScope ?? null,
     connectingWorkspaceId: props.connectingWorkspaceId,
     workspaceConnectionStateById: props.workspaceConnectionStateById,
     onSelectWorkspace: props.onSelectWorkspace,
@@ -1225,15 +1235,16 @@ function GlobalArchivedSessionItem({ group, session }: GlobalArchivedSessionEntr
 }
 
 function GlobalPinnedSessionTree({ group, sessionId }: GlobalPinnedSessionEntry) {
-  const pinnedIds = usePinnedSessionIds();
+  const pinnedIdList = useSessionManagementStore((state) => state.pinnedIds);
+  const pinnedIds = React.useMemo(() => new Set(pinnedIdList), [pinnedIdList]);
   const rootIds = React.useMemo(() => new Set([sessionId]), [sessionId]);
-  const rows = flattenSessionRows(
+  const rows = React.useMemo(() => flattenSessionRows(
     group.sessions,
     1,
     pinnedIds,
     [],
     { include: rootIds },
-  );
+  ), [group.sessions, pinnedIds, rootIds]);
 
   return rows.map((row) => (
     <SessionMenuItem
@@ -1284,7 +1295,6 @@ function WorkspaceReorderItem({
 
 type WorkspaceHeaderProps = {
   workspace: WorkspaceInfo;
-  conversationCount: number | undefined;
   statusLabel: string;
   isError: boolean;
   isLoading: boolean;
@@ -1293,7 +1303,6 @@ type WorkspaceHeaderProps = {
 
 function WorkspaceHeader({
   workspace,
-  conversationCount,
   statusLabel,
   isError,
   isLoading,
@@ -1301,7 +1310,6 @@ function WorkspaceHeader({
 }: WorkspaceHeaderProps) {
   const ctx = useSidebarContext();
   const label = workspaceLabel(workspace);
-  const countDescription = conversationCount === undefined ? undefined : t("workspace_list.conversation_count", { count: conversationCount });
   // Same reveal pattern as task rows: the name fades only where text is
   // hidden and scrolls into view on mouse hover or keyboard focus.
   const [isTitleHovered, setIsTitleHovered] = React.useState(false);
@@ -1336,7 +1344,6 @@ function WorkspaceHeader({
         // text, which put the fade on the last letters of every name.
         className="min-w-0 flex h-full flex-1 cursor-grab touch-none flex-col items-stretch justify-center border-0 bg-transparent p-0 text-left text-inherit active:cursor-grabbing pr-8 group-hover/workspace-header:pr-20 group-has-[[data-workspace-actions]:focus-within]/workspace-header:pr-20 group-has-data-popup-open/workspace-header:pr-20"
         aria-label={statusLabel ? `${label}, ${statusLabel}` : label}
-        aria-description={countDescription}
         onPointerDown={onTitlePointerDown}
         onPointerEnter={(event) => {
           if (event.pointerType === "mouse") setIsTitleHovered(true);
@@ -1346,13 +1353,8 @@ function WorkspaceHeader({
         onBlur={() => setIsTitleFocused(false)}
         onClick={handleSelectWorkspace}
       >
-        <span className="flex min-w-0 items-center gap-2">
+        <span className="flex min-w-0 items-center">
           <SessionTitle intent={titleIntent} title={label} tooltip={label} />
-          {conversationCount !== undefined ? (
-            <span data-testid={`workspace-conversation-count-${workspace.id}`} aria-hidden="true" title={countDescription} className="shrink-0 text-[10px] font-normal tabular-nums text-muted-foreground/70">
-              {conversationCount}
-            </span>
-          ) : null}
         </span>
         {statusLabel ? (
           <span className={cn("block text-xs", isError ? "text-destructive" : "text-muted-foreground")}>
@@ -1412,7 +1414,8 @@ function WorkspaceSidebarGroup({
     return workspaceKindLabel(workspace);
   })();
 
-  const pinnedIds = usePinnedSessionIds();
+  const pinnedIdList = useSessionManagementStore((state) => state.pinnedIds);
+  const pinnedIds = React.useMemo(() => new Set(pinnedIdList), [pinnedIdList]);
   const orderIds = useSessionOrder(workspace.id);
   const { groups: wsGroups, assignments: wsAssignments } = useWorkspaceGroups(workspace.id);
   const store = useSessionManagementStore;
@@ -1421,13 +1424,13 @@ function WorkspaceSidebarGroup({
     () => partitionArchivedSessions(group.sessions),
     [group.sessions],
   );
-  const sessionRows = flattenSessionRows(
+  const sessionRows = React.useMemo(() => flattenSessionRows(
     group.sessions,
     wsGroups.length > 0 ? Number.MAX_SAFE_INTEGER : previewCount,
     EMPTY_PINNED_IDS,
     orderIds,
     { exclude: pinnedIds },
-  );
+  ), [group.sessions, orderIds, pinnedIds, previewCount, wsGroups.length]);
   const visibleRootIds = React.useMemo(
     () => sessionRows.map((row) => row.session.id),
     [sessionRows],
@@ -1456,7 +1459,6 @@ function WorkspaceSidebarGroup({
             <div className="group/workspace-header relative max-md:hidden">
               <WorkspaceHeader
                 workspace={workspace}
-                conversationCount={isConnectionActionBusy || connectionState.status === "error" ? undefined : workspaceConversationCount(group)}
                 statusLabel={statusLabel}
                 isError={group.status === "error"}
                 isLoading={isConnecting}
@@ -1504,7 +1506,6 @@ function WorkspaceSidebarGroup({
 
             <CollapsibleContent className="pt-px">
               <SidebarMenuSub>
-                {showRemoteConnectionIssue ? null : <NewTaskDraftMenuItem workspaceId={workspace.id} />}
                 {showRemoteConnectionIssue ? (
                   <RemoteConnectionIssueCard
                     message={connectionIssueMessage}
@@ -1599,46 +1600,6 @@ function WorkspaceSidebarGroup({
 const SESSION_DRAG_TYPE = "application/x-openwork-session-id";
 const EMPTY_PINNED_IDS = new Set<string>();
 const UNGROUPED_GROUP_ID = "__openwork_ungrouped";
-
-/**
- * The prompt typed in this workspace's new-task composer before its session
- * exists. Opening another conversation unmounts that composer, so this row is
- * the way back to the unsent text; it disappears once the task is sent.
- */
-function NewTaskDraftMenuItem({ workspaceId }: { workspaceId: string }) {
-  const ctx = useSidebarContext();
-  const { snapshot } = useNewTaskDraftState(ctx.newTaskDraftScope, workspaceId);
-  const text = snapshot?.text.trim() ?? "";
-  if (!text) return null;
-  const isSelected = ctx.selectedWorkspaceId === workspaceId && ctx.selectedSessionId === null;
-  const label = t("workspace_list.new_task_draft");
-  const preview = text.split("\n")[0] ?? text;
-  return (
-    <SidebarMenuSubItem
-      className="flex items-center"
-      data-sidebar-new-task-draft={workspaceId}
-    >
-      <SidebarMenuSubButton
-        render={<button type="button" />}
-        isActive={isSelected}
-        data-testid={`sidebar-new-task-draft-${workspaceId}`}
-        onClick={() => ctx.onCreateTaskInWorkspace(workspaceId)}
-        aria-label={`${label}: ${preview}`}
-        title={text}
-        className="relative h-8 w-full rounded-md pe-2.5 text-start text-[13px] text-sidebar-foreground/80 transition-[background-color] duration-75 group-hover/menu-sub-item:bg-black/[0.05] dark:group-hover/menu-sub-item:bg-white/[0.09] data-active:bg-black/[0.07] dark:data-active:bg-white/[0.12] data-active:text-sidebar-foreground"
-        style={{ paddingInlineStart: sidebarRowPaddingInlineStart(0) }}
-      >
-        <SidebarGlyphSlot>
-          <SquarePen className="size-3.5 text-muted-foreground" aria-hidden />
-        </SidebarGlyphSlot>
-        <span className="min-w-0 flex-1 truncate">
-          <span className="text-muted-foreground">{label}: </span>
-          {preview}
-        </span>
-      </SidebarMenuSubButton>
-    </SidebarMenuSubItem>
-  );
-}
 
 function SessionGroupActions({ group, groups, workspaceId, count }: {
   group: SessionGroupDefinition;
@@ -2144,9 +2105,6 @@ function SessionMenuItem({
   workspaceName,
 }: SessionMenuItemProps) {
   const ctx = useSidebarContext();
-  const { snapshot } = useSessionDraftState(ctx.newTaskDraftScope, workspaceId, session.id);
-  const hasDraft = Boolean(snapshot?.text.trim());
-  const draftLabel = t("workspace_list.new_task_draft");
   const attachedAsSideChat = useWorkbenchStore((state) => Object.values(state.sideChats).some((chat) =>
     isSameWorkbenchSession(chat, { workspaceId, sessionId: session.id })));
   const [isTitleHovered, setIsTitleHovered] = React.useState(false);
@@ -2156,6 +2114,7 @@ function SessionMenuItem({
   const displayTitle = getDisplaySessionTitle(session.title);
   const itemTitle = workspaceName ? `${displayTitle} — ${workspaceName}` : displayTitle;
   const sessionActivityStatus = ctx.sessionStatusById?.[session.id];
+  const sessionAttentionLabel = ctx.sessionAttentionLabelById?.[session.id];
   const resolvedActiveWork = isActiveWorkSessionStatus(sessionActivityStatus);
   const isUnread = unreadIds.has(session.id) && !isSelected;
   const isArchived = isSessionArchived(session);
@@ -2199,7 +2158,7 @@ function SessionMenuItem({
   const accessibleState = resolvedActiveWork && isSessionActivityStatus(sessionActivityStatus)
     ? `${displayTitle}, ${getSessionActivityStatusLabel(sessionActivityStatus)}`
     : isNeedsAttentionSessionStatus(sessionActivityStatus)
-      ? `${displayTitle}, ${t("workspace_list.session_needs_attention")}`
+      ? `${displayTitle}, ${sessionAttentionLabel ?? t("workspace_list.session_needs_attention")}`
       : isUnread
         ? `${displayTitle}, ${t("workspace_list.session_unread")}`
         : itemTitle;
@@ -2218,7 +2177,13 @@ function SessionMenuItem({
   // Pinned/archived rows identify their workspace via the tooltip title
   // only — no workspace color dot in these sections.
   const leading = (
-    <SessionStatusIndicator status={sessionActivityStatus} isActiveWork={resolvedActiveWork} isUnread={isUnread} />
+    <SessionStatusIndicator
+      status={sessionActivityStatus}
+      isActiveWork={resolvedActiveWork}
+      isUnread={isUnread}
+      attentionLabel={sessionAttentionLabel}
+      attentionSource={ctx.sessionAttentionSourceById?.[session.id]}
+    />
   );
 
   const trailing = (
@@ -2261,7 +2226,7 @@ function SessionMenuItem({
               setIsTitleFocused(true);
             }}
             onBlur={() => setIsTitleFocused(false)}
-            aria-label={hasDraft ? `${accessibleState}, ${draftLabel}` : accessibleState}
+            aria-label={accessibleState}
             aria-description={shortcutDigit === undefined ? undefined : sessionNumberShortcutDescription(ctx.sessionNumberShortcutOs, shortcutDigit)}
             aria-keyshortcuts={ariaKeyShortcuts}
             className={cn(rowButtonClass, "w-full text-start")}
@@ -2269,11 +2234,6 @@ function SessionMenuItem({
           >
             {leading}
             <SessionTitle intent={titleIntent} title={displayTitle} tooltip={itemTitle} />
-            {hasDraft ? (
-              <span data-testid={`sidebar-session-draft-${session.id}`} className="shrink-0 text-xs text-muted-foreground">
-                {draftLabel}
-              </span>
-            ) : null}
             <SessionNumberShortcutSlot digit={shortcutDigit} />
           </SidebarMenuSubButton>
           {trailing}

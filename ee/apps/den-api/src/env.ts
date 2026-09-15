@@ -2,6 +2,7 @@ import os from "node:os"
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { denUrls } from "@openwork-ee/utils/den-urls"
+import { parseGatewayDeploymentEnv } from "@openwork-ee/utils/gateway-env"
 import { DEN_WORKER_POLL_INTERVAL_MS } from "./CONSTS.js"
 import { normalizeConfiguredPublicApiBaseUrl } from "./request-url.js"
 import { resolveDenServiceVersion } from "./service-version.js"
@@ -104,6 +105,9 @@ const EnvSchema = z.object({
   CLOUD_IDLE_LOOP_SECONDS: z.string().optional(),
   CLOUD_IDLE_STOP_BATCH_SIZE: z.string().optional(),
   PROVISIONER_MODE: z.enum(["stub", "render", "daytona"]).optional(),
+  // Preferred name for the sandbox host that runs OpenWork Cloud instances;
+  // PROVISIONER_MODE remains accepted as an alias.
+  CLOUD_RUNTIME_PROVIDER: z.enum(["stub", "render", "daytona"]).optional(),
   WORKER_URL_TEMPLATE: z.string().optional(),
   WORKER_ACTIVITY_BASE_URL: z.string().optional(),
   DEN_AUTOMATIONS_ENABLED: z.string().optional(),
@@ -181,7 +185,7 @@ const EnvSchema = z.object({
   DAYTONA_HEALTHCHECK_TIMEOUT_MS: z.string().optional(),
   DEN_CKPT_INTERVAL_SECONDS: z.string().optional(),
   DEN_CKPT_KEEP: z.string().optional(),
-  INFERENCE_PROXY_BASE_URL: z.string().optional(),
+  GATEWAY_PROXY_BASE_URL: z.string().optional(),
   OPENROUTER_MANAGEMENT_API_KEY: z.string().optional(),
   OPENROUTER_WORKSPACE_ID: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().optional(),
@@ -222,12 +226,12 @@ const EnvSchema = z.object({
     }
   }
 
-  if (value.PROVISIONER_MODE === "daytona") {
+  if ((value.CLOUD_RUNTIME_PROVIDER ?? value.PROVISIONER_MODE) === "daytona") {
     for (const key of ["DAYTONA_API_KEY"] as const) {
       if (!value[key]) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `${key} is required when PROVISIONER_MODE=daytona`,
+          message: `${key} is required when CLOUD_RUNTIME_PROVIDER=daytona`,
           path: [key],
         })
       }
@@ -235,7 +239,12 @@ const EnvSchema = z.object({
   }
 })
 
-const parsed = EnvSchema.parse(process.env)
+const gatewayDeployment = parseGatewayDeploymentEnv(process.env)
+const parsed = EnvSchema.parse({
+  ...process.env,
+  // Deprecated deployment alias; an explicitly set canonical value wins.
+  GATEWAY_PROXY_BASE_URL: process.env.GATEWAY_PROXY_BASE_URL ?? process.env.INFERENCE_PROXY_BASE_URL,
+})
 
 function splitCsv(value: string | undefined) {
   return (value ?? "")
@@ -776,7 +785,7 @@ export const env = {
   mcpClaimNamespace: normalizeOrigin(optionalString(parsed.DEN_MCP_CLAIM_NAMESPACE) ?? betterAuthUrl),
   bootstrapAdminEmails: splitCsv(parsed.DEN_BOOTSTRAP_ADMIN_EMAILS).map((email) => email.toLowerCase()),
   initialAdminBootstrapCode,
-  provisionerMode: parsed.PROVISIONER_MODE ?? "stub",
+  provisionerMode: parsed.CLOUD_RUNTIME_PROVIDER ?? parsed.PROVISIONER_MODE ?? "stub",
   workerProvisioningReconcileIntervalMs: Number(parsed.WORKER_PROVISIONING_RECONCILE_INTERVAL_MS ?? "60000"),
   // Live provisioning owners heartbeat `updated_at` every 30 seconds, so this
   // staleness only fires after several missed beats. Keep it several multiples
@@ -810,7 +819,13 @@ export const env = {
   dashboardsEnabled,
   corsHandledByEdge,
   openworkWebEnabled,
-  inferenceProxyBaseUrl: optionalString(parsed.INFERENCE_PROXY_BASE_URL) ?? "http://127.0.0.1:8791",
+  inferenceProxyBaseUrl: optionalString(parsed.GATEWAY_PROXY_BASE_URL) ?? "http://127.0.0.1:8791",
+  // Keep known public Models destinations even when Gateway management is off.
+  modelsPublicBaseUrl: gatewayDeployment.modelsPublicBaseUrl ?? optionalString(parsed.GATEWAY_PROXY_BASE_URL) ?? "http://127.0.0.1:8791",
+  gatewayEnabled: gatewayDeployment.enabled,
+  gatewayProxyBaseUrl: gatewayDeployment.proxyBaseUrl,
+  // Existing member payloads retain their legacy destination until explicitly configured.
+  gatewayPublicBaseUrl: gatewayDeployment.publicBaseUrl ?? optionalString(parsed.GATEWAY_PROXY_BASE_URL) ?? "http://127.0.0.1:8791",
   openRouterManagementApiKey: optionalString(parsed.OPENROUTER_MANAGEMENT_API_KEY),
   openRouterWorkspaceId: optionalString(parsed.OPENROUTER_WORKSPACE_ID),
   stripe: {

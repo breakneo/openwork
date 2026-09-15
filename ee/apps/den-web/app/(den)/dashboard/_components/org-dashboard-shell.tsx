@@ -23,6 +23,7 @@ import {
   getBrandAppearanceRoute,
   getBillingRoute,
   getCustomLlmProvidersRoute,
+  getGatewayProvidersRoute,
   getDiagnosticsRoute,
   getDesktopPoliciesRoute,
   getManagedDashboardsRoute,
@@ -59,6 +60,8 @@ import {
   type DenSearchBarHandle,
 } from "./command-palette/den-search-bar";
 import { UserProfileDialog } from "./user-profile-dialog";
+import { useGatewayDashboardAccess } from "./gateway-dashboard-capability-guard";
+import { DashboardHeaderActionsProvider, DashboardHeaderActionsSlot } from "./dashboard-header-actions";
 
 const OPENWORK_DOCS_URL = "https://openworklabs.com/docs";
 
@@ -245,6 +248,9 @@ function getDashboardPageTitle(pathname: string, orgSlug: string | null) {
   if (pathname.startsWith(getCustomLlmProvidersRoute(orgSlug))) {
     return "Bring your Own Keys";
   }
+  if (pathname.startsWith(getGatewayProvidersRoute(orgSlug))) {
+    return "Gateway";
+  }
   if (
     pathname.startsWith(getDesktopPoliciesRoute(orgSlug))
     || pathname.startsWith(getMarketplacesRoute(orgSlug))
@@ -296,9 +302,11 @@ function getDashboardPageTitle(pathname: string, orgSlug: string | null) {
 }
 
 export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
+  const gatewayAccess = useGatewayDashboardAccess();
   const pathname = usePathname();
   const onboardingRoute = getMarketplaceOnboardingRoute();
   const isOnboarding = pathname === onboardingRoute || pathname.startsWith(`${onboardingRoute}/`);
+  const isLibraryRoot = pathname === getLibraryRoute();
   const { user, signOut, updateUserProfile, runtimeConfig, runtimeConfigLoaded, setupPending, setupOrganizationId } = useDenFlow();
   const {
     activeOrg,
@@ -428,14 +436,18 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
   const navSections = buildDashboardNavSections({
     orgSlug: activeOrg?.slug ?? null,
     access,
-    capabilities: orgContext?.capabilities ?? {
-      cloud: false,
-      installLinks: false,
-      mcpConnections: false,
-      openworkWeb: false,
-      orgManagedDashboards: false,
-      workflows: false,
+    capabilities: {
+      ...(orgContext?.capabilities ?? {
+        cloud: false,
+        installLinks: false,
+        mcpConnections: false,
+        openworkWeb: false,
+        orgManagedDashboards: false,
+        workflows: false,
+      }),
+      gatewayDashboard: orgContext?.capabilities.gatewayDashboard === true,
     },
+    gatewayAccess,
     orgMode: runtimeConfig.orgMode,
     runtimeConfigLoaded,
   });
@@ -746,8 +758,9 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
         </div>
       ) : null}
 
+      <DashboardHeaderActionsProvider>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-gray-100 bg-white px-4 md:px-6">
+        <header className={`flex shrink-0 items-center justify-between border-b border-gray-100 bg-white ${isLibraryRoot ? "h-[52px] px-6" : "h-14 px-4 md:px-6"}`}>
           <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
@@ -757,40 +770,46 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
             >
               <Menu className="h-5 w-5" />
             </button>
-            <span className="text-[14px] tracking-[-0.1px] text-gray-900">
-              {pageTitle}
-            </span>
+            {isLibraryRoot ? (
+              <h1 className="text-[16px] font-medium leading-6 text-gray-900">My Library</h1>
+            ) : (
+              <span className="text-[14px] tracking-[-0.1px] text-gray-900">{pageTitle}</span>
+            )}
           </div>
 
-          <div className="flex flex-1 justify-center px-4">
-            <DenSearchBar
-              ref={searchBarRef}
-              onOpen={() => handleCommandPaletteOpenChange(true)}
-            />
-          </div>
+          {isLibraryRoot ? <DashboardHeaderActionsSlot /> : (
+            <>
+              <div className="flex flex-1 justify-center px-4">
+                <DenSearchBar
+                  ref={searchBarRef}
+                  onOpen={() => handleCommandPaletteOpenChange(true)}
+                />
+              </div>
 
-          <div className="flex shrink-0 items-center gap-1">
-            {showFeedbackLink ? (
-              <a
-                href={feedbackHref}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700"
-              >
-                <MessageSquare className="h-4 w-4" />
-                <span className="hidden sm:inline">Feedback</span>
-              </a>
-            ) : null}
-            <a
-              href={OPENWORK_DOCS_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700"
-            >
-              <FileText className="h-4 w-4" />
-              <span className="hidden sm:inline">Docs</span>
-            </a>
-          </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {showFeedbackLink ? (
+                  <a
+                    href={feedbackHref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700"
+                  >
+                    <MessageSquare className="h-4 w-4" />
+                    <span className="hidden sm:inline">Feedback</span>
+                  </a>
+                ) : null}
+                <a
+                  href={OPENWORK_DOCS_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-700"
+                >
+                  <FileText className="h-4 w-4" />
+                  <span className="hidden sm:inline">Docs</span>
+                </a>
+              </div>
+            </>
+          )}
         </header>
 
         <main className="flex-1 overflow-y-auto bg-[#fafafa]">
@@ -802,6 +821,7 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+      </DashboardHeaderActionsProvider>
 
       <DenCommandPalette
         open={commandPaletteOpen}

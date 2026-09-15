@@ -1,3 +1,5 @@
+import type { liveArtifactConnectionFailure } from "./mcp/capability-registry.js"
+import { artifactRuntime } from "./artifact-runtime.js"
 import type {
   AutomationAction,
 } from "@openwork/types/automations"
@@ -8,7 +10,7 @@ import type {
   WorkflowVersion,
 } from "@openwork/types/workflows"
 import { WorkflowGraph } from "@openwork/codemode"
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, type SQL } from "@openwork-ee/den-db/drizzle"
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql, type SQL } from "@openwork-ee/den-db/drizzle"
 import {
   AutomationRevisionTable,
   AutomationRunTable,
@@ -234,14 +236,25 @@ async function workflowVersions(
   })
 }
 
+function snapshotReadAccess(memberId: DenTypeId<"member">) {
+  if (!memberId) throw new Error("workflow_receipt_member_required")
+  return or(
+    eq(WorkflowRunTable.org_membership_id, memberId),
+    eq(WorkflowRunTable.source, sql`concat('plugin:', ${WorkflowRunTable.plugin_id}, ':', ${WorkflowRunTable.config_object_id})`),
+  )
+}
+
 async function snapshotRows(
   organizationId: DenTypeId<"organization">,
   configObjectId: ConfigObjectId,
+  memberId: DenTypeId<"member">,
   limit = 100,
   cursor?: KeysetCursor,
 ) {
+  if (!memberId) throw new Error("workflow_receipt_member_required")
   const conditions: Array<SQL | undefined> = [
     eq(WorkflowRunTable.organization_id, organizationId),
+    snapshotReadAccess(memberId),
     eq(WorkflowRunTable.config_object_id, configObjectId),
     isNotNull(WorkflowRunTable.config_object_version_id),
   ]
@@ -257,10 +270,10 @@ async function snapshotRows(
 export async function workflowSnapshotPage(
   organizationId: DenTypeId<"organization">,
   configObjectId: ConfigObjectId,
-  input: { limit?: number; cursor?: KeysetCursor },
+  input: { memberId: DenTypeId<"member">; limit?: number; cursor?: KeysetCursor },
 ): Promise<{ items: WorkflowArtifactSnapshot[]; nextCursor: string | null }> {
   const limit = Math.min(200, Math.max(1, input.limit ?? 100))
-  const rows = await snapshotRows(organizationId, configObjectId, limit + 1, input.cursor)
+  const rows = await snapshotRows(organizationId, configObjectId, input.memberId, limit + 1, input.cursor)
   const page = keysetPage(rows, limit, (row) => ({ at: row.receipt.finished_at, id: row.receipt.id }))
   return {
     items: page.items.flatMap((row) => {
@@ -284,7 +297,7 @@ export async function getWorkflowDetail(input: {
   })
   const [versions, rows] = await Promise.all([
     workflowVersions(input.context, resource.configObject.id, role === "manager"),
-    snapshotRows(resource.configObject.organizationId, resource.configObject.id),
+    snapshotRows(resource.configObject.organizationId, resource.configObject.id, input.context.organizationContext.currentMember.id),
   ])
   const currentVersion = versions[0]
   if (!currentVersion) throw new Error("workflow_version_not_found")
@@ -390,6 +403,7 @@ export async function listWorkflowSnapshots(input: {
 }) {
   const resource = await workflowResource(input.context, input.configObjectId, "viewer")
   return workflowSnapshotPage(resource.configObject.organizationId, resource.configObject.id, {
+    memberId: input.context.organizationContext.currentMember.id,
     limit: input.limit,
     cursor: input.cursor,
   })
@@ -407,6 +421,7 @@ export async function getWorkflowSnapshot(input: {
     .where(and(
     eq(WorkflowRunTable.id, parseReceiptId(input.receiptId)),
     eq(WorkflowRunTable.organization_id, resource.configObject.organizationId),
+    snapshotReadAccess(input.context.organizationContext.currentMember.id),
     eq(WorkflowRunTable.config_object_id, resource.configObject.id),
     isNotNull(WorkflowRunTable.config_object_version_id),
   )).limit(1)
@@ -549,6 +564,7 @@ export async function deleteWorkflowSnapshotContent(input: {
   const rows = await db.select().from(WorkflowRunTable).where(and(
     eq(WorkflowRunTable.id, receiptId),
     eq(WorkflowRunTable.organization_id, resource.configObject.organizationId),
+    eq(WorkflowRunTable.org_membership_id, input.context.organizationContext.currentMember.id),
     eq(WorkflowRunTable.config_object_id, resource.configObject.id),
     isNotNull(WorkflowRunTable.config_object_version_id),
   )).limit(1)
@@ -871,4 +887,46 @@ export async function saveWorkflow(input: {
       mermaid: WorkflowGraph.toMermaid(graph),
     }
   })
+}
+
+export async function executeLiveArtifactWorkflow(input: {
+  context: PluginArchActorContext
+  configObjectId: string
+  expectedOutputSchemaDigest: string
+  timeZone?: string
+  describeUnavailable?: (missing: readonly { capabilityName: string }[]) => ReturnType<typeof liveArtifactConnectionFailure>
+  buildTools: () => Promise<BuiltCodemodeTools>
+}) {
+  const resource = await workflowResource(input.context, input.configObjectId, "viewer")
+  const rows = await db.select().from(ConfigObjectVersionTable).where(and(
+    eq(ConfigObjectVersionTable.organizationId, resource.configObject.organizationId),
+    eq(ConfigObjectVersionTable.configObjectId, resource.configObject.id),
+    eq(ConfigObjectVersionTable.isDeletedVersion, false),
+  )).orderBy(desc(ConfigObjectVersionTable.createdAt), desc(ConfigObjectVersionTable.id)).limit(1)
+  const version = rows[0]
+  if (!version) throw new Error("workflow_version_not_found")
+  const parsed = parseCodemodeScriptPayload(version.normalizedPayloadJson)
+  if (!parsed.ok || !parsed.payload.outputSchema
+    || optionalArtifactDigest(parsed.payload.outputSchema) !== input.expectedOutputSchemaDigest) {
+    throw new Error("artifact_view_schema_incompatible")
+  }
+  const result = await executeWorkflow({
+    database: db,
+    organizationId: resource.configObject.organizationId,
+    orgMembershipId: input.context.organizationContext.currentMember.id,
+    pluginId: resource.plugin.id,
+    configObjectId: resource.configObject.id,
+    configObjectVersionId: version.id,
+    normalizedPayloadJson: version.normalizedPayloadJson,
+    code: version.rawSourceText ?? "",
+    scriptInput: { runtime: artifactRuntime(input.timeZone) },
+    validateOutput: true,
+    readOnly: true,
+    buildTools: input.buildTools,
+  })
+  if (!result.ok && result.error === "capability_unavailable" && input.describeUnavailable) {
+    const connection = await input.describeUnavailable(result.missing).catch(() => null)
+    if (connection) return { ...result, ...connection }
+  }
+  return result
 }

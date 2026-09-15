@@ -1,10 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { ApiError } from "../errors.js";
 import { uiBridgeRequest } from "./openwork-ui-bridge.js";
 import { createGmailAttachmentFulfillment, type GmailAttachmentDependencies } from "./gmail-attachment-fulfillment.js";
 import { z } from "zod";
+import { sessionActivityFrom, type SessionActivity } from "./session-activity.js";
 import { visualizationSchema } from "@openwork/types/visualization";
-import type { OpenworkAffordanceEffects } from "@openwork/types/openwork-affordance";
+import { openworkSessionModelSchema, type OpenworkAffordanceEffects, type OpenworkSessionModel } from "@openwork/types/openwork-affordance";
 import { automationProposalSchema } from "@openwork/types/automations";
 import {
   appendAgentInstructions,
@@ -20,6 +22,12 @@ import {
 } from "./openwork-extensions-preview-steering.js";
 import {
   buildOpenworkProviderContributions,
+  sessionCreateArgsSchema,
+  sessionModelArgSchema,
+  sessionReadArgsSchema,
+  sessionSearchArgsSchema,
+  sessionSendArgsSchema,
+  sessionTimestampMs,
   type ConnectSkillDescriptor,
   type EngineMcpDescriptor,
 } from "./openwork-provider-adapters.js";
@@ -71,28 +79,6 @@ const connectSkillsEnvelopeSchema = z.object({
   skills: z.array(connectSkillDescriptorSchema),
 }).passthrough();
 
-const sessionSearchArgsSchema = z.object({
-  query: z.string().trim().min(1).describe("Text to search for across OpenWork session titles and message transcripts."),
-  workspaceId: z.string().trim().optional().describe("Optional OpenWork workspace id/name to limit the search."),
-  limit: z.number().int().positive().max(20).optional().describe("Maximum matching sessions to return. Defaults to 10, max 20."),
-  scanLimit: z.number().int().positive().max(500).optional().describe("Maximum newest sessions to scan across matching workspaces. Defaults to 100, max 500."),
-  messageLimit: z.number().int().positive().max(1000).optional().describe("Maximum recent messages to load per scanned session. Defaults to 400, max 1000."),
-});
-
-const sessionReadArgsSchema = z.object({
-  sessionId: z.string().trim().min(1).describe("OpenWork/OpenCode session ID returned by session.search."),
-  workspaceId: z.string().trim().optional().describe("Optional OpenWork workspace id/name. Omit to resolve the session across all workspaces."),
-  count: z.number().int().positive().max(100).optional().describe("Number of recent transcript messages to return. Defaults to 30, max 100."),
-});
-
-const sessionCreateArgsSchema = z.object({
-  sessions: z.array(z.object({
-    title: z.string().trim().min(1).max(120).describe("Short title shown in the OpenWork session list."),
-    prompt: z.string().trim().min(1).max(100_000).describe("Self-contained task to start in the new session."),
-  })).min(1).describe("One entry per new session to create and start."),
-  workspaceId: z.string().trim().optional().describe("Optional OpenWork workspace id/name. Defaults to the workspace containing the current session."),
-});
-
 const workspaceSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
@@ -107,13 +93,25 @@ const workspaceListEnvelopeSchema = z.object({
 const sessionTimeSchema = z.object({
   created: z.number().optional(),
   updated: z.number().optional(),
+  // Set by the engine when a session is archived; absent or 0 otherwise.
+  archived: z.number().nullish(),
+}).passthrough();
+
+// The engine's session-level model: set from `model` at creation and updated
+// by every prompt (`variant` is the reasoning effort the turn ran with).
+const engineSessionModelSchema = z.object({
+  id: z.string(),
+  providerID: z.string(),
+  variant: z.string().optional(),
 }).passthrough();
 
 const sessionInfoSchema = z.object({
   id: z.string(),
   title: z.string().nullish(),
   directory: z.string().optional(),
+  parentID: z.string().nullish(),
   time: sessionTimeSchema.optional(),
+  model: engineSessionModelSchema.nullish(),
 }).passthrough();
 
 const sessionPartSchema = z.object({
@@ -138,6 +136,7 @@ For lightweight UI mockups, wireframes, and design iterations, use openwork_visu
 Use openwork_context when the request depends on the current OpenWork screen, open tabs, split view, focused pane, sidebar, side panel, settings panel, or available app actions.
 Each affordance declares its effects and executor. Use openwork_query only for side-effect-free affordances whose executor is OpenWork. Use openwork_execute for OpenWork commands without activating the desktop window. If executor names another tool, call that exact tool instead.
 Reading another session does not require opening it. Prefer session.search then session.read for transcript questions; use session.create for new chats and a UI command only when the user asks to navigate.
+Messaging another session does not require opening it either: use session.send { sessionId, text } to append a prompt to that session by id; nothing on screen changes unless you pass reveal: true. composer.set_text and composer.send type into whichever composer the person currently has focused, so never use them to reach a different session.
 To open settings or navigate the app, use openwork_execute with ids from openwork_context such as settings.panel.open — never browser_* tools for the OpenWork app itself.`;
 
 // External-web mechanics only: the app-surface section above owns the rule
@@ -160,15 +159,23 @@ const WEBMCP_EXECUTION_TIMEOUT_MS = 125_000;
 
 type OpenWorkWorkspace = z.infer<typeof workspaceSchema>;
 type SessionInfo = z.infer<typeof sessionInfoSchema>;
+type SessionModelArg = z.infer<typeof sessionModelArgSchema>;
 type SessionMessage = z.infer<typeof sessionMessageSchema>;
+type SessionSearchArgs = z.infer<typeof sessionSearchArgsSchema>;
+type SessionSearchMatchMode = NonNullable<SessionSearchArgs["match"]>;
 type SessionSearchSnippet = { before: string; match: string; after: string };
 type SessionSearchResult = {
   workspaceId: string;
   workspace: string;
   sessionId: string;
   title: string;
+  createdAt: number;
   updatedAt: number;
+  archived: boolean;
+  parentId: string | null;
   kind: "title" | "message";
+  /** The whole query text appeared contiguously (not just every term). */
+  phrase: boolean;
   snippet: SessionSearchSnippet;
   role?: string;
   messageId?: string;
@@ -178,12 +185,16 @@ type CreatedOpenWorkSessionResult = {
   ok: true;
   sessionId: string;
   title: string;
+  titleTruncated: boolean;
   started: boolean;
+  /** The model the engine bound to the session, read from its create response. */
+  model: OpenworkSessionModel | null;
   route: string;
 };
 type FailedOpenWorkSessionResult = {
   ok: false;
   title: string;
+  titleTruncated: boolean;
   error: string;
 };
 
@@ -220,6 +231,9 @@ function preserveMcpResult(output: unknown): void {
 const affordanceReadEffects: OpenworkAffordanceEffects = { data: "read", ui: "none", external: false };
 const affordanceWriteEffects: OpenworkAffordanceEffects = { data: "write", ui: "none", external: false };
 const affordanceExternalWriteEffects: OpenworkAffordanceEffects = { data: "write", ui: "none", external: true };
+// session.send with reveal=true: the message is written headlessly, then the
+// target session is opened in the person's pane on their behalf.
+const affordanceWriteNavigateEffects: OpenworkAffordanceEffects = { data: "write", ui: "navigate", external: false };
 // A proposal writes nothing anywhere: it is rendered for a person to act on.
 const affordanceProposalEffects: OpenworkAffordanceEffects = { data: "none", ui: "none", external: false };
 
@@ -233,6 +247,7 @@ function affordanceResult(
       ok: false,
       id,
       error: typeof result.error === "string" ? result.error : `${id} failed`,
+      ...(Array.isArray(result.issues) ? { issues: result.issues } : {}),
       code: "failed",
     };
   }
@@ -298,6 +313,9 @@ function mergeTransformInputWithFactoryContext(input: unknown, factoryContext: O
 
 const SESSION_SEARCH_DEFAULT_LIMIT = 10;
 const SESSION_SEARCH_DEFAULT_SCAN_LIMIT = 100;
+// Title matching is one list call per workspace, so it covers every root
+// session; scanLimit only bounds the transcript phase.
+const SESSION_SEARCH_TITLE_LIST_LIMIT = 5000;
 const SESSION_SEARCH_DEFAULT_MESSAGE_LIMIT = 400;
 const SESSION_SEARCH_CONCURRENCY = 6;
 const SESSION_SNIPPET_BEFORE = 36;
@@ -438,6 +456,14 @@ async function executeOpenworkAffordance(
       affordanceWriteEffects,
     );
   }
+  if (request.id === "session.send") {
+    const sent = await sendToOpenWorkSession(request.args ?? {}, context);
+    return affordanceResult(
+      request.id,
+      sent,
+      sent.ok && sent.revealed === true ? affordanceWriteNavigateEffects : affordanceWriteEffects,
+    );
+  }
   if (request.id === "automation.propose") {
     return affordanceResult(
       request.id,
@@ -502,6 +528,50 @@ function sessionUpdatedAt(session: SessionInfo): number {
   return session.time?.updated ?? session.time?.created ?? 0;
 }
 
+function sessionCreatedAt(session: SessionInfo): number {
+  return session.time?.created ?? session.time?.updated ?? 0;
+}
+
+function sessionArchived(session: SessionInfo): boolean {
+  const archived = session.time?.archived;
+  return typeof archived === "number" && archived > 0;
+}
+
+function sessionMetadata(workspace: OpenWorkWorkspace, session: SessionInfo) {
+  return {
+    workspaceId: workspace.id,
+    workspace: workspaceLabel(workspace),
+    sessionId: session.id,
+    title: sessionTitle(session),
+    createdAt: sessionCreatedAt(session),
+    updatedAt: sessionUpdatedAt(session),
+    archived: sessionArchived(session),
+    parentId: session.parentID ?? null,
+  };
+}
+
+function sessionPassesFilters(session: SessionInfo, args: SessionSearchArgs): boolean {
+  const createdAt = sessionCreatedAt(session);
+  if (args.createdAfter !== undefined && createdAt < sessionTimestampMs(args.createdAfter)) return false;
+  if (args.createdBefore !== undefined && createdAt > sessionTimestampMs(args.createdBefore)) return false;
+  const archived = args.archived ?? "include";
+  if (archived === "exclude" && sessionArchived(session)) return false;
+  if (archived === "only" && !sessionArchived(session)) return false;
+  return true;
+}
+
+/**
+ * Session-level model from the engine record, or null when no model was ever
+ * bound. The engine writes the literal variant "default" for a turn that
+ * named none; agents pass and read null for that, like the composer pill.
+ */
+function sessionModelOf(session: SessionInfo): OpenworkSessionModel | null {
+  const model = session.model;
+  if (!model) return null;
+  const variant = model.variant?.trim();
+  return { providerId: model.providerID, modelId: model.id, variant: variant && variant !== "default" ? variant : null };
+}
+
 function messageText(message: SessionMessage): string {
   const parts: string[] = [];
   for (const part of message.parts) {
@@ -513,10 +583,13 @@ function messageText(message: SessionMessage): string {
   return parts.join("\n\n");
 }
 
-function findTextMatch(text: string, queryLower: string): { index: number; length: number } | null {
+type TextMatch = { index: number; length: number; phrase: boolean };
+
+function findTextMatch(text: string, queryLower: string, mode: SessionSearchMatchMode): TextMatch | null {
   const lower = text.toLowerCase();
   const exact = lower.indexOf(queryLower);
-  if (exact >= 0) return { index: exact, length: queryLower.length };
+  if (exact >= 0) return { index: exact, length: queryLower.length, phrase: true };
+  if (mode === "phrase") return null;
 
   const terms = queryLower.split(/\s+/).filter((term) => term.length > 1);
   if (terms.length < 2) return null;
@@ -525,47 +598,43 @@ function findTextMatch(text: string, queryLower: string): { index: number; lengt
   let firstLength = 0;
   for (const term of terms) {
     const index = lower.indexOf(term);
-    if (index < 0) return null;
+    if (index < 0) {
+      if (mode === "all") return null;
+      continue;
+    }
     if (index < firstIndex) {
       firstIndex = index;
       firstLength = term.length;
     }
   }
-  return Number.isFinite(firstIndex) ? { index: firstIndex, length: firstLength } : null;
+  return Number.isFinite(firstIndex) ? { index: firstIndex, length: firstLength, phrase: false } : null;
 }
 
-function titleSearchResult(workspace: OpenWorkWorkspace, session: SessionInfo, queryLower: string): SessionSearchResult | null {
-  const title = sessionTitle(session);
-  const text = `${title} ${workspaceLabel(workspace)}`;
-  const match = findTextMatch(text, queryLower);
+function titleSearchResult(workspace: OpenWorkWorkspace, session: SessionInfo, queryLower: string, mode: SessionSearchMatchMode): SessionSearchResult | null {
+  const text = `${sessionTitle(session)} ${workspaceLabel(workspace)}`;
+  const match = findTextMatch(text, queryLower, mode);
   if (!match) return null;
   return {
-    workspaceId: workspace.id,
-    workspace: workspaceLabel(workspace),
-    sessionId: session.id,
-    title,
-    updatedAt: sessionUpdatedAt(session),
+    ...sessionMetadata(workspace, session),
     kind: "title",
+    phrase: match.phrase,
     snippet: buildSessionSnippet(text, match.index, match.length),
   };
 }
 
-function messageSearchResult(workspace: OpenWorkWorkspace, session: SessionInfo, messages: SessionMessage[], queryLower: string): SessionSearchResult | null {
+function messageSearchResult(workspace: OpenWorkWorkspace, session: SessionInfo, messages: SessionMessage[], queryLower: string, mode: SessionSearchMatchMode): SessionSearchResult | null {
   let fallback: SessionSearchResult | null = null;
   for (const [index, message] of messages.entries()) {
     const role = message.info.role;
     if (role !== "user" && role !== "assistant") continue;
     const text = messageText(message);
     if (!text) continue;
-    const match = findTextMatch(text, queryLower);
+    const match = findTextMatch(text, queryLower, mode);
     if (!match) continue;
     const result: SessionSearchResult = {
-      workspaceId: workspace.id,
-      workspace: workspaceLabel(workspace),
-      sessionId: session.id,
-      title: sessionTitle(session),
-      updatedAt: sessionUpdatedAt(session),
+      ...sessionMetadata(workspace, session),
       kind: "message",
+      phrase: match.phrase,
       role,
       messageId: message.info.id,
       messageIndex: index,
@@ -575,6 +644,12 @@ function messageSearchResult(workspace: OpenWorkWorkspace, session: SessionInfo,
     if (!fallback) fallback = result;
   }
   return fallback;
+}
+
+/** Sessions whose title matched, or whose snippet is a phrase match, first; then newest activity. */
+function rankSearchResults(matches: SessionSearchResult[], titleMatched: ReadonlySet<string>): SessionSearchResult[] {
+  const rank = (result: SessionSearchResult) => (titleMatched.has(result.sessionId) || result.phrase ? 0 : 1);
+  return matches.sort((left, right) => rank(left) - rank(right) || right.updatedAt - left.updatedAt);
 }
 
 async function listOpenWorkWorkspaces(): Promise<OpenWorkWorkspace[]> {
@@ -625,10 +700,57 @@ async function readWorkspaceSession(workspace: OpenWorkWorkspace, sessionId: str
   return session;
 }
 
-async function readSessionMessages(workspace: OpenWorkWorkspace, sessionId: string, limit: number): Promise<SessionMessage[]> {
-  const query = new URLSearchParams({ limit: String(limit) });
+const MAX_SESSION_DESCENDANTS = 256;
+const sessionChildrenSchema = z.array(z.object({
+  id: z.string().trim().min(1),
+  time: z.object({ archived: z.number().optional() }).optional(),
+}).passthrough());
+
+async function readSessionDescendantIds(base: string, sessionId: string): Promise<{ ids: string[]; unknown: number }> {
+  const queue = [sessionId];
+  const seen = new Set(queue);
+  const ids: string[] = [];
+  let unknown = 0;
+  let index = 0;
+  for (; index < queue.length && index < MAX_SESSION_DESCENDANTS; index += 1) {
+    const parsed = sessionChildrenSchema.safeParse(
+      await serverGet(`${base}/session/${encodeURIComponent(queue[index])}/children`).catch(() => null),
+    );
+    if (!parsed.success) {
+      unknown += 1;
+      continue;
+    }
+    for (const child of parsed.data) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      if (child.time?.archived) continue;
+      if (queue.length >= MAX_SESSION_DESCENDANTS) {
+        unknown += 1;
+        continue;
+      }
+      ids.push(child.id);
+      queue.push(child.id);
+    }
+  }
+  return { ids, unknown };
+}
+
+async function readSessionActivity(workspace: OpenWorkWorkspace, session: SessionInfo): Promise<SessionActivity> {
+  const base = `/workspace/${encodeURIComponent(workspace.id)}/opencode`;
+  const probe = (path: string) => serverGet(`${base}${path}`).catch(() => null);
+  const [statuses, permissions, questions, descendants] = await Promise.all([
+    probe("/session/status"), probe("/permission"), probe("/question"),
+    session.time?.archived ? { ids: [], unknown: 0 } : readSessionDescendantIds(base, session.id),
+  ]);
+  return sessionActivityFrom(statuses, permissions, questions, session.id, descendants.ids, descendants.unknown);
+}
+
+// The engine returns the newest `limit` messages; without a limit it returns
+// the whole transcript, oldest first.
+async function readSessionMessages(workspace: OpenWorkWorkspace, sessionId: string, limit?: number): Promise<SessionMessage[]> {
+  const query = limit === undefined ? "" : `?${new URLSearchParams({ limit: String(limit) }).toString()}`;
   return z.array(sessionMessageSchema).parse(
-    await serverGet(`/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(sessionId)}/message?${query.toString()}`),
+    await serverGet(`/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(sessionId)}/message${query}`),
   );
 }
 
@@ -645,10 +767,13 @@ async function forEachWithConcurrency<T>(items: T[], concurrency: number, run: (
 }
 
 async function searchOpenWorkSessions(rawArgs: unknown): Promise<object> {
-  const args = sessionSearchArgsSchema.parse(rawArgs);
+  const parsed = sessionSearchArgsSchema.safeParse(rawArgs);
+  if (!parsed.success) return sessionArgumentError(parsed.error, rawArgs);
+  const args = parsed.data;
   const resultLimit = args.limit ?? SESSION_SEARCH_DEFAULT_LIMIT;
   const scanLimit = args.scanLimit ?? SESSION_SEARCH_DEFAULT_SCAN_LIMIT;
   const messageLimit = args.messageLimit ?? SESSION_SEARCH_DEFAULT_MESSAGE_LIMIT;
+  const mode = args.match ?? "all";
   const queryLower = args.query.trim().toLowerCase();
   const workspaces = filterWorkspaces(await listOpenWorkWorkspaces(), args.workspaceId);
   if (!workspaces.length) {
@@ -659,23 +784,34 @@ async function searchOpenWorkSessions(rawArgs: unknown): Promise<object> {
   const workspaceErrors: Array<{ workspaceId: string; workspace: string; error: string }> = [];
   await Promise.all(workspaces.map(async (workspace) => {
     try {
-      const items = await listWorkspaceSessions(workspace, scanLimit);
-      for (const session of items) sessions.push({ workspace, session });
+      const items = await listWorkspaceSessions(workspace, SESSION_SEARCH_TITLE_LIST_LIMIT);
+      for (const session of items) if (sessionPassesFilters(session, args)) sessions.push({ workspace, session });
     } catch (error) {
       workspaceErrors.push({ workspaceId: workspace.id, workspace: workspaceLabel(workspace), error: unknownErrorMessage(error) });
     }
   }));
 
-  const sessionsToScan = sessions
-    .sort((left, right) => sessionUpdatedAt(right.session) - sessionUpdatedAt(left.session))
-    .slice(0, scanLimit);
+  sessions.sort((left, right) => sessionUpdatedAt(right.session) - sessionUpdatedAt(left.session));
+  const sessionsToScan = sessions.slice(0, scanLimit);
   const matches: SessionSearchResult[] = [];
+  const titleMatched = new Set<string>();
 
+  // Title phase: every filtered root session, one list call per workspace.
+  for (const { workspace, session } of sessions.slice(scanLimit)) {
+    const titleMatch = titleSearchResult(workspace, session, queryLower, mode);
+    if (!titleMatch) continue;
+    titleMatched.add(session.id);
+    matches.push(titleMatch);
+  }
+
+  // Transcript phase: only the scanLimit newest sessions are read. A message
+  // match wins the snippet, but the title match still owns the rank.
   await forEachWithConcurrency(sessionsToScan, SESSION_SEARCH_CONCURRENCY, async ({ workspace, session }) => {
-    const titleMatch = titleSearchResult(workspace, session, queryLower);
+    const titleMatch = titleSearchResult(workspace, session, queryLower, mode);
+    if (titleMatch) titleMatched.add(session.id);
     try {
       const messages = await readSessionMessages(workspace, session.id, messageLimit);
-      const messageMatch = messageSearchResult(workspace, session, messages, queryLower);
+      const messageMatch = messageSearchResult(workspace, session, messages, queryLower, mode);
       if (messageMatch) matches.push(messageMatch);
       else if (titleMatch) matches.push(titleMatch);
     } catch {
@@ -683,13 +819,12 @@ async function searchOpenWorkSessions(rawArgs: unknown): Promise<object> {
     }
   });
 
-  const results = matches
-    .filter((match) => match !== undefined)
-    .sort((left, right) => right.updatedAt - left.updatedAt);
+  const results = rankSearchResults(matches, titleMatched);
 
   return {
     ok: true,
     query: args.query,
+    match: mode,
     workspaceCount: workspaces.length,
     totalCandidateSessions: sessions.length,
     scannedSessions: sessionsToScan.length,
@@ -702,9 +837,27 @@ async function searchOpenWorkSessions(rawArgs: unknown): Promise<object> {
   };
 }
 
+type ReadableMessage = { index: number; id: string; role: string; createdAt: number | null; text: string };
+
+function readableMessages(messages: SessionMessage[]): ReadableMessage[] {
+  return messages
+    .map((message, index) => ({
+      index,
+      id: message.info.id,
+      role: message.info.role,
+      createdAt: message.info.time?.created ?? null,
+      text: messageText(message),
+    }))
+    .filter((message) => message.text.trim().length > 0);
+}
+
 async function readOpenWorkSession(rawArgs: unknown): Promise<object> {
-  const args = sessionReadArgsSchema.parse(rawArgs);
+  const parsed = sessionReadArgsSchema.safeParse(rawArgs);
+  if (!parsed.success) return sessionArgumentError(parsed.error, rawArgs);
+  const args = parsed.data;
   const count = args.count ?? 30;
+  const from = args.from ?? "end";
+  const summary = args.summary ?? false;
   const workspaces = filterWorkspaces(await listOpenWorkWorkspaces(), args.workspaceId);
   if (!workspaces.length) {
     return { ok: false, error: args.workspaceId ? `No workspace matched ${args.workspaceId}` : "No OpenWork workspaces are available" };
@@ -713,25 +866,36 @@ async function readOpenWorkSession(rawArgs: unknown): Promise<object> {
   for (const workspace of workspaces) {
     try {
       const session = await readWorkspaceSession(workspace, args.sessionId);
-      const messages = await readSessionMessages(workspace, args.sessionId, count);
-      const readable = messages
-        .map((message, index) => ({
-          index,
-          id: message.info.id,
-          role: message.info.role,
-          text: messageText(message),
-        }))
-        .filter((message) => message.text.trim().length > 0);
+      // Reading from the start or summarizing needs the whole transcript.
+      const needsFullTranscript = summary || from === "start";
+      const [messages, activity] = await Promise.all([
+        readSessionMessages(workspace, args.sessionId, needsFullTranscript ? undefined : count),
+        readSessionActivity(workspace, session),
+      ]);
+      const readable = readableMessages(messages);
+      const metadata = {
+        ...sessionMetadata(workspace, session),
+        ...activity,
+      };
+      if (summary) {
+        return {
+          ok: true,
+          ...metadata,
+          model: sessionModelOf(session),
+          totalMessages: readable.length,
+          firstUser: readable.find((message) => message.role === "user") ?? null,
+          lastAssistant: [...readable].reverse().find((message) => message.role === "assistant") ?? null,
+        };
+      }
+      const window = from === "start" ? readable.slice(0, count) : readable.slice(-count);
       return {
         ok: true,
-        workspaceId: workspace.id,
-        workspace: workspaceLabel(workspace),
-        sessionId: session.id,
-        title: sessionTitle(session),
-        updatedAt: sessionUpdatedAt(session),
-        returned: readable.length,
+        ...metadata,
+        model: sessionModelOf(session),
+        from,
+        returned: window.length,
         requested: count,
-        messages: readable,
+        messages: window,
       };
     } catch {
       if (args.workspaceId) break;
@@ -739,6 +903,89 @@ async function readOpenWorkSession(rawArgs: unknown): Promise<object> {
   }
 
   return { ok: false, error: `Session ${args.sessionId} was not found in matching OpenWork workspaces` };
+}
+
+/**
+ * Resolve an existing session by id to the workspace that owns it. Same
+ * lookup as session.read: every matching workspace is probed and the
+ * ownership check in readWorkspaceSession refuses foreign sessions.
+ */
+async function locateOpenWorkSession(
+  sessionId: string,
+  workspaceId: string | undefined,
+): Promise<{ workspace: OpenWorkWorkspace; session: SessionInfo } | { error: string }> {
+  const workspaces = filterWorkspaces(await listOpenWorkWorkspaces(), workspaceId);
+  if (!workspaces.length) {
+    return { error: workspaceId ? `No workspace matched ${workspaceId}` : "No OpenWork workspaces are available" };
+  }
+  for (const workspace of workspaces) {
+    try {
+      return { workspace, session: await readWorkspaceSession(workspace, sessionId) };
+    } catch {
+      if (workspaceId) break;
+    }
+  }
+  return { error: `Session ${sessionId} was not found in matching OpenWork workspaces` };
+}
+
+let lastSendMessageStamp = 0;
+
+/** Same shape the desktop composer uses (see app/lib/opencode.ts createPromptMessageID). */
+function createSendMessageId(): string {
+  lastSendMessageStamp = Math.max(Date.now() * 0x1000, lastSendMessageStamp + 1);
+  return `msg_${lastSendMessageStamp.toString(16).padStart(12, "0").slice(-12)}${randomUUID().replaceAll("-", "").slice(0, 14)}`;
+}
+
+type SendToOpenWorkSessionResult =
+  | { ok: false; error: string }
+  | {
+    ok: true;
+    accepted: true;
+    sessionId: string;
+    workspaceId: string;
+    workspace: string;
+    title: string;
+    messageId: string;
+    revealed?: boolean;
+  };
+
+/**
+ * Append a prompt to an existing session by id through the engine's
+ * prompt_async, exactly as session.create starts a new one. The engine
+ * persists the user message immediately and returns 204; when that session
+ * is mid-turn its running loop picks the message up at the next step instead
+ * of rejecting it. Nothing on screen changes unless `reveal` is true, in
+ * which case the desktop is asked to open the session afterwards (best
+ * effort: the message is already sent if that fails).
+ */
+async function sendToOpenWorkSession(rawArgs: unknown, context: OpenCodeContext): Promise<SendToOpenWorkSessionResult> {
+  const parsed = sessionSendArgsSchema.safeParse(rawArgs);
+  if (!parsed.success) return sessionArgumentError(parsed.error, rawArgs);
+  const args = parsed.data;
+  const located = await locateOpenWorkSession(args.sessionId, args.workspaceId);
+  if ("error" in located) return { ok: false, error: located.error };
+  const { workspace, session } = located;
+  const messageId = createSendMessageId();
+  await postJson(
+    `/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(session.id)}/prompt_async`,
+    { messageID: messageId, parts: [{ type: "text", text: args.text }] },
+  );
+  const result: SendToOpenWorkSessionResult = {
+    ok: true,
+    accepted: true,
+    sessionId: session.id,
+    workspaceId: workspace.id,
+    workspace: workspaceLabel(workspace),
+    title: sessionTitle(session),
+    messageId,
+  };
+  if (args.reveal !== true) return result;
+  const opened = await uiControlRequest("command", {
+    id: "session.open",
+    args: { sessionId: session.id },
+    ...affordanceOrigin(context),
+  });
+  return { ...result, revealed: isRecord(opened) && opened.ok === true };
 }
 
 function serverUrl(): string {
@@ -814,32 +1061,73 @@ async function resolveContextWorkspace(workspaceId: string | undefined, context:
   throw new Error(`Multiple OpenWork workspaces match; pass workspaceId. Available: ${workspaces.map((workspace) => workspaceLabel(workspace)).join(", ")}`);
 }
 
+/**
+ * The engine takes the model in two shapes: `{ id, providerID, variant }` on
+ * the session record at creation, and `{ providerID, modelID }` plus a
+ * top-level `variant` on prompt_async. Both are sent so the session is bound
+ * to the model before its first turn and that turn runs at the same effort.
+ */
+function engineSessionCreateModel(model: SessionModelArg) {
+  return { providerID: model.providerId, id: model.modelId, ...(model.variant ? { variant: model.variant } : {}) };
+}
+
+function enginePromptModel(model: SessionModelArg) {
+  return { model: { providerID: model.providerId, modelID: model.modelId }, ...(model.variant ? { variant: model.variant } : {}) };
+}
+
+function argumentAtPath(value: unknown, path: PropertyKey[]): unknown {
+  for (const key of path) {
+    value = typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
+  }
+  return value;
+}
+
+function sessionArgumentError(error: z.ZodError, rawArgs: unknown): { ok: false; error: string; issues: Array<{ path: string; message: string }> } {
+  const issues = error.issues.map((issue) => {
+    const path = issue.path.map((key, index) => typeof key === "number" ? `[${key}]` : `${index ? "." : ""}${String(key)}`).join("");
+    const value = argumentAtPath(rawArgs, issue.path);
+    const detail = issue.code === "too_big" && issue.origin === "string" && typeof value === "string"
+      ? `${value.trim().length.toLocaleString("en-US")} characters, max ${issue.maximum.toLocaleString("en-US")}`
+      : issue.message;
+    return { path, message: `${path}: ${detail}` };
+  });
+  return { ok: false, error: issues.map((issue) => issue.message).join("; "), issues };
+}
+
 async function createOpenWorkSessions(rawArgs: unknown, context: OpenCodeContext): Promise<object> {
-  const args = sessionCreateArgsSchema.parse(rawArgs);
+  const parsed = sessionCreateArgsSchema.safeParse(rawArgs);
+  if (!parsed.success) return sessionArgumentError(parsed.error, rawArgs);
+  const args = parsed.data;
   const workspace = await resolveContextWorkspace(args.workspaceId, context);
   let createdOnEngine = false;
-  const results = await Promise.all(args.sessions.map(async (session): Promise<CreatedOpenWorkSessionResult | FailedOpenWorkSessionResult> => {
+  const results = await Promise.all(args.sessions.map(async (session, index): Promise<CreatedOpenWorkSessionResult | FailedOpenWorkSessionResult> => {
+    const inputTitle = argumentAtPath(rawArgs, ["sessions", index, "title"]);
+    const titleTruncated = typeof inputTitle === "string" && inputTitle.trim().length > 120;
+    const model = session.model ?? args.model;
     try {
       const payload = sessionInfoSchema.parse(await postJson(
         `/workspace/${encodeURIComponent(workspace.id)}/opencode/session`,
-        { title: session.title },
+        { title: session.title, ...(model ? { model: engineSessionCreateModel(model) } : {}) },
       ));
       createdOnEngine = true;
       await postJson(
         `/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(payload.id)}/prompt_async`,
-        { parts: [{ type: "text", text: session.prompt }] },
+        { ...(model ? enginePromptModel(model) : {}), parts: [{ type: "text", text: session.prompt }] },
       );
       return {
         ok: true,
         sessionId: payload.id,
-        title: payload.title?.trim() || session.title,
+        title: session.title,
+        titleTruncated,
         started: true,
+        model: sessionModelOf(payload),
         route: `/workspace/${encodeURIComponent(workspace.id)}/session/${encodeURIComponent(payload.id)}`,
       };
     } catch (error) {
       return {
         ok: false,
         title: session.title,
+        titleTruncated,
         error: unknownErrorMessage(error),
       };
     }

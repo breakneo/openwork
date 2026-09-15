@@ -7,13 +7,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useSavedApps, useAppsClient } from "../apps/use-apps";
-import { AppActionsMenu } from "../apps/app-actions-menu";
+import { AppActionsMenu, getAppUpdatePrompt } from "../apps/app-actions-menu";
 import { GeneratedAppPreview } from "../apps/generated-app-preview";
+import { LiveGeneratedApp, isLiveGeneratedApp } from "../apps/live-generated-app";
+import type { DashboardLaunchEndpoint } from "./mcp-app-tile";
 import { ShareDashboardButton } from "./share-dashboard-button";
 
 export type CreateDashboardApp = (prompt: string) => Promise<void>;
 
-export function DashboardApps({ onCreateApp }: { onCreateApp: CreateDashboardApp }) {
+export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp: CreateDashboardApp; fallbackEndpoints?: DashboardLaunchEndpoint[] }) {
   const { available, client, orgId, query, scope } = useSavedApps();
   const cache = useQueryClient();
   const [chooser, setChooser] = useState<"add" | "existing" | null>(null);
@@ -29,7 +31,7 @@ export function DashboardApps({ onCreateApp }: { onCreateApp: CreateDashboardApp
   });
   const create = async () => {
     setCreating(true); setError(null);
-    try { await onCreateApp("Create a reusable app for my dashboard that "); setChooser(null); }
+    try { await onCreateApp("Create one live app for my dashboard in one shot. Use my request to build and save one app that fetches fresh data with each viewer’s own connections whenever opened or refreshed. Handle the underlying workflow internally; do not ask me workflow questions. My app should "); setChooser(null); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start a conversation. Try again."); }
     finally { setCreating(false); }
   };
@@ -45,7 +47,7 @@ export function DashboardApps({ onCreateApp }: { onCreateApp: CreateDashboardApp
     {placement.error && !chooser ? <p role="alert" className="mb-4 text-sm text-destructive">{placement.error.message}</p> : null}
     {available && personal.length ? <section className="mb-8" aria-label="Your apps">
       <h2 className="mb-3 text-sm font-medium">Added by you</h2>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{personal.map((app) => <SavedDashboardApp key={app.view.id} app={app}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{personal.map((app) => <SavedDashboardApp key={JSON.stringify([...scope, app.view.id])} app={app} fallbackEndpoints={fallbackEndpoints} onCreateApp={onCreateApp}
         removing={placement.isPending && placement.variables?.appId === app.view.id}
         onRemove={() => placement.mutate({ appId: app.view.id, added: false })} />)}</div>
     </section> : available ? <section className="mb-8 rounded-xl border border-dashed p-6">
@@ -81,29 +83,40 @@ export function DashboardApps({ onCreateApp }: { onCreateApp: CreateDashboardApp
   </>;
 }
 
-function SavedDashboardApp({ app, onRemove, removing }: { app: SavedAppSummary; onRemove: () => void; removing: boolean }) {
+function SavedDashboardApp({ app, onRemove, removing, onCreateApp, fallbackEndpoints }: { fallbackEndpoints?: DashboardLaunchEndpoint[]; app: SavedAppSummary; onRemove: () => void; removing: boolean; onCreateApp: CreateDashboardApp }) {
   const navigate = useNavigate();
   const { client, orgId, scope } = useAppsClient();
   const detail = useQuery({
     queryKey: ["app-preview", ...scope, app.view.id, undefined, undefined],
-    enabled: Boolean(client && orgId),
+    enabled: Boolean(client && orgId) && !isLiveGeneratedApp(app.view),
     queryFn: () => {
       if (!client || !orgId) throw new Error("Sign in to open this app.");
       return client.getSavedApp(orgId, app.view.id);
     },
   });
+  const liveRevision = isLiveGeneratedApp(app.view) ? app.view.revisions.find((revision) => revision.id === app.view.activeRevisionId) : undefined;
+  const updatePrompt = app.canManage && !detail.isError ? getAppUpdatePrompt(isLiveGeneratedApp(app.view) ? { ...app, revision: liveRevision ?? null, html: null, payload: null, previewNotice: null } : detail.data) : undefined;
+  const update = useMutation({ mutationFn: onCreateApp });
+  const onUpdate = updatePrompt ? () => { if (!update.isPending && !removing) update.mutate(updatePrompt); } : undefined;
   return <article className="min-w-0 overflow-hidden rounded-xl border bg-background" data-personal-dashboard-app={app.view.id}>
     <header className="flex items-center gap-2 border-b p-3">
       <button className="min-w-0 flex-1 text-left" aria-label={`Open ${app.view.title}`} onClick={() => navigate(`/dashboard/apps/${app.view.id}`)}><span className="block truncate text-sm font-medium">{app.view.title}</span><span className="text-xs text-muted-foreground">Open app</span></button>
-      <AppActionsMenu appId={app.view.id} title={app.view.title} canDelete={app.canManage} onRemove={onRemove} busy={removing} />
+      <AppActionsMenu appId={app.view.id} title={app.view.title} canDelete={app.canManage} onRemove={onRemove} onUpdate={onUpdate} busy={removing || update.isPending} />
     </header>
     <div className="max-h-[32rem] overflow-auto px-4 pb-4">
-      {detail.isPending ? <p role="status" className="py-4 text-sm text-muted-foreground">Loading app…</p>
+      {liveRevision ? <LiveGeneratedApp view={app.view} revision={liveRevision} fallbackEndpoints={fallbackEndpoints} />
+        : isLiveGeneratedApp(app.view) ? <p role="status" className="py-4 text-sm text-muted-foreground">This app has no saved version ready to open.</p>
+        : detail.isPending ? <p role="status" className="py-4 text-sm text-muted-foreground">Loading app…</p>
         : detail.isError ? <div className="space-y-3 py-4"><p role="alert" className="text-sm">This app could not be loaded.</p><Button variant="outline" size="sm" onClick={() => void detail.refetch()}>Try again</Button></div>
+        : isLiveGeneratedApp(detail.data.view) && detail.data.revision ? <LiveGeneratedApp view={detail.data.view} revision={detail.data.revision} fallbackEndpoints={fallbackEndpoints} />
         : detail.data.html && detail.data.payload && detail.data.revision ? <>
           <GeneratedAppPreview html={detail.data.html} payload={detail.data.payload} title={app.view.title} revision={detail.data.revision} />
           <p className="mt-3 text-xs text-muted-foreground">Updated {new Date(detail.data.payload.artifact.generatedAt).toLocaleString()}</p>
-        </> : <p className="py-4 text-sm text-muted-foreground">{detail.data.previewNotice}</p>}
+        </> : <div className="flex flex-wrap items-center gap-x-3">
+          <p className="py-4 text-sm text-muted-foreground">{detail.data.previewNotice}</p>
+          {onUpdate ? <Button variant="outline" size="sm" disabled={removing || update.isPending} onClick={onUpdate}>{update.isPending ? "Opening conversation…" : "Update app"}</Button> : null}
+        </div>}
+      {update.isError ? <p role="alert" className="text-sm text-destructive">{update.error instanceof Error ? update.error.message : "Could not start a conversation. Try again."}</p> : null}
     </div>
   </article>;
 }

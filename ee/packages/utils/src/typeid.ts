@@ -74,6 +74,7 @@ export const idTypesMapNameToPrefix = {
   worker: "wrk",
   workerInstance: "wki",
   daytonaSandbox: "dts",
+  cloudRuntimeInstance: "cri",
   workerToken: "wkt",
   workerBundle: "wkb",
   automation: "atm",
@@ -102,6 +103,17 @@ export const idTypesMapNameToPrefix = {
   tempFile: "tmpf",
   dashboard: "dsb",
   dashboardAccessGrant: "dsg",
+  inferenceProvider: "ipr",
+  inferenceProviderModel: "ipm",
+  inferenceProviderCredential: "ipc",
+  inferenceProviderAccess: "ipa",
+  inferenceProviderOauthState: "ipos",
+  inferenceRequestLog: "irl",
+  inferenceUsageRollup: "iur",
+  gatewayKey: "gky",
+  gatewayModelGroup: "gmg",
+  gatewayModelGroupModel: "gmm",
+  gatewayCredentialSet: "gcs",
 } as const
 
 export const denTypeIdPrefixes = idTypesMapNameToPrefix

@@ -91,7 +91,7 @@ function capabilityMatch(
   }
 }
 
-function connectionStatusMatch(
+export function connectionStatusMatch(
   connection: NativeProviderConnectionEntry,
   score: number,
 ): NativeCapabilityMatch {

@@ -1,5 +1,9 @@
 /** @jsxImportSource react */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { DashboardConnectionCard } from "./dashboard-connection-card";
+import { connectionCardPayloadFromChatToolResult, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution";
+import type { ConnectionActionPayload } from "@openwork/types/connection-action-app";
+import type { ChatToolReconnectAction } from "@/components/tools/error-attribution";
 import { Play } from "lucide-react";
 
 import {
@@ -8,15 +12,18 @@ import {
   type OpenworkServerClient,
 } from "@/app/lib/openwork-server";
 import { McpAppSandboxView, type PreservedMcpAppResult } from "@/components/chat/mcp-app-frame";
+import { snapshotMcpAppArguments } from "@/components/chat/mcp-app-origin";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/react-app/shell/workspace-provider";
 import { DashboardTileShell } from "./dashboard-tile-shell";
+import { resolveDashboardMcpApp } from "./dashboard-mcp-app-resolution";
 import {
   DASHBOARD_AUTO_REFRESH_INTERVAL_MS,
   dashboardTileLaunchIsApproved,
   dashboardTileRunsAutomatically,
   readDashboardTileCache,
+  removeDashboardTileCache,
   shouldAutoRefreshDashboardTile,
   writeDashboardTileCache,
 } from "./dashboard-tile-cache";
@@ -47,6 +54,7 @@ type TileState =
       /** True only when the successful call did not need an approval override. */
       autoLaunchEligible?: boolean;
     }
+  | { phase: "connection"; connection: ConnectionActionPayload; action: ChatToolReconnectAction | null; output: unknown }
   | { phase: "closed" }
   | { phase: "error"; message: string };
 
@@ -85,10 +93,13 @@ function freshnessLabel(cachedAt: number): string {
   return ageHours === 1 ? "Updated 1 hour ago" : `Updated ${ageHours} hours ago`;
 }
 
-export function McpAppTile({
+export function McpAppTile(props: ComponentProps<typeof McpAppTileContent>) {
+  return <McpAppTileContent key={JSON.stringify([props.cacheScopeKey, props.entry.id, props.entry.connectionId, props.entry.serverName, props.entry.toolName, props.entry.resourceUri, props.entry.projectedToolName])} {...props} />;
+}
+
+function McpAppTileContent({
   entry,
   cacheScopeKey,
-  onApprovedLaunch,
   onAutoLaunchEnabled,
   onAutoLaunchDisabled,
   fallbackEndpoints,
@@ -96,7 +107,6 @@ export function McpAppTile({
   entry: DashboardMcpAppEntry;
   /** Per-user and per-organization scope for workspace-bound last-known-good dashboard data. */
   cacheScopeKey: string;
-  /** Persists the user's one-time launch approval on the stored entry. */
   onApprovedLaunch?: () => void;
   /** Enables later on-load launches after this user successfully runs a safe tile. */
   onAutoLaunchEnabled?: () => void;
@@ -131,6 +141,8 @@ export function McpAppTile({
     : null;
   const [started, setStarted] = useState(!manualLaunch);
   const [nonce, setNonce] = useState(0);
+  const [failedViewNonce, setFailedViewNonce] = useState<number | null>(null);
+  const lastHeight = useRef<number | undefined>(undefined);
   const [state, setState] = useState<TileState>(() => cached && cachedEndpoint
     ? { phase: "ready", app: cached.app, result: cached.result, endpoint: cachedEndpoint, cachedAt: cached.cachedAt }
     : { phase: manualLaunch ? "idle" : "loading" });
@@ -142,12 +154,8 @@ export function McpAppTile({
   stateRef.current = state;
   const lastRefreshAtRef = useRef(cachedEndpoint ? cached?.cachedAt ?? 0 : 0);
   const userInitiatedNonceRef = useRef<number | null>(null);
-  // Read consent through refs so persisting it after the first approval does
-  // not re-run the launch effect and duplicate a write-tool call.
   const launchApprovedRef = useRef(entry.launchApproved === true);
   launchApprovedRef.current = entry.launchApproved === true;
-  const onApprovedLaunchRef = useRef(onApprovedLaunch);
-  onApprovedLaunchRef.current = onApprovedLaunch;
   const onAutoLaunchEnabledRef = useRef(onAutoLaunchEnabled);
   onAutoLaunchEnabledRef.current = onAutoLaunchEnabled;
   const onAutoLaunchDisabledRef = useRef(onAutoLaunchDisabled);
@@ -156,7 +164,7 @@ export function McpAppTile({
   // reuses the same in-flight promise; a null promise marks a settled nonce so
   // later re-renders cannot repeat an already-executed data-modifying call.
   const launchRef = useRef<{ nonce: number; promise: Promise<TileState> | null } | null>(null);
-  const lifetime = useMemo(() => ({ active: true }), [cacheScopeKey, entry.id, entry.projectedToolName, launchArguments, nonce]);
+  const lifetime = useMemo(() => ({ active: true, controller: new AbortController() }), [cacheScopeKey, entry.id, entry.projectedToolName, entry.connectionId, entry.serverName, entry.toolName, entry.resourceUri, launchArguments, nonce]);
   const endpointsRef = useRef(launchEndpoints);
   const ownedLaunches = useRef(new Map<string, DashboardLaunchEndpoint>());
   const releaseLaunches = () => {
@@ -165,13 +173,15 @@ export function McpAppTile({
   };
   useLayoutEffect(() => {
     lifetime.active = true;
-    return () => { lifetime.active = false; releaseLaunches(); };
+    lifetime.controller = new AbortController();
+    return () => { lifetime.active = false; lifetime.controller.abort(); releaseLaunches(); };
   }, [lifetime]);
   useLayoutEffect(() => {
     endpointsRef.current = launchEndpoints;
     for (const [id, owner] of ownedLaunches.current) {
       if (launchEndpoints.some(endpoint => endpoint.client === owner.client && endpoint.workspaceId === owner.workspaceId)) continue;
       lifetime.active = false;
+      lifetime.controller.abort();
       void owner.client.releaseMcpApp(owner.workspaceId, id).catch(() => undefined);
       ownedLaunches.current.delete(id);
       setState(current => current.phase === "ready" ? { ...current, app: { ...current.app, launchId: undefined } } : current);
@@ -191,7 +201,7 @@ export function McpAppTile({
     // Tiles are user-scoped while MCP servers are workspace-scoped: prefer the
     // selected workspace's runtime, then any other available one that can
     // still resolve this app.
-    const candidates = launchEndpoints;
+    const candidates = endpointsRef.current;
     if (candidates.length === 0) {
       launchRef.current = { nonce, promise: null };
       if (stateRef.current.phase === "ready") setRefreshState("failed");
@@ -202,10 +212,14 @@ export function McpAppTile({
       return;
     }
     const userInitiated = userInitiatedNonceRef.current === nonce;
+    const signal = lifetime.controller.signal;
     const assertActive = () => {
-      if (!lifetime.active || launchRef.current?.nonce !== nonce) throw new Error("This App launch has closed or changed. Run the tile again.");
+      if (signal.aborted || !lifetime.active || launchRef.current?.nonce !== nonce) throw new Error("This App launch has closed or changed. Run the tile again.");
     };
+    const endpointIsActive = (endpoint: DashboardLaunchEndpoint) => !signal.aborted && lifetime.active
+      && endpointsRef.current.some(current => current.client === endpoint.client && current.workspaceId === endpoint.workspaceId);
     const promise = currentLaunch?.promise ?? (async (): Promise<TileState> => {
+      const argumentsSnapshot = snapshotMcpAppArguments(launchArguments);
       // Connect app-host apps resolve through their connection reference; the
       // host revalidates the live UI binding before returning the resource.
       const launch = entry.connectionId
@@ -213,36 +227,26 @@ export function McpAppTile({
             connectionId: entry.connectionId,
             toolName: entry.toolName,
             resourceUri: entry.resourceUri,
-            arguments: launchArguments,
+            arguments: {},
           }
         : undefined;
-      let resolved: { endpoint: DashboardLaunchEndpoint; app: OpenworkMcpAppResource } | null = null;
-      let resolveFailure: unknown = null;
-      for (const endpoint of candidates) {
-        try {
-          const { app } = await endpoint.client.resolveMcpApp(endpoint.workspaceId, entry.projectedToolName, launch, { sessionId: null, readOnly: false });
-          if (!lifetime.active || launchRef.current?.nonce !== nonce) {
-            if (app?.launchId) void endpoint.client.releaseMcpApp(endpoint.workspaceId, app.launchId).catch(() => undefined);
-            assertActive();
-          }
-          if (!endpointsRef.current.some(current => current.client === endpoint.client && current.workspaceId === endpoint.workspaceId)) {
-            if (app?.launchId) void endpoint.client.releaseMcpApp(endpoint.workspaceId, app.launchId).catch(() => undefined);
-            continue;
-          }
-          if (app) {
-            if (app.launchId) ownedLaunches.current.set(app.launchId, endpoint);
-            resolved = { endpoint, app };
-            break;
-          }
-        } catch (cause) {
-          resolveFailure ??= cause;
-        }
-      }
+      const resolved = await resolveDashboardMcpApp({
+        endpoints: candidates,
+        projectedToolName: entry.projectedToolName,
+        expected: { serverName: entry.serverName, toolName: entry.toolName, resourceUri: entry.resourceUri },
+        launch,
+        isActive: endpointIsActive,
+      });
       if (!resolved) {
-        if (resolveFailure) throw resolveFailure;
         return { phase: "error", message: "This tool no longer advertises an interactive app." };
       }
       const { endpoint, app } = resolved;
+      // The owner can retire between the resolver returning and this continuation.
+      if (!endpointIsActive(endpoint) || launchRef.current?.nonce !== nonce) {
+        if (app.launchId) void endpoint.client.releaseMcpApp(endpoint.workspaceId, app.launchId).catch(() => undefined);
+        throw new Error("This App launch has closed or changed. Run the tile again.");
+      }
+      if (app.launchId) ownedLaunches.current.set(app.launchId, endpoint);
       assertActive();
       if (!app.launchId) throw new Error("This App has no live launch context. Update OpenWork and run the tile again.");
       const request = {
@@ -251,7 +255,7 @@ export function McpAppTile({
         serverName: app.serverName,
         name: app.toolName,
         resourceUri: app.resourceUri,
-        arguments: launchArguments,
+        arguments: argumentsSnapshot,
         ...(dashboardTileLaunchIsApproved(
           entry.organizationAutoLaunch === true,
           launchApprovedRef.current,
@@ -265,23 +269,21 @@ export function McpAppTile({
         assertActive();
         if (!(cause instanceof OpenworkServerError) || cause.code !== "tool_requires_approval") throw cause;
         approvalWasRequired = true;
-        // A stored entry can go stale: a tool that was read-only at add time
-        // may need approval now. Never pop a consent prompt from an automatic
-        // mount launch — fall back to the idle Run card and ask on request.
         if (!userInitiated) return { phase: "idle", revokeAutoLaunch: true };
-        const approved = window.confirm(
-          `Allow this MCP App to call ${app.toolName} on ${app.serverName}? `
-          + "OpenWork remembers your choice for this tile until you remove it.",
-        );
-        assertActive();
-        if (!approved) return { phase: "error", message: "The app launch was declined." };
+        if (!endpointIsActive(endpoint)) throw new Error("This App launch has closed or changed. Run the tile again.");
+        onAutoLaunchDisabledRef.current?.();
         result = await endpoint.client.callMcpAppTool(endpoint.workspaceId, { ...request, approved: true });
         assertActive();
-        launchApprovedRef.current = true;
-        onApprovedLaunchRef.current?.();
-        onAutoLaunchDisabledRef.current?.();
       }
       assertActive();
+      const connectionOutput = result.structuredContent ?? firstTextContent(result.content);
+      const connection = connectionCardPayloadFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments);
+      if (connection) return {
+        phase: "connection",
+        connection,
+        action: reconnectActionFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments),
+        output: connectionOutput,
+      };
       if (result.isError) {
         return {
           phase: "error",
@@ -321,6 +323,12 @@ export function McpAppTile({
     void promise
       .then((next) => {
         if (cancelled) return;
+        if (next.phase === "connection") {
+          removeDashboardTileCache(cacheScopeKey, entry.id);
+          setState(next);
+          setRefreshState("idle");
+          return;
+        }
         if (next.phase === "ready") {
           for (const [id, endpoint] of ownedLaunches.current) {
             if (id === next.app.launchId) continue;
@@ -357,7 +365,18 @@ export function McpAppTile({
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        if (stateRef.current.phase === "ready") {
+        const connectionOutput = cause instanceof OpenworkServerError ? cause.details : undefined;
+        const connection = connectionCardPayloadFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments);
+        if (connection) {
+          removeDashboardTileCache(cacheScopeKey, entry.id);
+          setState({ phase: "connection", connection, output: connectionOutput,
+            action: reconnectActionFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments) });
+          setRefreshState("idle");
+          return;
+        }
+        if (cause instanceof OpenworkServerError && (cause.status === 401 || cause.status === 403)) {
+          removeDashboardTileCache(cacheScopeKey, entry.id);
+        } else if (stateRef.current.phase === "ready") {
           setRefreshState("failed");
           return;
         }
@@ -370,7 +389,7 @@ export function McpAppTile({
     return () => {
       cancelled = true;
     };
-  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.toolName, launchArguments, launchEndpoints, manualLaunch, nonce, started, lifetime]);
+  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, manualLaunch, nonce, started, lifetime]);
 
   useEffect(() => {
     if (manualLaunch) return;
@@ -448,6 +467,8 @@ export function McpAppTile({
       ) : undefined}
       onRefresh={run}
       refreshing={refreshState === "refreshing"}
+      compact={state.phase === "ready" && Boolean(interactiveEndpoint) && failedViewNonce !== nonce
+        && (refreshState === "refreshing" || (!origin?.readOnly && refreshState === "idle"))}
     >
       {state.phase === "idle" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 py-6 text-center">
@@ -468,6 +489,9 @@ export function McpAppTile({
           <Skeleton className="h-24 w-full" />
         </div>
       ) : null}
+      {state.phase === "connection" ? <DashboardConnectionCard key={JSON.stringify([cacheScopeKey, state.connection.connectionId, nonce])}
+        toolName={entry.projectedToolName} toolCallId={`${entry.id}:${nonce}`} output={state.output}
+        connection={state.connection} action={state.action} onConnected={run} /> : null}
       {state.phase === "error" ? (
         <p className="pt-3 text-xs text-muted-foreground" role="status">{state.message}</p>
       ) : null}
@@ -486,6 +510,10 @@ export function McpAppTile({
             inputArguments={launchArguments}
             result={state.result}
             unavailableNotice="This app view is unavailable."
+            presentation="dashboard"
+            initialHeight={lastHeight.current}
+            onHeightChange={(height) => { lastHeight.current = height; }}
+            onError={() => setFailedViewNonce(nonce)}
             onRequestTeardown={() => { releaseLaunches(); setState({ phase: "closed" }); }}
           />
         : (

@@ -33,7 +33,6 @@ export type SidebarSessionItem = {
 export type WorkspaceSessionGroup = {
   workspace: WorkspaceInfo;
   sessions: SidebarSessionItem[];
-  sessionsLoaded?: boolean;
   status: "idle" | "loading" | "ready" | "error";
   error?: string | null;
 };
@@ -187,6 +186,7 @@ export type OnboardingStep = "welcome" | "local" | "server" | "connecting";
 export const SETTINGS_TAB_VALUES = [
   "general",
   "ai",
+  "ollama",
   "preferences",
   "permissions",
   "cloud-account",

@@ -4,15 +4,23 @@ import { Ellipsis, Play, Sparkles, Trash2, Minus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { isLiveGeneratedApp } from "./live-generated-app-model";
 import { useAppsClient } from "./use-apps";
+import type { SavedAppDetail } from "@openwork/types/workflows";
 
-export function AppActionsMenu({ appId, title, canDelete, onDeleted, onRun, onEdit, onRemove, busy }: {
+export function getAppUpdatePrompt(app?: SavedAppDetail): string | undefined {
+  if (!app?.canManage || (!isLiveGeneratedApp(app.view) && (!app.previewNotice || (app.html && app.payload && app.revision)))) return undefined;
+  return `Update my existing saved app “${app.view.title}” (artifactViewId: ${app.view.id}, configObjectId: ${app.view.configObjectId}). Read its existing source with read_artifact_view before editing. Adapt the app to the latest workflow output for this configObjectId. Preserve the existing artifactViewId and configObjectId when saving the revised draft with save_artifact_view; do not recreate the app or workflow. Show a draft preview for me to review and explicitly choose Save. Do not autoactivate the draft or change the active revision without my explicit Save.`;
+}
+
+export function AppActionsMenu({ appId, title, canDelete, onDeleted, onRun, onEdit, onUpdate, onRemove, busy }: {
   appId: string;
   title: string;
   canDelete: boolean;
   onDeleted?: () => void;
   onRun?: () => void;
   onEdit?: () => void;
+  onUpdate?: () => void;
   onRemove?: () => void;
   busy?: boolean;
 }) {
@@ -33,15 +41,16 @@ export function AppActionsMenu({ appId, title, canDelete, onDeleted, onRun, onEd
       ]);
     },
   });
-  if (!canDelete && !onRun && !onEdit && !onRemove) return null;
+  if (!canDelete && !onRun && !onEdit && !onUpdate && !onRemove) return null;
   return <>
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label={`App options for ${title}`} disabled={busy}><Ellipsis className="size-4" /></Button>} />
       <DropdownMenuContent align="end">
         {onRun ? <DropdownMenuItem onClick={onRun}><Play />Run again</DropdownMenuItem> : null}
         {onEdit ? <DropdownMenuItem onClick={onEdit}><Sparkles />Ask for changes</DropdownMenuItem> : null}
+        {onUpdate ? <DropdownMenuItem onClick={onUpdate} disabled={busy}><Sparkles />Update app</DropdownMenuItem> : null}
         {onRemove ? <DropdownMenuItem onClick={onRemove} aria-label={`Remove ${title} from dashboard`}><Minus />Remove from dashboard</DropdownMenuItem> : null}
-        {canDelete && (onRun || onEdit || onRemove) ? <DropdownMenuSeparator /> : null}
+        {canDelete && (onRun || onEdit || onUpdate || onRemove) ? <DropdownMenuSeparator /> : null}
         {canDelete ? <DropdownMenuItem variant="destructive" aria-label={`Delete ${title}`} onClick={() => { deletion.reset(); setOpen(true); }}><Trash2 />Delete app</DropdownMenuItem> : null}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -49,7 +58,7 @@ export function AppActionsMenu({ appId, title, canDelete, onDeleted, onRun, onEd
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete “{title}”?</DialogTitle>
-          <DialogDescription>This removes the saved app from everyone’s dashboards and the app list. Its workflow and past results stay available.</DialogDescription>
+          <DialogDescription>This removes the saved app from everyone’s dashboards and the app list. Past results stay available.</DialogDescription>
         </DialogHeader>
         {deletion.error ? <p role="alert" className="text-sm text-destructive">{deletion.error.message}</p> : null}
         <DialogFooter>

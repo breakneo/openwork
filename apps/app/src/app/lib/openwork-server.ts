@@ -1,5 +1,6 @@
 import type { McpStatusMap } from "../types";
 import type { Message, Part, Session, Todo } from "@opencode-ai/sdk/v2/client";
+import type { GatewayDesktopOauthStartRequest, GatewayDesktopOauthStartResponse } from "@openwork/types/den/gateway";
 import {
   agentContextDiagnosticsReportSchema,
   agentContextDiagnosticsRequestSchema,
@@ -51,10 +52,13 @@ export type OpenworkCloudProviderSyncRun = {
 
 export type OpenworkCloudProviderSyncSkippedProvider = {
   cloudProviderId: string;
+  credentialSetId?: string;
   providerId: string;
   name: string;
   /** Machine-readable skip reason, e.g. "missing_credentials". */
   reason: string;
+  /** `member_auth_required` gateway providers: Den URL that starts the member's OAuth grant. */
+  authUrl?: string | null;
 };
 
 export type OpenworkCloudProviderSyncStatus = {
@@ -134,6 +138,8 @@ function parseCloudImportedProvider(value: unknown): CloudImportedProvider | nul
     source: "source" in value && typeof value.source === "string" ? value.source : null,
     updatedAt: "updatedAt" in value && typeof value.updatedAt === "string" ? value.updatedAt : null,
     modelIds: value.modelIds,
+    ...("modelConfigVersion" in value && typeof value.modelConfigVersion === "number"
+      ? { modelConfigVersion: value.modelConfigVersion } : {}),
     importedAt: "importedAt" in value && typeof value.importedAt === "number" ? value.importedAt : null,
   };
 }
@@ -174,6 +180,8 @@ function parseCloudProviderSyncStatus(value: unknown): OpenworkCloudProviderSync
         providerId: raw.providerId,
         name: raw.name,
         reason: raw.reason,
+        ...("credentialSetId" in raw && typeof raw.credentialSetId === "string" ? { credentialSetId: raw.credentialSetId } : {}),
+        ...("authUrl" in raw && typeof raw.authUrl === "string" ? { authUrl: raw.authUrl } : {}),
       });
     }
   }
@@ -258,6 +266,11 @@ export type OpenworkSessionSnapshot = {
     | { type: "busy" }
     | { type: "retry"; attempt: number; message: string; next: number };
 };
+
+// Stored history is independently readable. Missing activity fields are not an
+// observed idle state or an empty todo list; live hydration owns those values.
+export type OpenworkSessionHistory = Pick<OpenworkSessionSnapshot, "session" | "messages">
+  & Partial<Pick<OpenworkSessionSnapshot, "status" | "todos">>;
 
 export type OpenworkPluginItem = {
   spec: string;
@@ -514,6 +527,7 @@ export type OpenworkMcpAppToolResult = {
 export type OpenworkMcpAppSandbox = {
   url: string;
   expectedOrigin: string;
+  sandbox: "allow-scripts" | "allow-scripts allow-same-origin";
 };
 
 export function normalizeMcpAppHostOrigin(hostOrigin: string): string {
@@ -738,6 +752,8 @@ export type OpenworkCloudMcpHealth = {
   connectCatalogEnabled: boolean;
   /** Local private credential readiness, not provider health. Older servers omit it. */
   appHostAuthorizationReady?: boolean | null;
+  connectCatalogDiagnostic?: "ready" | "empty" | "missing_app_host_auth" | "untrusted_origin"
+    | "invalid_catalog" | "invalid_proxy_descriptor" | "discovery_unavailable";
   workspace: {
     id: string;
     type: string;
@@ -1243,7 +1259,9 @@ export function hydrateOpenworkServerSettingsFromEnv() {
     let changed = false;
 
     if (envUrl && (forceEnvSettings || !current.urlOverride)) {
-      const normalized = normalizeOpenworkServerUrl(envUrl);
+      const normalized = normalizeOpenworkServerUrl(
+        envUrl === "/api/openwork" ? new URL(envUrl, window.location.origin).href : envUrl,
+      );
       if (normalized && normalized !== current.urlOverride) {
         next.urlOverride = normalized;
         changed = true;
@@ -1607,6 +1625,10 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
     deleteDenSession: async () => {
       await requestJson<unknown>(baseUrl, "/den-session", { hostToken, method: "DELETE", timeoutMs: timeouts.config });
     },
+    startGatewayProviderOAuth: (providerId: string, orgId: string, credentialSetId?: string) =>
+      requestJson<GatewayDesktopOauthStartResponse>(baseUrl, `/cloud-provider-sync/providers/${encodeURIComponent(providerId)}/oauth/start`, {
+        hostToken, method: "POST", body: { orgId, ...(credentialSetId !== undefined ? { credentialSetId } : {}) } satisfies GatewayDesktopOauthStartRequest, timeoutMs: timeouts.config,
+      }),
     runCloudProviderSyncNow: async (reason?: string, signal?: AbortSignal) =>
       parseCloudProviderSyncRun(await requestJson<unknown>(baseUrl, "/cloud-provider-sync/run", {
         hostToken,
@@ -2005,7 +2027,7 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
           hostToken,
           method: "POST",
           body: { projectedToolName, ...(launch ? { launch } : {}), ...(context ? { context: { sessionId: context.sessionId, readOnly: context.readOnly, engine: context.engine } } : {}) },
-          timeoutMs: timeouts.config,
+          timeoutMs: timeouts.binary,
         },
       ),
     mcpAppSandbox: (app: OpenworkMcpAppResource, hostOrigin: string): OpenworkMcpAppSandbox => {
@@ -2015,7 +2037,14 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
       else if (url.origin === hostOrigin && url.hostname === "127.0.0.1") url.hostname = "localhost";
       url.searchParams.set("csp", JSON.stringify(app.csp));
       url.searchParams.set("hostOrigin", messageOrigin);
-      return { url: url.toString(), expectedOrigin: url.origin };
+      // Hosted Web serves the trusted proxy on its own origin. Keep that frame
+      // opaque rather than granting it access to the host's DOM and storage.
+      const sameOrigin = url.origin === messageOrigin;
+      return {
+        url: url.toString(),
+        expectedOrigin: sameOrigin ? "null" : url.origin,
+        sandbox: sameOrigin ? "allow-scripts" : "allow-scripts allow-same-origin",
+      };
     },
     callMcpAppTool: (
       workspaceId: string,
@@ -2075,6 +2104,12 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
           body: payload,
           timeoutMs: timeouts.cloudMcpReconcile,
         },
+      ),
+    refreshOpenworkCloudMcpCatalog: (workspaceId: string, providerModel?: OpenworkCloudMcpProviderModelContext) =>
+      requestJson<OpenworkCloudMcpHealth>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/mcp/openwork-cloud/reconcile`,
+        { token, hostToken, method: "POST", body: { mode: "refresh_catalog", ...providerModel }, timeoutMs: timeouts.cloudMcpReconcile },
       ),
     refreshOpenworkCloudMcpEngine: (
       workspaceId: string,

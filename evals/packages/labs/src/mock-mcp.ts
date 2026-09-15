@@ -64,6 +64,8 @@ export interface MockAgentWorkload {
 
 export interface MockAgentRequest {
   model: string;
+  advertisedToolNames?: string[];
+  toolResultCodes?: unknown;
   reasoningEffort?: string | null;
   promptMarker: string | null;
   matchedMarkers: string[];
@@ -128,14 +130,15 @@ export interface MockMcpTool {
   inputSchema: Record<string, unknown>;
   title?: string;
   annotations?: { readOnlyHint: boolean; destructiveHint: boolean };
-  _meta?: { ui: { resourceUri: string; visibility?: string[] } };
+  _meta?: { ui: { resourceUri?: string; visibility?: string[] } };
   /** Serve the HTML bound to this tool's _meta.ui.resourceUri. */
   appHtml?: string;
   /** Reject absent required input keys with JSON-RPC invalid params. */
   validateRequiredArguments?: boolean;
   /** Hold the response while the real engine exposes its running tool state. */
   delayMs?: number;
-  result: { content: { type: "text"; text: string }[]; isError?: boolean };
+  /** Served verbatim as the tools/call result, so structured content and result metadata reach the host unchanged. */
+  result: { content: { type: "text"; text: string }[]; isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: Record<string, unknown> };
 }
 
 export interface StartMockMcpOptions {
@@ -535,6 +538,9 @@ export async function startMockMcp(options: StartMockMcpOptions = {}): Promise<M
         || typeof completion.completedTools !== "number") continue;
       completions.push({
         model: completion.model,
+        toolResultCodes: completion.toolResultCodes,
+        advertisedToolNames: Array.isArray(completion.advertisedToolNames)
+          ? completion.advertisedToolNames.filter((value): value is string => typeof value === "string") : undefined,
         reasoningEffort: typeof completion.reasoningEffort === "string" ? completion.reasoningEffort : null,
         promptMarker: marker,
         matchedMarkers: completion.matchedMarkers.filter((value): value is string => typeof value === "string"),

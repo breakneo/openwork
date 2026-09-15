@@ -32,7 +32,8 @@ import { SYNTHETIC_SESSION_ERROR_MESSAGE_PREFIX } from "@/app/types"
 import { t } from "@/i18n"
 import { useOpenTargets } from "@/lib/target-provider"
 import { openTargetFromUrl } from "@/react-app/domains/session/artifacts/open-target"
-import { sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
+import { presentOpencodeSessionError, sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
+import { openModelPickerEvent } from "@/react-app/shell/new-providers-listener"
 import { ApplyPatchTool } from "@/components/tools/apply-patch"
 import { BashTool } from "@/components/tools/bash"
 import { EditTool } from "@/components/tools/edit"
@@ -744,9 +745,16 @@ const UserMessage = React.memo(
                         )
                       }
                       if (isFileUIPart(part)) {
+                        // An attachment is identified by its position among the
+                        // message's files, not by its URL or filename: a sent image
+                        // first shows the composer's blob: preview, then the server's
+                        // recompressed data: copy. Keeping one element lets the
+                        // browser swap the bitmap in place instead of remounting an
+                        // <img> that has to decode before it can paint.
+                        const attachmentIndex = inlineParts.slice(0, index).filter(isFileUIPart).length
                         return (
                           <span
-                            key={`file-${part.url}-${index}`}
+                            key={`file-${attachmentIndex}`}
                             className="mx-1 inline-flex align-middle not-prose"
                           >
                             <FileMessage part={part} tone="user" />
@@ -834,6 +842,8 @@ const MessageComponent = React.memo(
           showDescriptionOnResume={presentation?.kind === "provider-incomplete"}
           resumePrompt={presentation?.recoveryPrompt}
           technicalDetails={presentation?.technicalDetails}
+          gatewayConnectUrl={presentation?.kind === "gateway-auth-required" ? presentation.connectUrl ?? null : undefined}
+          gatewaySelectionRequired={presentation?.kind === "gateway-selection-required"}
         />
       )
     }
@@ -931,6 +941,13 @@ interface ErrorMessageProps {
   resumePrompt?: string | null
   /** Error type, status, provider, code, response body — for bug reports and support. */
   technicalDetails?: string | null
+  /**
+   * Set (possibly null) only when the OpenWork Gateway rejected the request
+   * because the member must sign in: a URL opens the grant in the browser,
+   * null deep-links to Settings > AI providers instead.
+   */
+  gatewayConnectUrl?: string | null
+  gatewaySelectionRequired?: boolean
 }
 
 /**
@@ -995,13 +1012,17 @@ function SessionErrorTechnicalDetails({ details, tone }: { details: string; tone
   )
 }
 
-function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails }: ErrorMessageProps) {
-  const { onResumeInterrupted, developerMode } = useMessageList()
+function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, gatewayConnectUrl, gatewaySelectionRequired }: ErrorMessageProps) {
+  const { onResumeInterrupted, developerMode, dispatchAction, sessionId } = useMessageList()
+  const selection = error?.includes("gateway_selection_required") ? presentOpencodeSessionError(error) : null
+  const displayError = selection?.title ?? error
+  const displayDescription = selection?.description ?? description
+  const displayDetails = selection?.technicalDetails ?? technicalDetails
   // Status codes, provider names, and response bodies are for developers,
   // admins, and support — not the plain-language card end users see. They
   // surface only with Developer mode (Settings → Advanced), like the
   // session debug panel.
-  const details = developerMode && hasExtraTechnicalDetails(error, technicalDetails) ? technicalDetails : null
+  const details = developerMode && hasExtraTechnicalDetails(displayError, displayDetails) ? displayDetails : null
 
   // A resumable interruption is a pause, not a failure: it renders as a
   // quiet status line (like "Working 12s"), with Resume as the emphasis.
@@ -1041,13 +1062,32 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
           <div className="flex flex-row items-start gap-2">
             <AlertTriangle aria-hidden="true" size={16} className="mt-0.5 shrink-0 text-destructive" />
             <div className="flex flex-col gap-1">
-              <p className="whitespace-pre-wrap text-destructive">{error}</p>
-              {description && (!resumePrompt || showDescriptionOnResume) ? (
-                <p className="text-sm text-destructive/80 whitespace-pre-wrap">{description}</p>
+              <p className="whitespace-pre-wrap text-destructive">{displayError}</p>
+              {displayDescription && (!resumePrompt || showDescriptionOnResume) ? (
+                <p className="text-sm text-destructive/80 whitespace-pre-wrap">{displayDescription}</p>
               ) : null}
             </div>
           </div>
           {details ? <SessionErrorTechnicalDetails details={details} tone="card" /> : null}
+          {gatewaySelectionRequired || selection ? (
+            <Button variant="outline" size="sm" className="self-start" data-testid="session-error-gateway-selection"
+              onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>
+              Choose group and credential set
+            </Button>
+          ) : null}
+          {gatewayConnectUrl !== undefined ? (
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="session-error-gateway-connect"
+              className="self-start"
+              onClick={() => {
+                dispatchAction({ target: "settings", action: "open", section: "providers" })
+              }}
+            >
+              Connect
+            </Button>
+          ) : null}
         </div>
       </div>
     </Message>
@@ -1455,6 +1495,7 @@ export interface RunSyncHealth {
 
 interface MessageListProps {
   messages: UIMessage[]
+  messageIdReplacements?: ReadonlyMap<string, string>
   status: ThreadStatus
   activityStatus: SessionActivityStatus
   retryStatus?: RetryStatus | null
@@ -1476,7 +1517,7 @@ export function shouldShowRunReconnecting(status: ThreadStatus, syncDegraded: bo
   return status === "submitted" || status === "streaming" || status === "retrying"
 }
 
-export function MessageList({ messages, status, activityStatus, retryStatus, syncHealth, viewport }: MessageListProps) {
+export function MessageList({ messages, messageIdReplacements, status, activityStatus, retryStatus, syncHealth, viewport }: MessageListProps) {
   const { workspaceId, sessionId } = useMessageList()
   const workspace = useWorkspaceMaybe()
   const tasks = React.useMemo(() => activeDelegatedTasks(messages), [messages])
@@ -1538,14 +1579,15 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
     () => collectLatestAssistantToolParts(messages),
     [messages],
   )
-  const hasVisibleToolActivity = latestAssistantToolParts.some(isToolPartInFlight)
+  // Delegated task rows may be above newer messages; keep the run footer visible.
+  const hasVisibleToolActivity = latestAssistantToolParts.some((part) => !isTaskToolPart(part) && isToolPartInFlight(part))
   const waiting = activityStatus === "waiting" || activityStatus === "compacting" || childBlocked
   const showReconnecting = !waiting && !retryStatus && shouldShowRunReconnecting(status, syncDegraded)
   const noNewActivity = hasNoNewActivity({
     active: activityActive && activityStatus !== "error", waiting, retrying: status === "retrying" || Boolean(retryStatus),
     disconnected: syncDegraded, lastProgressAt, now: Date.now(),
   })
-  const showLoading = !waiting && !noNewActivity && !showReconnecting && tasks.length === 0
+  const showLoading = !waiting && !noNewActivity && !showReconnecting
     && shouldShowMessageListLoading(status, messages.length, hasVisibleToolActivity)
   const baseUrl = workspace?.opencodeBaseUrl
   React.useEffect(() => {
@@ -1566,6 +1608,7 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
     >
       <ProgressiveMessageList
         groups={items}
+        groupKeyReplacements={messageIdReplacements}
         viewport={viewport}
         className="@container/message-list"
         getGroupKey={(item) => isMessageGroup(item) ? item.messages[0]?.message.id ?? "empty-assistant-group" : item.message.id}
