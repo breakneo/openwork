@@ -261,13 +261,17 @@ describe("cloud provider sync gateway", () => {
   }
 
   for (const ownership of ["persisted sync", "scoped legacy binding"]) {
-    test(`cold cleanup retains genuine provider ownership from ${ownership} without import baselines`, async () => {
+    test(`cold cleanup retires ${ownership} providers and removes only proven Cloud credentials`, async () => {
       const root = await createRoot();
       const config = serverConfig(root, "https://engine.example.test");
       const env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
-      const provider = buildProvider([{ id: "model-a", name: "Model A", config: {} }]);
-      const id = ownership === "persisted sync" ? provider.id : "lpr_00000000000000000000000003";
-      const envName = ownership === "persisted sync" ? "TEST_PROVIDER_API_KEY" : "LPR_00003_API_KEY";
+      const id = "lpr_00000000000000000000000003";
+      const envName = "LPR_00003_OPENAI_API_KEY";
+      const provider = {
+        ...buildProvider([{ id: "model-a", name: "Model A", config: {} }]),
+        id,
+        providerConfig: { id: "openai", npm: "@ai-sdk/openai", env: [envName] },
+      };
       const engineRequests: string[] = [];
       let offline = false;
       const fetchImpl = Object.assign(async (
@@ -305,14 +309,16 @@ describe("cloud provider sync gateway", () => {
       expect(await readOpenworkWorkspaceConfig(config, "ws_1")).toEqual({});
       offline = true;
       engineRequests.length = 0;
+      const envBefore = await env.list();
+      const coldEnv = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
       // New config and sync objects discard both in-memory ownership caches.
-      const cold = new CloudProviderSync({ config: serverConfig(root, "https://engine.example.test"), env,
+      const cold = new CloudProviderSync({ config: serverConfig(root, "https://engine.example.test"), env: coldEnv,
         fetchImpl, reloadEngine: reloadedInPlace });
       stops.push(() => cold.stop());
       await cold.clearSession();
       expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[id]).toBeUndefined();
       expect(runtimeProviderMap(await readRuntimeOpencodeConfig(config, "ws_1"))[id]).toBeUndefined();
-      expect(await env.list()).toEqual([]);
+      expect(await coldEnv.list()).toEqual(ownership === "persisted sync" ? [] : envBefore);
       expect(engineRequests).toEqual([`DELETE /auth/${id}`]);
       expect(await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__"))
         .toEqual({ providerIds: [], envHashes: {} });
@@ -1173,23 +1179,33 @@ describe("cloud provider sync gateway", () => {
     expect(denPaths.some((path) => path.startsWith("/v1/llm-providers/ipr_"))).toBe(false);
   });
 
-  test("materializes a credential-less Den provider from a matching local Desktop environment key", async () => {
+  test("preserves a scoped local Desktop credential through upgrades, restarts, and provider revocation", async () => {
     const root = await createRoot();
-    const credentialKey = "LOCAL_FALLBACK_API_KEY";
+    const credentialKey = "LPR_00004_OPENAI_API_KEY";
     const localSecret = "sk-local-fallback-never-cloud-owned";
     const provider: FakeProvider = {
       ...buildProvider([{ id: "allowed-local-model", name: "Allowed Local Model", config: {} }]),
-      id: "lpr_local_fallback",
+      id: "lpr_00000000000000000000000004",
+      providerId: "openai",
+      source: "models_dev",
       name: "Local Credential Provider",
       apiKey: "",
       apiKeys: null,
       providerConfig: {
+        id: "openai",
         env: [credentialKey],
-        npm: "@ai-sdk/openai-compatible",
+        npm: "@ai-sdk/openai",
       },
     };
+    const legacyProvider = {
+      ...provider.providerConfig,
+      name: provider.name,
+      models: { "allowed-local-model": { id: "allowed-local-model", name: "Allowed Local Model" } },
+    };
+    const session = { baseUrl: "https://den.example.test", token: "den-token", orgId: "org-local-fallback" };
+    let granted = true;
     const denTraffic: Array<{ url: string; body: string | null }> = [];
-    const engineTraffic: Array<{ method: string; url: string; body: string | null }> = [];
+    const engineAuth = new Map<string, string>();
     const fetchImpl = Object.assign(async (
       input: Parameters<typeof globalThis.fetch>[0],
       init?: Parameters<typeof globalThis.fetch>[1],
@@ -1198,33 +1214,65 @@ describe("cloud provider sync gateway", () => {
       const body = typeof init?.body === "string" ? init.body : null;
       if (url.hostname === "den.example.test") {
         denTraffic.push({ url: url.toString(), body });
-        if (url.pathname === "/v1/llm-providers") return Response.json({ llmProviders: [provider] });
-        if (url.pathname === `/v1/llm-providers/${provider.id}/connect`) {
+        const allowed = granted && new Headers(init?.headers).get("x-openwork-org-id") === session.orgId;
+        if (url.pathname === "/v1/llm-providers") return Response.json({ llmProviders: allowed ? [provider] : [] });
+        if (allowed && url.pathname === `/v1/llm-providers/${provider.id}/connect`) {
           return Response.json({ llmProvider: provider });
         }
       }
-      if (url.hostname === "engine.example.test") {
-        engineTraffic.push({ method: init?.method ?? "GET", url: url.toString(), body });
+      if (url.hostname === "engine.example.test" && url.pathname.startsWith("/auth/")) {
+        const id = decodeURIComponent(url.pathname.slice("/auth/".length));
+        if (init?.method === "DELETE") engineAuth.delete(id);
+        if (init?.method === "PUT") {
+          const auth = expectRecord(JSON.parse(body ?? "null"), "engine auth");
+          if (typeof auth.key !== "string") throw new Error("Expected engine credential");
+          engineAuth.set(id, auth.key);
+        }
         return Response.json(true);
       }
       return Response.json({ error: "not_found" }, { status: 404 });
     }, { preconnect: globalThis.fetch.preconnect });
     const config = serverConfig(root, "https://engine.example.test");
-    const env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
-    const sync = new CloudProviderSync({
-      config,
-      env,
-      fetchImpl,
-      reloadEngine: reloadedInPlace,
-      intervalMs: 3_600_000,
-    });
-    stops.push(() => sync.stop());
+    let env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
+    const newSync = () => {
+      const sync = new CloudProviderSync({
+        config: serverConfig(root, "https://engine.example.test"),
+        env,
+        fetchImpl,
+        reloadEngine: reloadedInPlace,
+        intervalMs: 3_600_000,
+      });
+      stops.push(() => sync.stop());
+      return sync;
+    };
+    let sync = newSync();
+    const expectConnected = async (envHashes: Record<string, unknown> = {}) => {
+      expect(sync.status().providers.map((entry) => entry.cloudProviderId)).toEqual([provider.id]);
+      expect(sync.status().providers[0]?.modelIds).toEqual(["allowed-local-model"]);
+      expect(sync.status().skippedProviders).toEqual([]);
+      expect(sync.status().lastRun?.detail?.envUpserts).toBe(0);
+      expect(sync.status().lastRun?.detail?.envDeletes).toBe(0);
+      const runtimeProvider = runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id];
+      expect(runtimeProvider).toEqual(legacyProvider);
+      expect(runtimeProviderMap(await readRuntimeOpencodeConfig(config, "ws_1"))[provider.id]).toBeUndefined();
+      expect(JSON.stringify(runtimeProvider)).not.toContain(localSecret);
+      expect(JSON.stringify(sync.status())).not.toContain(localSecret);
+      expect(JSON.stringify(denTraffic)).not.toContain(localSecret);
+      expect(engineAuth.get(provider.id)).toBe(localSecret);
+      expect((await env.list()).find((entry) => entry.key === credentialKey)?.value).toBe(localSecret);
+      expect(await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__"))
+        .toEqual({ providerIds: [provider.id], envHashes });
+    };
+    const expectRetired = async () => {
+      expect(sync.status().providers).toEqual([]);
+      expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id]).toBeUndefined();
+      expect(runtimeProviderMap(await readRuntimeOpencodeConfig(config, "ws_1"))[provider.id]).toBeUndefined();
+      expect(await readFile(openworkRuntimeConfigFilePath(config), "utf8")).not.toContain(provider.id);
+      expect(engineAuth.has(provider.id)).toBe(false);
+      expect((await env.list()).find((entry) => entry.key === credentialKey)?.value).toBe(localSecret);
+    };
 
-    await sync.setSession({
-      baseUrl: "https://den.example.test",
-      token: "den-token",
-      orgId: "org-local-fallback",
-    });
+    await sync.setSession(session);
     await sync.run("initial-missing");
     expect(sync.status().providers).toEqual([]);
     expect(sync.status().skippedProviders).toEqual([{
@@ -1240,39 +1288,83 @@ describe("cloud provider sync gateway", () => {
     expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id]).toBeUndefined();
 
     await env.upsertMany([{ key: credentialKey, value: localSecret }]);
-    expect((await sync.run("matching-local-key")).status).toBe("applied");
-    expect(sync.status().providers.map((entry) => entry.cloudProviderId)).toEqual([provider.id]);
-    expect(sync.status().skippedProviders).toEqual([]);
-    expect(sync.status().lastRun?.detail?.envUpserts).toBe(0);
-    const runtimeProvider = expectRecord(
-      runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id],
-      "local fallback runtime provider",
-    );
-    expect(Object.keys(expectRecord(runtimeProvider.models, "local fallback models"))).toEqual(["allowed-local-model"]);
-    expect(JSON.stringify(runtimeProvider)).not.toContain(localSecret);
-    expect(JSON.stringify(sync.status())).not.toContain(localSecret);
-    expect(JSON.stringify(denTraffic)).not.toContain(localSecret);
-    expect(engineTraffic.some((request) => request.method === "PUT" && request.body?.includes(localSecret))).toBe(true);
-    expect((await env.list()).find((entry) => entry.key === credentialKey)?.value).toBe(localSecret);
+    await writeGlobalRuntimeOpencodeConfig(config, () => ({ provider: { [provider.id]: legacyProvider } }));
+    await writeRuntimeOpencodeConfig(config, "ws_1", () => ({ provider: { [provider.id]: legacyProvider } }));
+    expect(await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__"))
+      .toEqual({ providerIds: [], envHashes: {} });
+    sync.stop();
+    env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
+    sync = newSync();
+    await sync.setSession(session);
+    expect((await sync.run("legacy-local-key-upgrade")).status).toBe("applied");
+    await expectConnected();
+    expect((await sync.run("unchanged-local-key")).status).toBe("noop");
+    await expectConnected();
 
+    sync.stop();
+    env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
+    sync = newSync();
+    await sync.setSession(session);
+    expect((await sync.run("restart-with-local-key")).status).toBe("applied");
+    await expectConnected();
+
+    granted = false;
+    expect((await sync.run("provider-revoked")).status).toBe("applied");
+    await expectRetired();
+    expect((await sync.run("still-revoked-with-local-key")).status).toBe("noop");
+    await expectRetired();
+
+    granted = true;
+    expect((await sync.run("provider-grant-restored")).status).toBe("applied");
+    await expectConnected();
     await sync.clearSession();
-    expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id]).toBeUndefined();
-    expect((await env.list()).find((entry) => entry.key === credentialKey)?.value).toBe(localSecret);
+    await expectRetired();
+    expect(await sync.run("signed-out-with-local-key")).toEqual({ status: "no_session" });
 
-    await sync.setSession({
-      baseUrl: "https://den.example.test",
-      token: "den-token",
-      orgId: "org-local-fallback",
-    });
+    await sync.setSession(session);
     await sync.run("restore-with-local-key");
-    expect(sync.status().providers.map((entry) => entry.cloudProviderId)).toEqual([provider.id]);
+    await expectConnected();
+    await sync.setSession({ ...session, orgId: "org-other" });
+    await sync.run("different-organization-with-local-key");
+    await expectRetired();
+    await sync.setSession(session);
+    await sync.run("restore-allowed-organization");
+    await expectConnected();
 
     await env.delete(credentialKey);
     expect((await sync.run("local-key-removed")).status).toBe("applied");
     expect(sync.status().providers).toEqual([]);
     expect(sync.status().skippedProviders[0]?.reason).toBe("missing_credentials");
     expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id]).toBeUndefined();
+    expect(engineAuth.has(provider.id)).toBe(false);
     expect((await env.list()).find((entry) => entry.key === "UNRELATED_API_KEY")?.value).toBe("sk-unrelated");
+
+    provider.apiKey = "sk-cloud-supplied-fixture";
+    expect((await sync.run("cloud-key-supplied")).status).toBe("applied");
+    const cloudOwnership = await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__");
+    const cloudHashes = expectRecord(cloudOwnership.envHashes, "Cloud credential hashes");
+    expect(Object.keys(cloudHashes)).toEqual([credentialKey]);
+    expect(engineAuth.get(provider.id)).toBe(provider.apiKey);
+    provider.apiKey = "";
+    expect((await sync.run("cloud-credential-withdrawn")).status).toBe("applied");
+    expect(sync.status().providers).toEqual([]);
+    expect(sync.status().skippedProviders[0]?.reason).toBe("missing_credentials");
+    expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))[provider.id]).toBeUndefined();
+    expect((await env.list()).some((entry) => entry.key === credentialKey)).toBe(false);
+    expect(engineAuth.has(provider.id)).toBe(false);
+
+    provider.apiKey = "sk-cloud-supplied-fixture";
+    expect((await sync.run("cloud-credential-restored")).status).toBe("applied");
+    await env.upsertMany([{ key: credentialKey, value: localSecret }]);
+    provider.apiKey = "";
+    sync.stop();
+    env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
+    sync = newSync();
+    await sync.setSession(session);
+    expect((await sync.run("restart-with-locally-replaced-cloud-key")).status).toBe("applied");
+    await expectConnected(cloudHashes);
+    await sync.clearSession();
+    await expectRetired();
   });
 
   test("moves the org credential an earlier release stored under the bare catalog name and never touches a member's different value", async () => {
