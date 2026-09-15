@@ -454,9 +454,11 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       stopSandbox?.()
       teardownRef.current?.()
     }
-    if (!readOnly) bridge.oncalltool = async ({ name, arguments: args }) => {
+    if (!readOnly) bridge.oncalltool = async ({ name, arguments: args, _meta }) => {
       try {
-        return mcpToolResult(await actions.callTool(name, args))
+        // The proxy overwrites this field on every request. App-supplied metadata
+        // cannot authorize a call or reuse another view's interaction proof.
+        return mcpToolResult(await actions.callTool(name, args, _meta?.["openwork/userInteraction"] === true))
       } catch (cause) {
         if (cause instanceof OpenworkServerError && ["missing_launch_context", "stale_launch_context", "inactive_session"].includes(cause.code)) {
           fail("MCP_APP_LAUNCH_CONTEXT_STALE", "resource-resolution", cause, "Reopen the App in its original conversation before trying again.")

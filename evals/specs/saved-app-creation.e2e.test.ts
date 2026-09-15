@@ -10,7 +10,7 @@ const draftTest = spec.world(cloudDraftRouting, {
   needs: { commands: ["bun", "pnpm", "opencode"] }, timeout: 600_000,
 });
 
-draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves and sends once without host approval, launch replay, or cross-server dispatch", async ({ world, agent, user, probe, evidence }) => {
+draftTest("APP-DRAFT-ROUTING Cloud SDK draft allows automatic reads and one trusted Send without a second modal, replay, or cross-server dispatch", async ({ world, agent, user, probe, evidence }) => {
   const sinceIso = new Date().toISOString();
   expect(draftRoutingPrompt).not.toContain(world.connectionId);
   await agent.send(draftRoutingPrompt);
@@ -38,9 +38,17 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves and sends once without hos
     throw error;
   }
   await user.notSee({ text: "Allow App action?" });
-  const reports = await probe.eventually(() => world.reports(), { within: 30_000, label: "automatic SDK recipient resolution and rejected helpers without host approval", until: values => values.some(value => value.complete === true) });
+  const reports = await probe.eventually(() => world.reports(), { within: 30_000, label: "automatic SDK recipient resolution and completed background, forged, and synthetic send denials", until: values => values.some(value => value.complete === true) });
   expect(reports).toHaveLength(1);
-  expect(reports[0]).toMatchObject({ input: { recipient: "Test recipient" }, helper: { isError: false, structuredContent: { recipient: "Test recipient", id: "synthetic-recipient" } }, complete: true, send: null, sendError: null, sendClicks: 0 });
+  const sdkApprovalError = { code: -32603, message: expect.stringContaining("requires user approval") };
+  expect(reports[0]).toMatchObject({ input: { recipient: "Test recipient" }, helper: { isError: false, structuredContent: { recipient: "Test recipient", id: "synthetic-recipient" } },
+    complete: true, send: null, sendError: null, sendClicks: 0, trustedClick: false,
+    backgroundSend: null, backgroundSendError: sdkApprovalError, forgedSend: null, forgedSendError: sdkApprovalError,
+    syntheticSend: null, syntheticSendError: sdkApprovalError, syntheticClicks: 1, syntheticTrustedClick: false,
+    replay: null, replayError: null, replayComplete: false });
+  const deniedSend = { approved: false, status: 422, code: "tool_requires_approval" };
+  const backgroundRequests = await world.sendRequests();
+  expect(backgroundRequests).toEqual([deniedSend, deniedSend, deniedSend]);
   await user.notSee({ text: "Allow App action?" });
   const rejected = reports[0].rejected;
   expect(rejected).toEqual([{ name: "unknown_helper", error: expect.any(String) }, { name: "other_server_helper", error: expect.any(String) }]);
@@ -56,7 +64,7 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves and sends once without hos
   expect(resolveDelay.aborted).toBe(0);
   await user.notSee({ text: "Interactive view unavailable. The normal tool result is still available." });
   await user.screenshot();
-  evidence.recordAssertionEvidence("Cloud draft survives a 12-second resolve and automatically resolves its recipient without host approval or sending", JSON.stringify({ reconciled: world.reconciled, resolveDelay, reports, calls: calls.map(call => ({ name: call.name, args: call.args })), otherDispatches: 0 }), true);
+  evidence.recordAssertionEvidence("Cloud draft survives a 12-second resolve, permits automatic read-only helpers, and blocks untrusted sends", JSON.stringify({ reconciled: world.reconciled, resolveDelay, reports, backgroundRequests, calls: calls.map(call => ({ name: call.name, args: call.args })), otherDispatches: 0 }), true);
 
   await using draft = await world.draftSurface();
   const draftUser = user.on(draft);
@@ -64,10 +72,13 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves and sends once without hos
   await draftUser.click({ role: "button", label: "Send" });
   await user.notSee({ text: "Allow App action?" });
   await draftUser.see({ text: "Sent to Test recipient." }, { timeoutMs: 30_000 });
-  const sent = await world.reports();
+  const sent = await probe.eventually(() => world.reports(), { within: 30_000, label: "trusted Send and immediate replay both settled", until: values => values.some(value => value.replayComplete === true) });
   expect(sent).toHaveLength(1);
   expect(sent[0]).toMatchObject({ sendClicks: 1, trustedClick: true, sendError: null,
+    syntheticClicks: 1, syntheticTrustedClick: false, replay: null, replayError: sdkApprovalError, replayComplete: true,
     send: { isError: false, structuredContent: { sent: true, id: "synthetic-message" } } });
+  const sendRequests = await world.sendRequests();
+  expect(sendRequests).toEqual([...backgroundRequests, { approved: true, status: 200, code: null }, deniedSend]);
   const sentCalls = await world.den.mocks.slack.toolCalls({ sinceIso, atLeast: 3 });
   expect(sentCalls.map(call => ({ name: call.name, args: call.args }))).toEqual([
     { name: "render_slack_draft", args: { recipient: "Test recipient" } },
@@ -79,7 +90,7 @@ draftTest("APP-DRAFT-ROUTING Cloud SDK draft resolves and sends once without hos
   await user.screenshot();
   expect((await world.den.mocks.slack.toolCalls({ sinceIso, atLeast: 0 })).map(call => ({ name: call.name, args: call.args })))
     .toEqual(sentCalls.map(call => ({ name: call.name, args: call.args })));
-  evidence.recordAssertionEvidence("Send dispatches the reviewed Slack message exactly once without an OpenWork approval modal", JSON.stringify({ reports: sent, calls: sentCalls.map(call => ({ name: call.name, args: call.args })), otherDispatches: 0 }), true);
+  evidence.recordAssertionEvidence("One trusted Send dispatches the reviewed Slack message exactly once without a second modal; its immediate replay is denied", JSON.stringify({ reports: sent, sendRequests, calls: sentCalls.map(call => ({ name: call.name, args: call.args })), otherDispatches: 0 }), true);
 });
 
 const isolationTest = spec.world(isolatedMcpApps, {
@@ -117,7 +128,7 @@ isolationTest("APP-ISOLATION embedded MCP Apps isolate siblings while SDK initia
   evidence.recordAssertionEvidence("Sibling Apps cannot read or inject into each other", "App A attempted sibling DOM reads, proxy script injection, and a forged helper request; both DOM operations raised SecurityError and neither provider observed the forged call.", true);
   evidence.recordAssertionEvidence("Opaque Apps retain the standard SDK round trip", "Both real SDK Apps initialized through the shared renderer, received their distinct launch input and result, and completed exactly one legitimate helper call on their own provider.", true);
   await user.notSee({ text: "Allow App action?" });
-  evidence.recordAssertionEvidence("Open Apps complete background helpers without an extra host approval", "Both the non-read-only App A helper and read-only App B helper completed on their own provider exactly once without a host approval click or native confirmation.", true);
+  evidence.recordAssertionEvidence("Open Apps complete read-only background helpers without an extra host approval", "Both annotated read-only helpers completed on their own provider exactly once without a host approval click or native confirmation; App A preserved its provider error result.", true);
   evidence.recordAssertionEvidence("Launch delivery preserves provider data and truthfully reports inline-only display", "Complete input arrived before the result; provider structured fields, view-only metadata, and explicit false survived. The helper error flag survived too. The host advertised tools and links and returned inline for all three valid display-mode requests.", true);
 
   await user.reload();
@@ -138,7 +149,7 @@ isolationTest("APP-ISOLATION embedded MCP Apps isolate siblings while SDK initia
     { marker: "legitimate-B" }, { marker: "legitimate-B" },
   ]);
   expect(await world.nativeConfirmCalls()).toBe(0);
-  evidence.recordAssertionEvidence("Reload preserves direct background dispatch without duplicates or forged calls", "Each reloaded App completed one additional legitimate helper on its own provider. Both provider counts reached exactly two, with no forged arguments, approval dialog, or native confirmation.", true);
+  evidence.recordAssertionEvidence("Reload preserves read-only background dispatch without duplicates or forged calls", "Each reloaded App completed one additional annotated read-only helper on its own provider. Both provider counts reached exactly two, with no forged arguments, approval dialog, or native confirmation.", true);
 });
 
 // The v2 engine does not expose a native archive mutation yet.
@@ -171,7 +182,7 @@ isolationTest.skipIf(process.env.OPENWORK_EVAL_ENGINE === "v2")("APP-ARCHIVE arc
   expect((await world.second.toolCalls({ name: "read_detail", sinceIso, atLeast: 1 })).map(call => call.args)).toEqual([{ marker: "legitimate-B" }]);
   await user.notSee({ text: "Allow App action?" });
   expect(await world.nativeConfirmCalls()).toBe(0);
-  evidence.recordAssertionEvidence("Archived conversations cannot dispatch App helper calls", "After active Apps completed their initial helpers without host approval, reopened archived Apps received their original inputs and results, rejected helper requests without an approval dialog, and neither provider recorded an additional call. No native confirmation was invoked.", true);
+  evidence.recordAssertionEvidence("Archived conversations cannot dispatch even read-only App helper calls", "After active Apps completed their initial read-only helpers without host approval, reopened archived Apps received their original inputs and results, rejected helper requests without an approval dialog, and neither provider recorded an additional call. No native confirmation was invoked.", true);
 });
 
 test("create, preview, save and reopen an app without changing already-open results", async ({ world, user, probe, seed, step, evidence }) => {

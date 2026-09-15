@@ -35,7 +35,7 @@ export function createMcpAppActions(
   return {
     dispose: () => { active = false; },
     assertActive,
-    callTool: async (name: string, args?: Record<string, unknown>) => {
+    callTool: async (name: string, args?: Record<string, unknown>, userInteraction = false) => {
       assertActive();
       const request = {
         launchId: app.launchId,
@@ -45,10 +45,10 @@ export function createMcpAppActions(
         resourceUri: app.resourceUri,
         name,
         arguments: snapshotMcpAppArguments(args),
-        // The connected App owns its action controls, including background calls.
-        // This selects the authenticated collaborator path; live launch, same-server
-        // and organization permission checks are still enforced by the server.
-        approved: true,
+        // Only the isolated host proxy can attest a recent, single-use trusted
+        // click. Background calls retain the server's read-only approval gate.
+        // All calls still pass live-lease, same-server and permission checks.
+        ...(userInteraction ? { approved: true } : {}),
       };
       try {
         const result = await origin.client.callMcpAppTool(origin.workspaceId, request);

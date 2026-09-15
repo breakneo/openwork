@@ -100,7 +100,7 @@ describe("App conversation ownership", () => {
     const actions = createMcpAppActions({ client, workspaceId: "workspace-b", sessionId: "session-b", engine: "v2", readOnly: false }, app);
     const confirmSpy = spyOn(window, "confirm").mockReturnValue(false);
     try {
-      expect(await actions.callTool(name, { id: "b" })).toEqual(result);
+      expect(await actions.callTool(name, { id: "b" }, true)).toEqual(result);
       expect(requests).toEqual([{ workspaceId: "workspace-b", payload: {
         launchId: "launch-a", sessionId: "session-b", engine: "v2", serverName: "fixture", resourceUri: app.resourceUri,
         name, arguments: { id: "b" }, approved: true,
@@ -123,7 +123,7 @@ describe("App conversation ownership", () => {
     const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
       callMcpAppTool: async (_workspace, payload) => { approvals.push(payload.approved); throw failure; } };
     const actions = createMcpAppActions({ client, workspaceId: "b", sessionId: "b", readOnly: false }, app);
-    await expect(actions.callTool("write_detail")).rejects.toBe(failure);
+    await expect(actions.callTool("write_detail", undefined, true)).rejects.toBe(failure);
     expect(approvals).toEqual([true]);
   });
 
@@ -170,15 +170,32 @@ describe("App conversation ownership", () => {
       } };
     const actions = createMcpAppActions({ client, workspaceId: "b", sessionId: "b", readOnly: false }, app);
     const args = { nested: { value: "original" } };
-    const first = actions.callTool("write_detail", args);
+    const first = actions.callTool("write_detail", args, true);
     args.nested.value = "changed";
-    const second = actions.callTool("another_write");
+    const second = actions.callTool("another_write", undefined, true);
     expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({ approved: true, arguments: { nested: { value: "original" } } });
     expect(Object.isFrozen(calls[0]?.arguments?.nested)).toBe(true);
     expect(calls[1]).toMatchObject({ approved: true });
     completions.forEach(complete => complete());
     expect(await Promise.all([first, second])).toEqual([result, result]);
+    actions.dispose();
+  });
+
+  test("background reads run without approval, but writes never escalate or retry", async () => {
+    const calls: Array<{ name: string; approved?: boolean }> = [];
+    const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+      callMcpAppTool: async (_workspace, payload) => {
+        calls.push(payload);
+        if (payload.name === "write_detail" && !payload.approved) throw needsApproval();
+        return result;
+      } };
+    const actions = createMcpAppActions({ client, workspaceId: "b", sessionId: "b", readOnly: false }, app);
+    expect(await actions.callTool("read_detail")).toEqual(result);
+    await expect(actions.callTool("write_detail")).rejects.toMatchObject({ code: "tool_requires_approval" });
+    expect(calls.map(({ name, approved }) => ({ name, approved }))).toEqual([
+      { name: "read_detail", approved: undefined }, { name: "write_detail", approved: undefined },
+    ]);
     actions.dispose();
   });
 
@@ -189,7 +206,7 @@ describe("App conversation ownership", () => {
     for (const readOnly of [true, false]) {
       const actions = createMcpAppActions({ client, workspaceId: "b", sessionId: "b", readOnly }, { ...app, launchId: readOnly ? app.launchId : undefined });
       expect(() => actions.assertActive()).toThrow(readOnly ? "read-only" : "no live launch context");
-      await expect(actions.callTool("read_detail")).rejects.toThrow(readOnly ? "read-only" : "no live launch context");
+      await expect(actions.callTool("read_detail", undefined, true)).rejects.toThrow(readOnly ? "read-only" : "no live launch context");
     }
     expect(calls).toBe(0);
   });

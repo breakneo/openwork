@@ -736,7 +736,7 @@ describe("MCP App iframe policy", () => {
         expect(await request(method, params)).toMatchObject({ error: { code: -32601 } })
       }
       let pendingCall: Promise<JSONRPCMessage> | undefined
-      await act(async () => { pendingCall = request("tools/call", { name: "read_detail", arguments: {} }) })
+      await act(async () => { pendingCall = request("tools/call", { name: "read_detail", arguments: {}, _meta: { "openwork/userInteraction": true } }) })
       expect(document.querySelector('[role="alertdialog"]')).toBeNull()
       expect(await pendingCall).toMatchObject(readOnly ? { error: { code: -32601 } } : { result })
       expect(await request("ui/open-link", { url: "https://example.com/" })).toMatchObject(
@@ -749,6 +749,14 @@ describe("MCP App iframe policy", () => {
         launchId: "launch_fixture", sessionId: "session_fixture", engine: "v2",
         serverName: app.serverName, resourceUri: app.resourceUri, name: "read_detail", arguments: {}, approved: true,
       } }])
+      if (challenge && !readOnly) {
+        const before = toolCalls.length
+        expect(await request("tools/call", { name: "write_detail", arguments: {} })).toMatchObject({ error: { message: expect.stringContaining("Approval required") } })
+        expect(toolCalls).toHaveLength(before + 1)
+        expect(toolCalls.at(-1)).toMatchObject({ payload: { name: "write_detail" } })
+        expect(toolCalls.at(-1)).not.toMatchObject({ payload: { approved: true } })
+        expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+      }
       const callsBeforeDenial = toolCalls.length
       const denied = await request("tools/call", { name: "forbidden_detail", arguments: {} })
       if (!("error" in denied)) throw new Error("Expected an SDK error response")
