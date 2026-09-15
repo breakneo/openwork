@@ -31,12 +31,8 @@ case "$DEN_API_URL" in https://*|http://127.0.0.1:*|http://localhost:*) ;; *) ex
 PREFIX=${DEMO_KEY_PREFIX:-}
 [[ -z "$PREFIX" || "$PREFIX" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || exit 2
 [[ ${#PREFIX} -le 100 ]] || exit 2
-if [[ "$DEN_API_URL" == https://api.openworklabs.com ]]; then
-  [[ "$PREFIX" == rsproof-eng105-* ]] || { printf 'Hosted proof requires rsproof-eng105- prefix.\n' >&2; exit 2; }
-  EXPECTED_ORG=org_01m2gjx1yae3dtf2w55a7nx3j2
-else
-  EXPECTED_ORG=${DEMO_EXPECTED_ORG_ID:-}
-fi
+# Experiments set this explicitly; the script supports any authorized Den org.
+EXPECTED_ORG=${DEMO_EXPECTED_ORG_ID:-}
 STATE=${DEMO_STATE_DIR:-.eng105-den-state}
 [[ ! -L "$STATE" ]] || exit 2
 mkdir -p "$STATE"
@@ -116,9 +112,12 @@ lookup() {
   LOOKUP_METHOD=by-key
   if [[ "$BY_KEY_GET" == true || "$PROBED" == false ]]; then
     request "$key" lookup-by-key GET "/v1/mcp-connections/by-key/$key"
-    PROBED=true
-    if [[ "$STATUS" == 200 ]]; then FOUND=$BODY; return 0; fi
+    if [[ "$STATUS" == 200 && "$OK" == true ]]; then
+      jq -e --arg key "$key" '.externalKey==$key and (.id|type)=="string"' <<< "$BODY" >/dev/null || return 1
+      FOUND=$BODY; return 0
+    fi
     [[ "$STATUS" == 404 ]] || return 1
+    PROBED=true
     if [[ "$BY_KEY_GET" == true ]]; then return 0; fi
   fi
   LOOKUP_METHOD=list-exact-externalKey-and-detail
@@ -171,7 +170,7 @@ HOME_URL=${DEMO_HOME_URL:-https://acme-home-demo.vercel.app/mcp}
 CLOCKS_URL=${DEMO_CLOCKS_URL:-https://world-clocks-six.vercel.app/mcp}
 CALENDAR_URL=${DEMO_CALENDAR_URL:-https://personal-calendar-demo-mcp-app.vercel.app/mcp}
 ISSUER=${DEMO_CALENDAR_ISSUER:-https://personal-calendar-demo-mcp-app.vercel.app}
-SCOPES=${DEMO_CALENDAR_SCOPES:-'["calendar.read"]'}
+SCOPES=${DEMO_CALENDAR_SCOPES:-'["calendar:read"]'}
 jq -e 'type=="array" and all(.[];type=="string")' <<< "$SCOPES" >/dev/null || exit 2
 CONNECTION_IDS='[]'
 printf 'key\tid\tauthType\tcredentialMode\torgWide\tconnected\n' >&2
@@ -190,7 +189,13 @@ for base in acme-home-demo world-clocks-demo personal-calendar-demo; do
     if [[ "$before" != null ]] && ! jq -e --arg auth "$auth" --arg mode "$mode" --arg url "$url" '.authType==$auth and .credentialMode==$mode and .url==$url' <<< "$before" >/dev/null; then
       fail "Existing connection identity/auth differs for $key; preserved."; continue
     fi
-    access=$(jq -c 'if .==null then {orgWide:true,memberIds:[],teamIds:[]} else {orgWide:true,memberIds:(.access.memberIds // []),teamIds:(.access.teamIds // [])} end' <<< "$before")
+    if [[ "$before" != null && "$auth" == oauth ]] && ! jq -e --arg issuer "$ISSUER" --argjson scopes "$SCOPES" '.authorizationServerIssuer==$issuer and ((.requestedScopes // []|sort)==($scopes|sort))' <<< "$before" >/dev/null; then
+      fail "Existing OAuth issuer/scopes differ for $key; preserved without rotation."; continue
+    fi
+    if [[ "$before" != null ]] && ! jq -e '.access|type=="object" and (.memberIds|type)=="array" and (.teamIds|type)=="array"' <<< "$before" >/dev/null; then
+      fail 'Existing grants unavailable; refuse replacement rather than clear grants.'; continue
+    fi
+    access=$(jq -c 'if .==null then {orgWide:true,memberIds:[],teamIds:[]} else {orgWide:true,memberIds:.access.memberIds,teamIds:.access.teamIds} end' <<< "$before")
     payload=$(jq -cn --arg name "$PREFIX$name" --arg url "$url" --arg auth "$auth" --arg mode "$mode" --arg issuer "$ISSUER" --argjson scopes "$SCOPES" --argjson access "$access" '{name:$name,url:$url,authType:$auth,credentialMode:$mode,exposeDirectly:false,access:$access} + (if $auth=="oauth" then {authorizationServerIssuer:$issuer,requestedScopes:$scopes} else {} end)')
     request "$key" apply PUT "/v1/mcp-connections/by-key/$key" "$payload" '200 201'
     if [[ "$OK" != true ]]; then fail "Apply failed for $key."; continue; fi
