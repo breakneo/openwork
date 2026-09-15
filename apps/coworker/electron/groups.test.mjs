@@ -13,7 +13,9 @@ import { HeadlessThreadError } from "@openwork/headless-threads/v2";
 import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS, EVENT_REMINDER_LEAD_MS } from "./activity-inbox.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
 import { createGroupExecution, repairGroupSelection } from "./group-execution.mjs";
-import { normalizeSettings } from "./settings.mjs";
+import { normalizeSettings, readSettings, updateSettings } from "./settings.mjs";
+import { createCoworker, getCoworker, updateCoworker } from "./coworkers.mjs";
+import { createMaintenanceAdmission } from "./maintenance.mjs";
 import { withInteractiveQuestionDefault } from "./collaboration-plugin.mjs";
 import { createEvents, assertEventToolContext, assertEventHumanOrigin, eventToolCatalog, eventNativeSchemas } from "./events.mjs";
 import { EVENT_PLUGIN } from "./event-plugin.mjs";
@@ -551,6 +553,128 @@ test("turn submission preserves definitive refusal and generation checks without
   assert.equal(submissions, 0);
   assert.equal((await guardedSend({ ...guardedInput, expectedReadiness: { ...guardedInput.expectedReadiness, readinessKey: generation } })).messageId, receipt.messageId);
   assert.equal(submissions, 1);
+  await withHome(async (home) => {
+    const created = await createCoworker(home, { name: "Fixture", role: "Test" });
+    const coworker = await updateCoworker(home, created.slug, { workspaceId: "ws_fixture", model: "fixture/model", modelVariant: "low", modelChosenBy: "app", useAppModelDefaults: true });
+    const settingsPath = path.join(home, "settings.json");
+    await updateSettings(settingsPath, { modelDefaults: { conversation: { model: coworker.model, modelVariant: "low" } } });
+    const handle = { url: "http://127.0.0.1:8790", managedOpencodeV2: { pid: 1234, isAlive: () => true } };
+    const frame = {};
+    const event = { sender: { mainFrame: frame }, senderFrame: frame };
+    let invoke, gate, syncGate, syncOutcome = { status: "noop" }, failSave = false, notifications = 0, serverCalls = 0;
+    const save = async (write) => {
+      if (gate) { gate.entered.resolve(); await gate.release.promise; }
+      const result = await write();
+      if (failSave) throw new Error("Save acknowledgement unavailable");
+      return result;
+    };
+    const context = {
+      Error, serverHandle: handle, denSession: null, coworkersDir: home, settingsPath,
+      denSessionHandoff: Promise.resolve(), storedSkillSession: null, appliedSkillSession: null,
+      getCoworker, readSettings, updateCoworker: (...args) => save(() => updateCoworker(...args)), updateSettings: (...args) => save(() => updateSettings(...args)),
+      privateOwner: async () => ({}), progressSummaries: { configure() {} }, conversationMemory: { configure() {} },
+      ensurePlatformServer: async () => { serverCalls++; return handle; }, loadOrCreateTokens: async () => ({ hostToken: "fixture-host" }),
+      fetchJson: async () => {
+        if (syncGate) { syncGate.entered.resolve(); await syncGate.release.promise; }
+        if (syncOutcome instanceof Error) throw syncOutcome;
+        return syncOutcome;
+      },
+      mainWindow: { isDestroyed: () => false, webContents: { send: () => { notifications++; } } }, runtimeInfo: () => ({}),
+      maintenanceAdmission: createMaintenanceAdmission(), resetInProgress: false,
+      ipcMain: { handle: (_name, callback) => { invoke = (command, payload = {}) => callback(event, { command, payload }); } },
+    };
+    const handlers = [["coworkers.update", "abilities.catalog"], ["settings.update", "shell.openExternal"], ["den.providers.sync", "voice.status"]]
+      .map(([first, next]) => source.slice(source.indexOf(`  "${first}":`), source.indexOf(`  "${next}":`))).join("\n");
+    const readiness = runInNewContext(`${source.slice(source.indexOf("const warmedCoworkerWorkspaces ="), source.indexOf("async function runCoworkerWorkspaceWarmup("))}
+      ${source.slice(source.indexOf("function queueDenSessionHandoff("), source.indexOf("async function clearDenSession("))}
+      const commands = {${handlers}};
+      ${source.slice(source.indexOf("function registerIpc()"), source.indexOf("function installApplicationMenu()"))}
+      registerIpc();
+      ({ readinessKey, assertExpectedReadiness, workspaceReadinessChanges, warmedCoworkerWorkspaces });`, context);
+    const owner = { workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt };
+    const prepared = { readinessKey: readiness.readinessKey(), workspaceId: coworker.workspaceId, createdAt: coworker.createdAt };
+    readiness.warmedCoworkerWorkspaces.add(coworker.workspaceId);
+    for (const [command, payload] of [
+      ["den.providers.sync", {}],
+      ["coworkers.update", { slug: coworker.slug, patch: { model: " fixture/model ", modelVariant: " low ", modelSelectionPreferences: coworker.modelSelectionPreferences } }],
+      ["settings.update", { modelDefaults: { conversation: { model: " fixture/model ", modelVariant: " low " } } }],
+    ]) {
+      assert.equal((await invoke(command, payload)).ok, true);
+      assert.equal(readiness.readinessKey(), prepared.readinessKey, `${command} preserves a completed no-op's prepared stamp`);
+      assert.doesNotThrow(() => readiness.assertExpectedReadiness(prepared, owner));
+    }
+    assert.equal(serverCalls, 0, "the direct no-session handler does not touch the runtime");
+    assert.equal(notifications, 0);
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), true);
+    gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+    let changing, changed, posts = 0, attempts = 0;
+    try {
+      await assert.rejects(dispatchNativeTurn({
+        client: {
+          getThreadSnapshot: async () => ({ threadId: "ses_fenced", messages: [], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }),
+          sendTurn: async (_threadId, input) => { await input.beforeInput(); posts++; },
+        },
+        threadId: "ses_fenced", turn: { messageId: "msg_fenced", prompt: "Hello", agent: "build", nativeAdmission: "prepared" },
+        validateAdmission: () => readiness.assertExpectedReadiness(prepared, owner),
+        markAttempted: async () => {
+          attempts++;
+          changing = invoke("coworkers.update", { slug: coworker.slug, patch: { model: "fixture/replacement" } });
+          await gate.entered.promise;
+          assert.equal((await invoke("den.providers.sync")).ok, true);
+          assert.equal(readiness.readinessKey(), prepared.readinessKey);
+          assert.equal(readiness.workspaceReadinessChanges.size, 1, "a completed no-op cannot release another operation's fence");
+        },
+      }), { code: "readiness_changed", inputNotSent: true });
+    } finally { gate.release.resolve(); changed = await changing; gate = null; }
+    assert.equal(changed.ok, true);
+    assert.equal(attempts, 1);
+    assert.equal(posts, 0);
+    assert.throws(() => readiness.assertExpectedReadiness(prepared, owner), { code: "readiness_changed" });
+    assert.equal(readiness.warmedCoworkerWorkspaces.size, 0);
+    for (const [command, payload] of [
+      ["settings.update", { modelDefaults: { conversation: { modelVariant: "high" } } }],
+      ["coworkers.update", { slug: coworker.slug, patch: { model: "fixture/replacement", modelChosenBy: "person" } }],
+    ]) {
+      const before = readiness.readinessKey();
+      assert.equal((await invoke(command, payload)).ok, true);
+      assert.notEqual(readiness.readinessKey(), before, "saved effective changes still invalidate readiness");
+    }
+    failSave = true;
+    const beforeFailure = readiness.readinessKey();
+    assert.equal((await invoke("coworkers.update", { slug: coworker.slug, patch: { modelVariant: "high" } })).ok, false);
+    assert.notEqual(readiness.readinessKey(), beforeFailure);
+    failSave = false;
+    context.denSession = { orgId: "fixture" };
+    const nativeNoChange = { fingerprintChanged: false, providerStateChanged: false, envUpserts: 0, envDeletes: 0,
+      cleanupChanged: false, cleanupRuntimeChanged: false, fileChanged: false, reloadDeferred: false, nativeReloadAttempted: false, nativeReloadPending: false };
+    syncOutcome = { status: "noop", detail: nativeNoChange };
+    syncGate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+    const signedInStamp = { ...prepared, readinessKey: readiness.readinessKey() };
+    const beforeNotifications = notifications;
+    let refreshing, refreshed;
+    try {
+      refreshing = invoke("den.providers.sync");
+      await syncGate.entered.promise;
+      assert.equal(readiness.readinessKey(), signedInStamp.readinessKey);
+      assert.throws(() => readiness.assertExpectedReadiness(signedInStamp, owner), { code: "readiness_changed" });
+    } finally { syncGate.release.resolve(); refreshed = await refreshing; syncGate = null; }
+    assert.equal(refreshed.ok, true);
+    assert.equal(readiness.readinessKey(), signedInStamp.readinessKey);
+    assert.doesNotThrow(() => readiness.assertExpectedReadiness(signedInStamp, owner));
+    assert.equal(notifications, beforeNotifications);
+    for (const outcome of [
+      { status: "noop" }, { status: "noop", readinessUnchanged: true }, { status: "noop", detail: { nativeReloadAttempted: false } },
+      ...["no_session", "applied", "failed", "unknown"].map((status) => ({ status, detail: nativeNoChange })),
+      ...Object.entries(nativeNoChange).map(([field, value]) => ({ status: "noop", detail: { ...nativeNoChange, [field]: value === false ? true : 1 } })),
+      new Error("Refresh unconfirmed"),
+    ]) {
+      syncOutcome = outcome;
+      const before = readiness.readinessKey();
+      assert.equal((await invoke("den.providers.sync")).ok, !(outcome instanceof Error));
+      assert.notEqual(readiness.readinessKey(), before, "only a complete successful native no-change receipt preserves readiness");
+    }
+    assert.equal(readiness.workspaceReadinessChanges.size, 0);
+  });
   const observed = await dispatchNativeTurn({
     client: { getThreadSnapshot: async () => ({ threadId: "ses_fixture", messages: [{ id: "msg_fixture", role: "user" }], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }), sendTurn: async () => assert.fail("Observed input must not be replayed") },
     threadId: "ses_fixture", turn: { messageId: "msg_fixture", nativeAdmission: "prepared" },

@@ -38,6 +38,7 @@ export type CloudProviderDenSession = {
 export type CloudProviderSyncRunResult = {
   status: "applied" | "noop" | "failed" | "no_session";
   message?: string;
+  detail?: CloudProviderSyncRunDetail;
 };
 
 export type CloudProviderSyncStatusProvider = {
@@ -85,6 +86,8 @@ export type CloudProviderSyncRunDetail = {
   cleanupRuntimeChanged: boolean;
   fileChanged: boolean;
   reloadDeferred: boolean;
+  nativeReloadAttempted?: boolean;
+  nativeReloadPending?: boolean;
 };
 
 export type CloudProviderSyncStatus = {
@@ -177,6 +180,7 @@ type CloudProviderSyncLogger = {
 type CloudProviderSyncRequest = {
   contextKey: string;
   generation: number;
+  nativeReloadRevision: number;
   session: CloudProviderDenSession;
   reason?: string;
 };
@@ -826,6 +830,7 @@ export class CloudProviderSync {
   private managedProviderIds = new Set<string>();
   private importedAtByCloudProviderId = new Map<string, number>();
   private reloadPending = false;
+  private nativeReloadRevision = 0;
   private queue: Promise<void> = Promise.resolve();
   private contextGeneration = 0;
   private pendingSession: CloudProviderSyncPendingSession | null = null;
@@ -840,7 +845,11 @@ export class CloudProviderSync {
   constructor(options: CloudProviderSyncOptions) {
     this.config = options.config;
     this.env = options.env;
-    this.reloadEngine = options.reloadEngine;
+    this.reloadEngine = () => {
+      if (this.config.engine !== "v2") return options.reloadEngine();
+      this.nativeReloadRevision += 1;
+      return options.reloadEngine().finally(() => { this.nativeReloadRevision += 1; });
+    };
     this.engineBusy = options.engineBusy;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.logger = options.logger;
@@ -952,6 +961,7 @@ export class CloudProviderSync {
     const request = {
       contextKey: this.sessionContextKey(session),
       generation: this.contextGeneration,
+      nativeReloadRevision: this.nativeReloadRevision,
       session,
       reason,
     };
@@ -1193,7 +1203,7 @@ export class CloudProviderSync {
       // Ownership follows the apply that can write, not a pending session.
       // Retain it through suspension, including a partially completed apply.
       this.materializationContextKey = request.contextKey;
-      const { changed, detail, reloadError } = await this.apply(prepared);
+      const { changed, detail, reloadError } = await this.apply(prepared, request.nativeReloadRevision);
       if (request.generation !== this.contextGeneration) return { status: "no_session" };
       // The materialization itself succeeded (config + env writes landed), so
       // record it even when the engine reload failed: hiding the providers
@@ -1205,11 +1215,11 @@ export class CloudProviderSync {
         const message = reloadError instanceof Error ? reloadError.message : "cloud_provider_engine_reload_failed";
         this.lastRun = { at: new Date().toISOString(), status: "failed", message, detail };
         this.logger?.warn("cloud provider sync failed", { reason, message });
-        return { status: "failed", message };
+        return { status: "failed", message, ...(this.config.engine === "v2" ? { detail } : {}) };
       }
       const status = changed ? "applied" : "noop";
       this.lastRun = { at: new Date().toISOString(), status, detail };
-      return { status };
+      return { status, ...(this.config.engine === "v2" ? { detail } : {}) };
     } catch (error) {
       if (request.generation !== this.contextGeneration) return { status: "no_session" };
       const message = error instanceof Error ? error.message : "cloud_provider_sync_failed";
@@ -1221,6 +1231,7 @@ export class CloudProviderSync {
 
   private async apply(
     prepared: PreparedMaterialization,
+    nativeReloadRevision: number,
   ): Promise<{ changed: boolean; detail: CloudProviderSyncRunDetail; reloadError?: unknown }> {
     const desiredProviders = desiredProviderMap(prepared);
     const globalRuntime = await readGlobalRuntimeOpencodeConfig(this.config);
@@ -1353,6 +1364,10 @@ export class CloudProviderSync {
       cleanupRuntimeChanged: workspaceCleanup.runtimeChanged,
       fileChanged: runtimeFileChanged,
       reloadDeferred,
+      ...(this.config.engine === "v2" ? {
+        nativeReloadAttempted: this.nativeReloadRevision !== nativeReloadRevision,
+        nativeReloadPending: this.reloadPending,
+      } : {}),
     };
     const changed = detail.fingerprintChanged
       || providerStateChanged

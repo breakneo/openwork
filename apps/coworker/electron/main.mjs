@@ -518,9 +518,14 @@ async function requestCloudProviderSync(handle, hostToken, reason) {
     headers: { "Content-Type": "application/json", "X-OpenWork-Host-Token": hostToken },
     body: JSON.stringify({ reason }),
   }, 90_000);
+  const detail = payload?.detail;
+  const nativeUnchanged = payload?.status === "noop" && detail?.nativeReloadAttempted === false
+    && ["fingerprintChanged", "providerStateChanged", "cleanupChanged", "cleanupRuntimeChanged", "fileChanged", "reloadDeferred", "nativeReloadPending"].every((field) => detail[field] === false)
+    && detail.envUpserts === 0 && detail.envDeletes === 0;
   return {
     status: typeof payload?.status === "string" ? payload.status : "failed",
     message: typeof payload?.message === "string" ? payload.message : "",
+    ...(nativeUnchanged ? { readinessUnchanged: true } : {}),
   };
 }
 
@@ -3227,13 +3232,28 @@ function registerIpc() {
     const changesReadiness = ["runtime.restart", "den.session.set", "den.session.clear", "den.providers.sync", "localProviders.connect", "localProviders.saveKey", "localProviders.disconnect", "localProviders.custom.add", "localProviders.signIn.start"].includes(command)
       || (command === "coworkers.update" && ["model", "modelVariant", "modelMode", "useAppModelDefaults", "modelSelectionPreferences", "effortPreference"].some((field) => Object.hasOwn(request?.payload?.patch ?? {}, field)))
       || (command === "settings.update" && request?.payload?.modelDefaults !== undefined);
+    const compareSavedReadiness = changesReadiness && (command === "settings.update" || (command === "coworkers.update" && !request?.payload?.patch?.conversationThreadId));
     const readinessChange = changesReadiness ? Promise.withResolvers() : null;
-    if (readinessChange) { workspaceReadinessChanges.add(readinessChange.promise); invalidateWorkspaceReadiness(); }
+    let readinessUnchanged = false;
+    if (readinessChange) {
+      workspaceReadinessChanges.add(readinessChange.promise);
+      if (!compareSavedReadiness && command !== "den.providers.sync") invalidateWorkspaceReadiness();
+    }
     try {
       if (command.startsWith("maintenance.")) assertMaintenanceSender(event, mainWindow?.webContents, rendererUrl());
       const result = ["maintenance.factoryReset", "maintenance.handoffReceived"].includes(command)
         ? await handler(request?.payload ?? {})
-        : await maintenanceAdmission.run(() => handler(request?.payload ?? {}));
+        : await maintenanceAdmission.run(async () => {
+          const previous = compareSavedReadiness
+            ? command === "coworkers.update" ? await getCoworker(coworkersDir, request?.payload?.slug) : await readSettings(settingsPath)
+            : null;
+          const noSession = command === "den.providers.sync" && !denSession;
+          const result = await handler(request?.payload ?? {});
+          readinessUnchanged = (noSession && result?.status === "no_session")
+            || (command === "den.providers.sync" && result?.readinessUnchanged === true)
+            || (previous !== null && JSON.stringify(previous) === JSON.stringify(result));
+          return result;
+        });
       return { ok: true, result };
     } catch (error) {
       return { ok: false, error: resetInProgress && resetBlockedReason ? resetBlockedReason : error instanceof Error ? error.message : String(error),
@@ -3241,7 +3261,7 @@ function registerIpc() {
           ? { maintenanceRetryable: !resetInProgress && !quitting && !quitReady && !resetExitReady && (!maintenanceAdmission.closed || resetRetryReady) } : {}) };
     } finally {
       if (readinessChange) { workspaceReadinessChanges.delete(readinessChange.promise); readinessChange.resolve(); }
-      if (changesReadiness && command !== "runtime.restart") invalidateWorkspaceReadiness();
+      if (changesReadiness && !readinessUnchanged && command !== "runtime.restart") invalidateWorkspaceReadiness();
       else if (command === "runtime.restart" && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("coworker:runtime-changed", runtimeInfo());
     }
   });

@@ -34,6 +34,12 @@ export function nativeV2InputSkillsMatch(snapshot: HeadlessThreadSnapshot, messa
 }
 const nativeModel = (value: HeadlessThreadModel): NativeV2Model => ({ providerID: value.providerId, id: value.modelId, ...(value.variant ? { variant: value.variant } : {}) });
 const sameModel = (a: NativeV2Model | undefined, b: NativeV2Model) => a?.id === b.id && a.providerID === b.providerID && (a.variant ?? "default") === (b.variant ?? "default");
+// Native instruction updates project as system annotations at the next step
+// boundary. They are not admitted inputs; a claimed host binding or attachment
+// still requires reconciliation under the existing serialized-writer contract.
+function isNativeSystemAnnotation(message: NativeV2Message): boolean {
+  return message.type === "system" && !Object.hasOwn(message.metadata ?? {}, "headlessTurn") && nativeV2AttachmentsMatch(message, []);
+}
 const terminalType = z.enum(["succeeded", "failed", "interrupted"]);
 type Outcome = z.infer<typeof terminalType>;
 
@@ -102,7 +108,7 @@ export function projectNativeV2History(history: NativeV2Message[], session: Nati
     const next = nextUser ? bindings(nextUser) : undefined;
     const index = history.indexOf(user);
     const previousIndex = binding.data.previousMessageId === null ? -1 : history.findIndex((item) => item.id === binding.data.previousMessageId);
-    const between = history.slice(previousIndex + 1, index);
+    const between = history.slice(previousIndex + 1, index).filter((item) => !isNativeSystemAnnotation(item));
     const nextTail = next?.success ? history.findIndex((item) => item.id === next.data.previousMessageId) : -1;
     const end = nextUser ? nextTail + 1 : history.length;
     const interval = history.slice(index + 1, end);
@@ -116,7 +122,7 @@ export function projectNativeV2History(history: NativeV2Message[], session: Nati
     const priorAssistant = history.slice(0, previousIndex + 1).filter((item) => item.type === "assistant").at(-1);
     const valid = !session.revert && !session.parentID && (binding.data.previousMessageId === null || previousIndex >= 0) && previousIndex < index
       && nativeV2AttachmentsMatch(user, (binding.data.skillIds ?? []).map((id) => ({ id })))
-      && (binding.data.contextId === null ? between.length === 0 : between.length === 1 && between[0]?.id === binding.data.contextId && between[0].type === "synthetic" && JSON.stringify(between[0].metadata?.headlessTurn) === JSON.stringify(user.metadata?.headlessTurn))
+      && (binding.data.contextId === null ? between.length === 0 : between.length === 1 && between[0]?.id === binding.data.contextId && between[0].type === "synthetic" && nativeV2AttachmentsMatch(between[0], []) && JSON.stringify(between[0].metadata?.headlessTurn) === JSON.stringify(user.metadata?.headlessTurn))
       && (!previousUser || (binding.data.previousIdleAt !== null && binding.data.previousOutcome !== null && history.indexOf(previousUser) <= previousIndex && (!priorAssistant || priorAssistant.time.created <= binding.data.previousIdleAt)))
       && (!nextUser || (next?.success && nextTail >= index && terminal))
       && interval.every((item) => ["assistant", "system", "agent-switched", "model-switched"].includes(item.type) || (item.type === "compaction" && item.reason === "auto"))
@@ -189,16 +195,16 @@ export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Opti
     if (user && binding.success && !session.revert && !session.parentID) {
       const skills = boundInputSkills(user.id, user.payload);
       const contextId = binding.data.contextId;
-      const tail = history.at(-1);
-      const deliveredContext = contextId !== null && tail?.id === contextId && tail.type === "synthetic" ? tail : undefined;
+      const previousIndex = binding.data.previousMessageId === null ? -1 : history.findIndex((item) => item.id === binding.data.previousMessageId);
+      const between = history.slice(previousIndex + 1).filter((item) => !isNativeSystemAnnotation(item));
+      const deliveredContext = contextId !== null && between.length === 1 && between[0]?.id === contextId && between[0].type === "synthetic" ? between[0] : undefined;
       const queuedContext = pending.filter((item) => item.type === "synthetic").find((item) => item.id === contextId);
       const context = deliveredContext ?? queuedContext?.payload;
-      const before = deliveredContext ? history.slice(0, -1) : history;
-      const previousUser = before.filter((item) => item.type === "user").at(-1);
+      const previousUser = history.slice(0, previousIndex + 1).filter((item) => item.type === "user").at(-1);
       const contextMatches = contextId === null ? !context : context !== undefined && !(deliveredContext && queuedContext)
         && nativeV2AttachmentsMatch(context, []) && JSON.stringify(context.metadata?.headlessTurn) === JSON.stringify(user.payload.metadata?.headlessTurn);
       if (skills !== undefined && contextMatches && pending.length === (queuedContext ? 2 : 1)
-        && binding.data.previousMessageId === (before.at(-1)?.id ?? null)
+        && (binding.data.previousMessageId === null || previousIndex >= 0) && between.length === (deliveredContext ? 1 : 0)
         && binding.data.previousIdleAt === (session.time.idle ?? null) && binding.data.previousOutcome === (session.outcome ?? null)
         && binding.data.agent === session.agent && sameModel(session.model, binding.data.model)
         && (!previousUser || Object.hasOwn(projection.inputSkills, previousUser.id))) inputSkills[user.id] = skills;

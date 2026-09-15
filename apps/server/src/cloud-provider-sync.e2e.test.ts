@@ -748,7 +748,7 @@ describe("cloud provider sync gateway", () => {
 
     // The new generation has no applied auth yet: the key is re-delivered but
     // its value did not change, so nothing may reload.
-    expect((await sync.run("new_chat")).status).toBe("noop");
+    expect(await sync.run("new_chat")).toEqual({ status: "noop" });
     expect(authPuts).toEqual(["generation-one", "generation-2"]);
     expect(reloads).toBe(1);
     expect((await sync.run("interval")).status).toBe("noop");
@@ -781,7 +781,7 @@ describe("cloud provider sync gateway", () => {
       expect(sync.status().reloadPending).toBe(true);
       expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))).toEqual(before);
       release.resolve();
-      expect(await rotation).toEqual({ status: "failed", message: "fixture_native_mirror_failed" });
+      expect(await rotation).toMatchObject({ status: "failed", message: "fixture_native_mirror_failed", detail: { nativeReloadAttempted: true, nativeReloadPending: true } });
       expect(sync.status().lastRun?.detail).toMatchObject({ providerStateChanged: false, envUpserts: 1 });
       expect(sync.status().reloadPending).toBe(true);
       expect(JSON.stringify(sync.status())).not.toContain(provider.apiKey);
@@ -794,9 +794,10 @@ describe("cloud provider sync gateway", () => {
       expect(sync.status().reloadPending).toBe(true);
       expect(sync.status().lastRun?.status).toBe("failed");
       retryRelease.resolve();
-      expect((await sync.run("native-unchanged-after-retry")).status).toBe("noop");
+      expect(await sync.run("native-unchanged-after-retry")).toMatchObject({ status: "noop", detail: { nativeReloadAttempted: true, nativeReloadPending: false } });
       expect(sync.status().reloadPending).toBe(false);
       expect(sync.status().lastRun?.detail).toMatchObject({ providerStateChanged: false, envUpserts: 0, envDeletes: 0 });
+      expect(await sync.run("native-unchanged")).toMatchObject({ status: "noop", detail: { nativeReloadAttempted: false, nativeReloadPending: false } });
       expect(reloads).toBe(4);
       expect(authPuts).toEqual(["generation-one", "generation-2", "generation-2"]);
     } finally {

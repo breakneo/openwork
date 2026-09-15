@@ -186,6 +186,42 @@ test("two users in one execution, missing host metadata, and an early assistant 
   }
 });
 
+test("native instruction annotations preserve a follow-up's exact input boundary", () => {
+  const first = user("msg_first"), firstReply = assistant("msg_first_reply");
+  const reply = assistant("msg_followup_reply");
+  reply.time = { created: 7, completed: 8 };
+  const session: NativeV2Session = { id: sid, location: { directory: "/fixture" }, projectID: "fixture", cost: 0, tokens, outcome: "succeeded", time: { created: 0, updated: 9, idle: 9 } };
+  const annotation: NativeV2Message = { id: "msg_instruction", type: "system", text: "Instructions updated", time: { created: 5 } };
+  const binding = { headlessTurn: { ...metadata("msg_followup", "msg_followup_context").headlessTurn, previousMessageId: firstReply.id, previousIdleAt: 4, previousOutcome: "succeeded" } };
+  const context: NativeV2Message = { id: "msg_followup_context", type: "synthetic", text: "Reference", metadata: binding, time: { created: 6 } };
+  const followup: NativeV2Message = { ...user("msg_followup"), metadata: binding, time: { created: 6 } };
+  for (const inputs of [
+    [annotation, context, followup],
+    [context, annotation, followup],
+    [annotation, { ...followup, metadata: { headlessTurn: { ...binding.headlessTurn, contextId: null } } }],
+  ] satisfies NativeV2Message[][]) {
+    const history = [first, firstReply, ...inputs, reply];
+    const projection = projectNativeV2History(history, session, true);
+    assert.equal(projection.messages.at(-1)?.parentId, followup.id);
+    assert.equal(projection.turnOutcomes[followup.id], "succeeded");
+    assert.deepEqual(projection.inputSkills[followup.id], []);
+    assert.equal(projection.messages.length, history.length, "annotations remain in history");
+  }
+  for (const foreign of [
+    user("msg_foreign"),
+    { id: "msg_foreign_context", type: "synthetic", text: "Unadmitted", time: { created: 5 } },
+    { ...annotation, metadata: { headlessTurn: null } },
+    { ...annotation, skills: [{ id: skill.id, name: skill.name }] },
+  ] satisfies NativeV2Message[]) {
+    const projection = projectNativeV2History([first, firstReply, foreign, context, followup, reply], session, true);
+    assert.ok(projection.ambiguousTurns.includes(followup.id));
+    assert.equal(projection.messages.at(-1)?.parentId, null);
+    assert.equal(projection.inputSkills[followup.id], undefined);
+  }
+  const attachedContext = { ...context, skills: [{ id: skill.id, name: skill.name }] };
+  assert.ok(projectNativeV2History([first, firstReply, attachedContext, followup, reply], session, true).ambiguousTurns.includes(followup.id));
+});
+
 test("lost acknowledgement reconciles exactly once; simultaneous clients cannot admit another turn", async (t) => {
   const { client, state, options } = await fixture(t);
   state.lose = true; state.finish = false;
@@ -255,7 +291,16 @@ test("pending recovery exposes frozen IDs only for a verified host-bound inbox p
   assert.ok(state.seen.slice(reads).every((item) => item.method === "GET" && !item.path.endsWith("/skill")));
   await assert.rejects(client.sendTurn(sid, { messageId, prompt: "Hello", context: "Reference", skills: [{ id: "other" }] }), { code: "input_conflict" });
   const pending = state.inbox.find((item) => item.id === messageId); assert.ok(pending?.type === "user");
-  const context = state.inbox.find((item) => item.id === contextId); assert.ok(context);
+  const context = state.inbox.find((item) => item.id === contextId); assert.ok(context?.type === "synthetic");
+  const annotation: NativeV2Message = { id: "msg_instruction", type: "system", text: "Instructions updated", time: { created: 1 } };
+  state.history = [annotation];
+  assert.deepEqual((await client.getThreadSnapshot(sid)).native?.inputSkills, { [messageId]: [{ id: skill.id }] });
+  state.history.push({ ...context.payload, id: contextId, type: "synthetic", time: { created: 1 } }, { ...annotation, id: "msg_next_instruction" });
+  state.inbox = [pending];
+  assert.deepEqual((await client.getThreadSnapshot(sid)).native?.inputSkills, { [messageId]: [{ id: skill.id }] });
+  state.history.push({ ...annotation, id: "msg_unconfirmed", metadata: { headlessTurn: null } });
+  assert.deepEqual((await client.getThreadSnapshot(sid)).native?.inputSkills, {});
+  state.history = [];
   for (const payload of [
     { ...pending.payload, metadata: undefined },
     { ...pending.payload, metadata: { headlessTurn: { ...binding.headlessTurn, skillIds: ["other"] } } },
