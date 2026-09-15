@@ -6,7 +6,8 @@ import { useWorkspace } from "@/react-app/shell/workspace-provider";
 const PREVIEW_ARGUMENTS = {};
 
 /** Chat previews and dashboard apps use the same MCP renderer. */
-export function GeneratedAppPreview({ html, payload, title, revision }: {
+export function GeneratedAppPreview({ html, payload, title, revision, presentation = "inline" }: {
+  presentation?: "inline" | "dashboard";
   html: string;
   payload: WorkflowArtifactPayload;
   title: string;
@@ -30,5 +31,5 @@ export function GeneratedAppPreview({ html, payload, title, revision }: {
   }
   return <McpAppSandboxView origin={origin} app={resource} toolName={title} inputArguments={PREVIEW_ARGUMENTS}
     result={result} unavailableNotice="This app could not open. Try reopening it, or ask OpenWork to fix the preview."
-    initialHeight={360} />;
+    initialHeight={360} presentation={presentation} />;
 }

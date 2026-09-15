@@ -77,6 +77,61 @@ async function refreshCompactTile(container: HTMLElement) {
   await act(async () => item.click());
 }
 
+test("live generated actions share refresh state without remounting the menu or resetting the launch on rerender", async () => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  let launches = 0;
+  let resolutions = 0;
+  const pending = Promise.withResolvers<{ content: [] }>();
+  const released: string[] = [];
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_fixture", resourceUri: liveRevision.resourceUri, launchId: `actions-${++resolutions}` } }),
+    callMcpAppTool: async () => ++launches === 1 ? { content: [] } : pending.promise,
+    releaseMcpApp: async (_workspace, id) => { released.push(id); return { released: true }; },
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const render = async () => {
+    await act(async () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+      <LiveGeneratedApp view={liveView} revision={liveRevision} renderActions={({ onRefresh, refreshing, badge }) =>
+        <div data-custom-actions><button aria-label="Custom refresh" onClick={onRefresh} disabled={refreshing}>Refresh</button>{badge}</div>} />
+    </WorkspaceProvider>));
+  };
+  try {
+    await render();
+    const actions = container.querySelector("[data-custom-actions]");
+    const view = container.querySelector("[data-sandbox-view]");
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Custom refresh"]');
+    expect(button).not.toBeNull();
+    expect(container.querySelector("header")).toBeNull();
+    await act(async () => sandboxView?.onHeightChange?.(720));
+    await render();
+    expect(container.querySelector("[data-custom-actions]")).toBe(actions);
+    expect(container.querySelector("[data-sandbox-view]")).toBe(view);
+    expect(launches).toBe(1);
+    expect(released).toEqual([]);
+    await act(async () => button?.click());
+    expect(button?.disabled).toBe(true);
+    expect(container.textContent).toContain("refreshing");
+    expect(container.querySelector("[data-custom-actions]")).toBe(actions);
+    expect(sandboxView?.initialHeight).toBe(720);
+    await act(async () => pending.reject(new Error("Fixture refresh unavailable")));
+    expect(container.querySelector("header")).not.toBeNull();
+    expect(container.querySelector("[data-custom-actions]")).toBe(actions);
+    expect(button?.disabled).toBe(false);
+    expect(container.querySelector('[data-dashboard-cache-state="failed"]')).not.toBeNull();
+    expect(container.textContent).toContain("run required");
+    expect(launches).toBe(2);
+    expect(released).toEqual(["actions-1"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+  expect(released).toEqual(["actions-1", "actions-2"]);
+  window.localStorage.removeItem(liveGeneratedAppCacheScope(viewerScope));
+});
+
 test("bounds retries to transient discovery failures", () => {
   for (const code of ["server_unavailable", "mcp_unreachable"]) {
     const cause = new OpenworkServerError(503, code, "starting");
