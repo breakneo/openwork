@@ -415,7 +415,7 @@ test.each(["sandbox", "refresh", "teardown"])("healthy tiles retain height and r
     resolveMcpApp: async () => ({ app: { ...resource, launchId: `compact-${++resolutions}` } }),
     callMcpAppTool: async () => {
       launches++;
-      if (failRefresh) throw new OpenworkServerError(403, "tool_denied", "Refresh denied");
+      if (failRefresh) throw new OpenworkServerError(503, "server_unavailable", "Refresh temporarily unavailable");
       return { content: [] };
     },
     releaseMcpApp: async (_workspace, id) => { released.push(id); return { released: true }; },
@@ -509,4 +509,132 @@ test.each(["sandbox", "refresh", "teardown"])("healthy tiles retain height and r
     Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
   }
   expect(released).toEqual(Array.from({ length: resolutions }, (_, index) => `compact-${index + 1}`));
+});
+
+test.each(["result", "transport"])("live setup failures render a native connection card and evict the last good result (%s)", async (failureMode) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const liveResource = { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_fixture" };
+  let needsSetup = false;
+  let calls = 0;
+  const connection = {
+    schemaVersion: "1", connectionId: "emc_fixture", connectionName: "Calendar", state: "needs_connection",
+    actor: "member", message: "Connect your calendar", action: { type: "connect", label: "Connect", surface: "openwork_your_connections" },
+  };
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async (_workspace, name) => {
+      expect(name).toBe("openwork-cloud_run_artifact_arv_fixture");
+      return { app: { ...liveResource, launchId: "live-lease" } };
+    },
+    callMcpAppTool: async (_workspace, request) => {
+      calls++;
+      expect(request.name).toBe("run_artifact_arv_fixture");
+      expect(request.arguments).toEqual({ timeZone: "Asia/Tokyo" });
+      if (needsSetup && failureMode === "transport") throw new OpenworkServerError(403, "connection_required", "Connect your calendar", { connectionAction: connection });
+      return needsSetup ? { isError: true, content: [], structuredContent: { connectionAction: connection } } : { content: [] };
+    },
+    releaseMcpApp: async () => ({ released: true }),
+  };
+  const entry: DashboardMcpAppEntry = { kind: "mcp", id: "live-setup", title: "Fixture", serverName: liveResource.serverName,
+    toolName: liveResource.toolName, projectedToolName: `openwork-cloud_${liveResource.toolName}`, resourceUri: liveResource.resourceUri,
+    autoLaunch: true, launchArguments: { timeZone: "Asia/Tokyo" } };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+      <McpAppTile entry={entry} cacheScopeKey="live-setup-scope" />
+    </WorkspaceProvider>));
+    expect(container.querySelector("[data-sandbox-view]")).not.toBeNull();
+    needsSetup = true;
+    await refreshCompactTile(container);
+    expect(calls).toBe(2);
+    expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+    expect(container.querySelector('[data-testid="desktop-connection-card"]')?.textContent).toContain("Calendar");
+    expect(container.querySelector('button[aria-label="Connect Calendar"]')).not.toBeNull();
+    expect(JSON.parse(window.localStorage.getItem("live-setup-scope") ?? "{}")[entry.id]).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem("live-setup-scope");
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test.each(["result", "connection"])("switching viewers never exposes the prior viewer %s", async (initialState) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const pending = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  let calls = 0;
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_scope", launchId: "scoped-lease" } }),
+    callMcpAppTool: async () => {
+      if (++calls !== 1) return pending.promise;
+      return initialState === "result" ? { content: [] } : { isError: true, content: [], structuredContent: { connectionAction: {
+        schemaVersion: "1", connectionId: "emc_scope", connectionName: "Calendar", state: "needs_connection",
+        actor: "member", message: "Connect your calendar", action: { type: "connect", label: "Connect", surface: "openwork_your_connections" },
+      } } };
+    },
+    releaseMcpApp: async () => ({ released: true }),
+  };
+  const entry: DashboardMcpAppEntry = { kind: "mcp", id: "viewer-scope", title: "Fixture", serverName: "openwork-cloud",
+    toolName: "run_artifact_arv_scope", projectedToolName: "openwork-cloud_run_artifact_arv_scope", resourceUri: resource.resourceUri, autoLaunch: true };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const render = (scope: string) => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <McpAppTile entry={entry} cacheScopeKey={scope} />
+  </WorkspaceProvider>);
+  try {
+    await act(async () => render("viewer-one"));
+    expect(container.querySelector(initialState === "result" ? "[data-sandbox-view]" : '[data-testid="desktop-connection-card"]')).not.toBeNull();
+    await act(async () => render("viewer-two"));
+    expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+    expect(container.querySelector('[data-testid="desktop-connection-card"]')).toBeNull();
+    expect(container.textContent).toContain("Loading");
+    await act(async () => pending.resolve({ content: [] }));
+    expect(container.querySelector("[data-sandbox-view]")).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem("viewer-one");
+    window.localStorage.removeItem("viewer-two");
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test("reopening a tile paints caller-scoped cached data while refreshing and retains it on a transient failure", async () => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const pending = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  let calls = 0;
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, launchId: "cache-lease" } }),
+    callMcpAppTool: async () => ++calls === 1 ? { content: [] } : pending.promise,
+    releaseMcpApp: async () => ({ released: true }),
+  };
+  const entry: DashboardMcpAppEntry = { kind: "mcp", id: "cache-reopen", title: "Fixture", serverName: resource.serverName,
+    toolName: resource.toolName, projectedToolName: "fixture_render", resourceUri: resource.resourceUri, autoLaunch: true };
+  const container = document.body.appendChild(document.createElement("div"));
+  let root = createRoot(container);
+  const render = () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <McpAppTile entry={entry} cacheScopeKey="cache-reopen-scope" />
+  </WorkspaceProvider>);
+  try {
+    await act(async () => render());
+    expect(container.querySelector("[data-sandbox-view]")).not.toBeNull();
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => render());
+    expect(calls).toBe(2);
+    expect(container.querySelector("[data-sandbox-view]")).not.toBeNull();
+    expect(sandboxView?.origin.readOnly).toBe(true);
+    expect((await compactRefreshItem(container)).getAttribute("aria-disabled")).toBe("true");
+    await act(async () => pending.reject(new OpenworkServerError(503, "server_unavailable", "Try again later")));
+    expect(container.querySelector("[data-sandbox-view]")).not.toBeNull();
+    expect(container.querySelector('[data-dashboard-cache-state="failed"]')).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem("cache-reopen-scope");
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
 });

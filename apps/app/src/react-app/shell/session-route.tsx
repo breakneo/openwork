@@ -3506,7 +3506,15 @@ export function SessionRoute() {
       }
       primaryTitle={appsRouteActive ? "Dashboard" : automationsRouteActive ? "Automations" : dashboardRouteActive ? "Dashboard" : undefined}
       primarySlot={appsRouteActive ? (
-        <AppsPage onNewApp={startAppConversation} />
+        <WorkspaceProvider
+          client={opencodeClient}
+          opencodeBaseUrl={opencodeBaseUrl}
+          openworkServerClient={dashboardEndpoint?.client ?? null}
+          workspaceId={dashboardEndpoint?.workspaceId ?? ""}
+          selectedWorkspaceRoot={selectedWorkspaceRoot}
+        >
+          <AppsPage onNewApp={startAppConversation} fallbackEndpoints={dashboardFallbackEndpoints} />
+        </WorkspaceProvider>
       ) : automationsRouteActive ? (
         <AutomationsPage providerCatalog={providerCatalog} workspaceId={selectedWorkspaceId} />
       ) : dashboardRouteActive ? (

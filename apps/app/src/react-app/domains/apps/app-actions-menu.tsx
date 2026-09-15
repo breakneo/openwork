@@ -4,11 +4,12 @@ import { Ellipsis, Play, Sparkles, Trash2, Minus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { isLiveGeneratedApp } from "./live-generated-app-model";
 import { useAppsClient } from "./use-apps";
 import type { SavedAppDetail } from "@openwork/types/workflows";
 
 export function getAppUpdatePrompt(app?: SavedAppDetail): string | undefined {
-  if (!app?.canManage || !app.previewNotice || (app.html && app.payload && app.revision)) return undefined;
+  if (!app?.canManage || (!isLiveGeneratedApp(app.view) && (!app.previewNotice || (app.html && app.payload && app.revision)))) return undefined;
   return `Update my existing saved app “${app.view.title}” (artifactViewId: ${app.view.id}, configObjectId: ${app.view.configObjectId}). Read its existing source with read_artifact_view before editing. Adapt the app to the latest workflow output for this configObjectId. Preserve the existing artifactViewId and configObjectId when saving the revised draft with save_artifact_view; do not recreate the app or workflow. Show a draft preview for me to review and explicitly choose Save. Do not autoactivate the draft or change the active revision without my explicit Save.`;
 }
 
@@ -57,7 +58,7 @@ export function AppActionsMenu({ appId, title, canDelete, onDeleted, onRun, onEd
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete “{title}”?</DialogTitle>
-          <DialogDescription>This removes the saved app from everyone’s dashboards and the app list. Its workflow and past results stay available.</DialogDescription>
+          <DialogDescription>This removes the saved app from everyone’s dashboards and the app list. Past results stay available.</DialogDescription>
         </DialogHeader>
         {deletion.error ? <p role="alert" className="text-sm text-destructive">{deletion.error.message}</p> : null}
         <DialogFooter>

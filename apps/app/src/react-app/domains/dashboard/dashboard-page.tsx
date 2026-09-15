@@ -129,7 +129,7 @@ function DashboardBoard({ consentScopeKey, cacheScopeKey, grantedDashboards, gra
       data-dashboard-cache-scope={cacheScopeKey}
       data-dashboard-consent-scope={consentScopeKey}
     >
-      <DashboardApps key={consentScopeKey} onCreateApp={onCreateApp} />
+      <DashboardApps key={consentScopeKey} onCreateApp={onCreateApp} fallbackEndpoints={fallbackEndpoints} />
       {grantedError ? (
         <p className="mb-4 text-xs text-muted-foreground" role="status">
           Your organization&apos;s dashboards could not be loaded right now.

@@ -1,5 +1,9 @@
 /** @jsxImportSource react */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { DashboardConnectionCard } from "./dashboard-connection-card";
+import { connectionCardPayloadFromChatToolResult, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution";
+import type { ConnectionActionPayload } from "@openwork/types/connection-action-app";
+import type { ChatToolReconnectAction } from "@/components/tools/error-attribution";
 import { Play } from "lucide-react";
 
 import {
@@ -19,6 +23,7 @@ import {
   dashboardTileLaunchIsApproved,
   dashboardTileRunsAutomatically,
   readDashboardTileCache,
+  removeDashboardTileCache,
   shouldAutoRefreshDashboardTile,
   writeDashboardTileCache,
 } from "./dashboard-tile-cache";
@@ -49,6 +54,7 @@ type TileState =
       /** True only when the successful call did not need an approval override. */
       autoLaunchEligible?: boolean;
     }
+  | { phase: "connection"; connection: ConnectionActionPayload; action: ChatToolReconnectAction | null; output: unknown }
   | { phase: "closed" }
   | { phase: "error"; message: string };
 
@@ -87,7 +93,11 @@ function freshnessLabel(cachedAt: number): string {
   return ageHours === 1 ? "Updated 1 hour ago" : `Updated ${ageHours} hours ago`;
 }
 
-export function McpAppTile({
+export function McpAppTile(props: ComponentProps<typeof McpAppTileContent>) {
+  return <McpAppTileContent key={JSON.stringify([props.cacheScopeKey, props.entry.id, props.entry.connectionId, props.entry.serverName, props.entry.toolName, props.entry.resourceUri, props.entry.projectedToolName])} {...props} />;
+}
+
+function McpAppTileContent({
   entry,
   cacheScopeKey,
   onAutoLaunchEnabled,
@@ -266,6 +276,14 @@ export function McpAppTile({
         assertActive();
       }
       assertActive();
+      const connectionOutput = result.structuredContent ?? firstTextContent(result.content);
+      const connection = connectionCardPayloadFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments);
+      if (connection) return {
+        phase: "connection",
+        connection,
+        action: reconnectActionFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments),
+        output: connectionOutput,
+      };
       if (result.isError) {
         return {
           phase: "error",
@@ -305,6 +323,12 @@ export function McpAppTile({
     void promise
       .then((next) => {
         if (cancelled) return;
+        if (next.phase === "connection") {
+          removeDashboardTileCache(cacheScopeKey, entry.id);
+          setState(next);
+          setRefreshState("idle");
+          return;
+        }
         if (next.phase === "ready") {
           for (const [id, endpoint] of ownedLaunches.current) {
             if (id === next.app.launchId) continue;
@@ -341,7 +365,18 @@ export function McpAppTile({
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        if (stateRef.current.phase === "ready") {
+        const connectionOutput = cause instanceof OpenworkServerError ? cause.details : undefined;
+        const connection = connectionCardPayloadFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments);
+        if (connection) {
+          removeDashboardTileCache(cacheScopeKey, entry.id);
+          setState({ phase: "connection", connection, output: connectionOutput,
+            action: reconnectActionFromChatToolResult(entry.projectedToolName, connectionOutput, launchArguments) });
+          setRefreshState("idle");
+          return;
+        }
+        if (cause instanceof OpenworkServerError && (cause.status === 401 || cause.status === 403)) {
+          removeDashboardTileCache(cacheScopeKey, entry.id);
+        } else if (stateRef.current.phase === "ready") {
           setRefreshState("failed");
           return;
         }
@@ -454,6 +489,9 @@ export function McpAppTile({
           <Skeleton className="h-24 w-full" />
         </div>
       ) : null}
+      {state.phase === "connection" ? <DashboardConnectionCard key={JSON.stringify([cacheScopeKey, state.connection.connectionId, nonce])}
+        toolName={entry.projectedToolName} toolCallId={`${entry.id}:${nonce}`} output={state.output}
+        connection={state.connection} action={state.action} onConnected={run} /> : null}
       {state.phase === "error" ? (
         <p className="pt-3 text-xs text-muted-foreground" role="status">{state.message}</p>
       ) : null}

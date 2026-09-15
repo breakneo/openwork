@@ -147,3 +147,13 @@ export function writeDashboardTileCache(
     // Caching is best-effort. A live result still renders when storage is unavailable.
   }
 }
+
+export function removeDashboardTileCache(scopeKey: string, entryId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(scopeKey) ?? "{}");
+    if (!isRecord(parsed)) return;
+    delete parsed[entryId];
+    window.localStorage.setItem(scopeKey, JSON.stringify(parsed));
+  } catch {}
+}

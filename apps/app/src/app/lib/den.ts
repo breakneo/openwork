@@ -3085,10 +3085,11 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
       }
       return { enabled: payload.enabled, sharingEnabled: payload.sharingEnabled === true, items: payload.items.map((item) => savedAppSummarySchema.parse(item)) };
     },
-    async getSavedApp(orgId: string, appId: string, options: { revisionId?: string; receiptId?: string } = {}) {
+    async getSavedApp(orgId: string, appId: string, options: { revisionId?: string; receiptId?: string; timeZone?: string } = {}) {
       const params = new URLSearchParams();
       if (options.revisionId) params.set("revisionId", options.revisionId);
       if (options.receiptId) params.set("receiptId", options.receiptId);
+      if (options.timeZone) params.set("timeZone", options.timeZone);
       return savedAppDetailSchema.parse(await requestJson<unknown>(baseUrls, `/v1/apps/${encodeURIComponent(appId)}?${params}`, {
         method: "GET", token, organizationId: orgId,
       }));
