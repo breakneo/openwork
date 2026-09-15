@@ -82,7 +82,7 @@ import { resolveCollectibleOpenTarget } from "../artifacts/resolve-open-target";
 import type { OpenTargetOptions } from "@/lib/target-provider";
 import { SidePanel } from "../panel/side-panel";
 import { getSidePanelSessionKey } from "../panel/side-panel-session";
-import { useCreateTab, useSelectTab } from "../panel/use-side-panel-tabs";
+import { useCreateTab, useOpenBrowserRailPane } from "../panel/use-side-panel-tabs";
 import { TerminalDock } from "../terminal/terminal-dock";
 import { useActivePanelTab, usePanelTabStore, useSessionPanelState } from "../panel/panel-tab-store";
 import { useWorkspaceShellLayout } from "../../../shell/workspace-shell-layout";
@@ -482,7 +482,6 @@ export function SessionPage(props: SessionPageProps) {
   const panelRailActive = activeSidePanel === "panel";
   const browserRailActive = panelRailActive && activePanelTab?.type === "browser";
   const filesRailActive = panelRailActive && activePanelTab?.type !== "browser";
-  const selectBrowserTab = useSelectTab();
   const showCloudSignIn = shellConfig.cloudSignin && !denAuth.isSignedIn && denAuth.status !== "checking";
   const openCloudSignIn = useCallback(() => {
     const baseUrl = readDenBootstrapConfig().baseUrl;
@@ -784,25 +783,7 @@ export function SessionPage(props: SessionPageProps) {
   const openGeneralSidePanel = useCallback(() => {
     setCurrentSidePanel("panel");
   }, [setCurrentSidePanel]);
-  const openBrowserRailPane = useCallback(() => {
-    if (browserRailActive) {
-      closeRightPane();
-      return;
-    }
-    const browserTab = activePanelTab?.type === "browser"
-      ? activePanelTab
-      : sessionPanelState.tabs.find((tab) => tab.type === "browser");
-    if (!browserTab) {
-      // No page yet: the rail still opens the browser. The new tab is owned by
-      // this panel (same owner the panel's own "New tab" button uses), and the
-      // main process answers with panel-opened, which selects it here.
-      void createBrowserTab(undefined, sidePanelSessionKey);
-      setCurrentSidePanel("panel");
-      return;
-    }
-    selectBrowserTab(sidePanelSessionKey, browserTab.id);
-    setCurrentSidePanel("panel");
-  }, [activePanelTab, browserRailActive, closeRightPane, createBrowserTab, selectBrowserTab, sessionPanelState.tabs, setCurrentSidePanel, sidePanelSessionKey]);
+  const openBrowserRailPane = useOpenBrowserRailPane(sidePanelSessionKey, browserRailActive, setCurrentSidePanel);
   const openBrowserUrlControlAction = useMemo<OpenworkControlAction>(() => ({
     id: "browser.open_url",
     label: "Open URL in built-in browser",

@@ -2,9 +2,11 @@ import { afterAll, afterEach, beforeEach, expect, mock, test, setSystemTime, spy
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { notifyManager, QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import type { GeneratedArtifactViewRevision, SavedAppDetail } from "@openwork/types/workflows";
+
+import type { DashboardTileActions } from "../src/react-app/domains/dashboard/dashboard-tile-shell";
 
 GlobalRegistrator.register({ url: "http://localhost/" });
 const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
@@ -29,11 +31,16 @@ mock.module("../src/react-app/domains/apps/use-apps", () => ({
   }),
 }));
 mock.module("../src/react-app/domains/apps/generated-app-preview", () => ({
-  GeneratedAppPreview: () => <div data-preview>Working preview</div>,
+  GeneratedAppPreview: ({ presentation }: { presentation?: string }) => <div data-preview data-presentation={presentation} style={{ height: 720 }}>Working preview</div>,
 }));
 
+const { DashboardTileShell } = await import("../src/react-app/domains/dashboard/dashboard-tile-shell");
+const refresh = mock(() => {});
 mock.module("../src/react-app/domains/dashboard/mcp-app-tile", () => ({
-  McpAppTile: ({ entry, cacheScopeKey }: { entry: { toolName: string; launchArguments?: Record<string, unknown> }; cacheScopeKey: string }) => <div data-live-tool={entry.toolName} data-live-scope={cacheScopeKey}>{JSON.stringify(entry.launchArguments)}</div>,
+  McpAppTile: ({ entry, cacheScopeKey, renderActions }: { entry: { title: string; toolName: string; launchArguments?: Record<string, unknown> }; cacheScopeKey: string; renderActions?: DashboardTileActions }) =>
+    <DashboardTileShell title={entry.title} compact renderActions={renderActions} onRefresh={refresh} badge={<span>Updated just now</span>}>
+      <div data-live-tool={entry.toolName} data-live-scope={cacheScopeKey} style={{ height: 720 }}>{JSON.stringify(entry.launchArguments)}</div>
+    </DashboardTileShell>,
 }));
 
 mock.module("../src/react-app/domains/dashboard/dashboard-connection-card", () => ({
@@ -67,6 +74,7 @@ let launch = mock(async (_prompt: string) => {});
 beforeEach(() => {
   detail = unavailable();
   writes.mockClear();
+  refresh.mockClear();
   client.getSavedApp.mockClear();
   launch = mock(async (_prompt: string) => {});
   cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity }, mutations: { retry: false } } });
@@ -88,10 +96,13 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
+function Location() { return <output data-location>{useLocation().pathname}</output>; }
+
 async function render(surface: string, withLauncher = true) {
   cache.setQueryData(["saved-apps", ...scope], { enabled: true, sharingEnabled: false, items: [detail] });
   cache.setQueryData(["app-preview", ...scope, detail.view.id, undefined, undefined], detail);
   await act(async () => root.render(<QueryClientProvider client={cache}><MemoryRouter>
+    <Location />
     {surface === "dashboard" ? <DashboardApps onCreateApp={launch} /> : <AppArtifact appId={detail.view.id} onAsk={withLauncher ? launch : undefined} />}
   </MemoryRouter></QueryClientProvider>));
 }
@@ -299,6 +310,64 @@ test("yesterday's successful live payload cannot be loaded after midnight", () =
   expect(readDashboardTileCache(cacheScope, yesterday.id, midnight)).not.toBeNull();
   expect(readDashboardTileCache(cacheScope, today.id, midnight)).toBeNull();
   window.localStorage.removeItem(cacheScope);
+});
+
+test.each(["live", "snapshot"])("%s saved tiles have no duplicate card or height cap and keep one accessible actions menu", async (mode) => {
+  workingDetail();
+  if (mode === "live") detail.view = { ...detail.view, dataMode: "live", revisions: detail.revision ? [detail.revision] : [] };
+  await render("dashboard");
+  const tile = container.querySelector<HTMLElement>("[data-personal-dashboard-app]");
+  expect(tile).not.toBeNull();
+  expect(tile?.closest("[data-dashboard-masonry]")).not.toBeNull();
+  expect(tile?.querySelector("header")).toBeNull();
+  expect(tile?.textContent).not.toContain("Open app");
+  expect(tile?.className).not.toMatch(/border|overflow-hidden/);
+  const preview = tile?.querySelector<HTMLElement>(mode === "live" ? "[data-live-tool]" : "[data-preview]");
+  expect(preview?.style.height).toBe("720px");
+  for (let parent = preview?.parentElement; parent && parent !== tile?.parentElement; parent = parent.parentElement) {
+    expect(parent.className).not.toMatch(/max-h-|overflow-auto|overflow-y-auto/);
+  }
+  if (mode === "snapshot") expect(preview?.dataset.presentation).toBe("dashboard");
+  const triggers = tile?.querySelectorAll<HTMLButtonElement>('[aria-label^="App options"]');
+  expect(triggers?.length).toBe(1);
+  expect(triggers?.[0]?.disabled).toBe(false);
+  expect(triggers?.[0]?.tabIndex).toBe(0);
+  expect(triggers?.[0]?.parentElement?.className).toContain("focus-within:opacity-100");
+  await openMenu();
+  expect(document.querySelector(`[aria-label="Remove ${detail.view.title} from dashboard"]`)).not.toBeNull();
+  expect(document.querySelector(`[aria-label="Delete ${detail.view.title}"]`)).not.toBeNull();
+  const open = document.querySelector<HTMLElement>(`[role="menuitem"][aria-label="Open ${detail.view.title}"]`);
+  expect(open).not.toBeNull();
+  await act(async () => open?.click());
+  expect(container.querySelector("[data-location]")?.textContent).toBe(`/dashboard/apps/${detail.view.id}`);
+  if (mode === "live") {
+    await openMenu();
+    expect(document.body.textContent).toContain("Updated just now");
+    const item = document.querySelector<HTMLElement>(`[role="menuitem"][aria-label="Refresh ${detail.view.title}"]`);
+    expect(item).not.toBeNull();
+    await act(async () => item?.click());
+    expect(refresh).toHaveBeenCalledTimes(1);
+  }
+});
+
+test("saved app options open by keyboard and deletion still requires confirmation", async () => {
+  workingDetail();
+  await render("dashboard");
+  const trigger = container.querySelector<HTMLButtonElement>('[aria-label^="App options"]');
+  if (!trigger) throw new Error("Missing app options");
+  await act(async () => {
+    trigger.focus();
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  const deletion = document.querySelector<HTMLElement>(`[role="menuitem"][aria-label="Delete ${detail.view.title}"]`);
+  expect(deletion).not.toBeNull();
+  await act(async () => deletion?.click());
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(`Delete “${detail.view.title}”?`);
+  expect(writes).not.toHaveBeenCalled();
+  const cancel = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent === "Cancel");
+  await act(async () => cancel?.click());
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
 });
 
 function workingDetail() {
