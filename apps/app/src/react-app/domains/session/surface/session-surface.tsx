@@ -51,6 +51,7 @@ import type {
   CloudMcpSubmissionResult,
 } from "@/react-app/domains/connections/cloud-mcp-submit-readiness";
 import { ReactSessionComposer } from "./composer/composer";
+import { sessionComposerDiagnosticReasons } from "./composer/composer-diagnostics";
 import { WorkspaceRunModeMenu } from "./composer/workspace-run-mode-menu";
 import { useSessionModelSelection } from "./session-model-store";
 import { getSessionAgentSelection, useSessionAgentSelection } from "./session-mode-memory";
@@ -3473,6 +3474,18 @@ export function SessionSurface(props: SessionSurfaceProps) {
         submissionPreparing={preparingCloudTools || sending || autoSending}
         queuedCount={queuedItems.length}
         disabled={!archiveStateKnown || archiveHeld || model.transitionState !== "idle" || sessionModelUnavailable || queuedDrainState.phase.kind === "admission_unknown"}
+        disabledReasons={sessionComposerDiagnosticReasons({
+          archiveStateKnown,
+          archiveHeld,
+          modelTransitioning: model.transitionState !== "idle",
+          modelUnavailable: sessionModelUnavailable,
+          admissionUnknown: queuedDrainState.phase.kind === "admission_unknown",
+        })}
+        preparingReasons={[
+          ...(preparingCloudTools ? ["send_preparing_tools" as const] : []),
+          ...(sending ? ["send_submitting" as const] : []),
+          ...(autoSending ? ["send_auto_sending" as const] : []),
+        ]}
         modelUnavailable={sessionModelUnavailable}
         modelUnavailableMessage={sessionModelUnavailable ? props.modelUnavailableMessage : null}
         organizationModelsEmpty={props.organizationModelsEmpty}

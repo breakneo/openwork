@@ -42,6 +42,7 @@ import {
   type DesktopBootstrapConfig as ShellDesktopBootstrapConfig,
 } from "./desktop";
 import { enterpriseActivationRequired } from "./enterprise-activation";
+import { observeDenRequest } from "./den-request-diagnostics";
 import { getOpenworkGatewayOrigin } from "./gateway-runtime";
 import { clearDesktopSignInIntent, clearOrgSelectionPending } from "./den-sign-in-intent";
 import { clearDashboardTileCacheStorage } from "./dashboard-cache-storage";
@@ -2843,7 +2844,7 @@ type DenRequestOptions = {
   automationModelAttentionCapable?: boolean;
 };
 
-async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit, timeoutMs: number) {
+async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit, timeoutMs: number, onTimeout?: () => void) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return fetchImpl(url, init);
   }
@@ -2855,6 +2856,7 @@ async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: Request
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
+      onTimeout?.();
       try {
         controller?.abort();
       } catch {
@@ -2895,26 +2897,29 @@ async function requestJsonRaw<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetchWithTimeout(
-    resolveFetch(url),
-    url,
-    {
-      method: options.method ?? "GET",
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: "include",
-    },
-    options.timeoutMs ?? DEFAULT_DEN_TIMEOUT_MS,
-  );
+  return observeDenRequest(async (onTimeout) => {
+    const response = await fetchWithTimeout(
+      resolveFetch(url),
+      url,
+      {
+        method: options.method ?? "GET",
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        credentials: "include",
+      },
+      options.timeoutMs ?? DEFAULT_DEN_TIMEOUT_MS,
+      onTimeout,
+    );
 
-  const text = await response.text();
-  let json: T | null = null;
-  try {
-    json = text ? (JSON.parse(text) as T) : null;
-  } catch {
-    json = null;
-  }
-  return { ok: response.ok, status: response.status, json };
+    const text = await response.text();
+    let json: T | null = null;
+    try {
+      json = text ? (JSON.parse(text) as T) : null;
+    } catch {
+      json = null;
+    }
+    return { ok: response.ok, status: response.status, json };
+  });
 }
 
 async function requestJson<T>(
