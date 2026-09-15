@@ -1,3 +1,9 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { denFetch, signIn } from "../evals/packages/behaviors/src/den.ts";
 import type { DenSession } from "../evals/packages/behaviors/src/den.ts";
 import { signInDesktopAs } from "../evals/packages/behaviors/src/desktop-boot.ts";
@@ -10,19 +16,54 @@ import type { AcmeDemoWorld } from "./acme-demo.ts";
 
 export interface RegistrationReceipt {
   key: string;
-  phase: "registration" | "superseded-api-key-contract";
-  url: string;
+  phase: string;
+  url: string | null;
   status: number;
   ok: boolean;
   connectionId: string | null;
-  /** Exact failure response, with world credentials redacted; never a success payload. */
-  errorBody: string | null;
+  /** Sanitized response supplied by the portable script; never a success payload. */
+  errorBody: unknown;
+  lookupMethod?: string;
+  authType?: string;
+  credentialMode?: string;
+  orgWide?: boolean;
 }
 
 export interface AcmeDemoEng105World extends AcmeDemoWorld {
   orgId: string;
   jordanSession: DenSession;
   registrations: RegistrationReceipt[];
+  reapplyRegistrations: RegistrationReceipt[];
+  setupExitCodes: number[];
+}
+
+const execFileAsync = promisify(execFile);
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const RELEASE_TAG = "v0.18.46";
+const RELEASE_SHA = "a0d6bd1de8debf4f09d22b8538e124b2ff45b339";
+
+/** Source fallback, not packaged-binary validation. Worktree .git files are supported. */
+export async function assertReleaseSource(): Promise<void> {
+  const git = async (args: string[]) => (await execFileAsync("git", args, { cwd: REPO_ROOT })).stdout.trim();
+  if (await git(["rev-parse", `${RELEASE_TAG}^{}`]) !== RELEASE_SHA) throw new Error("ENG105 release tag SHA mismatch");
+  const allowed = (path: string) => path === "worlds/acme-demo-eng105.ts"
+    || path.startsWith("docs/") || path.startsWith("scripts/demo/") || path.startsWith("evals/specs/");
+  // Compare the actual worktree (including staged/unstaged changes) with the tag.
+  const changed = await git(["diff", "--name-only", RELEASE_SHA, "--"]);
+  const untracked = await git(["ls-files", "--others", "--exclude-standard"]);
+  const forbidden = `${changed}\n${untracked}`.split("\n").filter((path) => path && !allowed(path));
+  if (forbidden.length) throw new Error(`ENG105 requires ${RELEASE_TAG} product source; non-overlay changes: ${forbidden.join(", ")}`);
+}
+
+function isReceipt(value: unknown): value is RegistrationReceipt {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return typeof Reflect.get(value, "key") === "string"
+    && typeof Reflect.get(value, "phase") === "string"
+    && (Reflect.get(value, "url") === null || typeof Reflect.get(value, "url") === "string")
+    && typeof Reflect.get(value, "status") === "number"
+    && typeof Reflect.get(value, "ok") === "boolean"
+    && (Reflect.get(value, "connectionId") === null || typeof Reflect.get(value, "connectionId") === "string")
+    && Object.hasOwn(value, "errorBody");
 }
 
 function field(value: unknown, key: string): string | null {
@@ -50,10 +91,11 @@ export async function bootAcmeDemoEng105(
   stack: AsyncDisposableStack,
   place: Place,
 ): Promise<AcmeDemoEng105World> {
+  await assertReleaseSource();
   if (place.kind !== "local") throw new Error("ENG105 demo-org seed requires the local lane");
-  if (process.env.OPENWORK_EVAL_DEN_API_URL || process.env.OPENWORK_EVAL_DESKTOP_CDP_URL) {
-    throw new Error("ENG105 refuses attached/shared Den or desktop overrides");
-  }
+  const overrides = ["OPENWORK_EVAL_DEN_API_URL", "OPENWORK_EVAL_DESKTOP_CDP_URL", "OPENWORK_EVAL_CDP_URL",
+    "OPENWORK_EVAL_ELECTRON_BINARY", "OPENWORK_EVAL_DEN_RUNTIME_PREPARED", "ELECTRON_RENDERER_URL"];
+  if (overrides.some((key) => process.env[key])) throw new Error("ENG105 refuses shared/attached/prebuilt runtime overrides");
   const homeUrl = endpoint(process.env.ENG105_HOME_MCP_URL ?? "https://acme-home-demo.vercel.app/mcp");
   const calendarUrl = endpoint(process.env.ENG105_CALENDAR_MCP_URL ?? "https://personal-calendar-demo-mcp-app.vercel.app/mcp");
   // Demo invitation mail stays in Den's dev outbox; never inherit a mail provider.
@@ -93,49 +135,51 @@ export async function bootAcmeDemoEng105(
   });
   if (!minted.response.ok) throw new Error(`ENG105 admin key: HTTP ${minted.response.status}`);
   const apiKey = required(minted.body, "key");
-  const redact = (text: string) => [apiKey, den.admin.token, den.admin.password, jordanSession.token, password, inviteToken]
-    .reduce((result, value) => value ? result.replaceAll(value, "[REDACTED]") : result, text);
-  const registrations: RegistrationReceipt[] = [];
-  const put = async (key: string, url: string, config: Record<string, unknown>, phase: RegistrationReceipt["phase"] = "registration") => {
-    // One request per declared config; no uncertain retries or auth substitutions.
-    const result = await denFetch(den.ref, `/v1/mcp-connections/by-key/${key}`, {
-      method: "PUT", headers: { "x-api-key": apiKey },
-      body: JSON.stringify({ url, access: { orgWide: true }, exposeDirectly: false, ...config }),
-    });
-    const receipt: RegistrationReceipt = {
-      key, phase, url, status: result.response.status, ok: result.response.ok,
-      connectionId: field(result.body, "id"),
-      errorBody: result.response.ok ? null : redact(result.text),
-    };
-    registrations.push(receipt);
-    console.log(`ENG105 registration ${JSON.stringify(receipt)}`);
+  const stateDir = await mkdtemp(join(tmpdir(), "eng105-den-"));
+  stack.defer(() => rm(stateDir, { recursive: true, force: true }));
+  const setupExitCodes: number[] = [];
+  const apply = async (): Promise<RegistrationReceipt[]> => {
+    let stdout: string;
+    let code = 0;
+    try {
+      ({ stdout } = await execFileAsync("bash", ["scripts/demo/setup-eng105-den.sh", "--connections-only"], {
+        cwd: REPO_ROOT, maxBuffer: 2 * 1024 * 1024,
+        env: { ...process.env, DEN_API_URL: den.ref.apiUrl, DEN_API_KEY: apiKey,
+          DEMO_STATE_DIR: stateDir, DEMO_EXPECTED_ORG_ID: orgId, DEMO_KEY_PREFIX: "",
+          DEMO_TEAMMATE_EMAIL: "", DEMO_HOME_URL: homeUrl, DEMO_CALENDAR_URL: calendarUrl,
+          DEMO_CLOCKS_URL: "https://world-clocks-six.vercel.app/mcp",
+          DEMO_CALENDAR_ISSUER: new URL(calendarUrl).origin },
+      }));
+    } catch (error) {
+      // Script reports sanitized JSON even on a partial apply; never print exec errors/env.
+      if (typeof error !== "object" || error === null || typeof Reflect.get(error, "stdout") !== "string") {
+        throw new Error("ENG105 setup script failed without a JSON receipt");
+      }
+      stdout = String(Reflect.get(error, "stdout"));
+      const exitCode: unknown = Reflect.get(error, "code");
+      code = typeof exitCode === "number" ? exitCode : 1;
+    }
+    const parsed: unknown = JSON.parse(stdout);
+    if (!Array.isArray(parsed) || !parsed.every(isReceipt)) throw new Error("ENG105 setup script returned invalid receipts");
+    setupExitCodes.push(code);
+    return parsed;
   };
-  await put("eng105-acme-home", homeUrl, { name: "Acme Home", authType: "none", credentialMode: "shared" });
-  await put("eng105-world-clocks", "https://world-clocks-six.vercel.app/mcp", { name: "World Clocks", authType: "none", credentialMode: "shared" });
-  await put("eng105-personal-calendar", calendarUrl, { name: "Personal Calendar", authType: "apikey", credentialMode: "per_member" }, "superseded-api-key-contract");
-  const clientId = process.env.ENG105_CALENDAR_CLIENT_ID;
-  if (clientId) {
-    await put("eng105-personal-calendar", calendarUrl, {
-      name: "Personal Calendar", authType: "oauth", credentialMode: "per_member",
-      authorizationServerIssuer: new URL(calendarUrl).origin,
-      oauthClient: { clientId, tokenEndpointAuthMethod: "none" },
-      requestedScopes: ["calendar:read"],
-    });
-  } else {
-    registrations.push({ key: "eng105-personal-calendar", phase: "registration", url: calendarUrl,
-      status: 0, ok: false, connectionId: null,
-      errorBody: "Pending calendar worker contract: set ENG105_CALENDAR_CLIENT_ID to the public DCR/client-metadata client ID. No OAuth flow was attempted." });
-  }
-  return { ...world, orgId, jordanSession, registrations };
+  const registrations = await apply();
+  // Only reapply a completed setup: an uncertain failure is not automatically retried.
+  const reapplyRegistrations = setupExitCodes[0] === 0 ? await apply() : [];
+  return { ...world, orgId, jordanSession, registrations, reapplyRegistrations, setupExitCodes };
 }
 
 export async function main(): Promise<void> {
   await using stack = new AsyncDisposableStack();
   const world = await bootAcmeDemoEng105(stack, resolvePlace());
-  const { den, alex, jordan, jordanSession, orgId, registrations } = world;
+  const { den, alex, jordan, jordanSession, orgId, registrations, reapplyRegistrations, setupExitCodes } = world;
   await hold({
     name: "acme-demo-eng105",
     outputs: {
+      releaseTag: output(RELEASE_TAG, { group: "Build" }),
+      releaseSha: output(RELEASE_SHA, { group: "Build" }),
+      lane: output("local-release-source", { group: "Build", note: "Not packaged-binary validation" }),
       denWeb: output(den.ref.webUrl, { group: "URLs" }),
       denApi: output(den.ref.apiUrl, { group: "URLs" }),
       alexCdp: output(alex.handle.cdpUrl, { group: "URLs" }),
@@ -147,6 +191,9 @@ export async function main(): Promise<void> {
       orgId: output(orgId, { group: "Org" }),
       dashboards: output("enabled", { group: "Org", note: "DEN_DASHBOARDS_ENABLED=true" }),
       registrations: output(JSON.stringify(registrations), { group: "Receipts", note: "Registration is not provider connectivity or UI proof" }),
+      reapplyRegistrations: output(JSON.stringify(reapplyRegistrations), { group: "Receipts" }),
+      setupExitCodes: output(JSON.stringify(setupExitCodes), { group: "Receipts", note: "Reapply only follows successful initial apply" }),
+      supersededApiKeyContract: output('Historical dev smoke: HTTP 400 {"error":"invalid_request","message":"apiKey is required when authType is apikey."}', { group: "Historical diagnostic", note: "Superseded by OAuth; not attempted in normal startup" }),
       calendarConnect: output("Each member clicks Connect in Your Connections; no member credentials seeded", { group: "Next steps" }),
       journey: output("Den Web Dashboard: Add MCP App, then grant Jordan access. Not chat Save as app.", { group: "Next steps" }),
     },
