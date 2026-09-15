@@ -23164,6 +23164,217 @@ export type PostV1TeamsResponses = {
 
 export type PostV1TeamsResponse = PostV1TeamsResponses[keyof PostV1TeamsResponses];
 
+export type GetV1McpConnectionsByConnectionIdSlackAssistantData = {
+  body?: never;
+  path: {
+    /**
+     * Den TypeID with 'emc_' prefix and a 26-character base32 suffix.
+     */
+    connectionId: string;
+  };
+  query?: never;
+  url: "/v1/mcp-connections/{connectionId}/slack-assistant";
+};
+
+export type GetV1McpConnectionsByConnectionIdSlackAssistantErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type GetV1McpConnectionsByConnectionIdSlackAssistantResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
+export type PutV1McpConnectionsByConnectionIdSlackAssistantData = {
+  body: {
+    enabled: boolean;
+    signingSecret?: string;
+    channelIds?: Array<string>;
+    shadowMode?: boolean;
+    dailyLimit?: number;
+  };
+  path: {
+    /**
+     * Den TypeID with 'emc_' prefix and a 26-character base32 suffix.
+     */
+    connectionId: string;
+  };
+  query?: never;
+  url: "/v1/mcp-connections/{connectionId}/slack-assistant";
+};
+
+export type PutV1McpConnectionsByConnectionIdSlackAssistantErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type PutV1McpConnectionsByConnectionIdSlackAssistantResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
+export type PostV1McpConnectionsByConnectionIdSlackAssistantInstallData = {
+  body?: never;
+  path: {
+    /**
+     * Den TypeID with 'emc_' prefix and a 26-character base32 suffix.
+     */
+    connectionId: string;
+  };
+  query?: never;
+  url: "/v1/mcp-connections/{connectionId}/slack-assistant/install";
+};
+
+export type PostV1McpConnectionsByConnectionIdSlackAssistantInstallErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type PostV1McpConnectionsByConnectionIdSlackAssistantInstallResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
+export type GetV1IntegrationsSlackOauthCallbackData = {
+  body?: never;
+  path?: never;
+  query?: never;
+  url: "/v1/integrations/slack/oauth/callback";
+};
+
+export type GetV1IntegrationsSlackOauthCallbackErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type GetV1IntegrationsSlackOauthCallbackResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
+export type PostV1IntegrationsSlackByConnectionIdEventsData = {
+  body?: never;
+  path: {
+    /**
+     * Den TypeID with 'emc_' prefix and a 26-character base32 suffix.
+     */
+    connectionId: string;
+  };
+  query?: never;
+  url: "/v1/integrations/slack/{connectionId}/events";
+};
+
+export type PostV1IntegrationsSlackByConnectionIdEventsErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type PostV1IntegrationsSlackByConnectionIdEventsResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
+export type PostV1IntegrationsSlackByConnectionIdCommandsData = {
+  body?: never;
+  path: {
+    /**
+     * Den TypeID with 'emc_' prefix and a 26-character base32 suffix.
+     */
+    connectionId: string;
+  };
+  query?: never;
+  url: "/v1/integrations/slack/{connectionId}/commands";
+};
+
+export type PostV1IntegrationsSlackByConnectionIdCommandsErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type PostV1IntegrationsSlackByConnectionIdCommandsResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
+export type PostV1IntegrationsSlackByConnectionIdInteractionsData = {
+  body?: never;
+  path: {
+    /**
+     * Den TypeID with 'emc_' prefix and a 26-character base32 suffix.
+     */
+    connectionId: string;
+  };
+  query?: never;
+  url: "/v1/integrations/slack/{connectionId}/interactions";
+};
+
+export type PostV1IntegrationsSlackByConnectionIdInteractionsErrors = {
+  /**
+   * Invalid request.
+   */
+  400: unknown;
+  /**
+   * Access denied.
+   */
+  403: unknown;
+};
+
+export type PostV1IntegrationsSlackByConnectionIdInteractionsResponses = {
+  /**
+   * Request handled.
+   */
+  200: unknown;
+};
+
 export type GetV1AppVersionData = {
   body?: never;
   path?: never;

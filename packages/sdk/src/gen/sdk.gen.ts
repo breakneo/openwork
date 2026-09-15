@@ -296,6 +296,8 @@ import type {
   GetV1InstallByPlatformResponses,
   GetV1InstallConfigErrors,
   GetV1InstallConfigResponses,
+  GetV1IntegrationsSlackOauthCallbackErrors,
+  GetV1IntegrationsSlackOauthCallbackResponses,
   GetV1LlmProviderCatalogByProviderIdErrors,
   GetV1LlmProviderCatalogByProviderIdResponses,
   GetV1LlmProviderCatalogErrors,
@@ -330,6 +332,8 @@ import type {
   GetV1McpConnectionsByConnectionIdMcpAppsErrors,
   GetV1McpConnectionsByConnectionIdMcpAppsResponses,
   GetV1McpConnectionsByConnectionIdResponses,
+  GetV1McpConnectionsByConnectionIdSlackAssistantErrors,
+  GetV1McpConnectionsByConnectionIdSlackAssistantResponses,
   GetV1McpConnectionsByConnectionIdToolPolicyErrors,
   GetV1McpConnectionsByConnectionIdToolPolicyResponses,
   GetV1McpConnectionsByConnectionIdToolsErrors,
@@ -649,6 +653,12 @@ import type {
   PostV1InstallConnectPreviewResponses,
   PostV1InstallConnectStatusErrors,
   PostV1InstallConnectStatusResponses,
+  PostV1IntegrationsSlackByConnectionIdCommandsErrors,
+  PostV1IntegrationsSlackByConnectionIdCommandsResponses,
+  PostV1IntegrationsSlackByConnectionIdEventsErrors,
+  PostV1IntegrationsSlackByConnectionIdEventsResponses,
+  PostV1IntegrationsSlackByConnectionIdInteractionsErrors,
+  PostV1IntegrationsSlackByConnectionIdInteractionsResponses,
   PostV1InvitationsByInvitationIdCancelErrors,
   PostV1InvitationsByInvitationIdCancelResponses,
   PostV1InvitationsErrors,
@@ -677,6 +687,8 @@ import type {
   PostV1McpConnectionsByConnectionIdDisconnectResponses,
   PostV1McpConnectionsByConnectionIdOauthIssuerReviewErrors,
   PostV1McpConnectionsByConnectionIdOauthIssuerReviewResponses,
+  PostV1McpConnectionsByConnectionIdSlackAssistantInstallErrors,
+  PostV1McpConnectionsByConnectionIdSlackAssistantInstallResponses,
   PostV1McpConnectionsByConnectionIdToolsCallErrors,
   PostV1McpConnectionsByConnectionIdToolsCallResponses,
   PostV1McpConnectionsDiscoverErrors,
@@ -793,6 +805,8 @@ import type {
   PutV1McpConnectionsByConnectionIdAccessResponses,
   PutV1McpConnectionsByConnectionIdErrors,
   PutV1McpConnectionsByConnectionIdResponses,
+  PutV1McpConnectionsByConnectionIdSlackAssistantErrors,
+  PutV1McpConnectionsByConnectionIdSlackAssistantResponses,
   PutV1McpConnectionsByConnectionIdToolPolicyErrors,
   PutV1McpConnectionsByConnectionIdToolPolicyResponses,
   PutV1McpConnectionsByKeyByExternalKeyErrors,
@@ -12756,6 +12770,169 @@ export class DenClient extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    });
+  }
+
+  /**
+   * Read Slack assistant setup
+   */
+  public getV1McpConnectionsByConnectionIdSlackAssistant<ThrowOnError extends boolean = false>(
+    parameters: {
+      connectionId: string;
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "connectionId" }] }]);
+    return (options?.client ?? this.client).get<
+      GetV1McpConnectionsByConnectionIdSlackAssistantResponses,
+      GetV1McpConnectionsByConnectionIdSlackAssistantErrors,
+      ThrowOnError
+    >({
+      url: "/v1/mcp-connections/{connectionId}/slack-assistant",
+      ...options,
+      ...params,
+    });
+  }
+
+  /**
+   * Configure Slack assistant installation
+   */
+  public putV1McpConnectionsByConnectionIdSlackAssistant<ThrowOnError extends boolean = false>(
+    parameters: {
+      connectionId: string;
+      enabled: boolean;
+      signingSecret?: string;
+      channelIds?: Array<string>;
+      shadowMode?: boolean;
+      dailyLimit?: number;
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "connectionId" },
+            { in: "body", key: "enabled" },
+            { in: "body", key: "signingSecret" },
+            { in: "body", key: "channelIds" },
+            { in: "body", key: "shadowMode" },
+            { in: "body", key: "dailyLimit" },
+          ],
+        },
+      ],
+    );
+    return (options?.client ?? this.client).put<
+      PutV1McpConnectionsByConnectionIdSlackAssistantResponses,
+      PutV1McpConnectionsByConnectionIdSlackAssistantErrors,
+      ThrowOnError
+    >({
+      url: "/v1/mcp-connections/{connectionId}/slack-assistant",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    });
+  }
+
+  /**
+   * Start Slack bot installation
+   */
+  public postV1McpConnectionsByConnectionIdSlackAssistantInstall<ThrowOnError extends boolean = false>(
+    parameters: {
+      connectionId: string;
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "connectionId" }] }]);
+    return (options?.client ?? this.client).post<
+      PostV1McpConnectionsByConnectionIdSlackAssistantInstallResponses,
+      PostV1McpConnectionsByConnectionIdSlackAssistantInstallErrors,
+      ThrowOnError
+    >({
+      url: "/v1/mcp-connections/{connectionId}/slack-assistant/install",
+      ...options,
+      ...params,
+    });
+  }
+
+  /**
+   * Complete Slack bot installation
+   */
+  public getV1IntegrationsSlackOauthCallback<ThrowOnError extends boolean = false>(
+    options?: Options<never, ThrowOnError>,
+  ) {
+    return (options?.client ?? this.client).get<
+      GetV1IntegrationsSlackOauthCallbackResponses,
+      GetV1IntegrationsSlackOauthCallbackErrors,
+      ThrowOnError
+    >({ url: "/v1/integrations/slack/oauth/callback", ...options });
+  }
+
+  /**
+   * Receive signed Slack assistant events
+   */
+  public postV1IntegrationsSlackByConnectionIdEvents<ThrowOnError extends boolean = false>(
+    parameters: {
+      connectionId: string;
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "connectionId" }] }]);
+    return (options?.client ?? this.client).post<
+      PostV1IntegrationsSlackByConnectionIdEventsResponses,
+      PostV1IntegrationsSlackByConnectionIdEventsErrors,
+      ThrowOnError
+    >({
+      url: "/v1/integrations/slack/{connectionId}/events",
+      ...options,
+      ...params,
+    });
+  }
+
+  /**
+   * Receive Slack commands
+   */
+  public postV1IntegrationsSlackByConnectionIdCommands<ThrowOnError extends boolean = false>(
+    parameters: {
+      connectionId: string;
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "connectionId" }] }]);
+    return (options?.client ?? this.client).post<
+      PostV1IntegrationsSlackByConnectionIdCommandsResponses,
+      PostV1IntegrationsSlackByConnectionIdCommandsErrors,
+      ThrowOnError
+    >({
+      url: "/v1/integrations/slack/{connectionId}/commands",
+      ...options,
+      ...params,
+    });
+  }
+
+  /**
+   * Receive Slack interactions
+   */
+  public postV1IntegrationsSlackByConnectionIdInteractions<ThrowOnError extends boolean = false>(
+    parameters: {
+      connectionId: string;
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "connectionId" }] }]);
+    return (options?.client ?? this.client).post<
+      PostV1IntegrationsSlackByConnectionIdInteractionsResponses,
+      PostV1IntegrationsSlackByConnectionIdInteractionsErrors,
+      ThrowOnError
+    >({
+      url: "/v1/integrations/slack/{connectionId}/interactions",
+      ...options,
+      ...params,
     });
   }
 
