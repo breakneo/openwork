@@ -102,8 +102,8 @@ function launchFailureMessage(content: Array<Record<string, unknown>>): string |
   return text;
 }
 
-function freshnessLabel(cachedAt: number): string {
-  const ageMinutes = Math.max(0, Math.floor((Date.now() - cachedAt) / 60_000));
+function freshnessLabel(cachedAt: number, now = Date.now()): string {
+  const ageMinutes = Math.max(0, Math.floor((now - cachedAt) / 60_000));
   if (ageMinutes < 1) return "Updated just now";
   if (ageMinutes === 1) return "Updated 1 minute ago";
   if (ageMinutes < 60) return `Updated ${ageMinutes} minutes ago`;
@@ -563,6 +563,15 @@ function McpAppTileContent({
     };
   }, [manualLaunch, requestRefresh]);
 
+  // The relative freshness label must age even when nothing else re-renders.
+  const [freshnessNow, setFreshnessNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (state.phase !== "ready") return;
+    const tick = () => setFreshnessNow(Date.now());
+    tick();
+    const interval = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(interval);
+  }, [state.phase, state.phase === "ready" ? state.cachedAt : 0]);
   const run = () => requestRefresh(true);
   const interactiveEndpoint = state.phase === "ready" && state.argumentsSignature === argumentsSignature && appMatchesEntry(state.app, entry)
     && launchEndpoints.some((endpoint) => sameLaunchEndpoint(endpoint, state.endpoint))
@@ -581,10 +590,10 @@ function McpAppTileContent({
     if (state.phase === "ready" && refreshState === "refreshing") return "Saved locally · refreshing";
     if (state.phase === "ready" && refreshState === "failed") return "Saved locally · refresh failed";
     if (state.phase === "ready" && entry.organizationAutoLaunch === true) {
-      return `Organization auto-run · ${freshnessLabel(state.cachedAt)}`;
+      return `Organization auto-run · ${freshnessLabel(state.cachedAt, freshnessNow)}`;
     }
     if (state.phase === "ready" && entry.requiresApproval === true) return "Saved locally · run on request";
-    if (state.phase === "ready") return freshnessLabel(state.cachedAt);
+    if (state.phase === "ready") return freshnessLabel(state.cachedAt, freshnessNow);
     if (state.phase === "loading") return "Loading";
     if (state.phase === "error") return "Refresh failed";
     if (entry.organizationAutoLaunch === true) return "Organization auto-run";

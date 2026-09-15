@@ -919,6 +919,35 @@ test.each(["requiresApproval", "launchApproved"])("same-ID argument changes neve
   }
 });
 
+test("the freshness label ages on its own without another state change", async () => {
+  let now = Date.parse("2026-09-15T20:00:00Z");
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const interval = spyOn(window, "setInterval");
+  const fixture = continuityFixture();
+  const host = await mountContinuityTile(fixture);
+  try {
+    // Healthy tiles keep the badge inside the options menu, where a person reads it.
+    const trigger = host.container.querySelector<HTMLButtonElement>('button[aria-label="App options for Fixture"]');
+    if (!trigger) throw new Error("Missing compact app menu trigger");
+    await act(async () => { trigger.focus(); trigger.click(); });
+    const label = () => document.querySelector('[role="menu"] [data-dashboard-cache-state]')?.textContent ?? "";
+    expect(label()).toContain("Updated just now");
+    const minuteTimers = interval.mock.calls.filter(([, delay]) => delay === 60_000);
+    expect(minuteTimers).toHaveLength(1);
+    const tick = minuteTimers[0]?.[0];
+    if (typeof tick !== "function") throw new Error("Missing freshness timer");
+    // Nothing else changes; only the clock and the label timer advance.
+    now += 3 * 60_000;
+    await act(async () => { tick(); });
+    expect(label()).toContain("Updated 3 minutes ago");
+    expect(fixture.calls).toHaveLength(1);
+    now += 62 * 60_000;
+    await act(async () => { tick(); });
+    expect(label()).toContain("Updated 1 hour ago");
+    expect(fixture.calls).toHaveLength(1);
+  } finally { await host.dispose(); clock.mockRestore(); interval.mockRestore(); }
+});
+
 test.each(["success", "failure"])("generated dashboard refresh is bounded across rerenders, timer and focus (%s)", async (outcome) => {
   const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);

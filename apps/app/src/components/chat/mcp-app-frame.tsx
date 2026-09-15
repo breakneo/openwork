@@ -476,6 +476,10 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (disposed || failed) return
       if (!Number.isFinite(requestedHeight) || requestedHeight === undefined) return
+      // Before the app initializes, the guest is measuring an empty shell.
+      // Keep the remembered height rather than collapsing to the shell size
+      // and growing back a moment later; growth is still honored.
+      if (!initialized && requestedHeight < heightRef.current) return
       if (Date.now() - lastSizeEventAt >= SIZE_EVENT_INTERVAL_MS) {
         applyHeight(requestedHeight)
         return

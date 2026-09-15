@@ -671,6 +671,37 @@ describe("MCP App sandbox presentation", () => {
     } finally { await host.dispose() }
   })
 
+  test("holds the remembered height until the app initializes, then honors the guest's real measurement", async () => {
+    // A restored dashboard tile knows it was 717px last time. The guest's
+    // startup shell measures ~238px before it renders the result; applying
+    // that would collapse the tile and grow it back a moment later.
+    const host = await startupFixture({ presentation: "dashboard", initialHeight: 717 })
+    try {
+      await host.renderView()
+      const iframe = host.frame(0)
+      expect(iframe.style.height).toBe("717px")
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      const bridge = host.bridges[0]
+      // Shrink before initialization/result delivery: ignored.
+      await act(async () => { bridge.onsizechange?.({ height: 238 }) })
+      await host.advance(150)
+      expect(iframe.style.height).toBe("717px")
+      expect(host.heightChanges).toEqual([])
+      // Growth before delivery is still honored (content can be taller than remembered).
+      await act(async () => { bridge.onsizechange?.({ height: 760 }) })
+      await host.advance(150)
+      expect(iframe.style.height).toBe("760px")
+      // Once the app has initialized its measurements are real, including a shrink.
+      await act(async () => { bridge.oninitialized?.() })
+      await host.advance(150)
+      await act(async () => { bridge.onsizechange?.({ height: 711 }) })
+      await host.advance(150)
+      expect(iframe.style.height).toBe("711px")
+      expect(host.heightChanges.map(change => change.height)).toEqual([760, 711])
+      expect(host.srcAssignments).toHaveLength(1)
+    } finally { await host.dispose() }
+  })
+
   test("a newer leading height cancels the older trailing update without losing the next trailing measurement", async () => {
     const host = await startupFixture()
     try {
