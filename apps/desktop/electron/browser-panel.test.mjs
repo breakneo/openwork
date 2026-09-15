@@ -1798,7 +1798,8 @@ test("a first task open stays blank through asynchronous panel mounting and loca
   assert.equal(pending.url, "about:blank");
   assert.equal(pending.browserApproval.approveLabel, "Allow for this thread");
   assert.equal(pending.browserApproval.title, "Allow browser control for this thread?");
-  assert.match(pending.browserApproval.detail, /navigating allowed websites, reading, clicking, typing and scrolling using the signed-in browser, including potential website changes/);
+  assert.match(pending.browserApproval.detail, /navigating allowed websites, reading and scrolling using the signed-in browser/);
+  assert.match(pending.browserApproval.detail, /Clicking, typing, key input and website tools require separate confirmations/);
   assert.deepEqual(views()[0].webContents.loads, []);
   assert.deepEqual(views()[0].webContents.destinations, []);
   invoke("openwork:browser:show", PANEL_BOUNDS, "A");
@@ -1918,7 +1919,7 @@ test("blocked main-window links require navigation consent and retain their orig
   }
 });
 
-test("thread control reuses consent across origins and tabs for navigation, reading and DOM actions", async () => {
+test("thread control reuses navigation and reading consent across origins and tabs while DOM inputs require review", async () => {
   const { invoke, panel, views, approve } = createPanel();
   invoke("openwork:browser:show", PANEL_BOUNDS, "A");
   const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "http://127.0.0.1:4173/" } });
@@ -1930,7 +1931,11 @@ test("thread control reuses consent across origins and tabs for navigation, read
     assert.equal((await panel.browserTask({ sessionId: "A", operation: "navigate", args: { tabId, url } })).ok, true);
     const observed = await panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId } });
     assert.equal(observed.ok, true);
-    assert.equal((await panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId: observed.observationId, action: { type: "fill", ref: "e1", text: "Example" } } })).dispatched, true);
+    const filling = panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId: observed.observationId, action: { type: "fill", ref: "e1", text: "Example" } } });
+    await flush();
+    assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval?.title, "Allow browser action?");
+    approve();
+    assert.equal((await filling).dispatched, true);
     assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval, null);
   }
   assert.equal(page.inputs.length, 7);
@@ -2456,6 +2461,7 @@ test("DOM wheel dispatch keeps signed CSS deltas, reports page scroll and never 
     assert.equal(result.ok, true);
     assert.equal(result.outcome, "not_yet_verified");
     assert.equal(result.retrySafe, false);
+    assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval, null);
     assert.deepEqual(contents.debugger.commands.at(-1), { method: "Input.dispatchMouseEvent", params: { type: "mouseWheel", x: 25.5, y: 50.5, deltaX: 0, deltaY } });
     assert.equal(contents.debugger.isAttached(), false);
     assert.equal((await scroll(observed.observationId, deltaY)).code, "stale_observation");
@@ -2476,6 +2482,173 @@ test("DOM wheel dispatch keeps signed CSS deltas, reports page scroll and never 
   assert.equal(contents.debugger.commands.filter(command => command.method === "Input.dispatchMouseEvent").length, 4);
   assert.deepEqual(inputs, [], "wheel events never use native sendInputEvent");
   panel.destroy();
+});
+
+test("every click, fill and key requires fresh approval and dispatches only the reviewed payload", async () => {
+  const { invoke, panel, views, approve } = createPanel();
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://inputs.example/" } });
+  await flush(); approve();
+  const { tabId } = await opening;
+  const contents = views()[0].webContents;
+  const { inputs } = mockPage(contents);
+  const observe = () => panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId } });
+  const act = (observationId, action) => panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId, action } });
+  const mouseEvents = () => contents.debugger.commands.filter(command => command.method === "Input.dispatchMouseEvent");
+  for (const requested of [{ type: "click", ref: "e1" }, { type: "fill", ref: "e1", text: "Reviewed text" }, { type: "key", key: "Enter" }]) {
+    contents.debugger.commands.length = 0;
+    inputs.length = 0;
+    const observed = await observe();
+    const denied = act(observed.observationId, requested);
+    await flush();
+    const review = invoke("openwork:browser:state").tabs[0].browserApproval;
+    assert.equal(review?.title, "Allow browser action?");
+    assert.equal(review.approveLabel, "Allow once");
+    assert.match(review.detail, /Target:/);
+    assert.match(review.detail, /may submit information or change website data/);
+    if (requested.type === "fill") assert.match(review.detail, /Text to enter: Reviewed text/);
+    if (requested.type === "key") assert.match(review.detail, /focused control from this observation\. Key: Enter/);
+    else assert.match(review.detail, /Search\. Reference: e1/);
+    assert.deepEqual(inputs, []);
+    assert.deepEqual(mouseEvents(), []);
+    approve(false);
+    assert.equal((await denied).code, "user_denied");
+    assert.deepEqual(inputs, []);
+    assert.deepEqual(mouseEvents(), []);
+    assert.equal((await act(observed.observationId, requested)).code, "stale_observation");
+    const fresh = await observe();
+    const payload = { ...requested };
+    const accepted = act(fresh.observationId, payload);
+    await flush();
+    assert.notEqual(invoke("openwork:browser:state").tabs[0].browserApproval?.id, review.id);
+    assert.deepEqual(inputs, []);
+    assert.deepEqual(mouseEvents(), []);
+    Object.assign(payload, { type: "scroll", ref: "e99", text: "Unreviewed text", key: "Escape", x: 300, y: 200, deltaY: 600 });
+    approve();
+    assert.equal((await accepted).dispatched, true);
+    if (requested.type === "click") {
+      assert.deepEqual(mouseEvents().map(event => event.params), [
+        { type: "mousePressed", x: 60, y: 40, button: "left", clickCount: 1 },
+        { type: "mouseReleased", x: 60, y: 40, button: "left", clickCount: 1 },
+      ]);
+      assert.deepEqual(inputs, []);
+    } else {
+      assert.deepEqual(mouseEvents(), []);
+      assert.deepEqual(inputs, requested.type === "fill" ? [{ type: "text", text: "Reviewed text" }] : [{ type: "keyDown", keyCode: "Enter" }, { type: "keyUp", keyCode: "Enter" }]);
+    }
+  }
+  panel.destroy();
+});
+
+test("only the current approval wait is excluded from the action freshness budget", async (t) => {
+  const { invoke, panel, views, approve } = createPanel();
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://review.example/" } });
+  await flush(); approve();
+  const { tabId } = await opening;
+  const contents = views()[0].webContents;
+  const { inputs } = mockPage(contents);
+  const observe = () => panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId } });
+  const act = (observationId) => panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId, action: { type: "fill", ref: "e1", text: "Reviewed text" } } });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  const observed = await observe();
+  t.mock.timers.tick(14_000);
+  const accepted = act(observed.observationId);
+  await flush();
+  t.mock.timers.tick(20_000);
+  assert.deepEqual(inputs, []);
+  approve();
+  assert.equal((await accepted).ok, true, "an unchanged page remains usable after a 20-second review");
+  assert.deepEqual(inputs, [{ type: "text", text: "Reviewed text" }]);
+  const expired = await observe();
+  t.mock.timers.tick(15_001);
+  assert.equal((await act(expired.observationId)).code, "stale_observation", "review time never extends another observation's age");
+  assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval, null);
+  const fresh = await observe();
+  t.mock.timers.tick(14_000);
+  const delayed = act(fresh.observationId);
+  await flush();
+  t.mock.timers.tick(20_000);
+  const evaluate = contents.executeJavaScriptInIsolatedWorld;
+  contents.executeJavaScriptInIsolatedWorld = async (...args) => { const result = await evaluate(...args); t.mock.timers.tick(1_001); return result; };
+  approve();
+  const result = await delayed;
+  assert.equal(result.code, "stale_observation", "preparation still consumes the remaining age budget");
+  assert.equal(result.dispatched, false);
+  assert.equal(inputs.length, 1);
+  panel.destroy();
+});
+
+test("approval cannot authorize a changed document, layout, focus, image, target or policy", async (t) => {
+  let blocked = false;
+  const { invoke, panel, views, approve } = createPanel(async () => { if (blocked) throw new Error("managed denial"); });
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://controls.example/" } });
+  await flush(); approve();
+  const { tabId } = await opening;
+  const contents = views()[0].webContents;
+  const page = mockPage(contents);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  for (const { change, reset, action } of [
+    { change: () => { blocked = true; }, reset: () => { blocked = false; } },
+    { change: () => { page.context.__openworkBrowserObservation.id = "replaced"; }, reset: () => {} },
+    { change: () => { page.context.__openworkBrowserObservation.changed = true; }, reset: () => {} },
+    { change: () => contents.emit("did-start-navigation", contents.url, false, true), reset: () => {} },
+    { change: () => { contents.url += "next"; }, reset: () => { contents.url = "https://controls.example/"; } },
+    { change: () => { page.context.innerWidth = 900; }, reset: () => { page.context.innerWidth = 800; } },
+    { change: () => { page.context.scrollY = 1; }, reset: () => { page.context.scrollY = 0; } },
+    { change: () => { page.element.rect.x += 20; }, reset: () => { page.element.rect.x -= 20; } },
+    { change: () => { page.element.isConnected = false; }, reset: () => { page.element.isConnected = true; } },
+    { change: () => { page.element.disabled = true; }, reset: () => { page.element.disabled = false; } },
+    { change: () => { page.element.type = "password"; }, reset: () => { page.element.type = "text"; } },
+    { change: () => { page.context.document.activeElement = new page.context.HTMLElement(); }, reset: () => { page.context.document.activeElement = page.element; }, action: { type: "key", key: "Enter" } },
+    { change: () => page.setImage("changed"), reset: () => page.setImage("initial image"), action: { type: "click", x: 30, y: 30 } },
+  ]) {
+    const observed = await panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId, includeImage: true } });
+    assert.equal(observed.ok, true);
+    const pending = panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId: observed.observationId, action: action ?? { type: "click", ref: "e1" } } });
+    await flush();
+    assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval?.title, "Allow browser action?");
+    t.mock.timers.tick(20_000);
+    change();
+    approve();
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.dispatched, false);
+    reset();
+  }
+  assert.deepEqual(page.inputs, []);
+  assert.equal(contents.debugger.commands.filter(command => command.method === "Input.dispatchMouseEvent").length, 0);
+  panel.destroy();
+});
+
+test("hidden, paused and timed-out input approvals send no events and reject late acceptance", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  for (const ending of ["hide", "pause", "timeout"]) {
+    const { invoke, panel, views, approve } = createPanel();
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+    const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://inputs.example/" } });
+    await flush(); approve();
+    const { tabId } = await opening;
+    const contents = views()[0].webContents;
+    const { inputs } = mockPage(contents);
+    const observed = await panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId } });
+    const pending = panel.browserTask({ sessionId: "A", operation: "act", args: { tabId, observationId: observed.observationId, action: { type: "key", key: "Enter" } } });
+    await flush();
+    const review = invoke("openwork:browser:state").tabs[0].browserApproval;
+    assert.equal(review?.title, "Allow browser action?");
+    if (ending === "hide") { invoke("openwork:browser:hide"); approve(true, tabId); }
+    if (ending === "pause") invoke("openwork:browser:taskControl", tabId, "pause");
+    if (ending === "timeout") t.mock.timers.tick(30_000);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.dispatched, false);
+    if (ending === "timeout") assert.equal(result.code, "timeout");
+    assert.equal(invoke("openwork:browser:approve", tabId, review.id, true), false);
+    assert.deepEqual(inputs, []);
+    assert.equal(contents.debugger.commands.filter(command => command.method === "Input.dispatchMouseEvent").length, 0);
+    panel.destroy();
+  }
 });
 
 test("DOM actions retain policy, visibility, bounded age, geometry, page, image and sensitive-input gates", async (t) => {
@@ -2504,7 +2677,10 @@ test("DOM actions retain policy, visibility, bounded age, geometry, page, image 
     const observed = await observe();
     assert.equal(observed.ok, true);
     change();
-    assert.equal((await act(observed.observationId, action)).code, code);
+    const pending = act(observed.observationId, action);
+    await flush();
+    if (invoke("openwork:browser:state").tabs[0].browserApproval) approve();
+    assert.equal((await pending).code, code);
     reset();
   }
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
@@ -2516,8 +2692,8 @@ test("DOM actions retain policy, visibility, bounded age, geometry, page, image 
   panel.destroy();
 });
 
-test("canceling policy, preparation or dispatch revokes thread consent and fences late DOM writes", async () => {
-  for (const phase of ["policy", "prepare", "dispatch"]) {
+test("canceling policy, approval, preparation or dispatch revokes thread consent and fences late DOM writes", async () => {
+  for (const phase of ["policy", "approval", "prepare", "dispatch"]) {
     let hold = false;
     const held = gate();
     const { invoke, panel, views, approve } = createPanel(async () => { if (hold && phase === "policy") await held.promise; });
@@ -2537,11 +2713,14 @@ test("canceling policy, preparation or dispatch revokes thread consent and fence
     hold = true;
     const action = panel.browserTask({ sessionId: "A", operation: "act", args: { tabId: second.tabId, observationId: observed.observationId, action: { type: "click", ref: "e1" } } }, { signal: controller.signal });
     await flush();
+    const review = invoke("openwork:browser:state").tabs[1].browserApproval;
+    if (phase === "prepare" || phase === "dispatch") { approve(); await flush(); }
     controller.abort();
     const result = await action;
     assert.equal(result.ok, false);
     assert.equal(result.dispatched, phase === "dispatch");
     assert.equal(result.retrySafe, false);
+    if (review) assert.equal(invoke("openwork:browser:approve", second.tabId, review.id, true), false);
     hold = false;
     held.finish();
     await flush();

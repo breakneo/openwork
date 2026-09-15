@@ -10,13 +10,15 @@ it does not create a different website account for every conversation.
 1. List the conversation's tabs and reuse a matching page, or open the requested
    URL in a new owned tab. Review **Allow browser control for this thread?** in
    the panel and choose **Allow for this thread** once. The grant covers allowed
-   website navigation, reading and DOM actions across this thread's tabs, using
-   the built-in browser's signed-in account. It can change website data. A new
-   thread's first tab stays blank until acceptance; localhost has no exemption.
+   website navigation, reading and scrolling across this thread's tabs, using
+   the built-in browser's signed-in account. A new thread's first tab stays blank
+   until acceptance; localhost has no exemption.
 2. Discover site tools. Prefer a relevant structured integration or site tool;
-   otherwise observe the page and use its visible controls. Clicking, typing,
-   keyboard input and scrolling do not need another browser permission prompt.
-   A fresh image supports a coordinate click without a useful DOM reference.
+   otherwise observe the page and use its visible controls. Scrolling needs no
+   further prompt. Every click, fill and key instead asks **Allow browser action?**
+   with its target, key or text before dispatch. Choose **Allow once** or **Deny**:
+   these inputs can submit information or change website data. A fresh image
+   supports a coordinate click without a useful DOM reference.
 3. Review each WebMCP invocation separately. A site's read-only annotation is
    advisory. Approvals bind the operation to its tab and current page.
    After a site callback returns, review its complete bounded result locally
@@ -55,11 +57,16 @@ browser-tool boundary; it does not sandbox unrelated shell tools or user-added
 plugins with independent machine permissions.
 
 Each tab allows one operation at a time. There is no mutation queue. DOM
-observations carry random IDs and expire after 15 seconds, DOM changes or
-navigation, scrolling or viewport changes. Coordinate clicks require an image
-scaled to the page viewport and recheck its pixels before dispatch. Actions consume their observation before dispatch. A failure or
-cancellation clears it. Timeouts and uncertain outcomes prohibit automatic
-replay, including switching to another method to repeat the action.
+observations carry random IDs and must be no older than 15 seconds when an action
+starts. One action's approval wait is excluded from its remaining age budget,
+without renewing the stored observation or extending the operation timeout.
+After approval the host rechecks observation identity, document, URL, policy,
+DOM changes, viewport, scroll and target readiness. Key input also requires the
+same focused element. Coordinate clicks require an image scaled to the page
+viewport and recheck its pixels before dispatch. The reviewed action payload is
+copied before waiting and never replaced silently. Actions consume their
+observation before dispatch; failure or cancellation clears it. Timeouts and
+uncertain outcomes prohibit automatic replay, including through another method.
 
 Browser-control consent is one in-memory grant per trusted conversation ID.
 Same-thread tabs and popups reuse it; other conversations never do. Takeover,

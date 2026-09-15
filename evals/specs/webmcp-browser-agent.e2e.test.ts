@@ -34,6 +34,32 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     return withoutBrowserApproval(pending);
   };
   const witness = () => probe.browserFixtureState(world.origin);
+  const reviewInput = async (args: BrowserTaskInput["args"], decision: "allow" | "deny" = "allow", reviewMs = 0) => {
+    const before = await witness();
+    const unchanged = async () => expect(await witness()).toMatchObject({
+      records: before.records, inputValue: before.inputValue, popups: before.popups,
+      frameClicks: before.frameClicks, pageRequests: before.pageRequests, signInCount: before.signInCount,
+    });
+    let settled = false;
+    const pending = task("act", args).then((value) => { settled = true; return value; });
+    await user.see({ text: "Allow browser action?" });
+    await user.see({ role: "button", label: "Allow once" });
+    await user.notSee({ role: "button", label: "Allow for this thread" });
+    const reviewStarted = Date.now();
+    await probe.eventually(async () => {
+      expect(settled).toBe(false);
+      await unchanged();
+      return Date.now() - reviewStarted;
+    }, { within: reviewMs + 5_000, until: (elapsed) => elapsed >= reviewMs, label: "input stays undispatched throughout action review" });
+    await user.click({ role: "button", label: decision === "allow" ? "Allow once" : "Deny" });
+    const result = await withoutBrowserApproval(pending);
+    if (decision === "deny") {
+      expect(result).toMatchObject({ ok: false, code: "user_denied", dispatched: false, mayHaveChangedState: false });
+      await unchanged();
+    }
+    await user.notSee({ role: "button", label: "Share result" });
+    return result;
+  };
   const conversation = async () => {
     const response = await probe.desktopApi(`${world.enginePath}/session/${sessionId}/message`);
     expect(response.status).toBe(200);
@@ -297,18 +323,22 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     }
   });
 
-  await step("Navigation invalidates site tools; DOM fallback uses a fresh observation in the signed-in tab", async () => {
+  await step("Navigation invalidates site tools; DOM input waits for approval without aging during consent", async () => {
     const requests = (await witness()).pageRequests;
     expect(await grantedTask("navigate", { tabId, url: `${world.origin}/fallback` })).toMatchObject({ ok: true, tabId });
     expect(await task("site_tool", { tabId, toolId: save.toolId, input: { confirm: true } })).toMatchObject({ ok: false, code: "stale_tool" });
-    expect((await task("site_tools", { tabId })).tools).toEqual([]);
-    const observed = await task("observe", { tabId, includeImage: true });
+    expect((await grantedTask("site_tools", { tabId })).tools).toEqual([]);
+    const denied = await grantedTask("observe", { tabId });
+    const deniedRef = denied.elements?.find((element) => element.name === "Save draft")?.ref;
+    if (!deniedRef) throw new Error("Missing Save draft control for denied input.");
+    await reviewInput({ tabId, observationId: denied.observationId, action: { type: "click", ref: deniedRef } }, "deny");
+    const observed = await grantedTask("observe", { tabId, includeImage: true });
     expect(observed.text).toContain("Session active");
     expect(observed.image?.data.length).toBeGreaterThan(100);
     const ref = observed.elements?.find((element) => element.name === "Save draft")?.ref;
     if (!ref) throw new Error("Missing observed Save draft control.");
     expect((await witness()).records).toHaveLength(1);
-    expect(await grantedTask("act", { tabId, observationId: observed.observationId, action: { type: "click", ref } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+    expect(await reviewInput({ tabId, observationId: observed.observationId, action: { type: "click", ref } }, "allow", 16_000)).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
     expect(await task("act", { tabId, observationId: observed.observationId, action: { type: "click", ref } })).toMatchObject({ ok: false, code: "stale_observation" });
     const fresh = await probe.eventually(() => task("observe", { tabId }), { within: 5_000, until: (value) => value.text?.includes("Saved 1") === true, label: "the page visibly completes its DOM save" });
     expect(fresh.observationId).not.toBe(observed.observationId);
@@ -319,16 +349,22 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     expect(state.pageRequests).toEqual([...requests, { path: "/fallback", signedIn: true }]);
   });
 
-  await step("Visible fill, key and real wheel scrolling reuse the thread grant and fresh observations", async () => {
+  await step("Fill and key each need action approval while real wheel scrolling reuses the thread grant", async () => {
+    const deniedFill = await grantedTask("observe", { tabId });
+    expect(deniedFill).toMatchObject({ ok: true, scroll: { x: 0, y: 0 } });
+    const deniedRef = deniedFill.elements?.find((element) => element.name === "Draft title")?.ref;
+    if (!deniedRef) throw new Error("Missing Draft title control for denied input.");
+    await reviewInput({ tabId, observationId: deniedFill.observationId, action: { type: "fill", ref: deniedRef, text: "A" } }, "deny");
     const observed = await grantedTask("observe", { tabId });
-    expect(observed).toMatchObject({ ok: true, scroll: { x: 0, y: 0 } });
     const ref = observed.elements?.find((element) => element.name === "Draft title")?.ref;
     if (!ref) throw new Error("Missing observed Draft title control.");
-    expect(await grantedTask("act", { tabId, observationId: observed.observationId, action: { type: "fill", ref, text: "A" } })).toMatchObject({ ok: true, dispatched: true });
-    await probe.eventually(witness, { within: 5_000, until: (value) => value.inputValue === "A", label: "the granted fill reaches the visible field" });
+    expect(await reviewInput({ tabId, observationId: observed.observationId, action: { type: "fill", ref, text: "A" } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+    await probe.eventually(witness, { within: 5_000, until: (value) => value.inputValue === "A", label: "only the approved fill reaches the visible field" });
+    const deniedKey = await grantedTask("observe", { tabId });
+    await reviewInput({ tabId, observationId: deniedKey.observationId, action: { type: "key", key: "Backspace" } }, "deny");
     const filled = await grantedTask("observe", { tabId });
-    expect(await grantedTask("act", { tabId, observationId: filled.observationId, action: { type: "key", key: "Backspace" } })).toMatchObject({ ok: true, dispatched: true });
-    await probe.eventually(witness, { within: 5_000, until: (value) => value.inputValue === "", label: "the granted key clears the focused field" });
+    expect(await reviewInput({ tabId, observationId: filled.observationId, action: { type: "key", key: "Backspace" } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+    await probe.eventually(witness, { within: 5_000, until: (value) => value.inputValue === "", label: "only the approved key clears the focused field" });
     const before = await grantedTask("observe", { tabId });
     if (!before.scroll) throw new Error("Observation omitted the real scroll position.");
     const initialY = before.scroll.y;
@@ -357,7 +393,7 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     const point = browserImageTarget(observed.image);
     expect(point.pixels).toBeGreaterThan(200);
     expect((await witness()).popups).toEqual([]);
-    expect(await grantedTask("act", { tabId, observationId: observed.observationId, action: { type: "click", x: point.x, y: point.y } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+    expect(await reviewInput({ tabId, observationId: observed.observationId, action: { type: "click", x: point.x, y: point.y } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
     const state = await probe.eventually(() => probe.browserState(), { within: 10_000, until: (value) => !!value.activeTabId && value.activeTabId !== tabId, label: "the owned popup becomes active" });
     const popup = state.tabs.find((tab) => tab.id === state.activeTabId);
     if (!popup) throw new Error("No owned popup.");
@@ -371,7 +407,7 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     await user.hover({ role: "button", label: "Select tab: Project popup" });
     await user.click({ role: "button", label: "Close tab: Project popup" });
     expect(await task("observe", { tabId: popup.id })).toMatchObject({ ok: false, code: "tab_closed" });
-    evidence.recordAssertionEvidence("Popup ownership, inherited sign-in, and isolation are independently witnessed", "A PNG-derived coordinate opened the popup under the existing thread grant, without another approval. Its request carried the existing session without another sign-in. Hostile popup features exposed no Node globals and could not read the controlled cross-origin response.", true);
+    evidence.recordAssertionEvidence("Popup ownership, inherited sign-in, and isolation are independently witnessed", "The PNG-derived click required its own input approval before opening the popup. Popup navigation and reading reused the existing thread grant without additional consent. Its request carried the existing session without another sign-in. Hostile popup features exposed no Node globals and could not read the controlled cross-origin response.", true);
   });
 
   await step("Foreign conversations cannot inspect a tab or reuse its tool handles", async () => {
@@ -470,7 +506,7 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     expect(native).toMatchObject({ activeTabId: tabId, visibleSessionId: sessionId });
     expect(native.nativeViews.find((view) => view.tabId === tabId)).toMatchObject({ attached: true, aboveApp: true, visible: true, bounds: { width: point.width, height: point.height } });
     expect((await witness()).frameClicks).toBe(0);
-    expect(await grantedTask("act", { tabId, observationId: observed.observationId, action: { type: "click", x: point.x, y: point.y } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+    expect(await reviewInput({ tabId, observationId: observed.observationId, action: { type: "click", x: point.x, y: point.y } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
     const clicked = await probe.eventually(witness, { within: 5_000, until: (value) => value.frameClicks === 1 && value.frameInputs.some((input) => input.type === "click"), label: "the iframe received one visual click" });
     expect(clicked.frameClicks).toBe(1);
     expect(clicked.frameInputs.filter((input) => input.type === "click")).toEqual([expect.objectContaining({ page: "/frame-allowed", target: "BUTTON", trusted: true })]);

@@ -367,7 +367,7 @@ test("a background conversation reads its owned page silently and requests atten
     await user.see(tabButton("reading"));
   });
 
-  await step("Switching to the owner restores its native view and reuses its thread grant for visible actions", async () => {
+  await step("Switching to the owner restores its native view but visible inputs still need action approval", async () => {
     await user.click(conversation(researching.title));
     const state = await probe.eventually(() => probe.browserState(), { within: 30_000, until: (value) => value.visibleSessionId === researching.sessionId && value.activeTabId === researchTab.tabId, label: "the research conversation takes the screen" });
     expect(state.tabs.map((tab) => tab.ownerSessionId).sort()).toEqual([reading.sessionId, researching.sessionId].sort());
@@ -380,18 +380,34 @@ test("a background conversation reads its owned page silently and requests atten
     expect(native.nativeViews.find((view) => view.tabId === readingTab.tabId)).toMatchObject({ attached: false, aboveApp: false, bounds: { x: 0, y: 0, ...BACKGROUND_TAB_VIEWPORT } });
     const actions: Array<{ type: "click" | "fill"; name: string; text?: string }> = [{ type: "click", name: "Save draft" }, { type: "fill", name: "Draft title", text: "ok" }];
     for (const action of actions) {
-      const observed = await task("observe");
-      const ref = observed.elements?.find((element) => element.name === action.name)?.ref;
-      if (!ref) throw new Error(`Missing observed ${action.name} control.`);
-      expect(await task("act", { observationId: observed.observationId, action: { type: action.type, ref, text: action.text } })).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
-      await user.notSee({ role: "button", label: "Allow once" });
-      await user.notSee({ role: "button", label: "Allow for this thread" });
+      const before = await witness();
+      for (const decision of ["Deny", "Allow once"]) {
+        const observed = await task("observe");
+        const ref = observed.elements?.find((element) => element.name === action.name)?.ref;
+        if (!ref) throw new Error(`Missing observed ${action.name} control.`);
+        let settled = false;
+        const pending = task("act", { observationId: observed.observationId, action: { type: action.type, ref, text: action.text } })
+          .then((result) => { settled = true; return result; });
+        await user.see({ text: "Allow browser action?" });
+        await user.see({ role: "button", label: "Allow once" });
+        await user.notSee({ role: "button", label: "Allow for this thread" });
+        expect(settled).toBe(false);
+        expect(await witness()).toMatchObject({ records: before.records, inputValue: before.inputValue });
+        await user.click({ role: "button", label: decision });
+        const result = await pending;
+        if (decision === "Deny") {
+          expect(result).toMatchObject({ ok: false, code: "user_denied", dispatched: false, mayHaveChangedState: false });
+          expect(await witness()).toMatchObject({ records: before.records, inputValue: before.inputValue });
+        } else expect(result).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+        await user.notSee({ role: "button", label: "Allow once" });
+        await user.notSee({ role: "button", label: "Share result" });
+      }
       if (action.type === "click") await probe.eventually(() => task("observe"), { within: 5_000, until: (value) => value.text?.includes("Saved 1") === true, label: "the approved save visibly completes before the next action" });
     }
     const completed = await probe.eventually(witness, { within: 5_000, until: (value) => value.records.length === 1 && value.inputValue === "ok", label: "the fixture receives only the approved click and text" });
     expect(completed.records).toEqual([{ method: "dom", count: 1, signedIn: false }]);
     expect((await task("observe")).text).toContain("Saved 1");
-    evidence.recordAssertionEvidence("Selecting the owner restores its tab and reuses its thread grant", "Native attachment, z-order and both panel dimensions recovered. The guest fixture saw no writes while hidden, then one DOM save and the expected field value without further approval; a new page observation verified Saved 1.", true);
+    evidence.recordAssertionEvidence("Selecting the owner restores its tab while inputs require separate approval", "Native attachment, z-order and both panel dimensions recovered. Reading reused the thread grant. Hidden, pending and denied inputs caused no writes; separately approved inputs produced one DOM save and the expected field value, and a new page observation verified Saved 1.", true);
   });
 
   await step("A paused background conversation cannot open through the legacy automation command", async () => {

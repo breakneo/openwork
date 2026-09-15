@@ -43,7 +43,8 @@ function observePage(id) {
     nodes.set(ref, element);
     elements.push({ ref, tag: element.tagName.toLowerCase(), role: element.getAttribute("role"), name: label.trim().slice(0, 200), disabled: element.hasAttribute("disabled"), sensitive: password, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
   }
-  const observation = { id, nodes, changed: false, observer: null, width: innerWidth, height: innerHeight, x: scrollX, y: scrollY };
+  const observation = { id, nodes, bounds: new Map(elements.map(({ ref, bounds }) => [ref, bounds])), activeElement: document.activeElement,
+    changed: false, observer: null, width: innerWidth, height: innerHeight, x: scrollX, y: scrollY };
   observation.observer = new MutationObserver(() => { observation.changed = true; });
   observation.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   globalThis[key] = observation;
@@ -59,10 +60,13 @@ function prepareAction(id, action) {
   if (action.ref && (!element || !element.isConnected)) throw new Error("stale_element");
   if (element?.matches('input[type="password"],input[autocomplete="one-time-code"]')) throw new Error("sign_in_required");
   if (element?.disabled || element?.getAttribute("aria-disabled") === "true") throw new Error("element_disabled");
+  if (action.type === "key" && state.activeElement !== document.activeElement) throw new Error("stale_observation");
   if (action.type === "key" && document.activeElement?.matches('input[type="password"],input[type="file"],input[autocomplete="one-time-code"]')) throw new Error("sign_in_required");
   let x = action.x, y = action.y;
   if (element) {
     const rect = element.getBoundingClientRect();
+    const bounds = state.bounds.get(action.ref);
+    if (!bounds || !["x", "y", "width", "height"].every((key) => rect[key] === bounds[key])) throw new Error("stale_observation");
     x = rect.x + rect.width / 2; y = rect.y + rect.height / 2;
     if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) throw new Error("element_outside_viewport");
     const hit = document.elementFromPoint(x, y);
@@ -204,7 +208,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         publish(tab.tabId, "needs_attention", "Browser control");
         const accepted = await confirm({ tabId: tab.tabId, title: "Allow browser control for this thread?",
           message: "Allow browser control across this thread's tabs?", approveLabel: "Allow for this thread",
-          detail: "Allows navigating allowed websites, reading, clicking, typing and scrolling using the signed-in browser, including potential website changes. Applies only to this thread until Take over, cancellation of a browser operation, its last tab closes or desktop restart. Organization restrictions and separate website-tool confirmations still apply.",
+          detail: "Allows navigating allowed websites, reading and scrolling using the signed-in browser. Clicking, typing, key input and website tools require separate confirmations. Applies only to this thread until Take over, cancellation of a browser operation, its last tab closes or desktop restart. Organization restrictions still apply.",
           signal: scope.signal, waitForVisible });
         checkNavigation(scope);
         if (!accepted) fail("user_denied", "Browser control was not allowed.");
@@ -384,7 +388,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         if (operation !== "act") fail("unknown_operation", "Use a supported browser operation.");
         const observed = state.observation;
         if (!observed || observed.id !== args.observationId || Date.now() - observed.at > OBSERVATION_MS || observed.revision !== tab.webMcpRevision || observed.url !== tab.view.webContents.getURL()) fail("stale_observation", "Observe the current page before acting.");
-        const action = args.action;
+        const action = structuredClone(args.action);
         if (!action || !["click", "fill", "key", "scroll"].includes(action.type)) fail("invalid_action", "Use click, fill, key or scroll.");
         if (action.type === "click" && !action.ref && !observed.digest) fail("image_required", "Observe with includeImage before clicking image coordinates.");
         if (action.type === "fill" && (typeof action.text !== "string" || action.text.length > 8000 || !action.ref)) fail("invalid_action", "Fill needs an observed editable reference and text of at most 8000 characters.");
@@ -392,9 +396,22 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         if (action.type === "key" && !Object.hasOwn(keys, action.key)) fail("invalid_key", "Use Enter, Tab, Escape, arrows, Backspace or Space. System shortcuts are unavailable.");
         if (action.type === "scroll" && (!Number.isFinite(action.deltaY) || Math.abs(action.deltaY) > 1200)) fail("invalid_scroll", "Scroll distance must be between -1200 and 1200.");
         if (!isVisible(tab.tabId)) fail("needs_attention", "Select this tab in its conversation's browser panel, then retry from a fresh observation.");
-        if (!await allowed(observed.url) || observed.revision !== tab.webMcpRevision || observed.url !== tab.view.webContents.getURL()) fail("page_changed", "The page changed or access was blocked while preparing the action. Observe again.");
+        let approvalMs = 0;
+        if (action.type !== "scroll") {
+          const target = action.type === "key" ? "focused control from this observation" : observed.elements.find((item) => item.ref === action.ref)?.name || `position ${action.x}, ${action.y}`;
+          publish(tab.tabId, "needs_attention", `Approve ${action.type}`);
+          const approvalStarted = Date.now();
+          const accepted = await confirm({ tabId: tab.tabId, title: "Allow browser action?",
+            message: `Allow ${action.type} on ${new URL(observed.url).origin}?`,
+            detail: `Target: ${target}.${action.ref ? ` Reference: ${action.ref}.` : ""}${action.type === "key" ? ` Key: ${action.key}.` : ""}${action.type === "fill" ? ` Text to enter: ${action.text}` : ""} This may submit information or change website data.`, signal: requestSignal });
+          approvalMs = Math.max(0, Date.now() - approvalStarted);
+          checkNavigation(navigationScope);
+          if (!accepted) fail("user_denied", "The browser action was not allowed.");
+          if (!isVisible(tab.tabId)) fail("needs_attention", "The tab is no longer visible. Select it and observe again before acting.");
+        }
+        if (!await allowed(observed.url) || state.observation !== observed || observed.revision !== tab.webMcpRevision || observed.url !== tab.view.webContents.getURL()) fail("page_changed", "The page changed or access was blocked while preparing the action. Observe again.");
         requestSignal.throwIfAborted();
-        if (Date.now() - observed.at > OBSERVATION_MS) fail("stale_observation", "The observation expired. Observe again.");
+        if (Date.now() - observed.at - approvalMs > OBSERVATION_MS) fail("stale_observation", "The observation expired. Observe again.");
         if (action.type === "click" && !action.ref && imageDigest(await captureObservation(tab.view.webContents, observed.viewport)) !== observed.digest) fail("stale_observation", "The image changed. Observe again before choosing coordinates.");
         checkNavigation(navigationScope);
         let point;
@@ -405,7 +422,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
           throw error;
         }
         checkNavigation(navigationScope);
-        if (state.observation !== observed || Date.now() - observed.at > OBSERVATION_MS || observed.revision !== tab.webMcpRevision || observed.url !== tab.view.webContents.getURL()) fail("stale_observation", "The page or observation changed while preparing the action. Observe again.");
+        if (state.observation !== observed || Date.now() - observed.at - approvalMs > OBSERVATION_MS || observed.revision !== tab.webMcpRevision || observed.url !== tab.view.webContents.getURL()) fail("stale_observation", "The page or observation changed while preparing the action. Observe again.");
         state.observation = null; requestSignal.throwIfAborted();
         if (!isVisible(tab.tabId)) fail("needs_attention", "The tab is no longer visible. Select it and observe again before acting.");
         publish(tab.tabId, "running", action.type);
