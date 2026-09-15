@@ -292,6 +292,7 @@ function nativeFixture(onSend = async () => {}) {
       const messages = histories.get(threadId) ?? [];
       const present = messages.some((message) => message.id === input.messageId);
       if (!present) {
+        await input.beforeInput?.();
         requests.push({ slug, threadId, ...input });
         const reply = { id: `assistant_${++sequence}`, role: "assistant", parentId: input.messageId, completedAt: null, error: null, parts: [{ type: "tool", callId: `call_${sequence}` }] };
         messages.push({ id: input.messageId, role: "user", parentId: null, parts: [...(input.context ? [{ type: "text", text: input.context, synthetic: true }] : []), { type: "text", text: input.prompt }] }, reply);
@@ -740,10 +741,12 @@ test("native collaboration recovers inbox-only acceptance and fences uncertain a
       const client = await fixture.clientFor(slug);
       return { ...client,
         getThreadSnapshot: async (...args) => ({ ...await client.getThreadSnapshot(...args), native }),
-        sendTurn: async (...args) => {
-          const stored = JSON.parse(await readFile(path.join(home, ".collaboration", "state.json"), "utf8"));
-          assert.equal(Object.values(stored.executions)[0].nativeAdmission, "attempted", "the attempt is durable before send");
-          const acceptance = await client.sendTurn(...args);
+        sendTurn: async (threadId, input) => {
+          const acceptance = await client.sendTurn(threadId, { ...input, beforeInput: async () => {
+            await input.beforeInput?.();
+            const stored = JSON.parse(await readFile(path.join(home, ".collaboration", "state.json"), "utf8"));
+            assert.equal(Object.values(stored.executions)[0].nativeAdmission, "attempted", "the attempt is durable before input");
+          } });
           native.turnOutcomes[messageId] = "succeeded";
           return acceptance;
         },

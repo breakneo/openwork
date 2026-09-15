@@ -499,6 +499,7 @@ test("native Event Worker preparation freezes its role, brief and explicit effor
     const client = {
       getThreadSnapshot: async () => snapshot,
       sendTurn: async (threadId, input) => {
+        await input.beforeInput?.();
         assert.equal(threadId, worker.threadId);
         assert.equal(worker.pendingTurn.nativeAdmission, "attempted");
         assert.equal(worker.pendingTurn.eventPromptPrefix, ALL_HANDS_BRIEF);
@@ -557,6 +558,7 @@ test("native Worker inbox recovery never resends and a durable attempt fences lo
     nativeSkills: { readHistory: async () => [], readInbox: async () => [frozen] },
     getThreadSnapshot: async () => snapshot,
     sendTurn: async (_threadId, input) => {
+      await input.beforeInput?.();
       sends++;
       assert.equal((await getWorker(directory, "scout", worker.id)).pendingTurn.nativeAdmission, "attempted");
       assert.equal(input.messageId, messageId);
@@ -613,6 +615,7 @@ test("selected Coworker Next survives collaboration restart, preserves native ID
     workspaceId: "ws_fixture", getThreadSnapshot: async () => snapshot,
     validateSkills: async (turn) => validateSkillSelections(turn, catalog, "ws_fixture", null),
     sendTurn: async (_threadId, input) => {
+      await input.beforeInput?.();
       sends++;
       assert.equal(input.prompt, "Keep my ordinary words");
       assert.deepEqual(input.skills, selected.skills);

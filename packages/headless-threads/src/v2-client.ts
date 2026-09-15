@@ -223,15 +223,17 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const timeoutMs = z.number().int().positive().parse(options.requestTimeoutMs ?? 15_000);
   const attempted = new Set<string>();
+  const preparing = new Set<string>();
   const headers = { Authorization: `Bearer ${options.token}`, ...(options.hostToken === undefined ? {} : { "X-OpenWork-Host-Token": options.hostToken }) };
   const bounded = (signal?: AbortSignal) => AbortSignal.any([AbortSignal.timeout(timeoutMs), ...[options.signal, signal].filter((value): value is AbortSignal => value !== undefined)]);
   const sessionPath = (id: string) => `/session/${encodeURIComponent(sessionID.parse(id))}`;
   const failure = (code: string, method: string, path: string, message: string, status?: number) => new HeadlessThreadError({ code, method, path: `${mount}${path}`, message, status });
 
-  async function request<T>(method: string, path: string, schema: z.ZodType<T>, signal?: AbortSignal, body?: unknown, status = 200): Promise<T> {
+  async function request<T>(method: string, path: string, schema: z.ZodType<T>, signal?: AbortSignal, body?: unknown, status = 200, beforeWrite?: () => void | Promise<void>): Promise<T> {
     let response: Response;
     const requestSignal = bounded(signal);
     requestSignal.throwIfAborted();
+    if (beforeWrite) await beforeWrite();
     try {
       response = await fetchImpl(`${baseUrl}${mount}${path}`, {
         method, headers: { ...headers, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
@@ -240,7 +242,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
         ...(method === "GET" ? {} : { keepalive: false }),
       });
     } catch {
-      throw failure("request_failed", method, path, "Native v2 request failed; a write may have been admitted.");
+      throw failure("request_failed", method, path, method === "GET" ? "Native v2 observation failed. Execution status is unavailable." : "Native v2 request failed; a write may have been admitted.");
     }
     if (!response.ok) {
       await response.body?.cancel();
@@ -360,28 +362,32 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
    * Selected skills require live catalog membership and native session permission.
    * This does not atomically pair context with a prompt or set tool policies.
    */
-  async function admitInput(id: string, value: NativeV2Input, signal?: AbortSignal): Promise<NativeV2Admission> {
+  async function admitInput(id: string, value: NativeV2Input, signal?: AbortSignal, beforeWrite?: () => void | Promise<void>): Promise<NativeV2Admission> {
     const input = inputSchema.parse(value);
     const path = `${sessionPath(id)}/${input.type === "user" ? "prompt" : "synthetic"}`;
     const observed = await reconcileAdmission(id, input.id, signal);
     if (observed.state !== "unobserved") return matching(observed, input, path);
     const key = JSON.stringify([id, input.id]);
-    if (attempted.has(key)) throw failure("admission_unknown", "POST", path, "This ID was already submitted. Reconcile it; do not resend.");
+    if (attempted.has(key) || preparing.has(key)) throw failure("admission_unknown", "POST", path, "This ID was already submitted or reserved. Reconcile it; do not resend.");
     if (input.skills?.length) await checkSkills(id, input.skills, signal);
     // Permission evaluation is asynchronous; another call may have submitted meanwhile.
-    if (attempted.has(key)) throw failure("admission_unknown", "POST", path, "This ID was already submitted. Reconcile it; do not resend.");
+    if (attempted.has(key) || preparing.has(key)) throw failure("admission_unknown", "POST", path, "This ID was already submitted or reserved. Reconcile it; do not resend.");
     signal?.throwIfAborted();
     options.signal?.throwIfAborted();
-    attempted.add(key);
+    preparing.add(key);
     try {
       const result = await request("POST", path, z.object({ data: z.union([userReceipt, syntheticReceipt]) }), signal, {
         id: input.id, text: input.text, delivery: input.delivery ?? "queue", resume: input.resume ?? input.type === "user",
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
         ...(input.skills?.length ? { skills: input.skills } : {}),
+      }, 200, async () => {
+        await beforeWrite?.();
+        attempted.add(key);
       });
       if (result.data.sessionID !== id || result.data.delivery !== (input.delivery ?? "queue")) throw failure("invalid_response", "POST", path, "Admission receipt scope or delivery did not match.");
       return matching({ state: "accepted", receipt: result.data }, input, path);
     } catch (error) {
+      if (!attempted.has(key)) throw error;
       if (error instanceof HeadlessThreadError && (error.code === "input_conflict" || [400, 401, 403, 404, 422].includes(error.status ?? 0))) throw error;
       // A fresh read deadline can observe a POST whose own deadline expired.
       // Caller/client cancellation still applies; neither path repeats the POST.
@@ -392,7 +398,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
         if (reconciliationError instanceof HeadlessThreadError && reconciliationError.code === "input_conflict") throw reconciliationError;
       }
       throw failure("admission_unknown", "POST", path, "Native admission could not be confirmed. Keep the ID and reconcile; do not resend.");
-    }
+    } finally { preparing.delete(key); }
   }
 
   /** Observed idle is not success, queue cancellation, or native control revocation. */

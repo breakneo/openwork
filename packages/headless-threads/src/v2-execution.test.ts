@@ -392,6 +392,55 @@ test("missing, revoked, denied and ask skills never park context or submit a use
   assert.equal(state.inbox.length, 0);
 });
 
+test("input write boundary leaves preflight failures prepared and preserves Stop", async (t) => {
+  const { options, state } = await fixture(t);
+  let prepared = true, marks = 0, historyReads = 0;
+  const client = createHeadlessThreadClientV2({ ...options, fetch: async (url, init) => {
+    const path = new URL(url).pathname;
+    if (prepared && path.endsWith("/message") && ++historyReads === 4) throw new Error("Fixture observation unavailable");
+    if (/\/(prompt|synthetic)$/.test(path)) assert.equal(marks, 1);
+    return fetch(url, init);
+  } });
+  const input = { messageId: "msg_preflight", prompt: "Hello", beforeInput: async () => { await Promise.resolve(); marks++; } };
+  await assert.rejects(client.sendTurn(sid, input), { method: "GET" });
+  assert.equal(marks, 0);
+  assert.equal(state.seen.filter((item) => item.method !== "GET").length, 0);
+  assert.equal((await client.abortThread(sid)).accepted, true);
+  prepared = false;
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(client.sendTurn(sid, { ...input, signal: cancelled.signal }));
+  assert.equal(marks, 0);
+  await assert.rejects(client.sendTurn(sid, { ...input, beforeInput: async () => { throw new Error("Fixture persistence unavailable"); } }), /Fixture persistence unavailable/);
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 0);
+  await client.sendTurn(sid, input);
+  assert.equal(marks, 1);
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 1);
+});
+
+test("paired context keeps its own uncertainty and cannot replay after preflight failure", async (t) => {
+  for (const lost of [false, true]) {
+    const { options, state } = await fixture(t);
+    let marks = 0;
+    const client = createHeadlessThreadClientV2({ ...options, fetch: async (url, init) => {
+      const path = new URL(url).pathname;
+      if (marks && !lost && init?.method === "GET" && path.endsWith("/active")) throw new Error("Fixture observation unavailable");
+      if (/\/(prompt|synthetic)$/.test(path)) assert.equal(marks, 1);
+      return fetch(url, init);
+    } });
+    state.lose = lost; state.persist = !lost;
+    const input = { messageId: "msg_context_boundary", prompt: "Hello", context: "Reference", beforeInput: async () => { await Promise.resolve(); marks++; } };
+    await assert.rejects(client.sendTurn(sid, input), lost ? { code: "admission_unknown" } : { method: "GET" });
+    assert.equal(marks, 1);
+    const observer = createHeadlessThreadClientV2(options);
+    if (lost) await assert.rejects(observer.abortThread(sid), { code: "stop_unconfirmed" });
+    else assert.equal((await observer.abortThread(sid)).accepted, true);
+    await assert.rejects(observer.sendTurn(sid, input), { code: "admission_unknown" });
+    assert.equal(state.seen.filter((item) => item.path.endsWith("/synthetic")).length, 1);
+    assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 0);
+  }
+});
+
 test("unknown admission stays blocked, recovery never resends, and unsupported masks perform no writes", async (t) => {
   const { client, state } = await fixture(t);
   await assert.rejects(client.sendTurn(sid, { prompt: "Hello", tools: { shell: false } }), { code: "unsupported_tool_mask" });

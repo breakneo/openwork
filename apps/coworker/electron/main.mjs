@@ -1080,10 +1080,10 @@ async function ordinaryGroup(id) {
 
 async function collaborationClient(slug, { kind = "reply", requestText, model, agent, observationOnly = false, signal } = {}) {
   maintenanceAdmission.assertOpen();
-  const coworker = slug === ".coordinator" ? await ensureCoordinatorWorkspace() : await getCoworker(coworkersDir, slug);
+  const coworker = slug === ".coordinator" ? observationOnly ? await readCoordinator(coworkersDir) : await ensureCoordinatorWorkspace() : await getCoworker(coworkersDir, slug);
   const handle = await ensurePlatformServer();
-  if (!coworker.workspaceId) throw new Error("The AI service is not ready. Your work has been kept.");
-  if (slug !== ".coordinator") {
+  if (!coworker?.workspaceId) throw new Error("The AI service is not ready. Your work has been kept.");
+  if (!observationOnly && slug !== ".coordinator") {
     const server = await ensureToolsServer();
     await installNativeCoworkerPlugins(coworker, server);
     if (!toolsRegistered.has(slug)) await registerCoworkerTools(coworker);

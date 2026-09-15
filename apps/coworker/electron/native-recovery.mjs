@@ -52,7 +52,7 @@ export function nativeTurnReceipt(snapshot, messageId) {
 }
 
 /** Only an explicitly prepared, never-attempted input may be sent. The durable
- * marker precedes every native write (including paired memory context). Older
+ * marker precedes every native input write (including paired memory context). Older
  * records without a phase are uncertain, not permission to submit again. */
 export async function dispatchNativeTurn({ client, threadId, turn, markAttempted, signal }) {
   const snapshot = await client.getThreadSnapshot(threadId, { signal });
@@ -70,10 +70,12 @@ export async function dispatchNativeTurn({ client, threadId, turn, markAttempted
   }
   if (client.prepareSkillOrigin) await client.prepareSkillOrigin(turn, signal);
   signal?.throwIfAborted();
-  await markAttempted();
-  signal?.throwIfAborted();
   const { messageId, prompt, agent, model, context, skills } = turn;
-  return client.sendTurn(threadId, { messageId, prompt, agent, ...(skills !== undefined ? { skills } : {}), ...(model ? { model } : {}), ...(context ? { context } : {}), signal });
+  let marked = false;
+  const beforeInput = async () => { await markAttempted(); marked = true; };
+  const acceptance = await client.sendTurn(threadId, { messageId, prompt, agent, ...(skills !== undefined ? { skills } : {}), ...(model ? { model } : {}), ...(context ? { context } : {}), beforeInput, signal });
+  if (!marked && acceptance.alreadyPresent) await markAttempted();
+  return acceptance;
 }
 
 /** Observe the exact accepted input, even while it exists only in the inbox.

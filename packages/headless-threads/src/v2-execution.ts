@@ -295,33 +295,35 @@ export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Opti
       // client checks again immediately before the user POST, including direct callers.
       if (skills.length) await native.checkSkills(threadId, skills, input.signal);
       const metadata = { headlessTurn: { version: 1, messageId, contextId, skillIds, previousMessageId: before.at(-1)?.id ?? null, previousIdleAt: session.time.idle ?? null, previousOutcome: session.outcome ?? null, ...chosen } };
-      await options.onIntent?.({ threadId, messageId });
+      let marked = false;
+      const admit = async (value: NativeV2Input) => {
+        await native.admitInput(threadId, value, input.signal, async () => {
+          input.signal?.throwIfAborted(); options.signal?.throwIfAborted();
+          if (!marked) {
+            await options.onIntent?.({ threadId, messageId });
+            input.signal?.throwIfAborted(); options.signal?.throwIfAborted();
+            await input.beforeInput?.();
+            marked = true;
+          }
+          admissions.set(scope, { messageId, uncertain: true, uncertainInput: value });
+          submittedInputs.add(`${scope}/${messageId}`);
+        });
+        admissions.set(scope, { messageId, uncertain: false });
+      };
       // Both inputs steer an idle session. With no earlier pending work, native
       // promotion delivers both before the first step. Queueing context would
       // incorrectly start a separate provider turn before the user's prompt.
       if (contextId) {
         input.signal?.throwIfAborted(); options.signal?.throwIfAborted();
         const contextInput: NativeV2Input = { id: contextId, type: "synthetic", text: input.context ?? "", metadata, delivery: "steer", resume: false };
-        admissions.set(scope, { messageId, uncertain: true, uncertainInput: contextInput });
-        await native.admitInput(threadId, contextInput, input.signal);
-        admissions.set(scope, { messageId, uncertain: false });
+        await admit(contextInput);
         if (Object.hasOwn(await native.readActive(input.signal), threadId)) fail("session_busy", threadId, "Execution started before the paired prompt was admitted. Stop and reconcile the context.", messageId);
       }
       input.signal?.throwIfAborted(); options.signal?.throwIfAborted();
       const promptInput: NativeV2Input = { id: messageId, type: "user", text: input.prompt, ...(skills.length ? { skills } : {}), metadata, delivery: "steer", resume: true };
-      admissions.set(scope, { messageId, uncertain: true, uncertainInput: promptInput });
-      submittedInputs.add(`${scope}/${messageId}`);
-      await native.admitInput(threadId, promptInput, input.signal);
-      admissions.set(scope, { messageId, uncertain: false });
+      await admit(promptInput);
       return { threadId, messageId, acceptedAt: now(), messageCountBefore: before.length, alreadyPresent: false };
     } catch (error) {
-      // A late catalog revocation or permission refusal precedes the prompt
-      // POST. Keep paired context stoppable without inventing an uncertain write.
-      if (error instanceof HeadlessThreadError && ["skill_unavailable", "skill_denied", "skill_permission_required"].includes(error.code)
-        && admissions.get(scope)?.messageId === messageId && admissions.get(scope)?.uncertainInput?.type === "user") {
-        admissions.set(scope, { messageId, uncertain: false });
-        submittedInputs.delete(`${scope}/${messageId}`);
-      }
       if (error instanceof HeadlessThreadError && error.method === "POST" && /\/(prompt|synthetic)$/.test(error.path) && [400, 401, 403, 404, 422].includes(error.status ?? 0) && admissions.get(scope)?.messageId === messageId) admissions.set(scope, { messageId, uncertain: false });
       if (error instanceof HeadlessThreadError && !z.object({ threadId: z.string(), messageId: z.string() }).safeParse(error.body).success) throw new HeadlessThreadError({ code: error.code, message: error.message, method: error.method, path: error.path, ...(error.status === null ? {} : { status: error.status }), body: { threadId, messageId } });
       throw error;

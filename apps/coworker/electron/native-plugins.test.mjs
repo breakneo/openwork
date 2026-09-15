@@ -437,6 +437,7 @@ test("native main binds Worker skills to admitted provenance and consultations t
     createHeadlessThreadClient: (options) => ({
       getThreadSnapshot: async (threadId) => ({ threadId, messages: [], native: { engine: "v2" } }),
       sendTurn: async (threadId, turn) => {
+        await turn.beforeInput?.();
         await options.fetch(`${handle.url}/workspace/${workspaceId}/opencode2/api/session/${threadId}/prompt`, { method: "POST", body: JSON.stringify({ id: turn.messageId, text: turn.prompt, skills: turn.skills }) });
         return { threadId, messageId: turn.messageId };
       },

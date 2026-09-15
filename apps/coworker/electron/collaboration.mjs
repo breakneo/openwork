@@ -423,7 +423,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
     try {
       const setupSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(setupTimeoutMs)]);
       await withAbort(validateOwner(entry.owner), setupSignal);
-      const client = await withAbort(track(clientFor(entry.owner.slug, { kind: entry.continuation ? "review" : "reply", requestText: entry.requestText, model: entry.model, agent: entry.agent, observationOnly: Boolean(entry.sentAt) || nativeAdmissionPhase(entry, false) === "attempted", signal: setupSignal })), setupSignal);
+      const client = await withAbort(track(clientFor(entry.owner.slug, { kind: entry.continuation ? "review" : "reply", requestText: entry.requestText, model: entry.model, agent: entry.agent, observationOnly: nativeAdmissionPhase(entry, false) === "attempted", signal: setupSignal })), setupSignal);
       running.client = client;
       if (entry.workspaceId && client.workspaceId !== entry.workspaceId) throw new Error("The original workspace is no longer available. This execution will not be moved or replayed.");
       if (entry.coworkerCreatedAt && client.coworkerCreatedAt !== entry.coworkerCreatedAt) throw new Error("The original coworker is no longer available. This execution will not be moved or replayed.");

@@ -13,6 +13,7 @@ export interface CreateThreadInput extends Shared.CreateThreadInput {
 }
 
 export interface HeadlessThreadTurnInput extends Shared.HeadlessThreadTurnInput {
+  beforeInput?: () => void | Promise<void>;
   /** IDs checked against the live catalog and native session permissions. */
   skills?: Array<{ id: string }>;
 }
