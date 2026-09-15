@@ -9,6 +9,9 @@ import { resolveDashboardMcpApp } from "../src/react-app/domains/dashboard/dashb
 import { createMcpAppActions } from "../src/components/chat/mcp-app-origin";
 import type { McpAppSandboxViewProps } from "../src/components/chat/mcp-app-frame";
 import type { DashboardMcpAppEntry } from "../src/react-app/domains/dashboard/granted-dashboard-store";
+import type { GeneratedArtifactView, GeneratedArtifactViewRevision } from "@openwork/types/workflows";
+import { liveGeneratedAppCacheScope, liveGeneratedAppEntry, nextViewerDayBoundary } from "../src/react-app/domains/apps/live-generated-app-model";
+import { DASHBOARD_AUTO_REFRESH_INTERVAL_MS } from "../src/react-app/domains/dashboard/dashboard-tile-cache";
 
 let sandboxView: McpAppSandboxViewProps | undefined;
 
@@ -34,6 +37,23 @@ GlobalRegistrator.register({ url: "http://localhost/" });
 afterAll(() => GlobalRegistrator.unregister());
 const { WorkspaceProvider } = await import("../src/react-app/shell/workspace-provider");
 const { McpAppTile } = await import("../src/react-app/domains/dashboard/mcp-app-tile");
+let viewerScope = ["fixture-host", "fixture-member", "fixture-org"];
+mock.module("../src/react-app/domains/apps/use-apps", () => ({
+  useAppsClient: () => ({ client: {}, orgId: viewerScope[2], scope: viewerScope }),
+}));
+const { LiveGeneratedApp } = await import("../src/react-app/domains/apps/live-generated-app");
+const liveRevision: GeneratedArtifactViewRevision = {
+  id: "avr_fixture", artifactViewId: "arv_fixture", resourceUri: "ui://openwork/artifacts/arv_fixture/avr_fixture",
+  buildStatus: "ready", sourceDigest: "source", resourceDigest: "resource", outputSchemaDigest: "output",
+  csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, diagnostics: [],
+  compilerName: "fixture", compilerVersion: "1", reactVersion: "19", compiledHtmlBytes: 10,
+  retiredAt: null, createdAt: "2026-09-14T00:00:00.000Z",
+};
+const liveView: GeneratedArtifactView = {
+  id: "arv_fixture", configObjectId: "cob_fixture", title: "Fixture", description: null, dataMode: "live",
+  status: "active", activeRevisionId: liveRevision.id, revisions: [liveRevision],
+  createdAt: liveRevision.createdAt, updatedAt: liveRevision.createdAt,
+};
 
 const resource: OpenworkMcpAppResource = {
   serverName: "fixture", toolName: "render", resourceUri: "ui://fixture/view.html", html: "<p>Fixture</p>",
@@ -597,6 +617,287 @@ test.each(["result", "connection"])("switching viewers never exposes the prior v
     container.remove();
     window.localStorage.removeItem("viewer-one");
     window.localStorage.removeItem("viewer-two");
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test.each(["pending", "ready"])("equivalent launch input survives dashboard rerenders while %s", async (phase) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const pending = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  const released: string[] = [];
+  let calls = 0;
+  let resolutions = 0;
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, launchId: `stable-${++resolutions}` } }),
+    callMcpAppTool: async () => { calls++; return pending.promise; },
+    releaseMcpApp: async (_workspace, id) => { released.push(id); return { released: true }; },
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const scope = `stable-input-${phase}`;
+  let renderCount = 0;
+  const input = () => ++renderCount % 2
+    ? { timeZone: "Asia/Tokyo", filters: { limit: 3, sources: ["primary", "secondary"] } }
+    : { filters: { sources: ["primary", "secondary"], limit: 3 }, timeZone: "Asia/Tokyo" };
+  const render = () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <McpAppTile entry={{ kind: "mcp", id: "stable-input", title: "Fixture", serverName: resource.serverName,
+      toolName: resource.toolName, projectedToolName: "fixture_render", resourceUri: resource.resourceUri,
+      autoLaunch: true, launchArguments: input() }} cacheScopeKey={scope}
+      fallbackEndpoints={[{ client, workspaceId: "fixture" }]} onAutoLaunchEnabled={() => {}} />
+  </WorkspaceProvider>);
+  try {
+    await act(async () => render());
+    if (phase === "ready") await act(async () => pending.resolve({ content: [] }));
+    const initialArguments = sandboxView?.inputArguments;
+    const initialOrigin = sandboxView?.origin;
+    for (let i = 0; i < 10; i++) await act(async () => render());
+    expect(calls).toBe(1);
+    expect(resolutions).toBe(1);
+    expect(released).toEqual([]);
+    if (phase === "pending") await act(async () => pending.resolve({ content: [] }));
+    expect(sandboxView?.origin.readOnly).toBe(false);
+    expect(container.textContent).not.toContain("run required");
+    if (phase === "ready") {
+      expect(sandboxView?.inputArguments).toBe(initialArguments);
+      expect(sandboxView?.origin).toBe(initialOrigin);
+    }
+    await refreshCompactTile(container);
+    expect(calls).toBe(2);
+    expect(resolutions).toBe(2);
+    expect(released).toEqual(["stable-1"]);
+  } finally {
+    await act(async () => pending.resolve({ content: [] }));
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem(scope);
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test.each(["pending", "ready"])("changed arguments with the same tile ID retire the %s invocation and cannot reuse its last good data", async (phase) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const first = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  const second = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  const requests: unknown[] = [];
+  const released: string[] = [];
+  let resolutions = 0;
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_fixture", resourceUri: liveRevision.resourceUri, launchId: `changed-${++resolutions}` } }),
+    callMcpAppTool: async (_workspace, request) => { requests.push(request.arguments); return requests.length === 1 ? first.promise : second.promise; },
+    releaseMcpApp: async (_workspace, id) => { released.push(id); return { released: true }; },
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const scope = `changed-input-${phase}`;
+  const render = (timeZone: string) => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <McpAppTile entry={{ ...liveGeneratedAppEntry(liveView, liveRevision, timeZone), id: "same-id" }} cacheScopeKey={scope} />
+  </WorkspaceProvider>);
+  try {
+    await act(async () => render("UTC"));
+    if (phase === "ready") await act(async () => first.resolve({ content: [{ type: "text", text: "first-input" }] }));
+    await act(async () => render("Asia/Tokyo"));
+    expect(requests).toEqual([{ timeZone: "UTC" }, { timeZone: "Asia/Tokyo" }]);
+    expect(released).toEqual(["changed-1"]);
+    expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+    await act(async () => first.resolve({ content: [{ type: "text", text: "first-input" }] }));
+    expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+    await act(async () => second.resolve({ content: [{ type: "text", text: "second-input" }] }));
+    expect(sandboxView?.result?.content).toEqual([{ type: "text", text: "second-input" }]);
+    expect(sandboxView?.origin.readOnly).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem(scope);
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test.each(["requiresApproval", "launchApproved"])("same-ID argument changes never replay a manual tile (%s)", async (policy) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const requests: unknown[] = [];
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, launchId: "manual-input" } }),
+    callMcpAppTool: async (_workspace, request) => { requests.push(request.arguments); return { content: [] }; },
+    releaseMcpApp: async () => ({ released: true }),
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const scope = `manual-input-${policy}`;
+  const render = (query: string) => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <McpAppTile entry={{ kind: "mcp", id: "same-manual-id", title: "Fixture", serverName: resource.serverName,
+      toolName: resource.toolName, projectedToolName: "fixture_render", resourceUri: resource.resourceUri,
+      autoLaunch: true, requiresApproval: policy === "requiresApproval", launchApproved: policy === "launchApproved", launchArguments: { query } }} cacheScopeKey={scope} />
+  </WorkspaceProvider>);
+  const run = () => {
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Run Fixture"]');
+    if (!button) throw new Error("Missing manual Run button");
+    button.click();
+  };
+  try {
+    await act(async () => render("first"));
+    expect(requests).toEqual([]);
+    await act(async () => run());
+    expect(requests).toEqual([{ query: "first" }]);
+    await act(async () => render("second"));
+    expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+    for (let i = 0; i < 5; i++) await act(async () => { render("second"); window.dispatchEvent(new Event("focus")); });
+    expect(requests).toEqual([{ query: "first" }]);
+    await act(async () => run());
+    expect(requests).toEqual([{ query: "first" }, { query: "second" }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem(scope);
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test.each(["success", "failure"])("generated dashboard refresh is bounded across rerenders, timer and focus (%s)", async (outcome) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  let now = Date.parse("2026-09-14T12:00:00Z");
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const interval = spyOn(window, "setInterval");
+  const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+  let hidden = false;
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+  const pending = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  let calls = 0;
+  let resolutions = 0;
+  let failing = outcome === "failure";
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_fixture", resourceUri: liveRevision.resourceUri, launchId: `timed-${++resolutions}` } }),
+    callMcpAppTool: async () => {
+      if (++calls === 2) return pending.promise;
+      if (calls > 2 && failing) throw new OpenworkServerError(503, "server_unavailable", "Temporary failure");
+      return { content: [] };
+    },
+    releaseMcpApp: async () => ({ released: true }),
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const render = () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <LiveGeneratedApp view={{ ...liveView }} revision={{ ...liveRevision }} fallbackEndpoints={[{ client, workspaceId: "fixture" }]} />
+  </WorkspaceProvider>);
+  const focus = () => { window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); };
+  try {
+    await act(async () => render());
+    const initialOrigin = sandboxView?.origin;
+    for (let i = 0; i < 10; i++) await act(async () => { render(); focus(); });
+    expect(calls).toBe(1);
+    expect(sandboxView?.origin).toBe(initialOrigin);
+    const timers = interval.mock.calls.filter(([, delay]) => delay === DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
+    expect(timers).toHaveLength(1);
+    const tick = timers[0]?.[0];
+    if (typeof tick !== "function") throw new Error("Missing dashboard timer");
+    now += DASHBOARD_AUTO_REFRESH_INTERVAL_MS - 1;
+    await act(async () => { tick(); focus(); });
+    expect(calls).toBe(1);
+    now++;
+    hidden = true;
+    await act(async () => { tick(); focus(); });
+    expect(calls).toBe(1);
+    hidden = false;
+    await act(async () => { tick(); focus(); });
+    expect(calls).toBe(2);
+    for (let i = 0; i < 5; i++) await act(async () => { render(); tick(); focus(); });
+    expect(calls).toBe(2);
+    await act(async () => {
+      if (outcome === "success") pending.resolve({ content: [] });
+      else pending.reject(new OpenworkServerError(503, "server_unavailable", "Temporary failure"));
+    });
+    expect(container.querySelector("[data-sandbox-view]")).not.toBeNull();
+    for (let i = 0; i < 5; i++) await act(async () => focus());
+    expect(calls).toBe(2);
+    failing = false;
+    now += DASHBOARD_AUTO_REFRESH_INTERVAL_MS;
+    await act(async () => { tick(); focus(); });
+    expect(calls).toBe(3);
+    expect(resolutions).toBe(3);
+    await refreshCompactTile(container);
+    expect(calls).toBe(4);
+    expect(sandboxView?.origin.readOnly).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.removeItem(liveGeneratedAppCacheScope(viewerScope));
+    clock.mockRestore();
+    interval.mockRestore();
+    if (hiddenDescriptor) Object.defineProperty(document, "hidden", hiddenDescriptor);
+    else Reflect.deleteProperty(document, "hidden");
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+});
+
+test.each(["timer", "focus"])("generated day rollover via %s and caller changes isolate late results", async (trigger) => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const boundary = nextViewerDayBoundary(zone, Date.parse("2026-09-14T12:00:00Z"));
+  let now = boundary - 1_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const timeout = spyOn(globalThis, "setTimeout");
+  const first = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  const third = Promise.withResolvers<{ content: Array<Record<string, unknown>> }>();
+  const initialScope = viewerScope;
+  const nextScope = ["fixture-host", "another-member", "fixture-org"];
+  let calls = 0;
+  let resolutions = 0;
+  const released: string[] = [];
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_fixture", resourceUri: liveRevision.resourceUri, launchId: `day-${++resolutions}` } }),
+    callMcpAppTool: async () => {
+      if (++calls === 1) return first.promise;
+      if (calls === 3) return third.promise;
+      return { content: [{ type: "text", text: "new-day" }] };
+    },
+    releaseMcpApp: async (_workspace, id) => { released.push(id); return { released: true }; },
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const render = () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+    <LiveGeneratedApp view={{ ...liveView }} revision={{ ...liveRevision }} />
+  </WorkspaceProvider>);
+  try {
+    await act(async () => render());
+    expect(calls).toBe(1);
+    now = boundary;
+    await act(async () => {
+      if (trigger === "focus") window.dispatchEvent(new Event("focus"));
+      else {
+        const tick = timeout.mock.calls.find(([, delay]) => delay === 1_000)?.[0];
+        if (typeof tick !== "function") throw new Error("Missing local midnight timer");
+        tick();
+      }
+    });
+    expect(calls).toBe(2);
+    expect(released).toEqual(["day-1"]);
+    expect(sandboxView?.result?.content).toEqual([{ type: "text", text: "new-day" }]);
+    await act(async () => first.resolve({ content: [{ type: "text", text: "late-old-day" }] }));
+    expect(sandboxView?.result?.content).toEqual([{ type: "text", text: "new-day" }]);
+    viewerScope = nextScope;
+    await act(async () => render());
+    expect(calls).toBe(3);
+    expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+    expect(window.localStorage.getItem(liveGeneratedAppCacheScope(nextScope))).toBeNull();
+    await act(async () => third.resolve({ content: [{ type: "text", text: "another-viewer" }] }));
+    expect(sandboxView?.result?.content).toEqual([{ type: "text", text: "another-viewer" }]);
+    for (let i = 0; i < 5; i++) await act(async () => { render(); window.dispatchEvent(new Event("focus")); });
+    expect(calls).toBe(3);
+    expect(sandboxView?.origin.readOnly).toBe(false);
+    expect(window.localStorage.getItem(liveGeneratedAppCacheScope(initialScope))).not.toContain("late-old-day");
+    expect(window.localStorage.getItem(liveGeneratedAppCacheScope(nextScope))).not.toContain("new-day");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    viewerScope = initialScope;
+    window.localStorage.removeItem(liveGeneratedAppCacheScope(initialScope));
+    window.localStorage.removeItem(liveGeneratedAppCacheScope(nextScope));
+    clock.mockRestore();
+    timeout.mockRestore();
     Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
   }
 });
