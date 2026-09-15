@@ -1,11 +1,13 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
 import { denFetch, evalIn, fill, signInInBrowser, waitFor, type DenSession } from "@openwork/behaviors";
-import { browserScript, clickTarget, connect, debuggerUrlFor, evaluate, listTargets, navigate, type Surface } from "@openwork/cdp";
+import { browserScript, captureBrowserFilm, clickAt, connect, debuggerUrlFor, evaluate, listTargets, navigate, reload, type Surface } from "@openwork/cdp";
 import { chrome } from "@openwork/hosts";
-import { eventually, screenshot, test } from "@openwork/testkit";
-import { bootAcmeDemoEng105 } from "../../worlds/acme-demo-eng105.ts";
+import { screenshot } from "@openwork/test-evidence";
+import { eventually, test } from "@openwork/testkit";
+import { assertReleaseSource, bootAcmeDemoEng105 } from "../../worlds/acme-demo-eng105.ts";
 
 // Den Web authors references; the two real desktops execute the referenced Apps.
 // No Workflow snapshot, shared calendar credential, API-authored dashboard, or
@@ -14,6 +16,16 @@ import { bootAcmeDemoEng105 } from "../../worlds/acme-demo-eng105.ts";
 const runName = new Date().toISOString().replaceAll(":", "-");
 const reportDirectory = fileURLToPath(new URL(`../../reports/demo/eng105-proof/${runName}/`, import.meta.url));
 const captures: { name: string; at: string; actor: string; status: string }[] = [];
+const provenance = {
+  lane: "local-release-source", buildKind: "release-source", desktopVersion: "0.18.46", desktopTag: "v0.18.46",
+  releaseSha: "a0d6bd1de8debf4f09d22b8538e124b2ff45b339",
+  denBuildIdentity: "v0.18.46 release source a0d6bd1de8debf4f09d22b8538e124b2ff45b339",
+  desktopSourceSha: "a0d6bd1de8debf4f09d22b8538e124b2ff45b339",
+  denSourceSha: "a0d6bd1de8debf4f09d22b8538e124b2ff45b339",
+  packagedBinaryVerification: false,
+  laneReason: "Required demo-org seed/world has no Daytona placement implementation; Daytona service itself reachable; local source fallback explicitly authorized",
+  overlaySha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: fileURLToPath(new URL("../..", import.meta.url)), encoding: "utf8" }).trim(),
+};
 const boardName = "Acme Day";
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -40,6 +52,29 @@ async function api(session: DenSession, orgId: string, path: string) {
   // Never include raw response bodies/headers: they can contain credentials.
   expect(result.response.status, `GET ${path}`).toBe(200);
   return result.body;
+}
+async function clickTarget(surface: Surface, target: { role?: string; label?: string | RegExp; testId?: string }) {
+  const expression = target.label instanceof RegExp ? target.label.source : null;
+  const flags = target.label instanceof RegExp ? target.label.flags : "";
+  const exact = typeof target.label === "string" ? target.label : "";
+  const point = await eventually(() => evalIn(surface, browserScript((role, testId, exact, expression, flags) => {
+    const selector = testId ? `[data-testid="${testId}"]` : role === "button" ? 'button,[role="button"]' : `[role="${role}"]`;
+    const found = [...document.querySelectorAll<HTMLElement>(selector)].find(element => {
+      const label = (element.getAttribute("aria-label") || (element instanceof HTMLInputElement ? [...element.labels ?? []].map(label => label.textContent).join(" ") : "") || element.textContent || "").trim();
+      const box = element.getBoundingClientRect();
+      return box.width > 0 && box.height > 0 && !element.hasAttribute("disabled") && element.getAttribute("aria-disabled") !== "true"
+        && (testId || (expression ? new RegExp(expression, flags).test(label) : label === exact));
+    });
+    if (!found) return null;
+    found.scrollIntoView({ block: "center" });
+    const box = found.getBoundingClientRect();
+    const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const hit = document.elementFromPoint(point.x, point.y);
+    return hit && (hit === found || found.contains(hit)) ? point : null;
+  }, [target.role ?? "", target.testId ?? "", exact, expression, flags])),
+  { within: 60_000, until: point => point !== null, label: `clickable ${target.testId ?? String(target.label)}` });
+  if (!point) throw new Error("Control not visible for trusted pointer input");
+  await clickAt(surface, point);
 }
 async function frame(surface: Surface, title: string): Promise<Surface & AsyncDisposable> {
   return eventually(async () => {
@@ -87,6 +122,7 @@ async function checkpoint(surface: Surface, name: string) {
     await mkdir(directory, { recursive: true });
     await writeFile(`${directory}/${name}.png`, artifact.png);
     await writeFile(`${directory}/captures.json`, JSON.stringify(captures, null, 2));
+    await writeFile(`${directory}/provenance.json`, JSON.stringify(provenance, null, 2));
   }
 }
 async function see(surface: Surface, value: string) {
@@ -102,7 +138,7 @@ async function refresh(surface: Surface, title: string) {
   await eventually(calls, { within: 90_000, until: count => count > before, label: `${title} Refresh made a completed host tool request` });
 }
 
-interface CalendarView { name: string; identity: string; generation: number; meetings: string[] }
+interface CalendarView { name: string; identity: string; generation: number; meetings: string[]; instanceId: string; generatedAt: string }
 async function calendarView(surface: Surface): Promise<CalendarView> {
   return eventually(async () => {
     // These selectors inspect visible UI supplied by the real provider, not an
@@ -112,8 +148,10 @@ async function calendarView(surface: Surface): Promise<CalendarView> {
       identity: document.querySelector('[data-testid="calendar-identity"]')?.textContent?.trim() ?? "",
       generation: Number(document.querySelector('[data-testid="calendar-generation"]')?.textContent?.match(/\d+/)?.[0]),
       meetings: [...document.querySelectorAll('[data-testid="calendar-meeting-title"]')].map(node => node.textContent?.trim() ?? ""),
+      instanceId: document.querySelector('[data-testid="calendar-instance-id"]')?.textContent?.trim() ?? "",
+      generatedAt: document.querySelector('[data-testid="calendar-generated-at"]')?.textContent?.trim() ?? "",
     }));
-    if (!result.name || !result.identity || !Number.isFinite(result.generation) || !result.meetings.length) {
+    if (!result.name || !result.identity || !result.instanceId || !Number.isFinite(Date.parse(result.generatedAt)) || !Number.isFinite(result.generation) || !result.meetings.length) {
       throw new Error("Calendar must visibly render its name, fingerprint, generation, and meetings");
     }
     return result;
@@ -129,13 +167,28 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   const { den, alex, jordan, jordanSession, orgId } = world;
   expect(alex.handle.cdpUrl).not.toBe(jordan.handle.cdpUrl);
   expect(den.admin.email).not.toBe(jordanSession.email);
-  const registrations = world.registrations.filter(receipt => receipt.phase === "registration");
+  const registrations = world.registrations.filter(receipt => receipt.phase === "verified-state");
+  await writeFile(`${reportDirectory}setup-receipts.json`, JSON.stringify({
+    setupExitCodes: world.setupExitCodes, registrations: world.registrations, reapplyRegistrations: world.reapplyRegistrations,
+  }, null, 2));
+  expect(world.setupExitCodes, "Portable connection setup and idempotent reapply").toEqual([0, 0]);
+  const firstApply = world.registrations.filter(receipt => receipt.phase === "apply");
+  const secondApply = world.reapplyRegistrations.filter(receipt => receipt.phase === "apply");
+  expect(firstApply).toHaveLength(3);
+  expect(secondApply).toHaveLength(3);
+  for (const first of firstApply) {
+    expect(first.status).toBe(201);
+    const second = secondApply.find(receipt => receipt.key === first.key);
+    expect(second?.status).toBe(200);
+    expect(second?.connectionId).toBe(first.connectionId);
+    expect(object(second).changedFields).toEqual([]);
+  }
   evidence.recordAssertionEvidence("Three real hosted org connections registered", JSON.stringify(registrations),
     registrations.length === 3 && registrations.every(receipt => receipt.ok && receipt.connectionId));
   expect(registrations).toHaveLength(3);
   expect(registrations.every(receipt => receipt.ok && receipt.connectionId)).toBe(true);
   await writeFile(`${reportDirectory}world-sanitized.json`, JSON.stringify({
-    lane: place.kind, denWeb: den.ref.webUrl, denApi: den.ref.apiUrl,
+    ...provenance, denWeb: den.ref.webUrl, denApi: den.ref.apiUrl,
     alexCdp: alex.handle.cdpUrl, jordanCdp: jordan.handle.cdpUrl,
     alexEmail: den.admin.email, jordanEmail: jordanSession.email, orgId, registrations,
   }, null, 2));
@@ -185,22 +238,17 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   await see(alexBrowser, "World Clocks");
   await see(alexBrowser, "Personal Calendar");
   await checkpoint(alexBrowser, "00-alex-organization-connections");
-  await yourCalendar(alexBrowser, den.admin, "01-alex");
 
   const catalog = async (id: string) => array(await api(den.admin, orgId, `/v1/mcp-connections/${id}/mcp-apps`), "apps");
   const homeApps = await catalog(home.id);
   const clockApps = await catalog(clocks.id);
-  const calendarApps = await catalog(calendar.id);
   const homeApp = homeApps.find(app => app.toolName === "acme_home");
   const clockApp = clockApps.find(app => app.toolName === "show_world_clocks");
   expect(homeApp).toBeDefined();
   expect(clockApp).toBeDefined();
-  expect(calendarApps).toHaveLength(1);
-  const calendarApp = calendarApps[0];
-  if (!homeApp || !clockApp || !calendarApp) throw new Error("Missing real MCP App catalog entries");
+  if (!homeApp || !clockApp) throw new Error("Missing real Home/Clocks MCP App catalog entries");
   expect(homeApp.resourceUri).toBe("ui://acme-home/home.html");
   expect(clockApp.resourceUri).toBe("ui://world-clocks/mcp-app.html");
-  expect(text(calendarApp, "resourceUri")).toMatch(/^ui:\/\//);
 
   await navigate(alexBrowser.client, new URL("/dashboard/dashboards", den.ref.webUrl).href);
   await clickTarget(alexBrowser, { role: "button", label: "New dashboard" });
@@ -210,11 +258,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   const dashboardId = await evalIn(alexBrowser, () => location.pathname.split("/").at(-1));
   if (typeof dashboardId !== "string" || !dashboardId.startsWith("dsb_")) throw new Error("Dashboard detail route missing");
   const readBoard = () => api(den.admin, orgId, `/v1/dashboards/${dashboardId}`);
-  for (const [index, entry] of [
-    { connection: home, name: "Acme Home", app: homeApp },
-    { connection: clocks, name: "World Clocks", app: clockApp },
-    { connection: calendar, name: "Personal Calendar", app: calendarApp },
-  ].entries()) {
+  const addApp = async (entry: { name: string; app: Record<string, unknown> }, index: number) => {
     await clickTarget(alexBrowser, { role: "button", label: "Add app" });
     await clickTarget(alexBrowser, { role: "button", label: "MCP" });
     await clickTarget(alexBrowser, { role: "option", label: entry.name });
@@ -229,9 +273,11 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await eventually(async () => array(object(await readBoard()).item, "elements")[index]?.organizationAutoLaunch,
       { within: 30_000, until: value => value === true, label: "UI organization auto-run persisted" });
     await checkpoint(alexBrowser, `0${index + 2}-den-add-${entry.name.toLowerCase().replaceAll(" ", "-")}`);
-  }
-  const elements = array(object(await readBoard()).item, "elements");
-  expect(elements).toHaveLength(3);
+  };
+  await addApp({ name: "Acme Home", app: homeApp }, 0);
+  await addApp({ name: "World Clocks", app: clockApp }, 1);
+  let elements = array(object(await readBoard()).item, "elements");
+  expect(elements).toHaveLength(2);
   for (const element of elements) {
     expect(element.launchArguments, "Released UI omits empty defaults; host launches with {}").toBeUndefined();
     expect(element.organizationAutoLaunch).toBe(true);
@@ -265,8 +311,11 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   evidence.recordAssertionEvidence("Real Den Web Add, auto-run and named-person grants persist references, not calendar data", JSON.stringify({ dashboardId, elements, grants }), true);
 
   await signIn(jordanBrowser, jordanSession);
-  await yourCalendar(jordanBrowser, jordanSession, "06-jordan");
   for (const [surface, label] of [[alex, "alex"], [jordan, "jordan"]] satisfies [Surface, string][]) {
+    if (process.env.ENG105_CAPTURE_FILM === "1") {
+      const directory = process.env.ENG105_EXPORT_DIR ? `${process.env.ENG105_EXPORT_DIR}/${runName}` : reportDirectory;
+      stack.use(await captureBrowserFilm(surface, `${directory}/film-${label}`));
+    }
     await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));
     await clickTarget(surface, { role: "button", label: "Dashboard" });
     await waitFor(surface, browserScript(id => Boolean(document.querySelector(`[data-granted-dashboard="${id}"]`)), [dashboardId]),
@@ -284,50 +333,83 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await checkpoint(surface, `07-${label}-shared-dashboard`);
   }
 
-  // Provider document titles and visible test IDs are part of the demo contract.
-  await using alexCalendar = await frame(alex, "Personal Calendar");
-  await using jordanCalendar = await frame(jordan, "Personal Calendar");
-  const a = await calendarView(alexCalendar);
-  const j = await calendarView(jordanCalendar);
-  expect(a.name).not.toBe(j.name);
-  expect(a.identity).not.toBe(j.identity);
-  expect(a.meetings).not.toEqual(j.meetings);
-  await checkpoint(alex, "08-alex-personal-calendar");
-  await checkpoint(jordan, "09-jordan-different-personal-calendar");
-  const refreshed: CalendarView[] = [];
-  for (const [surface, before, member] of [[alex, a, "alex"], [jordan, j, "jordan"]] satisfies [Surface, CalendarView, string][]) {
-    await refresh(surface, text(calendarApp, "title"));
-    await using calendarFrame = await frame(surface, "Personal Calendar");
-    const after = await eventually(() => calendarView(calendarFrame), {
-      within: 90_000, until: view => view.generation > before.generation, label: `${member} Refresh executes a fresh tool generation`,
-    });
-    expect(after.name).toBe(before.name);
-    expect(after.identity).toBe(before.identity);
-    expect(after.meetings).toEqual(before.meetings);
-    refreshed.push(after);
-    await checkpoint(surface, `10-${member}-calendar-refreshed`);
-  }
-  expect(refreshed[0].identity).not.toBe(refreshed[1].identity);
-  expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
-  evidence.recordAssertionEvidence("Separate OAuth members render different names and meetings; Refresh keeps each identity and increases generation with unchanged {}", JSON.stringify({ alex: a, jordan: j, refreshed }), true);
-
   await using clockFrame = await frame(alex, "World Clocks");
   await clickTarget(clockFrame, { role: "button", label: "Edit" });
+  const existingCities = await evalIn(clockFrame, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()));
+  const addedCity = ["Tokyo", "Paris", "Berlin", "Toronto", "Mumbai", "Cape Town"].find(city => !existingCities.includes(city));
+  if (!addedCity) throw new Error("No unused demo city remains; do not claim a no-op edit as persistence proof");
   await clickTarget(clockFrame, { role: "combobox", label: "Add a city" });
-  await fill(clockFrame, '[role="combobox"]', "Tokyo");
-  await clickTarget(clockFrame, { role: "option", label: /Tokyo/ });
-  await see(clockFrame, "Tokyo");
+  await fill(clockFrame, '[role="combobox"]', addedCity);
+  await clickTarget(clockFrame, { role: "option", label: new RegExp(addedCity) });
+  await see(clockFrame, addedCity);
+  expect(await evalIn(clockFrame, () => Number(document.querySelector<HTMLSelectElement>("#wc-limit")?.value)),
+    "Clocks shown includes the added city").toBe(existingCities.length + 1);
   await waitFor(clockFrame, () => /Saved \(shared with everyone\)|Saved to your account/.test(document.body.innerText),
     { timeoutMs: 30_000, label: "save_preferences completed, not merely Done" });
   await checkpoint(alex, "11-world-clocks-edit-saved");
   await clickTarget(clockFrame, { role: "button", label: "Done" });
   await refresh(alex, text(clockApp, "title"));
   await using freshClocks = await frame(alex, "World Clocks");
-  await see(freshClocks, "Tokyo");
+  await see(freshClocks, addedCity);
+  expect(await evalIn(freshClocks, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()))).toContain(addedCity);
   await checkpoint(alex, "12-world-clocks-fresh-tool-persisted");
   expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
-  evidence.recordAssertionEvidence("World Clocks city edit persists through host Refresh using {}, not cold-start durability", "Tokyo remains visible after save_preferences acknowledgement and fresh show_world_clocks launch; dashboard launch arguments remain unchanged.", true);
-  await writeFile(`${reportDirectory}observations.json`, JSON.stringify({ dashboardId, alex: a, jordan: j, refreshed, clockCity: "Tokyo", lane: place.kind }, null, 2));
+  evidence.recordAssertionEvidence("World Clocks city edit persists through host Refresh using {}, not cold-start durability", `${addedCity} remains visible after save_preferences acknowledgement and fresh show_world_clocks launch; dashboard launch arguments remain unchanged.`, true);
+  // Calendar is deliberately last: an unavailable provider cannot erase the
+  // real Home/Clocks observations, but still prevents an overall Passed verdict.
+  await yourCalendar(alexBrowser, den.admin, "13-alex");
+  const calendarApps = await catalog(calendar.id);
+  expect(calendarApps).toHaveLength(1);
+  const calendarApp = calendarApps[0];
+  expect(calendarApp.toolName).toBe("show_calendar");
+  expect(calendarApp.resourceUri).toBe("ui://personal-calendar/mcp-app.html");
+  await navigate(alexBrowser.client, new URL(`/dashboard/dashboards/${dashboardId}`, den.ref.webUrl).href);
+  await see(alexBrowser, "Who sees this dashboard");
+  await addApp({ name: "Personal Calendar", app: calendarApp }, 2);
+  elements = array(object(await readBoard()).item, "elements");
+  expect(elements).toHaveLength(3);
+  expect(elements.every(element => element.organizationAutoLaunch === true && element.launchArguments === undefined)).toBe(true);
+  await yourCalendar(jordanBrowser, jordanSession, "14-jordan");
+  const shared = array(await api(jordanSession, orgId, "/v1/me/dashboards"), "items").find(item => item.id === dashboardId);
+  expect(shared?.elements).toEqual(elements);
+  for (const surface of [alex, jordan]) {
+    await reload(surface);
+    await see(surface, boardName);
+    await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));
+  }
+  const readCalendar = async (surface: Surface) => {
+    await using view = await frame(surface, "Personal Calendar");
+    return calendarView(view);
+  };
+  const a = await readCalendar(alex);
+  const j = await readCalendar(jordan);
+  expect(a.name).not.toBe(j.name);
+  expect(a.identity).not.toBe(j.identity);
+  expect(a.meetings).not.toEqual(j.meetings);
+  await checkpoint(alex, "15-alex-personal-calendar");
+  await checkpoint(jordan, "16-jordan-different-personal-calendar");
+  const refreshed: CalendarView[] = [];
+  for (const [surface, before, member] of [[alex, a, "alex"], [jordan, j, "jordan"]] satisfies [Surface, CalendarView, string][]) {
+    await refresh(surface, text(calendarApp, "title"));
+    const after = await eventually(() => readCalendar(surface), {
+      within: 90_000, until: view => Date.parse(view.generatedAt) > Date.parse(before.generatedAt),
+      label: `${member} Refresh executes a newly generated tool result`,
+    });
+    expect(after.name).toBe(before.name);
+    expect(after.identity).toBe(before.identity);
+    expect(after.meetings).toEqual(before.meetings);
+    if (after.instanceId === before.instanceId) expect(after.generation).toBeGreaterThan(before.generation);
+    else {
+      expect(after.generation).toBeGreaterThanOrEqual(1);
+      evidence.recordAssertionEvidence("Calendar process changed: generation reset is a disclosed demo limitation", JSON.stringify({ member, before, after }), true);
+    }
+    refreshed.push(after);
+    await checkpoint(surface, `17-${member}-calendar-refreshed`);
+  }
+  expect(refreshed[0].identity).not.toBe(refreshed[1].identity);
+  expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
+  evidence.recordAssertionEvidence("Separate OAuth members render different names and meetings; Refresh keeps identity and advances generation within the same instance using default {}", JSON.stringify({ alex: a, jordan: j, refreshed }), true);
+  await writeFile(`${reportDirectory}observations.json`, JSON.stringify({ dashboardId, alex: a, jordan: j, refreshed, clockCity: addedCity, ...provenance }, null, 2));
   } catch (error) {
     for (const [surface, name] of [[alex, "failed-alex-desktop"], [jordan, "failed-jordan-desktop"], [alexBrowser, "failed-alex-den-web"], [jordanBrowser, "failed-jordan-den-web"]] satisfies [Surface, string][]) {
       // Never photograph the authentication form or OAuth authorization URL.
@@ -337,5 +419,8 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
       if (safe) await checkpoint(surface, name).catch(() => undefined);
     }
     throw error;
+  } finally {
+    await stack.disposeAsync();
+    await assertReleaseSource();
   }
 });
