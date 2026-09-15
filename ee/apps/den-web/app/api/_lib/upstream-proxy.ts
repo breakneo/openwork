@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { joinBaseUrl, readBaseUrlEnv } from "@openwork/types/url";
 
-import { denWebLogger } from "../../../observability/runtime-logger";
+import { denWebLogger, reportScimProxyFailure } from "../../../observability/runtime-logger";
+import { canonicalScimProxyPath, scimProxyFailureFields } from "../../../observability/scim-proxy-failure";
 import { readPublicWebOrigin } from "../../_lib/public-web-origin";
 
 const NO_BODY_STATUS = new Set([204, 205, 304]);
@@ -728,12 +729,33 @@ export async function proxyUpstream(
       });
     } catch (error) {
       const cause = upstreamAbort.cause();
+      const scimPath = canonicalScimProxyPath(
+        options.routePrefix,
+        normalizePathPrefix(options.upstreamPathPrefix ?? ""),
+        targetPath,
+      );
+      if (scimPath !== null) {
+        try {
+          reportScimProxyFailure(await scimProxyFailureFields({
+            error,
+            abortCause: cause,
+            method: request.method,
+            path: scimPath,
+            referenceId,
+            durationMs: elapsedMs(startedAtMs),
+            observedBytes: bodyRead.observedBytes ?? 0,
+            expect: requestHeaders.get("expect"),
+          }));
+        } catch {
+          // Collection/export must not replace the original response or abort.
+        }
+      }
       if (cause === "client") {
         throw error;
       }
 
       const timedOut = cause === "deadline";
-      denWebLogger.error(timedOut ? "den-web upstream proxy timed out" : "den-web upstream proxy failed", {
+      if (scimPath === null) denWebLogger.error(timedOut ? "den-web upstream proxy timed out" : "den-web upstream proxy failed", {
         route_prefix: options.routePrefix,
         method: request.method,
         upstream_origin: upstreamOrigin(apiBase),
