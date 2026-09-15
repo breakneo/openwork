@@ -121,8 +121,8 @@ import { isDesktopProviderBlocked } from "@/app/cloud/desktop-app-restrictions";
 import { useCheckDesktopRestriction } from "@/react-app/domains/cloud/desktop-config-provider";
 import { useRestrictionNotice } from "@/react-app/domains/cloud/restriction-notice-provider";
 import { ReactSessionRuntime } from "@/react-app/domains/session/sync/runtime-sync";
-import { useSessionActivityStore } from "@/react-app/domains/session/status/session-activity-store";
-import { selectSessionAttention, sessionAttentionLabel, sessionAttentionSidebarStatus } from "@/react-app/domains/session/status/session-attention";
+import { createSessionChildIdsSelector, useSessionActivityStore } from "@/react-app/domains/session/status/session-activity-store";
+import { createWorkspaceSessionAttentionSelector, sessionAttentionLabel, sessionAttentionSidebarStatus } from "@/react-app/domains/session/status/session-attention";
 import { buildOpenworkSessionSystemContext } from "@/react-app/domains/session/sync/env-context";
 import {
   applySessionRevert,
@@ -827,7 +827,9 @@ export function SessionRoute() {
   const seedWorkspaceActivitySessions = useSessionActivityStore((state) => state.seedWorkspaceSessions);
   const sessionActivityByWorkspaceId = useSessionActivityStore((state) => state.statusesByWorkspaceId);
   const sessionWaitingByWorkspaceId = useSessionActivityStore((state) => state.waitingByWorkspaceId);
-  const sessionRecordsByWorkspaceId = useSessionActivityStore((state) => state.recordsByWorkspaceId);
+  const selectSessionChildIds = useMemo(createSessionChildIdsSelector, []);
+  const sessionChildIdsByWorkspaceId = useSessionActivityStore(selectSessionChildIds);
+  const selectWorkspaceAttention = useMemo(createWorkspaceSessionAttentionSelector, []);
 
   useEffect(() => {
     for (const group of workspaceSessionGroups) {
@@ -845,23 +847,14 @@ export function SessionRoute() {
     const sourceById: Record<string, "child" | "descendant"> = {};
     for (const group of workspaceSessionGroups) {
       const serverId = workspaceServerId(group.workspace);
-      const workspaceStatuses = {
-        ...(sessionActivityByWorkspaceId[group.workspace.id] ?? {}),
-        ...(serverId ? sessionActivityByWorkspaceId[serverId] ?? {} : {}),
-      };
-      const workspaceWaiting = {
-        ...(sessionWaitingByWorkspaceId[group.workspace.id] ?? {}),
-        ...(serverId ? sessionWaitingByWorkspaceId[serverId] ?? {} : {}),
-      };
-      const attention = selectSessionAttention(
-        group.sessions,
-        (sessionId) => workspaceStatuses[sessionId],
-        (sessionId) => workspaceWaiting[sessionId],
-        (sessionId) => [
-          ...(sessionRecordsByWorkspaceId[group.workspace.id]?.[sessionId]?.childSessionIds ?? []),
-          ...(serverId ? sessionRecordsByWorkspaceId[serverId]?.[sessionId]?.childSessionIds ?? [] : []),
-        ],
-      );
+      const attention = selectWorkspaceAttention(group.sessions, {
+        statuses: sessionActivityByWorkspaceId[group.workspace.id],
+        waiting: sessionWaitingByWorkspaceId[group.workspace.id],
+        childIds: sessionChildIdsByWorkspaceId[group.workspace.id],
+        serverStatuses: serverId ? sessionActivityByWorkspaceId[serverId] : undefined,
+        serverWaiting: serverId ? sessionWaitingByWorkspaceId[serverId] : undefined,
+        serverChildIds: serverId ? sessionChildIdsByWorkspaceId[serverId] : undefined,
+      });
       for (const session of group.sessions) {
         const entry = attention.get(session.id);
         if (!entry) continue;
@@ -873,7 +866,7 @@ export function SessionRoute() {
       }
     }
     return { statusById, labelById, sourceById };
-  }, [sessionActivityByWorkspaceId, sessionWaitingByWorkspaceId, sessionRecordsByWorkspaceId, workspaceSessionGroups]);
+  }, [selectWorkspaceAttention, sessionActivityByWorkspaceId, sessionWaitingByWorkspaceId, sessionChildIdsByWorkspaceId, workspaceSessionGroups]);
   const sidebarSessionStatusById = sidebarSessionAttention.statusById;
 
   const sidebarActiveWorkspaceId = useMemo(() => {
