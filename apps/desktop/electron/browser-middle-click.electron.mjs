@@ -46,6 +46,7 @@ async function run() {
   destination = `http://localhost:${address.port}/destination?value=%2F#section`;
   let mainWindow;
   let panel;
+  let exitCode = 0;
   try {
     stage = "wait for Electron readiness";
     await app.whenReady();
@@ -144,13 +145,13 @@ async function run() {
     console.log("PASS: Chromium middle-click in app and embedded main frame opens exactly once; no built-in popup/navigation; denial and synthetic events do not launch; app left click unchanged. OS launch stubbed.");
   } catch (error) {
     console.error(error);
-    process.exitCode = 1;
+    exitCode = 1;
   } finally {
     panel?.destroy();
     mainWindow?.destroy();
     server.close();
     clearTimeout(deadline);
-    app.exit(process.exitCode || 0);
+    app.exit(exitCode);
   }
 }
 

@@ -43,6 +43,18 @@ function loadPreload(surface, { native = true, mainFrame = true } = {}) {
       document: { readyState: "complete", documentElement: { dataset: {}, classList: { add() {} } } },
     });
   }
+  /**
+   * @param {MouseEventInit & {
+   *   href?: string,
+   *   attributes?: Record<string, string>,
+   *   type?: string,
+   *   trusted?: boolean,
+   *   prevented?: boolean,
+   *   editable?: boolean,
+   *   input?: boolean,
+   *   link?: boolean,
+   * }} [options]
+   */
   function dispatch({ href = "https://destination.example/a%2Fb?x=one%20two&x=%2F#section", attributes = {}, button = 1, type = "auxclick", trusted = true, prevented = false, editable = false, input = false, link = true, ...modifiers } = {}) {
     const anchor = new HTMLAnchorElement({ href, ...attributes });
     const child = input ? new HTMLInputElement() : new HTMLElement();
