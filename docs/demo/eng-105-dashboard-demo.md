@@ -24,9 +24,9 @@ World outputs are authoritative for `releaseTag`, `releaseSha`, `lane`, `denWeb`
 |---|---|---|---|
 | Acme Home | `https://acme-home-demo.vercel.app/mcp` | `acme_home {}` | none/shared |
 | World Clocks | `https://world-clocks-six.vercel.app/mcp` | `show_world_clocks {}` | none/shared |
-| Personal Calendar | Deployment verification pending; use world outputs | Planned `show_calendar {}` | OAuth/per-member; `calendar:read` |
+| Personal Calendar | `https://personal-calendar-demo-mcp-app.vercel.app/mcp` | `show_calendar {}` | OAuth/per-member; `calendar:read` |
 
-Home source: [yomgui/acme-home-demo](https://github.com/yomgui/acme-home-demo), verified deployment source `aa0f1b7aaa72fe4d41d9f0ee9408b83c80b53575`; UI resource `ui://acme-home/home.html`. Availability is not proof of member isolation.
+Home source: [yomgui/acme-home-demo](https://github.com/yomgui/acme-home-demo), verified deployment source `aa0f1b7aaa72fe4d41d9f0ee9408b83c80b53575`; UI resource `ui://acme-home/home.html`. Calendar's verified deployment source is `54a5f6e`, resource `ui://personal-calendar/mcp-app.html`, issuer `https://personal-calendar-demo-mcp-app.vercel.app`, with public-client DCR (`token_endpoint_auth_method: none`). Direct deployed OAuth/tool tests succeeded for two different synthetic identities; that is not yet proof of isolation through the released OpenWork host.
 
 ### Calendar's deliberately limited demo authorization
 
@@ -48,7 +48,7 @@ That world is stopped. CDP ports above are historical—never attach blindly. Th
 |---|---|---|
 | 1 | Start the world and inspect build/setup outputs. | Exact release SHA, two different signed-in members, three successful connection registrations, and successful stable-ID reapply. Record failures rather than claiming readiness. |
 | 2 | In an isolated browser profile, open `denWeb` and sign in as Alex using private world outputs. | Alex is the organization owner; **Manage → Dashboards** is available. |
-| 3 | Inspect the organization's connection inventory. | Acme Home, World Clocks, and Personal Calendar are registered. Calendar is **Individual accounts / per-member**, OAuth—not a shared API key. Registration alone does not mean it is connected. |
+| 3 | Open the organization's connections page and click **Configured** to inspect installed connections rather than the connector catalog. | Acme Home, World Clocks, and Personal Calendar are registered. Calendar is **Individual accounts / per-member**, OAuth—not a shared API key. Registration alone does not mean it is connected. |
 | 4 | Open **Manage → Dashboards → New dashboard**, name it **Acme Day**, and click **Create dashboard**. | An empty dashboard detail page with app/access controls opens. |
 | 5 | **Add app → MCP → Acme Home → Add → Done**; enable **Auto-run**. | One Home App reference is saved. No chat-save step is used. |
 | 6 | Add World Clocks with default `{}` and enable **Auto-run**. | One clock App reference is saved. Do not supply `cities`: explicit launch cities override saved preferences. |
