@@ -6,14 +6,48 @@ const safeText = z.string().trim().min(1).max(140).refine(
   'Use sanitized plain text without URLs, credentials, or control characters',
 );
 
+export const releaseSourcePin = {
+  version: '0.18.46',
+  tag: 'v0.18.46',
+  sha: 'a0d6bd1de8debf4f09d22b8538e124b2ff45b339',
+};
+
 const releaseIdentity = z.object({
+  buildKind: z.enum(['release-source', 'packaged-release', 'development']),
   desktopVersion: safeText.pipe(z.string().max(40)),
   desktopTag: safeText.pipe(z.string().max(64)),
+  releaseSha: z.string().regex(/^[a-f0-9]{40}$/, 'Supply the full release source commit SHA'),
+  lane: safeText.pipe(z.string().max(80)),
   denBuildIdentity: safeText.pipe(z.string().max(80)),
-  shippedRelease: z.boolean(),
 });
 
-export const releaseReceiptSchema = releaseIdentity.extend({ member: z.enum(['A', 'B']) }).strict();
+type ReleaseIdentity = z.infer<typeof releaseIdentity>;
+
+function checkRelease(identity: ReleaseIdentity, ctx: z.RefinementCtx) {
+  if (identity.buildKind === 'development') return;
+  const labels = `${identity.desktopVersion} ${identity.desktopTag} ${identity.denBuildIdentity}`;
+  if (/dev|unreleased|dirty|unknown|placeholder|replace_with/i.test(labels)
+    || (identity.buildKind === 'packaged-release' && /local|release.source/i.test(labels))) {
+    ctx.addIssue({ code: 'custom', message: 'Development or unknown builds cannot be labeled releases; source builds are not packaged binaries' });
+  }
+  if (identity.buildKind === 'release-source'
+    && (identity.desktopVersion !== releaseSourcePin.version
+      || identity.desktopTag !== releaseSourcePin.tag || identity.releaseSha !== releaseSourcePin.sha)) {
+    ctx.addIssue({ code: 'custom', message: 'release-source must pin the approved v0.18.46 version, tag and full commit SHA' });
+  }
+}
+
+export function buildLabel(kind: ReleaseIdentity['buildKind']) {
+  if (kind === 'release-source') return 'release-source, not packaged binary';
+  if (kind === 'packaged-release') return 'packaged-release, binary receipt supplied';
+  return 'development, not a release';
+}
+
+export function journeyBuildKind(identities: ReleaseIdentity[]) {
+  return [...new Set(identities.map((identity) => identity.buildKind))].sort().join('-and-');
+}
+
+export const releaseReceiptSchema = releaseIdentity.extend({ member: z.enum(['A', 'B']) }).strict().superRefine(checkRelease);
 
 export const manifestSchema = z.object({
   version: z.literal(1),
@@ -29,7 +63,7 @@ export const manifestSchema = z.object({
     caption: safeText,
     observed: safeText,
     hiddenApiSetup: z.boolean(),
-    release: releaseIdentity.extend({ evidencePath: z.string().trim().min(1) }).strict(),
+    release: releaseIdentity.extend({ evidencePath: z.string().trim().min(1) }).strict().superRefine(checkRelease),
     assertion: z.object({
       state: z.enum(['not-run', 'incomplete', 'failed', 'passed']),
       evidencePath: z.string().min(1).optional(),
@@ -47,11 +81,6 @@ export const manifestSchema = z.object({
     }
   }
   for (const scene of manifest.scenes) {
-    if (scene.release.shippedRelease && /dev|unreleased|dirty|local|unknown|placeholder|replace_with/i.test(
-      `${scene.release.desktopVersion} ${scene.release.desktopTag} ${scene.release.denBuildIdentity}`,
-    )) {
-      ctx.addIssue({ code: 'custom', message: 'Development or unknown builds cannot be labeled shipped releases' });
-    }
     if (scene.variant === 'D' && scene.kind !== 'png') {
       ctx.addIssue({ code: 'custom', message: 'D requires actual PNG captures rendered with Remotion' });
     }

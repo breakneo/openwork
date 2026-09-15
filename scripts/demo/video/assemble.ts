@@ -5,7 +5,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { manifestSchema, releaseReceiptSchema } from './manifest.ts';
+import { journeyBuildKind, manifestSchema, releaseReceiptSchema } from './manifest.ts';
 import type { RenderScene } from './manifest.ts';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -49,7 +49,7 @@ async function localFile(base: string, path: string) {
 
 async function main() {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('pnpm assemble --manifest <sanitized.json> [--validate-only]\nEach present C/D lane must contain A and B. C accepts clip/png; D accepts png only. Media must be under reports/demo/eng105-proof, or the explicitly authorized ENG105_CAPTURE_ROOT. Every scene requires release {desktopVersion, desktopTag, denBuildIdentity, shippedRelease, evidencePath}. The local JSON receipt must contain those identity fields plus member (no evidencePath), matching exactly. False shippedRelease produces only an unreleased-incomplete journey. Outputs stay in ignored reports/demo/eng-105-2026-09-15/runs/. No export. See manifest.template.json; replace placeholders and attest actualCapture/sanitized only after review. Requires ffmpeg and ffprobe on PATH.');
+    console.log('pnpm assemble --manifest <sanitized.json> [--validate-only]\nEach present C/D lane must contain A and B. C accepts clip/png; D accepts png only. Media must be under reports/demo/eng105-proof, or the explicitly authorized ENG105_CAPTURE_ROOT. Every scene requires release {buildKind, desktopVersion, desktopTag, releaseSha, lane, denBuildIdentity, evidencePath}. The local JSON receipt must contain those identity fields plus member (no evidencePath), matching exactly. buildKind is release-source, packaged-release, or development. release-source pins v0.18.46/a0d6bd1de8debf4f09d22b8538e124b2ff45b339 and is explicitly not a packaged binary. Outputs stay in ignored reports/demo/eng-105-2026-09-15/runs/. No export. See manifest.template.json; replace placeholders and attest actualCapture/sanitized only after review. Requires ffmpeg and ffprobe on PATH.');
     return;
   }
   if (args[0] !== '--manifest' || !args[1] || args.length > 3 || (args[2] && args[2] !== '--validate-only')) {
@@ -73,7 +73,9 @@ async function main() {
       || releaseReceipt.desktopVersion !== scene.release.desktopVersion
       || releaseReceipt.desktopTag !== scene.release.desktopTag
       || releaseReceipt.denBuildIdentity !== scene.release.denBuildIdentity
-      || releaseReceipt.shippedRelease !== scene.release.shippedRelease) {
+      || releaseReceipt.buildKind !== scene.release.buildKind
+      || releaseReceipt.releaseSha !== scene.release.releaseSha
+      || releaseReceipt.lane !== scene.release.lane) {
       throw new Error(`Scene ${index + 1}: release receipt does not match member and actual build identity`);
     }
     const releaseEvidenceSha256 = createHash('sha256').update(releaseSource).digest('hex');
@@ -124,7 +126,8 @@ async function main() {
       actualCapture: true, durationSeconds: frames / 30, startSeconds: 0, caption: scene.caption, observed: scene.observed,
       hiddenApiSetup: scene.hiddenApiSetup, assertion: { state: scene.assertion.state }, asset, frames,
       release: { desktopVersion: scene.release.desktopVersion, desktopTag: scene.release.desktopTag,
-        denBuildIdentity: scene.release.denBuildIdentity, shippedRelease: scene.release.shippedRelease } };
+        denBuildIdentity: scene.release.denBuildIdentity, buildKind: scene.release.buildKind,
+        releaseSha: scene.release.releaseSha, lane: scene.release.lane } };
     scenes.push(renderScene);
     receipts.push({ ...renderScene, sourceId, sourceSha256: item.sha256, sourceStartSeconds: scene.startSeconds,
       assetSha256: await hash(normalized), evidenceSha256: item.evidenceSha256,
@@ -145,7 +148,7 @@ async function main() {
     if (!selected.length) continue;
     const inputProps = { scenes: selected };
     const composition = await selectComposition({ serveUrl, id: 'ENG105', inputProps });
-    const journey = selected.every((scene) => scene.release.shippedRelease) ? 'release' : 'unreleased-incomplete';
+    const journey = journeyBuildKind(selected.map((scene) => scene.release));
     const file = `ENG105-${variant}-${journey}.mp4`;
     const output = join(work, file);
     await renderMedia({ serveUrl, composition, inputProps, codec: 'h264', outputLocation: output,

@@ -1,5 +1,6 @@
 import { Video } from '@remotion/media';
 import { AbsoluteFill, Composition, Img, registerRoot, Sequence, staticFile } from 'remotion';
+import { buildLabel } from './manifest.ts';
 import type { VideoProps } from './manifest.ts';
 
 function Film({ scenes }: VideoProps) {
@@ -14,9 +15,8 @@ function Film({ scenes }: VideoProps) {
             ENG-105 · Member {scene.member} desktop · {scene.variant === 'D' ? 'D: actual PNG + Remotion' : 'C: actual screencast / frame'}
           </div>
           <div style={{ height: 56, fontSize: 18, lineHeight: 1.3, overflowWrap: 'anywhere', color: '#fcd34d' }}>
-            {scenes.every((entry) => entry.release.shippedRelease) ? 'RELEASE JOURNEY — receipts supplied' : 'UNRELEASED / INCOMPLETE JOURNEY'}
-            {' · '}{scene.release.shippedRelease ? 'Reported shipped build' : 'NOT RELEASED'}
-            {' · '}Desktop {scene.release.desktopVersion} · tag {scene.release.desktopTag} · Den {scene.release.denBuildIdentity}
+            <div>{buildLabel(scene.release.buildKind)} · Desktop {scene.release.desktopVersion} · tag {scene.release.desktopTag} · SHA {scene.release.releaseSha}</div>
+            <div>Lane {scene.release.lane} · Den {scene.release.denBuildIdentity} · supplied provenance receipt, not inferred from footage</div>
           </div>
           <div style={{ height: 604, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             {scene.kind === 'png'

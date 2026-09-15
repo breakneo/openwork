@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { manifestSchema, releaseReceiptSchema } from './manifest.ts';
+import { buildLabel, journeyBuildKind, manifestSchema, releaseReceiptSchema, releaseSourcePin } from './manifest.ts';
 
 // Schema-only input fixtures: never rendered or presented as capture evidence.
 function input() {
@@ -13,7 +13,7 @@ function input() {
       durationSeconds: 10, startSeconds: 0, caption: 'Schema fixture', observed: 'Not capture evidence',
       hiddenApiSetup: true,
       release: { desktopVersion: '0.0.0-dev', desktopTag: 'dev', denBuildIdentity: 'dev',
-        shippedRelease: false, evidencePath: 'schema-only.json' },
+        buildKind: 'development', releaseSha: '0'.repeat(40), lane: 'local-development', evidencePath: 'schema-only.json' },
       assertion: { state: 'incomplete' },
     })),
   };
@@ -33,7 +33,7 @@ test('rejects absent release identity, fake release labels, missing B and excess
   missing.scenes[0].release.desktopVersion = '';
   assert.equal(manifestSchema.safeParse(missing).success, false);
   const mislabeled = input();
-  mislabeled.scenes[0].release.shippedRelease = true;
+  mislabeled.scenes[0].release.buildKind = 'packaged-release';
   assert.equal(manifestSchema.safeParse(mislabeled).success, false);
   const oneMember = input();
   oneMember.scenes[1].member = 'A';
@@ -56,6 +56,44 @@ test('rejects unsupported media, absent sanitization and passed assertions witho
   const url = input();
   url.scenes[0].caption = 'https://example.invalid';
   assert.equal(manifestSchema.safeParse(url).success, false);
+});
+
+test('approved local release-source passes both scene and receipt guards with precise caption and filename', () => {
+  const source = input();
+  for (const scene of source.scenes) {
+    scene.release = { ...scene.release, buildKind: 'release-source',
+      desktopVersion: releaseSourcePin.version, desktopTag: releaseSourcePin.tag,
+      releaseSha: releaseSourcePin.sha, lane: 'local-release-source',
+      denBuildIdentity: `local-release-source ${releaseSourcePin.tag}` };
+  }
+  const parsed = manifestSchema.parse(source);
+  const { evidencePath: _evidencePath, ...identity } = parsed.scenes[0].release;
+  assert.equal(releaseReceiptSchema.safeParse({ ...identity, member: 'A' }).success, true);
+  assert.equal(buildLabel(identity.buildKind), 'release-source, not packaged binary');
+  assert.equal(journeyBuildKind(parsed.scenes.map((scene) => scene.release)), 'release-source');
+  for (const badIdentity of [
+    { ...identity, desktopVersion: '0.18.45' },
+    { ...identity, desktopTag: 'v0.18.45' },
+    { ...identity, releaseSha: '0'.repeat(40) },
+    { ...identity, denBuildIdentity: 'dirty local build' },
+    { ...identity, buildKind: 'packaged-release' },
+  ]) {
+    assert.equal(releaseReceiptSchema.safeParse({ ...badIdentity, member: 'A' }).success, false);
+    assert.equal(manifestSchema.safeParse({ ...source,
+      scenes: source.scenes.map((scene) => ({ ...scene, release: { ...badIdentity, evidencePath: 'schema-only.json' } })),
+    }).success, false);
+  }
+});
+
+test('packaged and development builds remain explicit and old boolean schema is rejected', () => {
+  const identity = releaseReceiptSchema.parse({ member: 'A', buildKind: 'packaged-release',
+    desktopVersion: releaseSourcePin.version, desktopTag: releaseSourcePin.tag,
+    releaseSha: releaseSourcePin.sha, lane: 'installed-binary', denBuildIdentity: releaseSourcePin.tag });
+  assert.equal(journeyBuildKind([identity]), 'packaged-release');
+  assert.equal(buildLabel(identity.buildKind), 'packaged-release, binary receipt supplied');
+  assert.equal(buildLabel('development'), 'development, not a release');
+  assert.equal(journeyBuildKind([{ ...identity, buildKind: 'development' }]), 'development');
+  assert.equal(releaseReceiptSchema.safeParse({ ...identity, shippedRelease: true }).success, false);
 });
 
 test('release receipts require member and reject unknown fields', () => {

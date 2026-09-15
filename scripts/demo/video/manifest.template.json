@@ -17,7 +17,9 @@
         "desktopVersion": "",
         "desktopTag": "",
         "denBuildIdentity": "",
-        "shippedRelease": false,
+        "buildKind": "development",
+        "releaseSha": "",
+        "lane": "",
         "evidencePath": ""
       },
       "assertion": { "state": "incomplete" }
@@ -37,7 +39,9 @@
         "desktopVersion": "",
         "desktopTag": "",
         "denBuildIdentity": "",
-        "shippedRelease": false,
+        "buildKind": "development",
+        "releaseSha": "",
+        "lane": "",
         "evidencePath": ""
       },
       "assertion": { "state": "incomplete" }
