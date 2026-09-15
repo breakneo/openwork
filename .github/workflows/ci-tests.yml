@@ -85,6 +85,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-tests
+      - name: Build MCP App resources required by the server
+        run: pnpm --filter @openwork/mcp-apps build
       - name: Verify immutable runtime and authoring contracts
         run: pnpm --filter @openwork/codemode test && pnpm --filter @openwork-ee/den-api test:authoring
       - name: Verify shared encrypted receipt retention against Redis
