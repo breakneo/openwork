@@ -154,6 +154,13 @@ const cloudInstanceResponseSchema = z.object({
   }).optional(),
 }).meta({ ref: "CloudInstanceResponse" })
 
+const cloudInstanceUpdateRequestSchema = z.object({
+  // Web shells published before deferrals only understand already_current and
+  // flush_failed and reject anything else as an invalid payload. New shells opt
+  // in here to receive busy / activity_unknown when the sandbox cannot be stopped.
+  acceptsDeferral: z.boolean().optional(),
+})
+
 const cloudInstanceUpdateResponseSchema = z.union([
   z.object({
     ok: z.literal(true),
@@ -584,6 +591,7 @@ async function requestCloudInstanceUpdate(input: {
   hasActiveAutomationRun: HasActiveAutomationRun
   currentImageVersion: CurrentImageVersion
   now: () => number
+  acceptsDeferral: boolean
 }): Promise<CloudInstanceUpdateResponse> {
   if (!input.worker) {
     return { ok: true, status: "update_requested" }
@@ -628,8 +636,21 @@ async function requestCloudInstanceUpdate(input: {
       return endpoint ? { url: endpoint.endpointUrl, hostToken } : null
     },
   })
-  if (interruptibility.verdict === "busy") return { ok: false, error: "busy" }
-  if (interruptibility.verdict === "unknown") return { ok: false, error: "activity_unknown" }
+  if (interruptibility.verdict !== "interruptible") {
+    const deferral = interruptibility.verdict === "busy" ? "busy" : "activity_unknown"
+    if (input.acceptsDeferral) return { ok: false, error: deferral }
+    // A shell built before deferrals treats busy / activity_unknown as an invalid
+    // payload and shows a failure. Inside its contract, already_current is the one
+    // answer that leaves the update pending quietly: the pill keeps offering it, the
+    // shell tries again on the next version or when the person clicks Update now,
+    // and the stale sandbox still recycles on its next idle stop.
+    logger.info("cloud update deferred for a client without deferral support", {
+      worker_id: worker.id,
+      deferral,
+      reason: interruptibility.reason,
+    })
+    return { ok: false, error: "already_current" }
+  }
 
   const flushed = await input.flushWorkerCheckpoint(input.worker.id).catch((error) => {
     logger.warn("cloud update checkpoint flush failed", { worker_id: input.worker?.id, error })
@@ -896,7 +917,7 @@ export function registerCloudRoutes<T extends { Variables: OrgRouteVariables }>(
     describeRoute({
       tags: ["Cloud"],
       summary: "Request an update for the active organization's Cloud instance",
-      description: "Flushes a running Cloud workspace checkpoint and stops the sandbox so the next resolve can recycle it onto the latest snapshot.",
+      description: "Flushes a running Cloud workspace checkpoint and stops the sandbox so the next resolve can recycle it onto the latest snapshot. A sandbox that is mid-task is left running; clients that send { acceptsDeferral: true } learn why (busy or activity_unknown), older clients receive already_current.",
       responses: {
         200: jsonResponse("Cloud instance update request handled.", cloudInstanceUpdateResponseSchema),
         401: jsonResponse("The caller must be signed in to update Cloud.", unauthorizedSchema),
@@ -921,6 +942,7 @@ export function registerCloudRoutes<T extends { Variables: OrgRouteVariables }>(
         return c.json(cloudNotFound(), 404)
       }
 
+      const requestBody = cloudInstanceUpdateRequestSchema.safeParse(await c.req.json().catch(() => ({})))
       const worker = await getCloudWorker(payload.organization.id, user.id, store)
       const result = await requestCloudInstanceUpdate({
         worker,
@@ -934,6 +956,7 @@ export function registerCloudRoutes<T extends { Variables: OrgRouteVariables }>(
         hasActiveAutomationRun,
         currentImageVersion,
         now,
+        acceptsDeferral: requestBody.success && requestBody.data.acceptsDeferral === true,
       })
 
       return c.json(result)

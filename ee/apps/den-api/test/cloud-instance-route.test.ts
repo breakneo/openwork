@@ -73,6 +73,16 @@ function idleActivity(): CloudWorkerActivity {
   return { verdict: "idle", reason: "idle", alive: true, busySessions: 0, waitingRequests: 0, connectedClients: 0 }
 }
 
+// The current Web shell tells Den it understands a deferred update. Requests
+// without this body stand in for shells published before deferrals existed.
+function deferralAwareUpdateRequest(): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ acceptsDeferral: true }),
+  }
+}
+
 function organizationContext(metadata: string | null, input: {
   orgId?: OrganizationContext["organization"]["id"]
   userId?: OrganizationContext["currentMember"]["userId"]
@@ -1142,7 +1152,7 @@ describe("Cloud instance update route", () => {
         },
       })
 
-      const response = await app.request("http://den.local/v1/cloud/instance/update", { method: "POST" })
+      const response = await app.request("http://den.local/v1/cloud/instance/update", deferralAwareUpdateRequest())
 
       expect(response.status, entry.name).toBe(200)
       await expect(response.json(), entry.name).resolves.toEqual({ ok: false, error: "busy" })
@@ -1180,11 +1190,56 @@ describe("Cloud instance update route", () => {
         },
       })
 
-      const response = await app.request("http://den.local/v1/cloud/instance/update", { method: "POST" })
+      const response = await app.request("http://den.local/v1/cloud/instance/update", deferralAwareUpdateRequest())
 
       expect(response.status).toBe(200)
       await expect(response.json()).resolves.toEqual(entry.expected)
       expect(stopCalls).toBe(entry.stops)
+    }
+  })
+
+  test("answers a shell without deferral support inside its older contract and still leaves the sandbox running", async () => {
+    const orgId = createDenTypeId("organization")
+    const userId = createDenTypeId("user")
+    const cases: Array<{ name: string; activity: CloudWorkerActivity; request: RequestInit }> = [
+      { name: "busy, no body", activity: { ...idleActivity(), verdict: "busy", reason: "busy_sessions", busySessions: 1 }, request: { method: "POST" } },
+      { name: "busy, empty body", activity: { ...idleActivity(), verdict: "busy", reason: "busy_sessions", busySessions: 1 }, request: { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } },
+      { name: "unknown, no body", activity: { ...idleActivity(), verdict: "unknown", reason: "probe_failed", alive: false }, request: { method: "POST" } },
+    ]
+    for (const entry of cases) {
+      const worker = { ...storedWorker({ orgId, userId, status: "healthy" }), image_version: "openwork-0.18.7" }
+      const store = makeCloudWorkerStore({ initialWorkers: [worker], tokens: [makeToken(worker.id, "host")] })
+      const app = new Hono<{ Variables: OrgRouteVariables }>()
+      let flushCalls = 0
+      let stopCalls = 0
+      routes.registerCloudRoutes(app, {
+        memberRoute: contextMiddleware(organizationContext(JSON.stringify({ capabilities: { cloud: true } }), { orgId, userId })),
+        orgMode: "multi_org",
+        provisionerMode: "daytona",
+        daytonaApiKey: "daytona-test-key",
+        cloudWorkerStore: store.store,
+        getSandboxRecord: async () => fakeSandbox(),
+        inspectSandbox: async () => ({ state: "running" }),
+        hasActiveAutomationRun: async () => false,
+        probeActivity: async () => entry.activity,
+        flushWorkerCheckpoint: async () => {
+          flushCalls += 1
+          return true
+        },
+        stopCloudWorker: async () => {
+          stopCalls += 1
+        },
+      })
+
+      const response = await app.request("http://den.local/v1/cloud/instance/update", entry.request)
+
+      expect(response.status, entry.name).toBe(200)
+      // Shells published before deferrals only parse already_current and flush_failed;
+      // already_current keeps the update pending without showing them a failure.
+      await expect(response.json(), entry.name).resolves.toEqual({ ok: false, error: "already_current" })
+      expect(flushCalls, entry.name).toBe(0)
+      expect(stopCalls, entry.name).toBe(0)
+      expect(worker.status, entry.name).toBe("healthy")
     }
   })
 

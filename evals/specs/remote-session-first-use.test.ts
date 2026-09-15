@@ -45,14 +45,19 @@ async function grantWebAccess(databaseUrl: string, orgId: string) {
   );
 }
 
-async function cloudRequest(session: DenSession, path = "/v1/cloud/instance") {
+async function cloudRequest(session: DenSession, path = "/v1/cloud/instance", init: { body?: unknown } = {}) {
   const result = await denFetch(session, path, {
     method: path.endsWith("/retry") || path.endsWith("/update") ? "POST" : "GET",
     headers: { authorization: `Bearer ${session.token}`, "X-OpenWork-Gateway-Key": "witness-gateway-key" },
+    ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
   });
   expect(result.response.status, result.text).toBe(200);
   return record(result.body);
 }
+
+// The current Web shell sends this body; an update request without it is what a
+// shell published before deferrals still sends.
+const deferralAwareUpdate = { body: { acceptsDeferral: true } };
 
 async function mint(session: DenSession, scopes: string[]) {
   const result = await denFetch(session, "/v1/mcp/token", {
@@ -764,9 +769,11 @@ test("Cloud APIs keep a slow or busy sandbox running and update it only once it 
   await queryDenDatabase(databaseUrl, "UPDATE worker SET image_version = 'witness-previous' WHERE id = ?", [sandbox.workerId]);
   const busyStart = witness.events.length;
   witness.load(sandbox.id, { busySessions: 1, waitingRequests: 0 });
-  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update")).toEqual({ ok: false, error: "busy" });
+  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update", deferralAwareUpdate)).toEqual({ ok: false, error: "busy" });
   witness.load(sandbox.id, { busySessions: 0, waitingRequests: 1 });
-  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update")).toEqual({ ok: false, error: "busy" });
+  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update", deferralAwareUpdate)).toEqual({ ok: false, error: "busy" });
+  // A shell published before deferrals gets an answer it can parse and is not interrupted either.
+  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update")).toEqual({ ok: false, error: "already_current" });
   expect(ownedEvents(busyStart)).not.toContain("checkpoint-flush");
   expect(ownedEvents(busyStart)).not.toContain("stop");
   expect(sandbox.state).toBe("started");
@@ -777,11 +784,11 @@ test("Cloud APIs keep a slow or busy sandbox running and update it only once it 
   // sandbox so the next wake recycles it onto the pinned snapshot.
   witness.load(sandbox.id, null);
   const idleStart = witness.events.length;
-  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update")).toEqual({ ok: true, status: "update_requested" });
+  expect(await cloudRequest(den.admin, "/v1/cloud/instance/update", deferralAwareUpdate)).toEqual({ ok: true, status: "update_requested" });
   const updateOperations = ownedEvents(idleStart);
   expect(updateOperations.indexOf("checkpoint-flush")).toBeGreaterThanOrEqual(0);
   expect(updateOperations.indexOf("stop")).toBeGreaterThan(updateOperations.indexOf("checkpoint-flush"));
   expect(sandbox.state).toBe("stopped");
-  evidence.recordAssertionEvidence("Updates wait for the instance to be idle", JSON.stringify({ busy: ownedEvents(busyStart), idle: updateOperations }) + " POST /v1/cloud/instance/update answered busy while the instance reported a running session and then a waiting request, without any flush or stop; once idle the same request flushed the checkpoint and stopped the sandbox. No browser UI or Linux execution was exercised.", true);
+  evidence.recordAssertionEvidence("Updates wait for the instance to be idle", JSON.stringify({ busy: ownedEvents(busyStart), idle: updateOperations }) + " POST /v1/cloud/instance/update answered busy while the instance reported a running session and then a waiting request, without any flush or stop; a request without the acceptsDeferral body received already_current instead; once idle the same request flushed the checkpoint and stopped the sandbox. No browser UI or Linux execution was exercised.", true);
   expect(witness.unexpected).toEqual([]);
 });

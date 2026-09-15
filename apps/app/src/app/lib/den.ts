@@ -3262,7 +3262,9 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
         method: "POST",
         token,
         organizationId: orgId,
-        body: {},
+        // Tell Den this shell understands a deferred update; shells that do not
+        // opt in keep receiving the older already_current / flush_failed answers.
+        body: { acceptsDeferral: true },
       });
       const result = parseCloudInstanceUpdateResult(payload);
       if (!result) {
