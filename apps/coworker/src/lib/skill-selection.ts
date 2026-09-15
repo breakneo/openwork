@@ -90,6 +90,7 @@ export function createComposerDraftStore(io: { read: (key: string) => ComposerDr
   const entries = new Map<string, ComposerDraftSnapshot>();
   const listeners = new Map<string, Set<() => void>>();
   const submissions = new Map<string, ComposerDraftSubmission>();
+  const releasedDrafts = new Map<string, ComposerDraftSnapshot>();
   function read(key: string): ComposerDraftSnapshot {
     let entry = entries.get(key);
     if (!entry) { entry = { key, revision: 0, value: io.read(key) }; entries.set(key, entry); }
@@ -135,14 +136,23 @@ export function createComposerDraftStore(io: { read: (key: string) => ComposerDr
     if (read(snapshot.key).revision !== snapshot.revision || [...submissions.values()].some((item) => item.snapshot.key === snapshot.key && item.snapshot.revision === snapshot.revision)) return null;
     return bindSubmission(snapshot.key, messageId, snapshot.value);
   }
-  function finishSubmission(submission: ComposerDraftSubmission, acknowledged: boolean): void {
+  function releaseSubmission(submission: ComposerDraftSubmission): void {
+    const id = submissionKey(submission.snapshot.key, submission.messageId);
+    if (submissions.get(id) !== submission || releasedDrafts.has(id)) return;
+    const cleared = update(submission.snapshot.key, { text: "", skills: [] }, submission.snapshot.revision, true);
+    if (cleared) releasedDrafts.set(id, cleared);
+  }
+  function finishSubmission(submission: ComposerDraftSubmission, acknowledged: boolean | "uncertain"): void {
     const id = submissionKey(submission.snapshot.key, submission.messageId);
     if (submissions.get(id) !== submission) return;
-    if (acknowledged) clear(submission.snapshot);
+    const released = releasedDrafts.get(id);
+    if (acknowledged === true) clear(submission.snapshot);
+    else if (acknowledged === false && released) update(released.key, submission.snapshot.value, released.revision, true);
+    releasedDrafts.delete(id);
     submissions.delete(id);
   }
   return {
-    read, update, clear, transfer, bindSubmission, beginSubmission, finishSubmission,
+    read, update, clear, transfer, bindSubmission, beginSubmission, releaseSubmission, finishSubmission,
     hasOtherSubmission: (key: string, messageId?: string) => [...submissions.values()].some((item) => item.snapshot.key === key && item.messageId !== messageId),
     subscribe(key: string, listener: () => void) {
       let set = listeners.get(key);

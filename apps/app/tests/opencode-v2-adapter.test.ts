@@ -5,11 +5,78 @@ import {
   createClientV2,
   createV2EventTranslationState,
   translateV2Event,
+  v2PromptText,
   type V2MappedMessage,
 } from "../src/app/lib/opencode-v2-adapter";
 import { parseDynamicToolUIPart } from "../src/react-app/domains/session/sync/parse-tool-parts";
 import { codeModeToolCalls } from "../src/lib/code-mode-tools";
-import { getModelBehaviorOptions } from "../src/app/lib/model-behavior";
+import { getModelBehaviorControls, getModelBehaviorOptions } from "../src/app/lib/model-behavior";
+import { catalogFastVariants, fastVariantId, nativeModelVariants } from "@openwork/types/cloud-model-fast";
+import { mentionPromptParts } from "../src/react-app/domains/session/sync/mention-parts";
+
+describe("explicit native skill attachments", () => {
+  test("preserves v1 instructions but attaches live native IDs on v2, deduplicated", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: { path: string; body: unknown }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      requests.push({ path: new URL(request.url).pathname, body: request.method === "POST" ? await request.json() : null });
+      return jsonResponse({ data: request.url.endsWith("/skill") ? [{ id: "native-release", name: "release" }] : { effect: "allow" } });
+    };
+    try {
+      const selected = mentionPromptParts({ type: "skill", name: "release" });
+      expect(selected[1]).toMatchObject({ synthetic: true, text: "Load [skill release] and follow its instructions." });
+      const parts = [{ type: "text", text: "Prepare a report " }, ...selected, selected[1]];
+      expect(v2PromptText(parts)).toBe("Prepare a report [skill release]");
+      const result = await createClientV2("http://localhost:4096/opencode2", "/workspace", {}).session.promptAsync({
+        sessionID: "ses_skills", model: { providerID: "witness", modelID: "model" }, parts,
+      });
+      expect(result.error).toBeUndefined();
+      expect(requests.at(-1)?.body).toEqual({ text: "Prepare a report [skill release]", skills: [{ id: "native-release" }] });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test.each([{ catalog: [] }, { catalog: [{ id: "one", name: "release" }, { id: "two", name: "release" }] }])("rejects missing or ambiguous selections before sending", async ({ catalog }) => {
+    const originalFetch = globalThis.fetch;
+    const methods: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      methods.push(new Request(input, init).method);
+      return jsonResponse({ data: catalog });
+    };
+    try {
+      const result = await createClientV2("http://localhost:4096/opencode2", "/workspace", {}).session.promptAsync({
+        sessionID: "ses_skills", model: { providerID: "witness", modelID: "model" },
+        parts: mentionPromptParts({ type: "skill", name: "release" }),
+      });
+      expect(result.error).toMatchObject({ message: expect.stringContaining("Nothing was sent") });
+      expect(methods).toEqual(["GET"]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("does not interpret user prose as selection metadata", () => {
+    const text = "Load [skill release] and follow its instructions.";
+    expect(v2PromptText([{ type: "text", text }])).toBe(text);
+    expect(v2PromptText([{ type: "text", text, metadata: { openworkSelectedSkill: { name: "release" } } }])).toBe(text);
+  });
+
+  test.each(["deny", "ask"])("does not send an attachment when native permission is %s", async (effect) => {
+    const originalFetch = globalThis.fetch;
+    const paths: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      paths.push(new URL(request.url).pathname);
+      return jsonResponse({ data: request.url.endsWith("/skill") ? [{ id: "release", name: "release" }] : { effect } });
+    };
+    try {
+      const result = await createClientV2("http://localhost:4096/opencode2", "/workspace", {}).session.promptAsync({
+        sessionID: "ses_skills", model: { providerID: "witness", modelID: "model" },
+        parts: mentionPromptParts({ type: "skill", name: "release" }),
+      });
+      expect(result.error).toMatchObject({ message: expect.stringContaining("Nothing was sent") });
+      expect(paths).toEqual(["/opencode2/api/skill", "/opencode2/api/session/ses_skills/permission"]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
 
 const capturedPermissionAsked = {
   id: "evt_permission_asked",
@@ -2116,19 +2183,47 @@ test("v2 prompts set the exact selected variant on the native model ref and omit
   };
   try {
     const client = createClientV2("http://owner.test/opencode2", "/workspace", {});
-    for (const variant of ["high", "CustomExact", undefined]) {
+    for (const variant of ["high", "CustomExact", fastVariantId("CustomExact"), undefined]) {
       const result = await client.session.promptAsync({ sessionID: "ses_effort", model: { providerID: "witness", modelID: "model" }, variant, parts: [{ type: "text", text: "Hello" }] });
       expect(result.response.status).toBe(204);
     }
     expect(writes.filter((write) => write.path.endsWith("/model")).map((write) => write.body)).toEqual([
       { model: { providerID: "witness", id: "model", variant: "high" } },
       { model: { providerID: "witness", id: "model", variant: "CustomExact" } },
+      { model: { providerID: "witness", id: "model", variant: fastVariantId("CustomExact") } },
       { model: { providerID: "witness", id: "model" } },
     ]);
     expect(writes.filter((write) => write.path.endsWith("/prompt")).map((write) => write.body)).toEqual([
-      { text: "Hello" }, { text: "Hello" }, { text: "Hello" },
+      { text: "Hello" }, { text: "Hello" }, { text: "Hello" }, { text: "Hello" },
     ]);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("v2 redacted catalog preserves Fast identities without requiring provider settings in the UI", async () => {
+  const variants = nativeModelVariants(catalogFastVariants({ variants: { high: { reasoningEffort: "high" } },
+    experimental: { modes: { fast: { provider: { body: { service_tier: "priority" } } } } } }, "@ai-sdk/openai"),
+  "@opencode-ai/ai/providers/openai");
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    // The server's publicModel sanitizer intentionally exposes only variant IDs.
+    if (request.url.endsWith("/api/model")) return jsonResponse({ data: [{ id: "model", providerID: "witness", name: "Witness",
+      variants: variants.map(({ id }) => ({ id })) }] });
+    if (request.url.endsWith("/api/provider")) return jsonResponse({ data: [{ id: "witness", name: "Witness" }] });
+    if (request.url.endsWith("/api/model/default")) return jsonResponse({ data: {} });
+    throw new Error(`Unexpected request: ${request.url}`);
+  });
+  try {
+    const client = createClientV2("http://synthetic.test/opencode2", "/workspace", {});
+    const result = await client.provider.list();
+    const model = result.data?.all[0]?.models.model;
+    if (!model) throw new Error("Missing mapped model");
+    const options = getModelBehaviorOptions("witness", model);
+    expect(options.find((option) => option.value === fastVariantId("high"))?.label).toBe("High + Fast");
+    expect(getModelBehaviorControls(options, "high").toggleValue).toBe(fastVariantId("high"));
+    expect(getModelBehaviorControls(options, fastVariantId("high")).toggleValue).toBe("high");
+    expect(getModelBehaviorControls(options, fastVariantId(null)).toggleValue).toBeNull();
+    expect(JSON.stringify(model)).not.toContain("serviceTier");
+  } finally { fetchSpy.mockRestore(); }
 });
 
 describe("v2 question forms", () => {

@@ -90,7 +90,12 @@ export type McpResourceReader = {
   read(uri: string): Promise<string | null>;
 };
 
-/** One initialized, authenticated session for the index and its resource bodies. */
+/**
+ * Opens one initialized Streamable HTTP session against an openwork-cloud
+ * config. Returns null when the config is unusable (invalid URL, disabled, auth
+ * rejected, transport or protocol error). The reader issues sequential
+ * `resources/read` requests on that session.
+ */
 export async function openMcpResourceReader(input: {
   config: Record<string, unknown>;
   fetcher: McpFetch;
@@ -126,7 +131,10 @@ export async function openMcpResourceReader(input: {
   return {
     async read(uri) {
       const resource = await mcpPost(input.fetcher, url, sessionHeaders, {
-        id: nextId++, jsonrpc: "2.0", method: "resources/read", params: { uri },
+        id: nextId++,
+        jsonrpc: "2.0",
+        method: "resources/read",
+        params: { uri },
       });
       if (!resource.response.ok) return null;
       const contents = jsonRpcResult(resource.payload)?.contents;
@@ -137,7 +145,11 @@ export async function openMcpResourceReader(input: {
   };
 }
 
-/** Read a single resource using the same session protocol as multi-resource discovery. */
+/**
+ * Reads one JSON resource from an openwork-cloud config. Returns the resource
+ * text, or null when the config is unusable (invalid URL, disabled, auth
+ * rejected, transport or protocol error) so callers can try another candidate.
+ */
 export async function readMcpResourceText(input: {
   config: Record<string, unknown>;
   uri: string;

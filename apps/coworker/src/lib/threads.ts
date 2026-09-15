@@ -21,7 +21,7 @@ import { discussionIds, discussionIdsForWorkspace } from "./discussions.ts";
 import type { StreamEvent } from "./live-stream.ts";
 import { workerNameFromTitle } from "./workers.ts";
 import { PROGRESS_LIMITS } from "./progress-config.ts";
-import { normalizeModelIntelligence, type ModelIntelligence } from "./model-intelligence.ts";
+import { modelCatalogIdentity, normalizeModelIntelligence, preferredRoleModel, type ModelCatalogIdentity, type ModelIntelligence } from "./model-intelligence.ts";
 
 export type ThreadListItem = {
   id: string;
@@ -83,7 +83,7 @@ export type CoworkerActivity = {
 type ProviderListResponse = {
   connected: string[];
   default: Record<string, string>;
-  all: Array<{ id: string; name: string; source?: string; options?: Record<string, unknown>; models: Record<string, {
+  all: Array<{ id: string; name: string; source?: string; options?: Record<string, unknown>; models: Record<string, ModelCatalogIdentity & {
     name?: string; family?: string; variants?: Record<string, unknown>; status?: string; release_date?: string;
     cost?: { input: number; output: number }; api?: { npm?: string; id?: string };
     limit?: { context: number; input?: number; output: number };
@@ -155,7 +155,7 @@ export function modelTier(provider: { id: string; options?: Record<string, unkno
   return isLocalServerProvider(provider) ? "local-server" : "key";
 }
 
-export type EngineModelOption = {
+export type EngineModelOption = ModelCatalogIdentity & {
   /** "providerId/modelId" */
   id: string;
   providerId: string;
@@ -213,7 +213,7 @@ export type EngineModelCatalog = {
 
 /** Engine provider keys owned by the OpenWork account sync (`lpr_*` records and the hosted `openwork` provider). */
 export function isCloudManagedProviderId(providerId: string): boolean {
-  return /^lpr_/i.test(providerId) || providerId.trim() === "openwork";
+  return /^(?:lpr|ipr)_/i.test(providerId) || providerId.trim() === "openwork";
 }
 
 export function modelSourceLabel(source: ModelSource): string {
@@ -307,6 +307,7 @@ export function connectedModelCatalog(
       const knownPrice = typeof model.cost?.input === "number" && Number.isFinite(model.cost.input) && model.cost.input >= 0
         && typeof model.cost?.output === "number" && Number.isFinite(model.cost.output) && model.cost.output >= 0;
       return {
+        ...modelCatalogIdentity(model),
         id: `${provider.id}/${modelId}`,
         providerId: provider.id,
         providerLabel,
@@ -365,8 +366,10 @@ export function recommendModel(
   options: { exclude?: string | readonly string[] } = {},
 ): EngineModelOption | null {
   const excluded = new Set(typeof options.exclude === "string" ? [options.exclude] : options.exclude ?? []);
+  const preferred = preferredRoleModel(catalog, "conversation", { exclude: [...excluded] });
+  if (preferred) return preferred;
   const candidates = catalog.models.filter(
-    (model) => model.toolCall && model.status !== "deprecated" && !excluded.has(model.id),
+    (model) => model.providerId !== "opencode" && model.toolCall && model.status !== "deprecated" && !excluded.has(model.id),
   );
   const bestTier = MODEL_TIER_ORDER.find((tier) => candidates.some((model) => model.tier === tier));
   const pool = bestTier ? candidates.filter((model) => model.tier === bestTier) : [];
@@ -782,6 +785,7 @@ export function createCoworkerThreads(options: {
             const price = model.cost.find((cost) => !cost.tier);
             const modalities = (values: string[]) => Object.fromEntries(["text", "image", "audio", "video", "pdf"].map((kind) => [kind, values.some((value) => value === kind || value.startsWith(`${kind}/`))]));
             return [model.id, {
+              ...modelCatalogIdentity(model),
               name: model.name, family: model.family, variants: Object.fromEntries(model.variants.map((variant) => [variant.id, {}])),
               status: model.status, release_date: model.time.released > 0 ? new Date(model.time.released).toISOString().slice(0, 10) : "",
               ...(price ? { cost: { input: price.input, output: price.output } } : {}),

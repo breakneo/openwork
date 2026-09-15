@@ -2,13 +2,16 @@ import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import { beforeAll, describe, expect, test } from "bun:test"
 import type { CloudProviderMaterializationProvider } from "../src/llm/cloud-provider-materialization.js"
 import { runtimeProviderEnvTag } from "../src/llm/provider-credentials.js"
+import { materializeLegacyFastProviders } from "@openwork/types/cloud-model-fast"
 
 // Fixed row ids so the provider-scoped runtime env names are stable across
 // the suite: a models.dev provider's declared names leave Den as
 // `<LPR_tag>_<declared name>`, derived from nothing but the row id.
 const ANTHROPIC_PROVIDER_ID = "lpr_01kx4t3amgendr682dmp6120jv" as const
 const AZURE_PROVIDER_ID = "lpr_01kx4t3apjendr685c2ryzevqe" as const
+const GATEWAY_PROVIDER_ID = "ipr_01kx4t3aqfendr688a4dedf2m5" as const
 const ANTHROPIC_API_KEY_ENV = `${runtimeProviderEnvTag(ANTHROPIC_PROVIDER_ID)}_ANTHROPIC_API_KEY`
+const GATEWAY_API_KEY_ENV = `${runtimeProviderEnvTag(GATEWAY_PROVIDER_ID)}_ANTHROPIC_API_KEY`
 const AZURE_RESOURCE_NAME_ENV = `${runtimeProviderEnvTag(AZURE_PROVIDER_ID)}_AZURE_RESOURCE_NAME`
 const AZURE_API_KEY_ENV = `${runtimeProviderEnvTag(AZURE_PROVIDER_ID)}_AZURE_API_KEY`
 
@@ -29,6 +32,7 @@ const organizationId = createDenTypeId("organization")
 const instanceUrl = "https://worker.example.test"
 let materializeCloudWorkerProviders: MaterializerModule["materializeCloudWorkerProviders"]
 let computeCloudProviderMaterializationFingerprint: MaterializerModule["computeCloudProviderMaterializationFingerprint"]
+let gatewayMaterializationProvider: MaterializerModule["gatewayMaterializationProvider"]
 
 function seedRequiredEnv() {
   process.env.DATABASE_URL = process.env.DATABASE_URL ?? "mysql://root:password@127.0.0.1:3306/openwork_test"
@@ -43,6 +47,7 @@ beforeAll(async () => {
   const materializer = await import("../src/llm/cloud-provider-materialization.js")
   materializeCloudWorkerProviders = materializer.materializeCloudWorkerProviders
   computeCloudProviderMaterializationFingerprint = materializer.computeCloudProviderMaterializationFingerprint
+  gatewayMaterializationProvider = materializer.gatewayMaterializationProvider
 })
 
 function jsonResponse(body: unknown, status = 200) {
@@ -120,6 +125,56 @@ function makeAnthropicProvider(input: {
         },
       },
     ],
+  }
+}
+
+function makeGatewayProvider(apiKey = "ow_gw_synthetic_member_key"): CloudProviderMaterializationProvider {
+  const modelId = "gateway-group.gateway-set.claude-fable-5"
+  const api = `http://127.0.0.1:18791/api/v1/providers/${GATEWAY_PROVIDER_ID}`
+  return gatewayMaterializationProvider({
+    id: GATEWAY_PROVIDER_ID,
+    source: "openwork_gateway",
+    providerId: "anthropic",
+    name: "Anthropic via OpenWork Gateway",
+    credentialMode: "org",
+    credentialStatus: "ready",
+    authUrl: null,
+    status: "active",
+    updatedAt: "2026-09-13T00:00:00.000Z",
+    providerConfig: {
+      id: "anthropic",
+      name: "Anthropic via OpenWork Gateway",
+      npm: "@ai-sdk/anthropic",
+      env: [GATEWAY_API_KEY_ENV],
+      api,
+      options: { baseURL: api },
+    },
+    modelIds: ["claude-fable-5"],
+    models: [{
+      id: modelId,
+      name: "Claude Fable 5",
+      config: { id: modelId, name: "Claude Fable 5", tool_call: true },
+      upstreamModelId: "claude-fable-5",
+      modelGroupId: "gateway-group",
+      modelGroupName: "Gateway group",
+      credentialSetId: "gateway-set",
+      credentialSetName: "Gateway set",
+    }],
+    authorizationRequests: [],
+  }, apiKey)
+}
+
+function makeGatewayRuntimeProvider() {
+  const modelId = "gateway-group.gateway-set.claude-fable-5"
+  const api = `http://127.0.0.1:18791/api/v1/providers/${GATEWAY_PROVIDER_ID}`
+  return {
+    api,
+    options: { baseURL: api },
+    npm: "@ai-sdk/anthropic",
+    models: { [modelId]: { tool_call: true, name: "Claude Fable 5", id: modelId } },
+    env: [GATEWAY_API_KEY_ENV],
+    name: "Anthropic via OpenWork Gateway",
+    id: "anthropic",
   }
 }
 
@@ -351,6 +406,35 @@ async function materialize(input: {
 }
 
 describe("Cloud provider materialization", () => {
+  test("preserves catalog Fast metadata and accepts expanded v1 readback without repeated writes", async () => {
+    const provider = makeAnthropicProvider({ apiKey: "synthetic" })
+    provider.providerConfig = { npm: "@ai-sdk/openai", env: ["SYNTHETIC_API_KEY"] }
+    provider.models = [{ modelId: "model", name: "Model", modelConfig: {
+      reasoning_options: [{ type: "effort", values: ["low", "medium", "high", "xhigh", "max"] }],
+    } }]
+    const before = computeCloudProviderMaterializationFingerprint([provider])
+    provider.models[0].modelConfig.experimental = { modes: { fast: { provider: { body: { service_tier: "priority" } } } } }
+    expect(computeCloudProviderMaterializationFingerprint([provider])).not.toBe(before)
+    const instance = makeInstance()
+    const result = await materialize({ providers: () => [provider], fetchImpl: instance.fetchImpl, force: true })
+    expect(result.status).toBe("applied")
+    const written = instance.calls.find((call) => call.path === "/runtime-config/providers")?.body
+    expect(written).toMatchObject({ provider: { [provider.id]: { models: { model: { variants: {
+      __openwork_catalog_fast_v1: { disabled: true, openworkNativeFast: 1, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+    } } } } } })
+    expect(JSON.stringify(written)).not.toContain('"reasoningEffort"')
+    expect(JSON.stringify(written)).not.toContain('"experimental"')
+    const runtime = instance.runtimeProvider(provider.id)
+    if (!runtime) throw new Error("Missing materialized provider")
+    const compiled = materializeLegacyFastProviders({ [provider.id]: runtime })
+    const configuredEnv = Array.isArray(runtime.env) ? runtime.env : []
+    const envName = configuredEnv.find((value): value is string => typeof value === "string")
+    if (!envName) throw new Error("Missing synthetic credential name")
+    const restarted = makeInstance({ runtimeProviders: compiled, envValues: { [envName]: "synthetic" } })
+    const next = await materialize({ providers: () => [provider], fetchImpl: restarted.fetchImpl, force: true })
+    expect(next.status).toBe("noop")
+    expect(writeCalls(restarted.calls)).toEqual([])
+  })
   test("does not rewrite matching provider state after the den-api cache is lost", async () => {
     const provider = makeAnthropicProvider({ apiKey: "sk-anthropic" })
     const instance = makeInstance({
@@ -450,6 +534,49 @@ describe("Cloud provider materialization", () => {
       },
     })
     expect(writeCalls(instance.calls).map((call) => call.method)).toEqual(["PUT", "PATCH"])
+  })
+
+  test("materializes a member Gateway provider without changing the legacy provider path", async () => {
+    const legacy = makeAnthropicProvider({ apiKey: "sk-legacy-synthetic" })
+    const gateway = makeGatewayProvider()
+    const instance = makeInstance()
+
+    const result = await materialize({
+      providers: () => [legacy, gateway],
+      fetchImpl: instance.fetchImpl,
+      force: true,
+    })
+
+    expect(result).toMatchObject({ ok: true, status: "applied", providers: 2 })
+    const envWrite = instance.calls.find((call) => call.method === "PUT" && call.path === "/env")
+    expect(isRecord(envWrite?.body) && Array.isArray(envWrite.body.entries) ? envWrite.body.entries : []).toEqual(expect.arrayContaining([
+      { key: ANTHROPIC_API_KEY_ENV, value: "sk-legacy-synthetic" },
+      { key: GATEWAY_API_KEY_ENV, value: "ow_gw_synthetic_member_key" },
+    ]))
+    const patch = instance.calls.find((call) => call.method === "PATCH" && call.path === "/runtime-config/providers")
+    const providers = providerPatchFromBody(patch?.body)
+    expect(Object.keys(providers).sort()).toEqual([ANTHROPIC_PROVIDER_ID, GATEWAY_PROVIDER_ID].sort())
+    expect(providers[GATEWAY_PROVIDER_ID]).toMatchObject({
+      id: "anthropic",
+      name: "Anthropic via OpenWork Gateway",
+      env: [GATEWAY_API_KEY_ENV],
+      api: `http://127.0.0.1:18791/api/v1/providers/${GATEWAY_PROVIDER_ID}`,
+      options: { baseURL: `http://127.0.0.1:18791/api/v1/providers/${GATEWAY_PROVIDER_ID}` },
+      models: { "gateway-group.gateway-set.claude-fable-5": { id: "gateway-group.gateway-set.claude-fable-5" } },
+    })
+  })
+
+  test("removes a Gateway provider that is no longer in the member's usable inventory", async () => {
+    const instance = makeInstance({
+      envValues: { [GATEWAY_API_KEY_ENV]: "ow_gw_synthetic_member_key" },
+      runtimeProviders: { [GATEWAY_PROVIDER_ID]: makeGatewayRuntimeProvider() },
+    })
+
+    const result = await materialize({ providers: () => [], fetchImpl: instance.fetchImpl, force: true })
+
+    expect(result).toMatchObject({ ok: true, status: "applied", providers: 0 })
+    const patch = instance.calls.find((call) => call.method === "PATCH" && call.path === "/runtime-config/providers")
+    expect(patch?.body).toEqual({ provider: { [GATEWAY_PROVIDER_ID]: null } })
   })
 
   test("writes Azure resource name and API key env while preserving the provider env config", async () => {

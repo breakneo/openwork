@@ -20,6 +20,9 @@ import { dispatchNativeTurn, nativeTurnReceipt, verifyNativeTurnSkills, waitForN
 import { ALL_HANDS_BRIEF, EVENT_SCHEDULE_DENY, EVENT_WRITE_DENY } from "./event-execution.mjs";
 import { nativeTurnAgent } from "./native-turns.mjs";
 import { selectionFields, validateSkillSelections, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
+import { DEFAULT_MODEL_DEFAULTS } from "../src/lib/model-defaults.ts";
+import { resolveModelPreview } from "../src/lib/model-choice.ts";
+import { connectedModelCatalog } from "../src/lib/threads.ts";
 import {
   DEFAULT_TURN_BUDGET,
   MAX_LIVE_WORKERS,
@@ -812,9 +815,9 @@ test("a settled turn decides whether the worker continues, holds, or stops", () 
 test("steering and an admitted turn survive rereads, while pause and stop win settlement", async () => {
   const coworkersDir = await fixture();
   const providers = [
-    { id: "conversation", models: { standard: { capabilities: { toolcall: true }, variants: { low: {}, high: {} } } } },
-    { id: "reasoning", models: { deep: { capabilities: { toolcall: true }, variants: { low: {}, high: {} } } } },
-    { id: "delivery", models: { fast: { capabilities: { toolcall: true }, variants: {} } } },
+    { id: "conversation", models: { standard: { status: "active", capabilities: { toolcall: true }, variants: { low: {}, high: {} } } } },
+    { id: "reasoning", models: { deep: { status: "active", capabilities: { toolcall: true }, variants: { low: {}, high: {} } } } },
+    { id: "delivery", models: { fast: { status: "active", capabilities: { toolcall: true }, variants: {} } } },
   ];
   const owner = await updateCoworker(coworkersDir, "scout", { model: "conversation/standard", modelVariant: "low", modelMode: "auto", modelChosenBy: "person", effortPreference: "light", thinkingModel: "reasoning/deep", thinkingModelVariant: "high", deliveryModel: "delivery/fast" });
   const modelSnapshot = resolveWorkerModel(owner, "thinking", providers);
@@ -850,11 +853,40 @@ test("steering and an admitted turn survive rereads, while pause and stop win se
   assert.deepEqual(resolveWorkerModel({}, "delivery", providers, nativeDefault, configuredDefaults), nativeDefault, "a pinned default never follows later default edits");
   assert.throws(() => resolveWorkerModel({ thinkingModel: "reasoning/missing" }, "thinking", providers, null, nativeDefaults), /unavailable.*will not switch/);
   assert.throws(() => resolveWorkerModel({ model: "reasoning/missing" }, "delivery", providers, null, nativeDefaults), /unavailable.*will not switch/);
-  assert.throws(() => resolveWorkerModel({}, "delivery", providers, null, { ...nativeDefaults, model: "reasoning/missing" }), /unavailable.*will not switch/);
+  assert.deepEqual(resolveWorkerModel({}, "delivery", providers, null, { ...nativeDefaults, model: "reasoning/missing" }), nativeDefault, "an unavailable native suggestion cannot block an entirely inherited automatic role");
   assert.deepEqual(resolveWorkerModel({}, "delivery", providers, null, { default: configuredDefaults.default }), nativeDefault, "new unchosen Workers may anchor on a connected recommendation");
   assert.deepEqual(resolveWorkerModel({}, "delivery", providers), nativeDefault);
   assert.throws(() => resolveWorkerModel({}, "delivery", []), /unavailable/);
   assert.throws(() => resolveWorkerModel(edited, "thinking", providers, { providerId: "reasoning" }), /unreadable/);
+  const gatewayModel = (upstreamModelId, price) => ({ ...priced(true, price), upstreamModelId, modelGroupId: "group", credentialSetId: "set", variants: { low: {}, medium: {}, high: {} } });
+  const gateway = [{ id: "ipr_fixture", name: "OW OpenAI", models: {
+    gwm_anchor: gatewayModel("other-model", 10), gwm_luna: gatewayModel("gpt-5.6-luna", 1), gwm_astra: gatewayModel("gpt-6-astra", 5),
+  } }];
+  const autoOwner = { model: "ipr_fixture/gwm_luna", modelChosenBy: "app" };
+  assert.equal(resolveWorkerModel(autoOwner, "delivery", gateway).modelId, "gwm_luna");
+  assert.deepEqual(resolveWorkerModel(autoOwner, "thinking", gateway), { providerId: "ipr_fixture", modelId: "gwm_astra", variant: "medium" });
+  const previewCatalog = connectedModelCatalog({ all: gateway, connected: gateway.map((provider) => provider.id), default: {} });
+  for (const purpose of ["thinking", "delivery"]) {
+    const preview = resolveModelPreview(previewCatalog, purpose, DEFAULT_MODEL_DEFAULTS, autoOwner);
+    assert.equal(preview.state, "ready");
+    assert.deepEqual({ providerId: preview.model.providerId, modelId: preview.model.modelId, variant: preview.variant }, resolveWorkerModel(autoOwner, purpose, gateway), "the displayed role choice matches Worker execution");
+  }
+  assert.equal(resolveWorkerModel({ ...autoOwner, thinkingModel: "ipr_fixture/gwm_astra", thinkingModelVariant: "high" }, "thinking", gateway).variant, "high");
+  assert.equal(resolveWorkerModel(autoOwner, "thinking", gateway, null, {}, { ...DEFAULT_MODEL_DEFAULTS, thinking: { model: "", modelVariant: "low" } }).variant, "low");
+  assert.equal(resolveWorkerModel(autoOwner, "thinking", gateway, null, {}, { ...DEFAULT_MODEL_DEFAULTS, thinking: { model: "ipr_fixture/gwm_luna", modelVariant: "high" } }).modelId, "gwm_luna");
+  const pinned = resolveWorkerModel(autoOwner, "thinking", gateway);
+  assert.deepEqual(resolveWorkerModel({ ...autoOwner, thinkingModel: "ipr_fixture/gwm_luna" }, "thinking", gateway, pinned), pinned);
+  const oldRecommendation = { model: "legacy/deepseek", modelChosenBy: "app" };
+  assert.equal(resolveWorkerModel(oldRecommendation, "delivery", gateway).modelId, "gwm_luna");
+  assert.equal(resolveWorkerModel(oldRecommendation, "thinking", gateway).modelId, "gwm_astra");
+  assert.throws(() => resolveWorkerModel({ ...oldRecommendation, useAppModelDefaults: false }, "thinking", gateway), /unavailable/);
+  gateway[0].models.gwm_astra.cost.output = 11;
+  assert.equal(resolveWorkerModel(autoOwner, "thinking", gateway).modelId, "gwm_astra", "requested initial thinking default is not capped by the cheaper conversation model");
+  assert.notEqual(resolveWorkerModel({ ...autoOwner, useAppModelDefaults: false }, "thinking", gateway).modelId, "gwm_astra");
+  const ambiguousGateway = [{ ...gateway[0], models: { ...gateway[0].models, gwm_alternate: { ...gateway[0].models.gwm_astra, credentialSetId: "other" } } }];
+  assert.equal(resolveWorkerModel(autoOwner, "thinking", ambiguousGateway).modelId, "gwm_luna", "ambiguous credentials retain the constrained fallback");
+  const withoutAstra = [{ ...gateway[0], models: { gwm_luna: gateway[0].models.gwm_luna } }];
+  assert.equal(resolveWorkerModel(oldRecommendation, "thinking", withoutAstra).modelId, "gwm_luna", "missing role preference and stale app anchor still have a current fallback");
   const blocked = nextWorkerState(worker, { kind: "settled", report: { kind: "decision", text: "Missing acceptance criteria." } });
   assert.equal(blocked.patch.status, "failed", "a new Worker's blocker returns to the supervisor through durable completion");
   assert.equal(blocked.schedule, "stop");

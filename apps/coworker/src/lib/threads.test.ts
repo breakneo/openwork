@@ -182,6 +182,23 @@ test("connectedModelCatalog tells account (OpenWork Cloud) providers from this M
     ],
   );
   assert.equal(withStatus.cloud?.skippedProviders[0]?.reason, "needs_key");
+  const gateway: Parameters<typeof connectedModelCatalog>[0] = {
+    connected: ["ipr_openai", "ipr_anthropic"], default: {}, all: [
+      { id: "ipr_openai", name: "OW OpenAI", models: {
+        gwm_luna: { name: "GPT-5.6 Luna", upstreamModelId: "gpt-5.6-luna", modelGroupId: "group", credentialSetId: "set" },
+        gwm_astra: { name: "GPT-6 Astra", variants: { medium: {} } },
+        gwm_gpt: { name: "GPT-5.6" },
+      } },
+      { id: "ipr_anthropic", name: "OW Anthropic", models: { gwm_fable: { name: "Fable" } } },
+      { id: "ipr_unconnected", name: "Unconnected", models: { gwm_gpt6: { name: "GPT-6" } } },
+    ],
+  };
+  const assigned = connectedModelCatalog(gateway);
+  assert.deepEqual(assigned.models.map((model) => model.label), ["OW Anthropic · Fable", "OW OpenAI · GPT-5.6", "OW OpenAI · GPT-5.6 Luna", "OW OpenAI · GPT-6 Astra"]);
+  assert.ok(assigned.models.every((model) => model.source === "cloud"));
+  assert.equal(assigned.models.find((model) => model.modelId === "gwm_luna")?.upstreamModelId, "gpt-5.6-luna");
+  assert.deepEqual(assigned.models.find((model) => model.modelId === "gwm_astra")?.variants, ["medium"]);
+  assert.deepEqual(connectedModelCatalog(gateway, { hasSession: false, lastRun: null, providers: [], reloadPending: true, skippedProviders: [] }).models, []);
 
   // Without status, the cloud-owned key shapes still identify account providers.
   const withoutStatus = connectedModelCatalog(providerList);

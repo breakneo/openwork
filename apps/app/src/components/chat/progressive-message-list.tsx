@@ -20,6 +20,7 @@ interface ProgressiveMessageListProps<T> {
   groups: readonly T[]
   getGroupKey: (group: T) => string
   getMessageIds: (group: T) => readonly string[]
+  groupKeyReplacements?: ReadonlyMap<string, string>
   renderGroup: (group: T, index: number) => React.ReactNode
   viewport?: MessageListViewport
   className?: string
@@ -44,6 +45,7 @@ type MountState = {
 
 type Segment = { key: string; start: number; end: number; height: number; placeholder: boolean }
 type Plan = { keys: string[]; heights: number[]; segments: Segment[]; complete: boolean }
+type HeightPlan = { keys: string[]; scrollHeight: number | undefined; heights: number[]; totalHeight: number }
 type ReadingPosition = {
   reservedTop?: number
   element: HTMLElement | null
@@ -75,6 +77,10 @@ function sameStructure(a: Plan, b: Plan) {
       const other = b.segments[index]
       return segment.key === other.key && (!segment.placeholder || segment.height === other.height)
     })
+}
+
+function sameKeys(a: readonly string[], b: readonly string[]) {
+  return a === b || (a.length === b.length && a.every((key, index) => key === b[index]))
 }
 
 /** Whole groups mount once, then stay mounted. The key cancels work on a session switch. */
@@ -115,10 +121,13 @@ class ProgressiveGroups<T> extends React.Component<PreparedGroupsProps<T>, Mount
   static getDerivedStateFromProps<T>(props: PreparedGroupsProps<T>, state: MountState): MountState | null {
     const { keys, anchorIndex } = props
     if (!keys.length) return null
-    let mounted = state.mounted
+    const replacements = [...(props.groupKeyReplacements ?? [])]
+      .filter(([key, previous]) => state.mounted.has(previous) && !state.mounted.has(key) && keys.includes(key))
+      .map(([key]) => key)
+    let mounted = replacements.length ? new Set([...state.mounted, ...replacements]) : state.mounted
     const last = keys[keys.length - 1]
     if (!props.viewport || props.viewport.revealAll) {
-      if (keys.every((key) => mounted.has(key))) return null
+      if (keys.every((key) => state.mounted.has(key))) return null
       mounted = new Set(keys)
     } else if (!state.initialized || (anchorIndex >= 0 && (state.anchorPending || !mounted.has(keys[anchorIndex])))) {
       // Include the live tail without allowing the first mount to exceed eight groups.
@@ -133,7 +142,7 @@ class ProgressiveGroups<T> extends React.Component<PreparedGroupsProps<T>, Mount
       mounted = nearby
     } else if (!mounted.has(last)) {
       mounted = new Set([...mounted, last])
-    } else return null
+    } else if (mounted === state.mounted) return null
     return { ...state, mounted, initialized: true, anchorPending: state.anchorPending && anchorIndex < 0 && !props.viewport?.historyComplete }
   }
 
@@ -146,6 +155,7 @@ class ProgressiveGroups<T> extends React.Component<PreparedGroupsProps<T>, Mount
   private active = false
   private estimates = new Map<string, number>()
   private estimateScope = ""
+  private heightPlan: HeightPlan | null = null
 
   private cacheKey(width = this.state.width) {
     return JSON.stringify([this.props.viewport?.sessionKey, width])
@@ -359,27 +369,38 @@ class ProgressiveGroups<T> extends React.Component<PreparedGroupsProps<T>, Mount
 
   render() {
     const { groups, keys, renderGroup, viewport, header, children, className } = this.props
-    const cache = heightCache.get(this.cacheKey())
     const estimateScope = JSON.stringify([this.state.width, viewport?.historyComplete])
     if (estimateScope !== this.estimateScope) {
       this.estimateScope = estimateScope
       this.estimates = new Map()
+      this.heightPlan = null
     }
-    const known = keys.reduce((sum, key) => sum + (this.estimates.get(key) ?? cache?.get(key) ?? 0), 0)
-    const unknown = keys.filter((key) => !this.estimates.has(key) && !cache?.has(key)).length
-    const estimate = viewport?.historyComplete && viewport.scrollHeight && unknown > 0
-      ? Math.max(32, (viewport.scrollHeight - known - GROUP_GAP * Math.max(0, keys.length - 1)) / unknown)
-      : ESTIMATED_HEIGHT
-    // Freeze skipped geometry for this data/width scope. Learning a mounted
-    // group's size must not redistribute every other spacer during live reflow.
-    const heights = keys.map((key) => {
-      const height = this.estimates.get(key) ?? cache?.get(key) ?? estimate
-      this.estimates.set(key, height)
-      return height
-    })
+    let heightPlan = this.heightPlan
+    // Mount batches keep the same keys. Content-only parent updates may supply
+    // a new array with the same order, including after every group is mounted.
+    if (!heightPlan || heightPlan.scrollHeight !== viewport?.scrollHeight || !sameKeys(heightPlan.keys, keys)) {
+      const cache = heightCache.get(this.cacheKey())
+      const known = keys.reduce((sum, key) => sum + (this.estimates.get(key) ?? cache?.get(key) ?? 0), 0)
+      const unknown = keys.filter((key) => !this.estimates.has(key) && !cache?.has(key)).length
+      const estimate = viewport?.historyComplete && viewport.scrollHeight && unknown > 0
+        ? Math.max(32, (viewport.scrollHeight - known - GROUP_GAP * Math.max(0, keys.length - 1)) / unknown)
+        : ESTIMATED_HEIGHT
+      // Freeze skipped geometry for this data/width scope. Learning a mounted
+      // group's size must not redistribute every other spacer during live reflow.
+      let totalHeight = 0
+      const heights = keys.map((key) => {
+        const height = this.estimates.get(key) ?? cache?.get(key) ?? estimate
+        this.estimates.set(key, height)
+        totalHeight = totalHeight + height + GROUP_GAP
+        return height
+      })
+      heightPlan = { keys, scrollHeight: viewport?.scrollHeight, heights, totalHeight }
+      this.heightPlan = heightPlan
+    } else heightPlan.keys = keys
+    const { heights, totalHeight } = heightPlan
     const segments: Segment[] = []
     const reserved = viewport && !viewport.historyComplete
-      ? Math.max(0, (viewport.scrollHeight ?? 0) - heights.reduce((sum, height) => sum + height + GROUP_GAP, 0)) : 0
+      ? Math.max(0, (viewport.scrollHeight ?? 0) - totalHeight) : 0
     const leading = !viewport?.historyComplete ? viewport?.leadingHeight ?? reserved : 0
     const trailing = !viewport?.historyComplete ? viewport?.trailingHeight ?? 0 : 0
     if (leading > 0) segments.push({ key: "history-prefix", start: 0, end: 0, height: leading, placeholder: true })

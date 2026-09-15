@@ -587,7 +587,7 @@ export const coworkerBridge = {
     /** Explicit person recovery may return a NEW messageId and continuation prompt after tool work. */
     selectSkill: (input: { slug: string; uri: string; label: string; account: { baseUrl: string; orgId: string; email: string } }) => invoke<import("./skill-selection.ts").SelectedSkill>("turns.selectSkill", input),
     validateSkills: (slug: string, fields: import("./skill-selection.ts").SkillFields) => invoke<void>("turns.validateSkills", { slug, ...fields }),
-    send: (input: import("./skill-selection.ts").SkillFields & { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<HeadlessTurnAcceptance & { prompt: string }>("turns.send", input),
+    send: (input: import("./skill-selection.ts").SkillFields & { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<(HeadlessTurnAcceptance & { prompt: string; rejected?: false }) | { rejected: true; messageId: string; error: string }>("turns.send", input),
     cancel: (slug: string, threadId: string, messageId?: string) => invoke<{ ok: boolean }>("turns.cancel", { slug, threadId, messageId }),
   },
   templates: {

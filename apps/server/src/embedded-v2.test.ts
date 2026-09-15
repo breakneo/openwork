@@ -42,6 +42,8 @@ if (!process.env.OPENWORK_EMBEDDED_V2_TEST_ROOT) {
   const { default: constants } = await import("../../../constants.json", { with: { type: "json" } });
   const { default: nativeRuntime } = await import("../../coworker/native-runtime.json", { with: { type: "json" } });
   const { createNativeV2Client, createHeadlessThreadClientV2, nativeCatalogProviders } = await import("@openwork/headless-threads/v2");
+  const { createCoworkerThreads } = await import(new URL("../../coworker/src/lib/threads.ts", import.meta.url).href);
+  const { resolveWorkerModel } = await import(new URL("../../coworker/electron/workers.mjs", import.meta.url).href);
 
   async function fixture(version?: string) {
     const root = await mkdtemp(join(process.env.OPENWORK_EMBEDDED_V2_TEST_ROOT!, "case-"));
@@ -72,11 +74,16 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
     const providers = Object.entries(config().providers).map(([id, value]) => ({ id, activation: "enabled", ...value }));
     return Response.json({ data: url.pathname === "/api/provider" ? providers : providers.find((value) => value.id === decodeURIComponent(url.pathname.slice("/api/provider/".length))) });
   }
-  if (url.pathname === "/api/model") return Response.json({ data: Object.entries(config().providers).flatMap(([providerID, value]) => Object.entries(value.models ?? {}).map(([id, model]) => ({
-    id, modelID: id, providerID, name: id, capabilities: { tools: true, input: ["text"], output: ["text"] },
-    variants: [], time: { released: 0 }, cost: [{ input: 0, output: 0 }], status: "active", enabled: true,
-    limit: { context: 128000, output: 8192 }, ...model,
-  }))) });
+  if (url.pathname === "/api/model" || url.pathname === "/api/model/default") {
+    const models = Object.entries(config().providers).flatMap(([providerID, value]) => Object.entries(value.models ?? {}).map(([id, model]) => ({
+      id, modelID: model.modelID ?? id, providerID, name: model.name ?? id,
+      capabilities: model.capabilities ?? { tools: true, input: ["text"], output: ["text"] },
+      variants: model.variants ?? [], time: { released: 0 }, cost: model.cost ?? [], status: "active", enabled: model.disabled !== true,
+      limit: model.limit ?? { context: 128000, output: 8192 }, settings: model.settings, headers: model.headers,
+    })));
+    const preferred = config().model;
+    return Response.json({ data: url.pathname === "/api/model" ? models : models.find((model) => model.providerID === preferred?.providerID && model.id === preferred?.model) ?? null });
+  }
   if (url.pathname === "/api/integration") return Response.json({ data: [{ id: "fixture-integration", connections: [{ type: "env", name: "FIXTURE_CONNECTED" }] }] });
   if (url.pathname === "/api/mcp") return Response.json({ data: [...mcps.keys()].map((name) => ({ name, status: { status: "connected" } })) });
   if (url.pathname.startsWith("/api/mcp/")) {
@@ -168,7 +175,7 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
   }, 15_000);
 
   test("workspace proxy preserves native catalog eligibility and exposes only public provider metadata", async () => {
-    const item = await fixture();
+    const item = await fixture(nativeRuntime.opencodeV2Version);
     const packageName = "@opencode-ai/ai/providers/openai-compatible";
     const provider = {
       name: "Fixture", activation: "enabled", package: packageName,
@@ -179,11 +186,11 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
         variants: [{ id: "low", settings: { apiKey: "fixture-variant-key" } }] } },
     };
     const handle = await startEmbeddedServer({ ...item.options, opencodeV2: { ...item.options.opencodeV2,
-      config: { ...item.options.opencodeV2.config, providers: {
+      config: { ...item.options.opencodeV2.config, model: { providerID: "ipr_catalog", model: "opaque-luna" }, providers: {
         fixture: provider,
         integrated: { ...provider, activation: "auto", integrationID: "fixture-integration", settings: { baseURL: "https://fixture-user:fixture-password@example.test/private?key=fixture-query#fixture-fragment" } },
         disabled: { ...provider, activation: "disabled", integrationID: "fixture-integration", settings: { baseURL: "file:///fixture-private-file" } },
-        disconnected: { ...provider, activation: "auto", settings: { baseURL: "not a URL fixture-private-value" } },
+        disconnected: { ...provider, activation: "auto", settings: { baseURL: "not a URL fixture-private-value" }, models: { "opaque-astra": provider.models.text } },
       } } } });
     try {
       const id = handle.config.workspaces[0]!.id;
@@ -212,6 +219,65 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
       const models = await (await fetch(mount + "/model", { headers })).text();
       expect(models).not.toContain("fixture-model-key");
       expect(models).not.toContain("fixture-variant-key");
+      const identity = { upstreamModelId: "gpt-6-astra", modelGroupId: "gmg_fixture", credentialSetId: "gcs_fixture" };
+      const sourceModel = {
+        id: "opaque-astra", name: "Team thinking", ...identity,
+        reasoning: true, release_date: "2026-06-01", cost: { input: 2, output: 8, cache_read: 0.5, tiers: [{ input: 4, output: 12, tier: { type: "context", size: 272000 } }], context_over_200k: { input: 4, output: 12 }, private: "fixture-price-secret" },
+        variants: { medium: { reasoningEffort: "medium", customOption: "retained", apiKey: "fixture-variant-key" }, high: { disabled: true } },
+        options: { apiKey: "fixture-model-key" }, headers: { Authorization: "fixture-model-header" },
+      };
+      await writeGlobalRuntimeOpencodeConfig(handle.config, (current) => ({ ...current, provider: {
+        ipr_catalog: { name: "Connected catalog", npm: "@ai-sdk/openai", options: { apiKey: "fixture-catalog-key" }, models: {
+          "opaque-astra": sourceModel,
+          "opaque-luna": { ...sourceModel, id: "opaque-luna", name: "Team chat", upstreamModelId: "gpt-5.6-luna", variants: {} },
+          unknown: { name: "Unknown cost", cost: { input: -1, output: 0 }, release_date: "2026-02-30", reasoning_options: [{ type: "effort", values: ["medium"] }], upstreamModelId: "invalid\nidentity", credentialSetId: { secret: "fixture-identity-secret" } },
+          zero: { name: "Known zero", cost: { input: 0, output: 0 } },
+          retired: { ...sourceModel, id: "retired", status: "deprecated" },
+        } },
+        ipr_missing: { npm: "@ai-sdk/openai", env: ["MISSING_CATALOG_KEY"], models: { "opaque-astra": sourceModel } },
+      } }));
+      await engineV2ByConfig.get(handle.config)!.refresh();
+      const nativeConfig = JSON.parse(await readFile(join(item.options.opencodeV2.rootDir, "config/opencode.json"), "utf8"));
+      const nativeModels = nativeConfig.providers.ipr_catalog.models;
+      expect(nativeModels["opaque-astra"]).toMatchObject({ modelID: "opaque-astra", cost: [{ input: 2, output: 8, cache: { read: 0.5 } }, { input: 4, output: 12, tier: { type: "context", size: 272000 } }],
+        variants: [{ id: "medium", settings: { providerOptions: { reasoningEffort: "medium", customOption: "retained", apiKey: "fixture-variant-key" } } }] });
+      for (const key of ["upstreamModelId", "modelGroupId", "credentialSetId", "release_date", "time"]) expect(nativeModels["opaque-astra"]).not.toHaveProperty(key);
+      expect(nativeModels.unknown.cost).toEqual([]);
+      expect(nativeModels.unknown.variants).toBeUndefined();
+      expect(nativeConfig.providers).not.toHaveProperty("ipr_missing");
+      const rawModels = await (await fetch(mount + "/model", { headers })).json();
+      expect(rawModels.data.find((model: { id: string; providerID: string }) => model.providerID === "ipr_catalog" && model.id === "opaque-astra"))
+        .toMatchObject({ ...identity, id: "opaque-astra", modelID: "opaque-astra", variants: [{ id: "medium" }], time: { released: Date.parse("2026-06-01") } });
+      const preferred = await client.defaultModel();
+      expect(preferred).toMatchObject({ id: "opaque-luna", modelID: "opaque-luna", providerID: "ipr_catalog", upstreamModelId: "gpt-5.6-luna" });
+      const bridged = await client.readCatalog();
+      expect(bridged.connectedProviderIds).toEqual(["fixture", "integrated", "ipr_catalog"]);
+      expect(bridged.models.find((model) => model.id === "retired")?.enabled).toBe(false);
+      const workerProviders = nativeCatalogProviders(bridged);
+      const rendererHost = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/cloud-provider-sync/status") return Response.json({ hasSession: true, providers: [], skippedProviders: [], lastRun: null, reloadPending: false });
+        return fetch(handle.url + path, { headers: request.headers });
+      } });
+      let renderer: { models: Array<{ modelId: string; providerId: string; knownPrice: boolean }> };
+      try {
+        const threads = createCoworkerThreads({ serverUrl: `http://127.0.0.1:${rendererHost.port}`, workspaceId: id, token: handle.config.token });
+        renderer = await threads.listModelCatalog();
+      } finally { rendererHost.stop(true); }
+      expect(renderer.models.find((model) => model.modelId === "opaque-astra")).toMatchObject({ ...identity, providerId: "ipr_catalog", variants: ["medium"], knownPrice: true, cost: { input: 2, output: 8 } });
+      expect(renderer.models.find((model) => model.modelId === "unknown")?.knownPrice).toBe(false);
+      expect(renderer.models.find((model) => model.modelId === "zero")).toMatchObject({ knownPrice: true, cost: { input: 0, output: 0 } });
+      expect(bridged.models.find((model) => model.id === "unknown")?.time.released).toBe(0);
+      expect(renderer.models.some((model) => model.modelId === "retired" || model.providerId === "ipr_missing")).toBe(false);
+      expect(resolveWorkerModel({ thinkingModel: "ipr_catalog/opaque-astra", thinkingModelVariant: "medium" }, "thinking", workerProviders))
+        .toEqual({ providerId: "ipr_catalog", modelId: "opaque-astra", variant: "medium" });
+      expect(workerProviders.find((provider) => provider.id === "ipr_catalog")?.models["opaque-astra"]).toMatchObject(identity);
+      expect(resolveWorkerModel({}, "thinking", workerProviders)).toEqual({ providerId: "ipr_catalog", modelId: "opaque-astra", variant: "medium" });
+      expect(resolveWorkerModel({}, "delivery", workerProviders)).toEqual({ providerId: "ipr_catalog", modelId: "opaque-luna", variant: "" });
+      for (const secret of ["fixture-catalog-key", "fixture-model-key", "fixture-model-header", "fixture-variant-key", "fixture-price-secret", "fixture-identity-secret"]) {
+        expect(JSON.stringify([rawModels, preferred, workerProviders, renderer])).not.toContain(secret);
+      }
+      expect(rawModels.data.filter((model: { providerID: string }) => model.providerID !== "ipr_catalog").every((model: Record<string, unknown>) => model.upstreamModelId === undefined)).toBe(true);
       // An independently configured same-ID provider is restored when its
       // managed override disappears; mandatory readiness must accept it.
       const providerPatch = (value: unknown) => fetch(handle.url + "/runtime-config/providers", { method: "PATCH",
@@ -224,7 +290,7 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
     } finally { await handle.stop(); }
   }, 10_000);
 
-  test("Desktop optional preview retains plain skills, Connect guidance, minimal providers and untouched Cloud files", async () => {
+  test("Desktop optional preview preserves native skill sync, shared catalog projection and host configuration", async () => {
     const item = await fixture();
     const marker = join(item.options.opencodeV2.rootDir, "cloud-skills", "marker");
     await mkdir(join(marker, ".."), { recursive: true });
@@ -250,8 +316,12 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
       } } }));
       const mount = `${handle.url}/workspace/${handle.config.workspaces[0]!.id}/opencode2/api`;
       const headers = { authorization: `Bearer ${handle.config.token}`, "content-type": "application/json" };
-      expect(await (await fetch(mount + "/skill", { headers })).json()).toEqual(skillCatalog);
+      expect(await engine.request(handle.config.workspaces[0]!.path, "/api/skill")).toEqual({ status: 200, json: skillCatalog });
+      expect(await (await fetch(mount + "/skill", { headers })).json()).toEqual({ data: skillCatalog.data });
       expect(await (await fetch(mount + "/provider", { headers })).json()).toEqual({ data: [{ id: "preview", name: "Preview" }] });
+      await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      await mkdir(join(marker, ".."), { recursive: true });
+      await writeFile(marker, "preview-owned-marker");
       const sid = "ses_preview";
       await fetch(mount + "/session", { method: "POST", headers, body: JSON.stringify({ id: sid }) });
       const prompt = { id: "msg_preview", text: "Preview", skills: [{ id: "openwork-cloud-old", text: "Preview contract retained" }] };
@@ -260,12 +330,13 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
       expect(await response.json()).toEqual({ data: prompt });
       const previewLog = await readFile(item.log, "utf8");
       expect(previewLog.trim().split("\n").map((line) => JSON.parse(line)).some((entry) => entry.path?.endsWith("/permission"))).toBe(false);
-      expect(previewLog).toContain("Organization skills are provided by OpenWork Connect");
-      expect(JSON.parse(await readFile(join(item.options.opencodeV2.rootDir, "config/opencode.json"), "utf8"))).not.toHaveProperty("skills");
-      expect(cloudReads).toBe(0);
-      expect(await readFile(marker, "utf8")).toBe("preview-owned-marker");
+      expect(previewLog).toContain("Authorized organization skills are in the native skill catalog, not in Connect.");
+      expect(previewLog).toContain("OpenWork Connect tools are connected.");
+      expect(JSON.parse(await readFile(join(item.options.opencodeV2.rootDir, "config/opencode.json"), "utf8")).skills).toEqual([join(item.root, "not-preview-managed")]);
+      expect(cloudReads).toBe(1);
+      await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
       await handle.stop();
-      expect(await readFile(marker, "utf8")).toBe("preview-owned-marker");
+      await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       delete process.env.OPENWORK_ENGINE_V2_PREVIEW;
       await handle?.stop();
@@ -392,7 +463,9 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
     const requests = async () => (await readFile(item.log, "utf8")).trim().split("\n")
       .map((line): { method?: string; path?: string; query?: Record<string, string>; spawn?: boolean } => JSON.parse(line));
     try {
-      expect((await fetch(handle.url + mount + `/api/session/${sessionId}`, { headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(500);
+      expect((await fetch(handle.url + mount + `/api/session/${sessionId}`, { headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(200);
+      expect(preparations[0]).not.toHaveBeenCalled();
+      expect((await fetch(handle.url + mount + `/api/session/${sessionId}/prompt`, { method: "POST", headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(500);
       expect(preparations[0]).toHaveBeenCalledTimes(1);
       expect((await fetch(handle.url + mount + `/api/session/${sessionId}/interrupt?continue=false`, { method: "POST" })).status).toBe(401);
       for (const preparation of preparations) preparation.mockClear();

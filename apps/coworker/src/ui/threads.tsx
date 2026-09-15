@@ -31,6 +31,7 @@ import {
   describeInteractions,
   stalledRetry,
   hasPendingInteractions,
+  isCloudManagedProviderId,
   modelSourceLabel,
   parseModelPreference,
   recommendModel,
@@ -100,7 +101,7 @@ import {
 } from "@/lib/turn-outcome";
 import { describeTurnFailure, failureText } from "@/lib/turn-failure";
 import { composerDraftStore, useComposerDraft, useSelectedComposerDraft } from "@/ui/use-composer-draft";
-import { mergeSkillSelections, selectionFields, type ComposerDraftSnapshot, type ComposerDraftSubmission, type SelectedSkill } from "@/lib/skill-selection";
+import { mergeSkillSelections, sameSkillFields, selectionFields, type ComposerDraftSnapshot, type ComposerDraftSubmission, type SelectedSkill } from "@/lib/skill-selection";
 import { classifyFailure, retryDelayMs } from "@/lib/turn-retry";
 import { applyStreamEvent, type LivePart, type LiveStream } from "@/lib/live-stream";
 import { waitForGroup as waitForObservation } from "@/lib/group-continuity";
@@ -389,6 +390,7 @@ export function ThreadsPanel({
   onOpenSummary?: (kind: SummaryKind) => void;
 }) {
   const [discussionThreadId, setDiscussionThreadId] = useState(coworker.conversationThreadId);
+  const discussionSelection = useRef(0);
   /** Thread ids registered as discussions in `discussions.json`; the open one is added even when unregistered. */
   const [registeredDiscussions, setRegisteredDiscussions] = useState<string[]>([]);
   const discussionThreadIds = useMemo(
@@ -528,27 +530,16 @@ export function ThreadsPanel({
   /** Open a new native thread as this coworker's current discussion and register it. */
   const startDiscussion = useCallback(async (prepare?: { isCurrent: () => boolean; beforeOpen: (threadId: string) => void }) => {
     if (!threads) throw new Error("This coworker needs a workspace before it can chat.");
+    const selection = ++discussionSelection.current;
     const discussion = await threads.client.createThread({ title: discussionTitle(coworker.name) });
-    if (prepare && !prepare.isCurrent()) {
-      // Keep a late-created empty discussion recoverable without navigating or activating voice.
-      const registered = await registerDiscussion(coworker.slug, discussion.id);
-      setRegisteredDiscussions(registered);
-      return discussion.id;
-    }
+    const registered = await registerDiscussion(coworker.slug, discussion.id);
+    setRegisteredDiscussions(registered);
+    if (selection !== discussionSelection.current || (prepare && !prepare.isCurrent())) return discussion.id;
     prepare?.beforeOpen(discussion.id);
-    // The open thread already counts as a discussion through discussionThreadIds.
-    // Native browser/computer controls must wait for the saved registry, not an
-    // optimistic ID that can race their first binding against the file write.
     setDiscussionThreadId(discussion.id);
-    const [registered, updated] = await Promise.allSettled([
-      registerDiscussion(coworker.slug, discussion.id),
-      coworkerBridge.coworkers.update(coworker.slug, { conversationThreadId: discussion.id }),
-    ]);
-    if (registered.status === "fulfilled") setRegisteredDiscussions(registered.value);
-    if (updated.status === "fulfilled") onCoworkerChanged(updated.value);
-    if (registered.status === "rejected" && updated.status === "rejected") {
-      throw updated.reason instanceof Error ? updated.reason : new Error(String(updated.reason));
-    }
+    void coworkerBridge.coworkers.update(coworker.slug, { conversationThreadId: discussion.id })
+      .then((updated) => { if (selection === discussionSelection.current) onCoworkerChanged(updated); })
+      .catch((cause) => { if (selection === discussionSelection.current) setError(`The discussion is saved, but its sidebar selection could not be kept: ${cause instanceof Error ? cause.message : String(cause)}`); });
     return discussion.id;
   }, [coworker.name, coworker.slug, onCoworkerChanged, threads]);
 
@@ -585,8 +576,10 @@ export function ThreadsPanel({
       setOpenThreadId("");
       return;
     }
+    const selection = ++discussionSelection.current;
     try {
       const updated = await coworkerBridge.coworkers.update(coworker.slug, { conversationThreadId: threadId });
+      if (selection !== discussionSelection.current) return;
       setDiscussionThreadId(threadId);
       onCoworkerChanged(updated);
       setOpenThreadId("");
@@ -703,20 +696,19 @@ export function ThreadsPanel({
         warmingUp={warmingUp}
         onRetry={() => void refresh()}
         assignmentDraft={pendingAssignment}
-        onStartDiscussion={async (draft, takeCurrentDraft) => {
-          await coworkerBridge.turns.validateSkills(coworker.slug, selectionFields(draft.value.skills));
+        onStartDiscussion={async (draft, takeCurrentDraft, isCurrent) => {
           const messageId = newMessageId();
           const requestId = Date.now();
           let submission: ComposerDraftSubmission | undefined;
           try {
-            await startDiscussion({ isCurrent: () => true, beforeOpen: (threadId) => {
+            await startDiscussion({ isCurrent, beforeOpen: (threadId) => {
               const key = `${coworker.slug}:${coworker.createdAt}:${threadId}`;
               composerDraftStore.transfer(takeCurrentDraft(), key);
               // Bind before the new composer mounts, including the registration/IPC acknowledgement gap.
               submission = composerDraftStore.bindSubmission(key, messageId, draft.value);
-              setQueuedTurn({ id: requestId, threadId, prompt: draft.value.text.trim(), messageId, submission, ready: false });
+              composerDraftStore.clear(draft);
+              setQueuedTurn({ id: requestId, threadId, prompt: draft.value.text.trim(), messageId, submission });
             } });
-            setQueuedTurn((turn) => turn?.id === requestId ? { ...turn, ready: true } : turn);
           } catch (cause) {
             if (submission) composerDraftStore.finishSubmission(submission, false);
             setQueuedTurn((turn) => turn?.id === requestId ? null : turn);
@@ -821,7 +813,7 @@ function DiscussionWelcome({
   headerSlots: HeaderSlots;
   /** The teammate who proposed this coworker, when one did: its empty conversation says so. */
   proposerName?: string;
-  onStartDiscussion: (draft: ComposerDraftSnapshot, takeCurrentDraft: () => ComposerDraftSnapshot) => Promise<void>;
+  onStartDiscussion: (draft: ComposerDraftSnapshot, takeCurrentDraft: () => ComposerDraftSnapshot, isCurrent: () => boolean) => Promise<void>;
   onPrepareVoice: (request: VoicePreparation, takeDraft: () => ComposerDraftSnapshot) => Promise<void>;
   onCreateAssignment: (outcome: string, messages: ReadonlyArray<DiscussionMessage>) => Promise<void>;
   onAssignmentDraftHandled: () => void;
@@ -837,6 +829,9 @@ function DiscussionWelcome({
   const [busy, setBusy] = useState(false);
   const [composerError, setComposerError] = useState("");
   const startingDiscussion = useRef(false);
+  const startCancelled = useRef(false);
+  const [startingMessage, setStartingMessage] = useState<ComposerDraftSnapshot | null>(null);
+  useEffect(() => () => { startCancelled.current = true; }, []);
   const voice = useVoice({
     active: active && !assignmentMode && !busy,
     scope: `${coworker.slug}:new`,
@@ -872,17 +867,19 @@ function DiscussionWelcome({
     const snapshot = composerDraftStore.read(draftKey);
     if (!snapshot.value.text.trim() || startingDiscussion.current) return;
     startingDiscussion.current = true;
+    startCancelled.current = false;
+    setStartingMessage(snapshot);
     voice.stop("");
     setBusy(true);
     setComposerError("");
     try {
-      await onStartDiscussion(snapshot, () => composerDraftStore.read(draftKey));
-      acknowledgeCoworker(coworker.slug);
-      composerDraftStore.clear(snapshot);
+      await onStartDiscussion(snapshot, () => composerDraftStore.read(draftKey), () => !startCancelled.current);
+      if (!startCancelled.current) acknowledgeCoworker(coworker.slug);
     } catch (cause) {
       setComposerError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       startingDiscussion.current = false;
+      setStartingMessage(null);
       setBusy(false);
     }
   }
@@ -909,11 +906,14 @@ function DiscussionWelcome({
       <HeaderContent
         slots={headerSlots}
         title={<span className="whitespace-normal">New discussion</span>}
-        actions={<Button variant="ghost" disabled title="No active work to stop" data-testid="coworker-stop">Stop</Button>}
+        actions={<Button variant="ghost" disabled={!startingMessage} title={startingMessage ? "Cancel starting this message" : "No active work to stop"} data-testid="coworker-stop" onClick={() => { startCancelled.current = true; setStartingMessage(null); setComposerError("Starting cancelled. Your draft is kept."); }}>Stop</Button>}
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-8">
         {problem ? <WorkspaceProblemNote problem={problem} onRetry={onRetry} /> : null}
-        {!problem ? <QuietEmptyConversation coworker={coworker} warmingUp={warmingUp} proposerName={proposerName} /> : null}
+        {startingMessage ? <div className="space-y-3">
+          <article className="flex flex-col items-end" data-message-role="user"><div className="bubble bubble-user max-w-[72%] whitespace-pre-wrap bubble-tail-right">{startingMessage.value.text}</div></article>
+          <LiveRow coworker={coworker} phase="sending" />
+        </div> : !problem ? <QuietEmptyConversation coworker={coworker} warmingUp={warmingUp} proposerName={proposerName} /> : null}
       </div>
       <DiscussionComposer
         voice={voice}
@@ -1473,7 +1473,7 @@ function ThreadView({
   }, []);
 
   /** Change the thread's turn record: the cache updates at once, the file follows through the main process. */
-  const commitTurnState = useCallback((update: (state: ThreadTurnState) => ThreadTurnState, saved?: (kept: boolean) => void): ThreadTurnState => {
+  const commitTurnState = useCallback((update: (state: ThreadTurnState) => ThreadTurnState, saved?: (kept: boolean, recorded?: ThreadTurnState) => void): ThreadTurnState => {
     const previous = turnStateRef.current;
     const next = update(previous);
     // A completed observer must not release Next while cancellation is unresolved.
@@ -1483,7 +1483,7 @@ function ThreadView({
     turnStateRef.current = next;
     setTurnState(next);
     turnWrites.current += 1;
-    void saveThreadTurns(coworker.slug, threadId, next, previous).then(() => saved?.(true)).catch((cause) => { saved?.(false); setError(`Could not keep this turn: ${cause instanceof Error ? cause.message : String(cause)}`); }).finally(() => { turnWrites.current -= 1; });
+    void saveThreadTurns(coworker.slug, threadId, next, previous).then((recorded) => saved?.(true, recorded)).catch((cause) => { saved?.(false); setError(`Could not keep this turn: ${cause instanceof Error ? cause.message : String(cause)}`); }).finally(() => { turnWrites.current -= 1; });
     return next;
   }, [coworker.slug, stopScope, threadId]);
 
@@ -1624,7 +1624,11 @@ function ThreadView({
     setError("");
     if (send.mode !== "retry" || !send.switchedTo) setProviderRefreshNote("");
     if (resolution?.messageId !== messageId) setResolution(null);
-    commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now(), ...skillFields }));
+    commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now(), ...skillFields }), (kept, recorded) => {
+      if (!kept || !send.submission || recorded?.pending?.messageId !== messageId || recorded.pending.prompt !== prompt || !sameSkillFields(recorded.pending, skillFields)) return;
+      try { composerDraftStore.releaseSubmission(send.submission); }
+      catch (cause) { setError(`Your message is recorded; the draft could not be cleared: ${cause instanceof Error ? cause.message : String(cause)}`); }
+    });
     onActivityChange({
       state: "working",
       label: "Working",
@@ -1660,10 +1664,11 @@ function ThreadView({
       if (!engineKnows) setFailure(message);
     };
     try {
+      const skillsReady = skillFields.skills?.length ? coworkerBridge.turns.validateSkills(coworker.slug, skillFields) : Promise.resolve();
       if (!turnModel) {
         const selectionOwner = kind === "discussion" ? coworker : { ...coworker, useAppModelDefaults: false };
         const inherited = usesAppConversationDefault(selectionOwner);
-        const [catalog, settings] = await Promise.all([threads.listModelCatalog(), coworkerBridge.settings.get()]);
+        const [catalog, settings] = await Promise.all([threads.listModelCatalog(), coworkerBridge.settings.get(), skillsReady]);
         const modelDefaults = settings.modelDefaults;
         const automatic = inherited ? !modelDefaults.conversation.model : coworker.modelMode === "auto";
         const standardId = coworker.model || recommendModel(catalog)?.id || "";
@@ -1684,10 +1689,17 @@ function ThreadView({
           markAutoPicked(coworker.slug, pick.id);
           onActivityChange({ state: "working", label: "Working", detail: describeModelChoice(decision.lane, pick, { tense: "detail" }), updatedAt: Date.now(), threadId });
         }
-      }
+      } else await skillsReady;
+      if (threadStop(stopScope) || turnStateRef.current.pending?.stoppedAt != null) return;
       // An uncertain IPC response is not permission to send or switch models again.
       admissionAttempted = true;
       const acceptance = await coworkerBridge.turns.send({ slug: coworker.slug, threadId, kind, prompt, messageId, ...skillFields, model: turnModel, retry: send.mode === "retry", retryByPerson: send.mode === "retry" && send.byPerson === true, retryLabel: send.mode === "retry" ? send.switchedTo : undefined });
+      if (acceptance.rejected) {
+        if (acceptance.messageId !== messageId) throw new Error("This rejection belongs to another message. The recorded turn is kept.");
+        admissionAttempted = false;
+        setFailure(acceptance.error);
+        return;
+      }
       if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
       voiceIntent = voiceRef.current?.rebindExpected(voiceIntent, acceptance.messageId || messageId) ?? null;
       if (acceptance.messageId && acceptance.messageId !== messageId) {
@@ -1702,7 +1714,7 @@ function ThreadView({
       const waiting: ActiveTurn = { messageId, prompt, phase: "waiting" };
       activeTurnRef.current = waiting;
       setActiveTurn(waiting);
-      await refresh();
+      void refresh();
       // Stop pressed while the message was still on its way: the engine had nothing to abort then.
       // Now that it has the turn, abort it as soon as it runs, until it lets go or the turn is over.
       if (turnStateRef.current.pending?.messageId === messageId && turnStateRef.current.pending.stoppedAt !== null) {
@@ -1768,10 +1780,14 @@ function ThreadView({
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      await settleFailure(message, null, false);
+      if (!admissionAttempted) setFailure(message);
+      else await settleFailure(message, null, false);
     } finally {
       if (!voiceIntent?.admitted && !voiceFollowup) voiceRef.current?.abandonReply(voiceIntent);
-      if (send.submission && !voiceFollowup) composerDraftStore.finishSubmission(send.submission, false);
+      if (send.submission && !voiceFollowup) {
+        try { composerDraftStore.finishSubmission(send.submission, admissionAttempted ? "uncertain" : false); }
+        catch (cause) { setError(`Your recorded message is kept; its draft could not be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      }
       if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
       waitControllerRef.current = null;
       if (activeTurnRef.current?.messageId === messageId) {
@@ -1925,17 +1941,15 @@ function ThreadView({
    * The composer never holds. A message typed while the coworker works waits as
    * Next and steers the reply that follows; otherwise it is the next turn.
    */
-  async function send() {
+  function send() {
     const snapshot = composerDraftStore.read(draftKey);
     const text = snapshot.value.text.trim();
     if (!text || checkingDraft.current) return;
     const submission = composerDraftStore.beginSubmission(snapshot, newMessageId());
     if (!submission) return;
     checkingDraft.current = true;
-    try {
-      await coworkerBridge.turns.validateSkills(coworker.slug, selectionFields(snapshot.value.skills));
-      sendText(text, submission);
-    } catch (cause) { composerDraftStore.finishSubmission(submission, false); setError(cause instanceof Error ? cause.message : String(cause)); }
+    try { sendText(text, submission); }
+    catch (cause) { composerDraftStore.finishSubmission(submission, false); setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { checkingDraft.current = false; }
   }
 
@@ -3004,7 +3018,7 @@ function describeUnavailableModel(model: string, available: EngineModelOption[],
     const sample = providerModels[0];
     return `The saved model "${model}" is not offered by ${sample?.providerLabel ?? providerId} (${modelSourceLabel(sample?.source ?? "local")}) any more. Choose one of its ${providerModels.length} available AI model${providerModels.length === 1 ? "" : "s"}.`;
   }
-  const cloudManaged = /^lpr_/i.test(providerId) || providerId === "openwork";
+  const cloudManaged = isCloudManagedProviderId(providerId);
   if (cloudManaged) {
     return session
       ? `The saved model "${model}" belongs to an OpenWork Cloud provider that is not available right now. Refresh your OpenWork providers or choose another AI model.`

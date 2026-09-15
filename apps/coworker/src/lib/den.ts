@@ -220,6 +220,9 @@ export function providerSyncSession(session: DenSession): { baseUrl: string; tok
   return { baseUrl: denApiBase(session.baseUrl), token: session.token, orgId: session.orgId };
 }
 
+const syncSkipReasonSchema = z.enum(["missing_credentials", "needs_key", "member_auth_required", "org_credential_missing", "no_accessible_models"]);
+type SyncSkipReason = z.infer<typeof syncSkipReasonSchema>;
+
 export type CloudProviderSyncStatus = {
   hasSession: boolean;
   lastRun: { at: string; status: "applied" | "noop" | "failed"; message?: string } | null;
@@ -228,7 +231,7 @@ export type CloudProviderSyncStatus = {
   /** Materialized on disk but not yet served: the engine reload is still owed. */
   reloadPending: boolean;
   /** Granted by the organization but not usable here yet, each with the reason. */
-  skippedProviders: Array<{ providerId: string; name: string; reason: "missing_credentials" | "needs_key" }>;
+  skippedProviders: Array<{ providerId: string; name: string; reason: SyncSkipReason; credentialSetId?: string }>;
 };
 
 const cloudProviderSyncStatusSchema = z.object({
@@ -250,7 +253,7 @@ const cloudProviderSyncStatusSchema = z.object({
   ),
   reloadPending: z.boolean().default(false),
   skippedProviders: z
-    .array(z.object({ providerId: z.string(), name: z.string(), reason: z.enum(["missing_credentials", "needs_key"]) }))
+    .array(z.object({ providerId: z.string(), name: z.string(), reason: syncSkipReasonSchema, credentialSetId: z.string().optional() }))
     .default([]),
 });
 
@@ -272,10 +275,14 @@ export async function readCloudProviderSyncStatus(options: {
 }
 
 /** Plain-language reason a granted provider is not usable in this engine yet. */
-export function describeSkippedProvider(reason: "missing_credentials" | "needs_key"): string {
-  return reason === "needs_key"
-    ? "Needs your own key in OpenWork before it can run here."
-    : "Your organization has not attached a credential yet.";
+export function describeSkippedProvider(reason: SyncSkipReason): string {
+  switch (reason) {
+    case "needs_key": return "Needs your own key in OpenWork before it can run here.";
+    case "member_auth_required": return "Needs your sign-in for this credential set in OpenWork before it can run here.";
+    case "no_accessible_models": return "No models are currently available through your organization's assignments.";
+    case "org_credential_missing": return "Your organization needs to configure an active credential set.";
+    case "missing_credentials": return "Your organization has not attached a credential yet.";
+  }
 }
 
 type DenRequestOptions = {

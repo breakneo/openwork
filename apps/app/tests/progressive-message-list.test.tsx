@@ -66,6 +66,13 @@ function groups(count = 80): Group[] {
   return Array.from({ length: count }, (_, index) => ({ id: `g${index}`, messages: [{ id: `m${index}`, height: 240 }] }))
 }
 
+function trackHeightReads(data: readonly Group[]) {
+  const keys = new Set(data.map((group) => group.id))
+  const reads = spyOn(Map.prototype, "get")
+  // Height maps use raw group IDs; node tracking uses group:/placeholder: keys.
+  return () => reads.mock.calls.filter(([key]) => keys.has(key)).length
+}
+
 function fixture(initial = groups(), options: Partial<MessageListViewport> = {}, strict = false, fixedGeometry = false) {
   const container = document.createElement("div")
   document.body.append(container)
@@ -131,11 +138,12 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
   cleanups.push(unmount)
   return {
     container, ready, writes, rendered, key, ids, unmount,
-    async render(next = data, update: Partial<MessageListViewport> = {}, renderer?: (group: Group, index: number) => ReactNode) {
+    async render(next = data, update: Partial<MessageListViewport> = {}, renderer?: (group: Group, index: number) => ReactNode, groupKeyReplacements?: ReadonlyMap<string, string>) {
       data = next
       viewport = { ...viewport, ...update }
       const list = <ProgressiveMessageList
         groups={data} viewport={viewport} getGroupKey={key} getMessageIds={ids}
+        groupKeyReplacements={groupKeyReplacements}
         renderGroup={(group, index) => {
           rendered.push(index)
           if (renderer) return renderer(group, index)
@@ -163,6 +171,123 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
 }
 
 describe("progressive whole-group rendering", () => {
+  test.each([false, true])("reuses height planning across batches and fully mounted content updates (history complete: %s)", async (historyComplete) => {
+    const data = groups()
+    const view = fixture(data, { anchorMessageId: "m40", historyComplete, scrollHeight: 40_000 })
+    const heightReads = trackHeightReads(data)
+    await view.render()
+    const initialReads = heightReads()
+    expect(initialReads).toBeGreaterThan(0)
+    const tail = view.message("m79")
+    const anchor = view.message("m40")
+    const prefix = view.placeholders.find((node) => node.dataset.threadPlaceholder === "history-prefix")?.style.height
+    view.read("m40", -80)
+    // Measurements keep changing the shared cache, not the frozen height plan.
+    await act(async () => view.resize())
+    for (let index = 8; index < data.length; index += 8) {
+      await batch()
+      expect(heightReads()).toBe(initialReads)
+      expect(view.mounted).toHaveLength(Math.min(index + 8, data.length))
+      expect(view.position("m40")).toBeCloseTo(-80, 1)
+      expect(view.message("m40")).toBe(anchor)
+      expect(view.message("m79")).toBe(tail)
+    }
+    expect(view.complete).toBe(String(historyComplete))
+    expect(frames.size).toBe(0)
+    expect(view.placeholders.find((node) => node.dataset.threadPlaceholder === "history-prefix")?.style.height).toBe(prefix)
+    const next = data.map((group) => ({ ...group }))
+    next[79] = { ...next[79], messages: [...next[79].messages, { id: "live", height: 60 }] }
+    view.writes.length = 0
+    await view.render(next)
+    expect(heightReads()).toBe(initialReads)
+    expect(view.writes).toEqual([])
+    expect(view.message("m79")).toBe(tail)
+    expect(view.message("live")).toBeDefined()
+  })
+
+  test("rebuilds heights for added, reordered and removed keys without thawing existing estimates", async () => {
+    const data = groups(20)
+    for (const group of data) group.messages[0].height = 100
+    const prefix: Group = { id: "prefix", messages: [{ id: "prefix", height: 500 }] }
+    const view = fixture(data, { scrollHeight: 20 * 240 + 19 * 8 })
+    const heightReads = trackHeightReads([...data, prefix])
+    await view.render()
+    let previousReads = heightReads()
+    const tail = view.message("m19")
+    view.read("m16", -50)
+    await view.render([prefix, ...data], { scrollHeight: 20 * 240 + 500 + 20 * 8 })
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders[0].style.height).toBe(`${500 + 12 * 240 + 12 * 8}px`)
+    expect(view.position("m16")).toBeCloseTo(-50, 1)
+    previousReads = heightReads()
+    await view.render([data[19], ...data.slice(0, 12), prefix, ...data.slice(12, 19)])
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders[0].dataset.threadPlaceholder).toBe("placeholder:g0")
+    expect(view.placeholders[0].style.height).toBe(`${12 * 240 + 500 + 12 * 8}px`)
+    expect(view.message("m19")).toBe(tail)
+    previousReads = heightReads()
+    await view.render(data)
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders[0].style.height).toBe(`${12 * 240 + 11 * 8}px`)
+    expect(view.message("m19")).toBe(tail)
+    previousReads = heightReads()
+    await batch()
+    expect(heightReads()).toBe(previousReads)
+  })
+
+  test("invalidates width and history scopes while preserving measured geometry and the reading anchor", async () => {
+    const data = groups(20)
+    for (const group of data) group.messages[0].height = 100
+    const sessionKey = `planning-${++sessionId}`
+    const first = fixture(data, { sessionKey, revealAll: true })
+    await first.render()
+    await first.unmount()
+    const view = fixture(data, { sessionKey })
+    const heightReads = trackHeightReads(data)
+    await view.render()
+    expect(view.placeholders[0].style.height).toBe(`${12 * 100 + 11 * 8}px`)
+    view.read("m16", -50)
+    let previousReads = heightReads()
+    await act(async () => view.resize(900))
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders[0].style.height).toBe(`${12 * 240 + 11 * 8}px`)
+    expect(view.position("m16")).toBeCloseTo(-50, 1)
+    await act(async () => view.resize())
+    previousReads = heightReads()
+    await view.render(data, { historyComplete: false, scrollHeight: 8_000 })
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders.map((node) => node.style.height)).toEqual(["4160px", "2968px"])
+    expect(view.position("m16")).toBeCloseTo(-50, 1)
+    previousReads = heightReads()
+    await view.render(data, { historyComplete: true })
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders).toHaveLength(1)
+    expect(Number.parseFloat(view.placeholders[0].style.height)).toBeCloseTo(7_136, 1)
+    expect(view.position("m16")).toBeCloseTo(-50, 1)
+    previousReads = heightReads()
+    await batch()
+    expect(heightReads()).toBe(previousReads)
+  })
+
+  test("updates saved extent and explicit reserved regions without redistributing frozen group heights", async () => {
+    const data = groups(20)
+    const view = fixture(data, { historyComplete: false, scrollHeight: 8_000 })
+    const heightReads = trackHeightReads(data)
+    await view.render()
+    const previousReads = heightReads()
+    const skipped = view.placeholders[1].style.height
+    view.read("m16", -50)
+    await view.render(data, { scrollHeight: 9_000 })
+    expect(heightReads()).toBeGreaterThan(previousReads)
+    expect(view.placeholders.map((node) => node.style.height)).toEqual(["4040px", skipped])
+    expect(view.position("m16")).toBeCloseTo(-50, 1)
+    const geometryReads = heightReads()
+    await view.render(data, { leadingHeight: 1_000, trailingHeight: 500 })
+    expect(heightReads()).toBe(geometryReads)
+    expect(view.placeholders.map((node) => node.style.height)).toEqual(["1000px", skipped, "500px"])
+    expect(view.position("m16")).toBeCloseTo(-50, 1)
+  })
+
   for (const count of [80, 800, 1600]) {
     test(`invokes renderGroup only ${count} times while backfilling ${count} groups`, async () => {
       const data = groups(count)
@@ -309,6 +434,57 @@ describe("progressive whole-group rendering", () => {
     await view.render([...next, { id: "new-user", messages: [{ id: "new-user", height: 60 }] }])
     expect(view.message("new-user")).toBeDefined()
     expect(view.message("m79")).toBe(tail)
+  })
+
+  test.each([false, true])("keeps submitted text mounted when its native ID arrives with assistant already present: %s", async (assistantAlreadyPresent) => {
+    const history = groups()
+    const pending = { id: "pending-user", messages: [{ id: "pending-user", height: 60 }] }
+    const native = { id: "native-user", messages: [{ id: "native-user", height: 60 }] }
+    const assistant = { id: "assistant", messages: [{ id: "assistant", height: 60 }] }
+    const text = "Keep this submitted message visible."
+    const render = (group: Group) => group.messages.map((message) =>
+      <div key={message.id} data-message-id={message.id}>{group === pending || group === native ? text : message.id}</div>)
+    const view = fixture([...history, pending])
+    await view.render(undefined, {}, render)
+    const expectOneSubmission = () => expect(view.container.textContent?.split(text).length).toBe(2)
+    expectOneSubmission()
+    view.read("pending-user")
+    if (assistantAlreadyPresent) {
+      await view.render([...history, pending, assistant], {}, render)
+      expectOneSubmission()
+    }
+    await view.render([...history, native, assistant], {}, render, new Map([[native.id, pending.id]]))
+    expectOneSubmission()
+    expect(view.message("native-user")).toBeDefined()
+    expect(view.mounted).not.toContain("pending-user")
+    expect(view.mounted).not.toContain("g0")
+    await act(async () => runFrame())
+    expectOneSubmission()
+    await act(async () => runFrame())
+    expectOneSubmission()
+    await view.render([...history, native, assistant], {}, render)
+    expectOneSubmission()
+  })
+
+  test("replacement admission stays scoped to mounted groups in the same session, not new history", async () => {
+    const data = groups()
+    const view = fixture(data, { anchorMessageId: "m40" })
+    await view.render()
+    view.read("m40")
+    const next = data.map((group) => group.id === "g0" || group.id === "g40" ? { ...group, id: `native-${group.id}` } : group)
+    next.unshift({ id: "older-history", messages: [{ id: "older-history", height: 240 }] })
+    const replacements = new Map([["native-g0", "g0"], ["native-g40", "g40"]])
+    await view.render(next, { anchorMessageId: undefined }, undefined, replacements)
+    expect(view.mounted).toContain("native-g40")
+    expect(view.mounted).not.toContain("native-g0")
+    expect(view.mounted).not.toContain("older-history")
+    expect(view.mounted).toHaveLength(8)
+    await view.render(next)
+    expect(view.mounted).toContain("native-g40")
+    await view.render(next, { sessionKey: `replacement-${++sessionId}` }, undefined, replacements)
+    expect(view.mounted).not.toContain("native-g40")
+    expect(view.mounted).not.toContain("native-g0")
+    expect(view.mounted).toHaveLength(8)
   })
 
   test("keeps the exact visible message offset while estimates above it are replaced", async () => {

@@ -202,7 +202,7 @@ process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:message.id,result})+"\\n")
     await originalFetch(base + `/workspace/${id}/mcp/local-fixture`, { method: "DELETE", headers });
     expect(JSON.stringify((await native.request(workspace, "/api/mcp")).json)).not.toContain("local-fixture");
 
-    sync = new CloudProviderSync({ config: handle.config, env: envServiceForConfig(handle.config)!, reloadEngine: () => native.refresh(), engineBusy: async () => false });
+    sync = new CloudProviderSync({ config: handle.config, env: envServiceForConfig(handle.config)!, reloadEngine: async () => { await native.refresh(); return { action: "reloaded_in_place" }; }, engineBusy: async () => false });
     await sync.setSession({ baseUrl: origin, token: "local-control-fixture", orgId: "fixture" });
     const synced = await sync.run("native-proof");
     expect(synced.status).toBe("applied");

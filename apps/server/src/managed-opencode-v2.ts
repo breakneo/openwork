@@ -1,4 +1,5 @@
 import type { EnginePermissionRule } from "./managed-policy-rules.js";
+import { nativeModelVariants } from "@openwork/types/cloud-model-fast";
 // Provider injection uses v2's watched config, without disposing live sessions.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -9,6 +10,60 @@ import { appendEngineOutputTail, createEngineStartupLineReader } from "./engine-
 export { installOpencodeV2Binary } from "./opencode-v2-binary.js";
 
 import { loopbackFetch } from "./server-fetch.js";
+
+export function nativeCatalogIdentity(value: Record<string, unknown>) {
+  const id = (value: unknown) => typeof value === "string" && value.length <= 256 && /^[A-Za-z0-9._:@+/-]+$/.test(value) ? value : undefined;
+  return {
+    ...(id(value.upstreamModelId) ? { upstreamModelId: id(value.upstreamModelId) } : {}),
+    ...(id(value.modelGroupId) ? { modelGroupId: id(value.modelGroupId) } : {}),
+    ...(id(value.credentialSetId) ? { credentialSetId: id(value.credentialSetId) } : {}),
+  };
+}
+
+export function nativeCatalogModelMetadata(config: Record<string, unknown>) {
+  const released = typeof config.release_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(config.release_date)
+    ? Date.parse(`${config.release_date}T00:00:00.000Z`) : NaN;
+  return {
+    ...nativeCatalogIdentity(config),
+    ...(Number.isFinite(released) && new Date(released).toISOString().slice(0, 10) === config.release_date ? { time: { released } } : {}),
+  };
+}
+
+type NativeModelCost = {
+  input: number;
+  output: number;
+  cache?: { read?: number; write?: number };
+  tier?: { type: "context"; size: number };
+};
+
+function nativeModelCosts(value: unknown): NativeModelCost[] {
+  const rate = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+  const cost = (value: unknown) => {
+    if (!isRecord(value) || !rate(value.input) || !rate(value.output)) return undefined;
+    return { input: value.input, output: value.output,
+      ...(rate(value.cache_read) || rate(value.cache_write) ? { cache: {
+        ...(rate(value.cache_read) ? { read: value.cache_read } : {}),
+        ...(rate(value.cache_write) ? { write: value.cache_write } : {}),
+      } } : {}),
+    };
+  };
+  const base = cost(value);
+  const costs: NativeModelCost[] = base ? [base] : [];
+  if (!isRecord(value)) return costs;
+  if (Array.isArray(value.tiers)) {
+    for (const entry of value.tiers) {
+      const price = cost(entry);
+      const tier = isRecord(entry) && isRecord(entry.tier) ? entry.tier : undefined;
+      if (price && tier?.type === "context" && typeof tier.size === "number" && Number.isSafeInteger(tier.size) && tier.size >= 0) {
+        costs.push({ ...price, tier: { type: "context", size: tier.size } });
+      }
+    }
+  } else {
+    const price = cost(value.context_over_200k);
+    if (price) costs.push({ ...price, tier: { type: "context", size: 200_000 } });
+  }
+  return costs;
+}
 
 export interface OpencodeV2ModelSpec {
   id: string;
@@ -32,6 +87,7 @@ export interface ManagedOpencodeV2ServerOptions {
   rootDir: string;
   /** Mandatory native hosts opt into skill-directory config; previews do not. */
   nativeSkills?: boolean;
+  nativeCatalogMetadata?: boolean;
   cwd?: string;
   hostname?: string;
   port?: number;
@@ -61,6 +117,7 @@ export interface ManagedOpencodeV2Server {
   fetchJson(path: string, init?: { method?: string; body?: unknown; directory?: string; timeoutMs?: number }): Promise<{ status: number; json: unknown }>;
   injectProvider(spec: OpencodeV2ProviderSpec): Promise<void>;
   setProviders(specs: OpencodeV2ProviderSpec[]): Promise<void>;
+  /** Extra absolute skill directories registered through native config `skills`. */
   setSkills(directories: string[]): Promise<void>;
   close(): Promise<void>;
 }
@@ -80,6 +137,61 @@ function diagnostics(exitCode: number | null, stdout: string, stderr: string): E
   );
 }
 
+/** The whole generated engine config: every writer emits all current keys. */
+export function renderOpencodeV2Config(input: {
+  providers: OpencodeV2ProviderSpec[];
+  permissions?: EnginePermissionRule[];
+  skills: string[];
+  nativeCatalogMetadata?: boolean;
+}): Record<string, unknown> {
+  const providerConfig: Record<string, unknown> = {};
+  for (const provider of input.providers) {
+    const models: Record<string, unknown> = {};
+    for (const model of provider.models) {
+      const config = model.config ?? {};
+      const modalities = isRecord(config.modalities) ? config.modalities : {};
+      models[model.id] = {
+        name: model.name,
+        ...(typeof config.id === "string" ? { modelID: config.id } : {}),
+        capabilities: {
+          tools: typeof config.tool_call === "boolean" ? config.tool_call : true,
+          input: modalities.input ?? ["text"],
+          output: config.reasoning === true
+            ? [...new Set([...(Array.isArray(modalities.output) ? modalities.output : ["text"]), "reasoning"])]
+            : modalities.output ?? ["text"],
+        },
+        limit: config.limit ?? { context: 128_000, output: 8_192 },
+        ...(typeof config.family === "string" ? { family: config.family } : {}),
+        ...(input.nativeCatalogMetadata ? { cost: nativeModelCosts(config.cost) } : {}),
+        ...(isRecord(config.options) ? { settings: config.options } : {}),
+        ...(isRecord(config.variants) ? {
+          variants: nativeModelVariants(config.variants, provider.package),
+        } : {}),
+        ...(isRecord(config.headers) ? { headers: config.headers } : {}),
+        ...(config.status === "deprecated" ? { disabled: true } : {}),
+      };
+    }
+    providerConfig[provider.id] = {
+      name: provider.name,
+      package: provider.package ?? "@opencode-ai/ai/providers/openai-compatible",
+      settings: {
+        ...provider.settings,
+        ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+        apiKey: provider.apiKey,
+        name: provider.id,
+      },
+      ...(provider.headers ? { headers: provider.headers } : {}),
+      models,
+    };
+  }
+  return {
+    $schema: "https://opencode.ai/config.json",
+    providers: providerConfig,
+    ...(input.permissions ? { permissions: input.permissions } : {}),
+    ...(input.skills.length ? { skills: [...input.skills] } : {}),
+  };
+}
+
 export async function createManagedOpencodeV2Server(
   options: ManagedOpencodeV2ServerOptions,
 ): Promise<ManagedOpencodeV2Server> {
@@ -91,7 +203,7 @@ export async function createManagedOpencodeV2Server(
   const username = "opencode";
   let url = "";
   const providers = new Map<string, OpencodeV2ProviderSpec>();
-  let skills: string[] | undefined = options.nativeSkills ? [] : undefined;
+  let skills: string[] = [];
   let writes: Promise<void> = Promise.resolve();
   const opencodeModelsUrl = (options.env?.OPENCODE_MODELS_URL ?? process.env.OPENCODE_MODELS_URL)?.replace(/\/+$/, "");
   // The engine needs OS paths and locale settings, not the server's provider,
@@ -114,6 +226,8 @@ export async function createManagedOpencodeV2Server(
   // Replace the generated config before boot, removing stale managed-policy
   // registrations while retaining independent engine permissions. Leave the
   // old entrypoint on disk: another configuration may still reference it.
+  // Boot registers no skill directories: a stale materialized root is never
+  // visible until a fresh cloud skill sync succeeds.
   await writeConfig();
   const child = spawn(options.bin, ["serve", "--hostname", hostname, "--port", String(port)], {
     cwd: options.cwd,
@@ -200,8 +314,8 @@ export async function createManagedOpencodeV2Server(
     return { healthy, version, pid };
   }
 
-  // All config writers emit current provider, permission, plugin and skill
-  // state on one queue. A provider refresh must not drop native skill roots.
+  // Every rewrite (providers, permissions, skills) serializes through one
+  // queue and emits the whole current state, so no writer drops another's keys.
   function writeConfig(): Promise<void> {
     const next = writes.catch(() => undefined).then(writeConfigNow);
     writes = next;
@@ -209,62 +323,24 @@ export async function createManagedOpencodeV2Server(
   }
 
   async function writeConfigNow(): Promise<void> {
-    const providerConfig: Record<string, unknown> = {};
-    for (const provider of providers.values()) {
-      const models: Record<string, unknown> = {};
-      for (const model of provider.models) {
-        const config = model.config ?? {};
-        const modalities = isRecord(config.modalities) ? config.modalities : {};
-        models[model.id] = {
-          name: model.name,
-          ...(typeof config.id === "string" ? { modelID: config.id } : {}),
-          capabilities: {
-            tools: typeof config.tool_call === "boolean" ? config.tool_call : true,
-            input: modalities.input ?? ["text"],
-            output: config.reasoning === true
-              ? [...new Set([...(Array.isArray(modalities.output) ? modalities.output : ["text"]), "reasoning"])]
-              : modalities.output ?? ["text"],
-          },
-          limit: config.limit ?? { context: 128_000, output: 8_192 },
-          ...(typeof config.family === "string" ? { family: config.family } : {}),
-          ...(isRecord(config.options) ? { settings: config.options } : {}),
-          ...(isRecord(config.variants) ? {
-            variants: Object.entries(config.variants).flatMap(([id, value]) => {
-              if (!isRecord(value) || value.disabled === true) return [];
-              const { disabled, ...settings } = value;
-              // Mirrored adapters are native: unlike v1 AI SDK options, their
-              // model settings take generation options under providerOptions.
-              return [{ id, settings: { providerOptions: settings } }];
-            }),
-          } : {}),
-          ...(isRecord(config.headers) ? { headers: config.headers } : {}),
-          ...(config.status === "deprecated" ? { disabled: true } : {}),
-        };
-      }
-      providerConfig[provider.id] = {
-        name: provider.name,
-        package: provider.package ?? "@opencode-ai/ai/providers/openai-compatible",
-        settings: {
-          ...provider.settings,
-          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          apiKey: provider.apiKey,
-          name: provider.id,
-        },
-        ...(provider.headers ? { headers: provider.headers } : {}),
-        models,
-      };
-    }
     const target = join(configDir, "opencode.json");
     const temporary = `${target}.tmp-${randomBytes(8).toString("hex")}`;
     const { skills: configuredSkills, ...hostConfig } = options.config ?? {};
+    const generated = renderOpencodeV2Config({
+      providers: [...providers.values()],
+      nativeCatalogMetadata: options.nativeCatalogMetadata,
+      ...(options.permissions ? { permissions: await options.permissions() } : {}),
+      skills,
+    });
     await writeFile(temporary, `${JSON.stringify({
-      $schema: "https://opencode.ai/config.json",
       ...hostConfig,
-      ...(skills === undefined ? {} : { skills: [...(Array.isArray(configuredSkills) ? configuredSkills : []), ...skills] }),
-      providers: { ...(isRecord(options.config?.providers) ? options.config.providers : {}), ...providerConfig },
+      ...generated,
+      ...((Array.isArray(configuredSkills) && configuredSkills.length) || skills.length
+        ? { skills: [...(Array.isArray(configuredSkills) ? configuredSkills : []), ...skills] } : {}),
+      providers: { ...(isRecord(hostConfig.providers) ? hostConfig.providers : {}), ...(isRecord(generated.providers) ? generated.providers : {}) },
       ...(options.permissions ? { permissions: [
-        ...(Array.isArray(options.config?.permissions) ? options.config.permissions : []),
-        ...await options.permissions(),
+        ...(Array.isArray(hostConfig.permissions) ? hostConfig.permissions : []),
+        ...(Array.isArray(generated.permissions) ? generated.permissions : []),
       ] } : {}),
     }, null, 2)}\n`, { mode: 0o600 });
     await rename(temporary, target);

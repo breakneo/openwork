@@ -1,6 +1,6 @@
 # Model intelligence and selection preferences
 
-Policy reviewed September 9, 2026. This index describes documented metadata and
+Policy reviewed September 14, 2026. This index describes documented metadata and
 product preferences, **not a model leaderboard or measured speed/quality**.
 
 ## Three separate owners
@@ -55,11 +55,18 @@ compares the two reported text token rates only.
    inheritance is resolved before the retained coworker override.
    An explicit app effort no longer offered by its model refuses selection;
    the facilitator may use its deterministic scorer, never another effort.
-2. Resolve the exact standard anchor. An explicitly missing/excluded/avoided
-   anchor does not authorize a replacement or a provider-failure retry.
-3. Restrict substitutions to the same connected engine provider and both known
-   token rates no higher than the anchor. Require confirmed tools and active
-   status; preserve the anchor's known modalities and input/context/output limits.
+2. For inherited Automatic role defaults, prefer connected GPT-5.6 Luna for
+   conversation/delivery and GPT-6 Astra with advertised `medium` effort for
+   thinking. Match catalog identity, never display labels or member-specific IDs.
+   This initial role choice is not capped by a previous app recommendation's
+   price. Existing source-tier ordering and avoided models still apply; ambiguous
+   credential choices require an explicit choice. Explicit overrides remain exact.
+3. Otherwise resolve the standard anchor. A missing stale app recommendation may
+   use a current eligible recommendation, but an explicitly missing/excluded/avoided
+   choice does not authorize replacement. Ordinary substitutions and failure
+   fallbacks require the same connected provider, Gateway model group/credential
+   set, and both known token rates no higher than the anchor. Require confirmed
+   tools and active status; preserve known modalities and capacity limits.
 4. Rank using the versioned task criteria. Quick prefers confirmed non-reasoning;
    deep prefers confirmed reasoning and known capacity; standard keeps the anchor.
    Balanced uses task criteria. Lower token cost puts cost first; More documented
@@ -74,11 +81,15 @@ estimating a smaller context requirement from the latest message alone. A cheape
 model with lower limits may therefore remain ineligible even for a short prompt.
 
 Private discussion and native group/review paths share `resolveDiscussionModel`.
-Inherited conversations use the app's exact model or the quick policy around the
-coworker's anchor/recommendation; explicit depth still affects effort. Assignments
-retain their standard model. New Workers resolve coworker role override, app role
-default, then deep (thinking) or standard (delivery) around the owner anchor, and
-pin the result. Existing Worker snapshots and legacy unpinned execution are unchanged.
+Inherited conversations use the app's exact model or the automatic conversation
+role preference, then the constrained quick fallback; explicit depth still affects
+effort. Assignments retain their standard model. New Workers resolve coworker role
+override, app role default, then the automatic role preference or constrained
+thinking/delivery fallback, and pin the result. Existing Worker snapshots and
+legacy unpinned execution are unchanged. Fable and other assigned models remain
+selectable when connected; no static row fabricates access. Cloud-assigned Gateway
+providers retain their opaque request IDs and safe upstream identity metadata.
+Native key-only refresh must finish applying before sync reports it as applied.
 The facilitator honors group override then app choice, otherwise quick selection;
 automatic secondary attempts stay with the same provider at no higher known prices.
 Memory/progress transport allowlists, budgets and opt-in settings are unchanged.

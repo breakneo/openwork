@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+import { transform } from "esbuild";
 import {
   EMPTY_THREAD_TURNS,
   TURNS_FILE,
@@ -22,9 +25,14 @@ import {
   withThreadTurns,
   type ThreadTurnState,
 } from "./thread-queue.ts";
-import { createComposerDraftStore, mergeSkillSelections, parseComposerDraft, selectionFields, type ComposerDraft, type SelectedSkill } from "./skill-selection.ts";
+import { createComposerDraftStore, mergeSkillSelections, parseComposerDraft, sameSkillFields, selectionFields, type ComposerDraft, type SelectedSkill } from "./skill-selection.ts";
 const draft: ComposerDraft = { text: "Keep these unsent words", skills: [{ id: "native_exact", label: "Useful skill", workspaceId: "ws_fixture", source: { type: "openwork-cloud", uri: "skill://fixture", scope: "opaque-A" }, account: { baseUrl: "https://example.invalid", orgId: "org_fixture", accountId: "user_fixture" } }] };
 const selected = selectionFields(draft.skills);
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((ready) => { resolve = ready; });
+  return { promise, resolve };
+}
 
 test("a missing, empty, or malformed file is simply nothing unfinished", () => {
   for (const text of [null, undefined, "", "   ", "{not json", "[]", '{"threads": 4}', '{"threads": {"ses_1": {"pending": {"prompt": "no id"}, "next": [{"id": "q", "text": "  "}]}}}']) {
@@ -144,6 +152,147 @@ test("initial draft admission is bound before Enter; late send/queue acknowledge
   const latest = store.beginSubmission(store.read("discussion"), "msg_latest"); assert.ok(latest);
   store.finishSubmission(latest, true);
   assert.deepEqual(store.read("discussion").value, { text: "", skills: [] }, "only the acknowledged revision clears");
+});
+
+test("new discussion dispatch waits for registration but not sidebar bookkeeping, and cancelled starts never open", async () => {
+  const source = await readFile(new URL("../ui/threads.tsx", import.meta.url), "utf8");
+  const prefix = "  const startDiscussion = useCallback(";
+  const start = source.indexOf(prefix) + prefix.length;
+  const end = source.indexOf("  }, [coworker.name", start);
+  assert.ok(start >= prefix.length && end > start);
+  const script = await transform(`(${source.slice(start, end)}\n})`, { loader: "ts", target: "es2022" });
+  for (const cancelled of [false, true]) {
+    const events: string[] = [];
+    const registered = deferred();
+    const registering = deferred();
+    const sidebar = deferred();
+    const discussionSelection = { current: 0 };
+    const startDiscussion = runInNewContext(script.code, {
+      Error, String, threads: { client: { createThread: async () => ({ id: "ses_new" }) } },
+      coworker: { slug: "fixture", name: "Fixture" }, discussionTitle: () => "Discussion", discussionSelection,
+      registerDiscussion: () => { events.push("register"); registering.resolve(); return registered.promise; },
+      setRegisteredDiscussions: () => events.push("saved"), setDiscussionThreadId: () => events.push("open"),
+      coworkerBridge: { coworkers: { update: () => { events.push("sidebar"); return sidebar.promise; } } },
+      onCoworkerChanged: () => events.push("selected"), setError: () => {},
+    });
+    const started = startDiscussion({ isCurrent: () => !cancelled, beforeOpen: () => events.push("ready") });
+    await registering.promise;
+    assert.deepEqual(events, ["register"]);
+    registered.resolve();
+    assert.equal(await started, "ses_new");
+    assert.deepEqual(events, cancelled ? ["register", "saved"] : ["register", "saved", "ready", "open", "sidebar"]);
+    discussionSelection.current++;
+    sidebar.resolve(); await Promise.resolve();
+    assert.equal(events.includes("selected"), false);
+  }
+});
+
+test("the renderer echoes before skill preflight and does not gate observation on refresh; Stop prevents dispatch", async () => {
+  const source = await readFile(new URL("../ui/threads.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("async (prompt: string, messageId: string, send: TurnSend");
+  const end = source.indexOf("  }, [abortUntilQuiet", start);
+  assert.ok(start > 0 && end > start);
+  const script = await transform(`(${source.slice(start, end)}\n})`, { loader: "ts", target: "es2022" });
+  for (const outcome of ["send", "cancel", "reject", "not-recorded", "uncertain"]) {
+    const cancel = outcome === "cancel";
+    const events: string[] = [];
+    const files = new Map<string, ComposerDraft>();
+    const store = createComposerDraftStore({ read: (key) => files.get(key) ?? { text: "", skills: [] }, write: (key, value) => { files.set(key, value); } });
+    store.update("discussion", draft);
+    const submission = store.beginSubmission(store.read("discussion"), "msg_first"); assert.ok(submission);
+    const validation = deferred();
+    const refreshed = deferred();
+    const observed = deferred();
+    const turnStateRef = { current: EMPTY_THREAD_TURNS };
+    const activeTurnRef = { current: null };
+    const ignore = () => {};
+    const setters = Object.fromEntries(["setActiveTurn", "clearStall", "setFailure", "setAppRetry", "setRecovered", "setLiveStream", "setError", "setProviderRefreshNote", "setResolution", "setTitle"].map((name) => [name, ignore]));
+    const sandbox = { ...setters, Date, Promise, Error, String, Boolean,
+      activeTurnRef, threadStop: () => cancel && turnStateRef.current.pending?.stoppedAt != null,
+      stopScope: "discussion", turnStateRef, voiceRef: { current: null }, stallRef: { current: null },
+      coworker: { slug: "fixture", name: "Fixture", model: "fixture/text" }, kind: "discussion",
+      firstPromptRef: { current: "Hello" }, titleLoadedRef: { current: true }, title: "Discussion", defaultDiscussionTitle: "New discussion",
+      knownMessages: { current: new Map() }, retiredReplies: { current: new Set() }, streamTurn: { current: null }, resolution: null,
+      selectionFields, sameSkillFields, composerDraftStore: store, beginPending, clearPending,
+      commitTurnState: (update: (state: ThreadTurnState) => ThreadTurnState, saved?: (kept: boolean, recorded?: ThreadTurnState) => void) => {
+        turnStateRef.current = update(turnStateRef.current); events.push("echo"); saved?.(true, outcome === "not-recorded" ? EMPTY_THREAD_TURNS : turnStateRef.current);
+      }, onActivityChange: ignore,
+      coworkerBridge: { turns: {
+        validateSkills: () => { events.push("validate"); return validation.promise; },
+        activity: async () => [],
+        send: async () => { events.push("send"); if (outcome === "uncertain") throw new Error("IPC response unavailable"); return outcome === "reject" ? { rejected: true, messageId: "msg_first", error: "Selected skill denied" } : { messageId: "msg_first", prompt: draft.text, acceptedAt: 1 }; },
+      } },
+      refresh: () => { events.push("refresh"); return refreshed.promise; },
+      threads: { client: { getThreadSnapshot: async () => { throw new Error("Observation unavailable"); }, waitForThread: async () => { events.push("observe"); observed.resolve(); return { outcome: "settled", snapshot: { messages: [], status: { type: "idle" } } }; } } },
+      threadId: "ses_fixture", waitControllerRef: { current: null }, TURN_OBSERVER_SLICE_MS: 2000,
+      window: { setInterval: () => 1, clearInterval: ignore, setTimeout, clearTimeout, requestAnimationFrame: (callback: () => void) => callback() },
+      AbortController, isRunning: () => false, nativeV2InputSkillsMatch: () => true,
+    };
+    const submit = runInNewContext(script.code, sandbox);
+    const running = submit(draft.text, "msg_first", { mode: "send", submission, skills: draft.skills }, { providerId: "fixture", modelId: "text" });
+    assert.deepEqual(events, ["echo", "validate"]);
+    assert.deepEqual(store.read("discussion").value, outcome === "not-recorded" ? draft : { text: "", skills: [] });
+    if (cancel) turnStateRef.current = markStopped(turnStateRef.current, 1);
+    validation.resolve();
+    if (cancel || outcome === "reject") {
+      await running;
+      assert.equal(events.filter((event) => event === "send").length, cancel ? 0 : 1);
+      assert.equal(events.includes("observe"), false);
+      assert.deepEqual(store.read("discussion").value, draft);
+    } else if (outcome === "uncertain") {
+      await running;
+      assert.equal(events.filter((event) => event === "send").length, 1);
+      assert.deepEqual(store.read("discussion").value, { text: "", skills: [] });
+      assert.equal(turnStateRef.current.pending?.messageId, "msg_first");
+    } else {
+      await observed.promise;
+      assert.deepEqual(events.slice(0, 5), ["echo", "validate", "send", "refresh", "observe"]);
+      assert.equal(events.filter((event) => event === "send").length, 1);
+      refreshed.resolve(); await running;
+    }
+  }
+});
+
+test("a recorded submission releases the composer early, restores definitive rejection, and never replays uncertainty", async () => {
+  const files = new Map<string, string>();
+  let failWrite = false;
+  const store = createComposerDraftStore({ read: (key) => parseComposerDraft(files.get(key) ?? null), write: (key, value) => {
+    if (failWrite) throw new Error("Storage unavailable");
+    files.set(key, JSON.stringify(value));
+  } });
+  const outcomes: Array<boolean | "uncertain"> = [false, true, "uncertain"];
+  for (const result of outcomes) {
+    store.update("discussion", draft);
+    const snapshot = store.read("discussion");
+    const submission = store.beginSubmission(snapshot, `msg_${result}`); assert.ok(submission);
+    const pending = beginPending(EMPTY_THREAD_TURNS, { messageId: submission.messageId, prompt: draft.text, startedAt: 1, ...selected });
+    const recorded = deferred();
+    const released = recorded.promise.then(() => store.releaseSubmission(submission));
+    assert.deepEqual(store.read("discussion").value, draft);
+    assert.equal(store.beginSubmission(snapshot, "msg_duplicate"), null);
+    const saved = serializeTurnsFile(withThreadTurns({ schemaVersion: 1, threads: {} }, "discussion", pending));
+    recorded.resolve(); await released;
+    assert.deepEqual(store.read("discussion").value, { text: "", skills: [] });
+    assert.deepEqual(threadTurns(parseTurnsFile(saved), "discussion").pending?.skillSelections, draft.skills);
+    assert.equal(store.beginSubmission(snapshot, "msg_duplicate"), null);
+    store.finishSubmission(submission, result);
+    assert.deepEqual(store.read("discussion").value, result === false ? draft : { text: "", skills: [] });
+    store.releaseSubmission(submission);
+    assert.deepEqual(store.read("discussion").value, result === false ? draft : { text: "", skills: [] });
+  }
+  store.update("discussion", draft);
+  const older = store.beginSubmission(store.read("discussion"), "msg_older"); assert.ok(older);
+  store.releaseSubmission(older);
+  const newer = { text: "Newer words", skills: [] };
+  store.update("discussion", newer);
+  store.finishSubmission(older, false);
+  assert.deepEqual(store.read("discussion").value, newer);
+  const failing = store.beginSubmission(store.read("discussion"), "msg_storage"); assert.ok(failing);
+  failWrite = true;
+  assert.throws(() => store.releaseSubmission(failing), /Storage unavailable/);
+  assert.deepEqual(store.read("discussion").value, newer);
+  failWrite = false;
+  store.finishSubmission(failing, false);
 });
 
 test("the pending turn is begun, stopped, and cleared without touching Next", () => {

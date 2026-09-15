@@ -1,6 +1,3 @@
-// Shared Cloud-native skill materialization (PR #4881). The host reads the
-// authorized index and bodies on one MCP session, outside the agent tool loop.
-// Only an engine-private, auth-scoped directory is registered with native v2.
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -39,7 +36,6 @@ export class CloudNativeSkillSyncError extends Error {
 }
 
 export type CloudNativeSkillBody = { uri: string; content: string };
-/** Stable native id, source URI, private file location, and verbatim SKILL.md. */
 export type CloudNativeSkill = { id: string; uri: string; scope: string; location: string; content: string };
 export type CloudNativeSkillState = { root: string | null; skills: CloudNativeSkill[] };
 export const EMPTY_CLOUD_NATIVE_SKILL_STATE: CloudNativeSkillState = { root: null, skills: [] };
@@ -56,7 +52,6 @@ function authorizationHeader(config: Record<string, unknown>): string | null {
   return null;
 }
 
-/** Opaque endpoint + credential scope. Never put raw credentials in paths/logs. */
 export function cloudNativeSkillScopeKey(config: Record<string, unknown> | null): string | null {
   if (!config || config.enabled === false || config.disabled === true) return null;
   const url = typeof config.url === "string" ? config.url : "";
@@ -65,7 +60,6 @@ export function cloudNativeSkillScopeKey(config: Record<string, unknown> | null)
   return createHash("sha256").update(`${url}\n${authorization}`).digest("hex");
 }
 
-/** Stable URI -> native ID contract; independent of body revisions and auth rotation. */
 export function cloudNativeSkillId(uri: string): string {
   return `${CLOUD_NATIVE_SKILL_ID_PREFIX}${createHash("sha256").update(uri).digest("hex").slice(0, 16)}`;
 }
@@ -78,12 +72,10 @@ const skillIndexSchema = z.object({
   }).passthrough()),
 }).passthrough();
 
-/** Fresh index + every body on one authenticated MCP session. No body cache. */
 export async function fetchCloudNativeSkills(
   config: Record<string, unknown>,
   fetcher: McpFetch = externalFetch,
 ): Promise<CloudNativeSkillBody[]> {
-  // Fetch errors can contain URLs or headers. Surface only bounded failure codes.
   const reader = await openMcpResourceReader({ config, fetcher, clientName: "openwork-server-cloud-skills" }).catch(() => null);
   if (!reader) throw new CloudNativeSkillSyncError("cloud_skill_session_failed", "OpenWork Cloud skill session could not be initialized");
   const indexText = await reader.read(SKILL_INDEX_URI).catch(() => null);
@@ -141,7 +133,6 @@ async function listDirectories(path: string): Promise<string[]> {
   }
 }
 
-/** Stage bodies, atomically replace files, delete revoked skills and other scopes. */
 export async function materializeCloudNativeSkills(
   root: string, scopeKey: string, bodies: CloudNativeSkillBody[],
 ): Promise<CloudNativeSkillState> {
@@ -234,12 +225,8 @@ export function createCloudNativeSkillSync(options: {
       current = state;
       return state;
     } catch (error) {
-      // Cleanup/registration failures stay hard failures: never claim stale
-      // skills are gone unless both the config write and deletion succeeded.
       await clearAll();
       if (generation !== started) return "stale";
-      // Remember the attempted authorization even when it yielded an empty
-      // catalog. An unchanged failed connection is not a new scope change.
       activeScope = scope;
       throw error;
     }

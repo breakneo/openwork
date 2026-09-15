@@ -20,8 +20,8 @@ import { COMPUTER_DENY } from "./computer-control.mjs";
 import { BROWSER_TOOLS } from "./browser-control.mjs";
 import { assertWorkerSupervisor, workerControlRequest } from "./worker-controls.mjs";
 import { effortForTurn, effortStopOf } from "../src/lib/effort.ts";
-import { DEFAULT_MODEL_DEFAULTS } from "../src/lib/model-defaults.ts";
-import { chooseIndexedModel } from "../src/lib/model-intelligence.ts";
+import { DEFAULT_MODEL_DEFAULTS, usesAppConversationDefault } from "../src/lib/model-defaults.ts";
+import { chooseIndexedModel, chooseAutomaticRoleModel } from "../src/lib/model-intelligence.ts";
 import { connectedModelCatalog, recommendModel } from "../src/lib/threads.ts";
 import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
 import { sameSkillFields, skillSelectionsSchema } from "../src/lib/skill-selection.ts";
@@ -78,6 +78,7 @@ export function workerPurpose(value) {
 export function resolveWorkerModel(coworker, purpose, providers, snapshot = null, defaults = {}, modelDefaults = DEFAULT_MODEL_DEFAULTS) {
   const field = purpose === "thinking" ? "thinkingModel" : "deliveryModel";
   const selected = coworker[field]?.trim() ? { model: coworker[field].trim(), modelVariant: coworker[`${field}Variant`] } : modelDefaults[purpose];
+  let roleVariant = "";
   if (snapshot && (typeof snapshot.providerId !== "string" || typeof snapshot.modelId !== "string" || typeof snapshot.variant !== "string")) {
     throw new Error("The Worker's saved model is unreadable. No replacement model was selected.");
   }
@@ -93,9 +94,14 @@ export function resolveWorkerModel(coworker, purpose, providers, snapshot = null
   }
   if (!snapshot && !selected.model) {
     const catalog = connectedModelCatalog({ all: providers, connected: providers.map((provider) => provider.id), default: defaults.default });
-    const decision = chooseIndexedModel(catalog, purpose === "thinking" ? "deep" : "standard", { standard: id || recommendModel(catalog)?.id, preferences: coworker.modelSelectionPreferences });
+    const automatic = usesAppConversationDefault(coworker)
+      ? chooseAutomaticRoleModel(catalog, purpose, { standard: id || undefined, preferences: coworker.modelSelectionPreferences })
+      : null;
+    const decision = automatic
+      ?? chooseIndexedModel(catalog, purpose === "thinking" ? "deep" : "standard", { standard: id || recommendModel(catalog)?.id, preferences: coworker.modelSelectionPreferences });
     if (!decision.model) throw new Error(`Worker model ${id} is unavailable or ineligible. ${decision.reason} This Worker will not switch models.`);
     id = decision.model.id;
+    roleVariant = automatic?.variant ?? "";
   }
   const separator = id.indexOf("/");
   if (separator <= 0 || separator === id.length - 1) throw new Error("Choose a model in Coworker settings before starting a Worker. No default or paid fallback was selected.");
@@ -105,7 +111,7 @@ export function resolveWorkerModel(coworker, purpose, providers, snapshot = null
   if (!model || model.status === "deprecated") throw new Error(`Worker model ${id} is unavailable from a connected provider. Restore access or choose a model for a new Worker; this Worker will not switch models.`);
   if (model.capabilities?.toolcall !== true) throw new Error(`Worker model ${id} does not advertise tool support. Choose a tool-capable model for a new Worker.`);
   const variants = Object.keys(model.variants ?? {}).filter((variant) => model.variants[variant]?.disabled !== true);
-  const fixedVariant = snapshot ? snapshot.variant : selected.model ? String(selected.modelVariant ?? "").trim() : "";
+  const fixedVariant = snapshot ? snapshot.variant : String(selected.modelVariant ?? "").trim() || roleVariant;
   if (fixedVariant && !variants.includes(fixedVariant)) throw new Error(`Worker model ${id} no longer offers thinking effort ${fixedVariant}. This Worker will not change its saved effort.`);
   const variant = snapshot ? fixedVariant : effortForTurn({ kind: "worker-turn", stop: effortStopOf(coworker.effortPreference), fixedVariant, variants });
   return { providerId, modelId, variant };

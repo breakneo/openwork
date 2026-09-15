@@ -82,7 +82,7 @@ import { resolveCollectibleOpenTarget } from "../artifacts/resolve-open-target";
 import type { OpenTargetOptions } from "@/lib/target-provider";
 import { SidePanel } from "../panel/side-panel";
 import { getSidePanelSessionKey } from "../panel/side-panel-session";
-import { useCreateTab } from "../panel/use-side-panel-tabs";
+import { useCreateTab, useSelectTab } from "../panel/use-side-panel-tabs";
 import { TerminalDock } from "../terminal/terminal-dock";
 import { useActivePanelTab, usePanelTabStore, useSessionPanelState } from "../panel/panel-tab-store";
 import { useWorkspaceShellLayout } from "../../../shell/workspace-shell-layout";
@@ -150,6 +150,8 @@ export type SessionPageSidebarProps = {
   selectedSessionId: string | null;
   developerMode: boolean;
   sessionStatusById: Record<string, string>;
+  sessionAttentionLabelById?: Record<string, string>;
+  sessionAttentionSourceById?: Record<string, "child" | "descendant">;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
   newTaskDisabled: boolean;
@@ -264,6 +266,7 @@ export type SessionPageProps = {
   notFoundMessage?: string | null;
   mainContentTakeover?: React.ReactNode;
   mainContentTitle?: string;
+  mainContentHeaderActionsRef?: React.Ref<HTMLDivElement>;
   extensionsActive?: boolean;
   onOpenProviderAuth?: () => void;
   /** Chat-first: create a default workspace and start a task from the empty-state composer. */
@@ -455,7 +458,6 @@ export function SessionPage(props: SessionPageProps) {
     state.sidePanelState[sidePanelSessionKey] ?? null
   ));
   const setSidePanelState = useUiStateStore((state) => state.setSidePanelState);
-  const toggleSidePanelState = useUiStateStore((state) => state.toggleSidePanelState);
   const openTab = usePanelTabStore((state) => state.openTab);
   const closeTab = usePanelTabStore((state) => state.closeTab);
   const selectTab = usePanelTabStore((state) => state.selectTab);
@@ -480,6 +482,9 @@ export function SessionPage(props: SessionPageProps) {
   const activeSidePanel = sessionSidePanel;
   const sidePanelOpen = activeSidePanel !== null;
   const panelRailActive = activeSidePanel === "panel";
+  const browserRailActive = panelRailActive && activePanelTab?.type === "browser";
+  const filesRailActive = panelRailActive && activePanelTab?.type !== "browser";
+  const selectBrowserTab = useSelectTab();
   const showCloudSignIn = shellConfig.cloudSignin && !denAuth.isSignedIn && denAuth.status !== "checking";
   const openCloudSignIn = useCallback(() => {
     const baseUrl = readDenBootstrapConfig().baseUrl;
@@ -581,10 +586,6 @@ export function SessionPage(props: SessionPageProps) {
   const setCurrentSidePanel = useCallback((panel: SidePanelItem | null) => {
     setSidePanelState(sidePanelSessionKey, panel);
   }, [setSidePanelState, sidePanelSessionKey]);
-
-  const toggleCurrentSidePanel = useCallback((panel: SidePanelItem) => {
-    toggleSidePanelState(sidePanelSessionKey, panel);
-  }, [sidePanelSessionKey, toggleSidePanelState]);
 
   // Which conversation's browser tabs may take the screen. Every other
   // conversation's tabs keep loading silently in the background.
@@ -769,11 +770,17 @@ export function SessionPage(props: SessionPageProps) {
     setCurrentSidePanel("panel");
   }, [setCurrentSidePanel]);
   const openBrowserRailPane = useCallback(() => {
-    if (!hasBrowserTabs) return;
-    // Opening the browser pane should land on a usable page, not an empty
-    // panel that forces the user to click "+".
-    toggleCurrentSidePanel("panel");
-  }, [hasBrowserTabs, toggleCurrentSidePanel]);
+    if (browserRailActive) {
+      closeRightPane();
+      return;
+    }
+    const browserTab = activePanelTab?.type === "browser"
+      ? activePanelTab
+      : sessionPanelState.tabs.find((tab) => tab.type === "browser");
+    if (!browserTab) return;
+    selectBrowserTab(sidePanelSessionKey, browserTab.id);
+    setCurrentSidePanel("panel");
+  }, [activePanelTab, browserRailActive, closeRightPane, selectBrowserTab, sessionPanelState.tabs, setCurrentSidePanel, sidePanelSessionKey]);
   const openBrowserUrlControlAction = useMemo<OpenworkControlAction>(() => ({
     id: "browser.open_url",
     label: "Open URL in built-in browser",
@@ -858,6 +865,10 @@ export function SessionPage(props: SessionPageProps) {
   useControlAction(setBrowserProxyControlAction);
   const openArtifactRailPane = useCallback(() => {
     if (!hasArtifactTargets) {
+      const documentTab = activePanelTab?.type !== "browser" && activePanelTab
+        ? activePanelTab
+        : sessionPanelState.tabs.find((tab) => tab.type !== "browser");
+      selectTab(sidePanelSessionKey, documentTab?.id ?? null);
       setCurrentSidePanel("panel");
       return;
     }
@@ -885,14 +896,8 @@ export function SessionPage(props: SessionPageProps) {
       selectTab(props.selectedSessionId, tabToSelect);
     }
 
-    if (panelRailActive && activeTab?.type === "artifact") {
-      toggleCurrentSidePanel("panel");
-      return;
-    }
-    if (!panelRailActive) {
-      toggleCurrentSidePanel("panel");
-    }
-  }, [artifactFileTargets, hasArtifactTargets, openTab, panelRailActive, props.selectedSessionId, selectTab, sessionPanelState, setCurrentSidePanel, toggleCurrentSidePanel]);
+    setCurrentSidePanel("panel");
+  }, [activePanelTab, artifactFileTargets, hasArtifactTargets, openTab, props.selectedSessionId, selectTab, sessionPanelState, setCurrentSidePanel, sidePanelSessionKey]);
   const removeAccessibleTarget = useCallback((target: OpenTarget) => {
     const nextHiddenIds = new Set(hiddenAccessibleTargetIds);
     nextHiddenIds.add(target.id);
@@ -979,14 +984,13 @@ export function SessionPage(props: SessionPageProps) {
     }, 5000);
     return () => window.clearTimeout(id);
   }, [pendingConversationHistoryNavigation]);
-  useEffect(() => {
+  const workbenchInventory = useMemo(() => {
     const workspaceGroup = props.sidebar.workspaceSessionGroups.find(
       (group) => group.workspace.id === props.selectedWorkspaceId,
     );
-    syncWorkbench({
+    return {
       workspaceId: props.selectedWorkspaceId,
       workspaceTitle: workspaceName,
-      primarySessionId: props.selectedSessionId,
       sessionsKnown: workspaceGroup?.status === "ready",
       archivedSessionIds: (workspaceGroup?.sessions ?? []).filter((session) => session.time?.archived).map((session) => session.id),
       sessions: (workspaceGroup?.sessions ?? []).map((session) => ({
@@ -995,14 +999,11 @@ export function SessionPage(props: SessionPageProps) {
         title: getDisplaySessionTitle(session.title),
         workspaceTitle: workspaceName,
       })),
-    });
-  }, [
-    props.selectedSessionId,
-    props.selectedWorkspaceId,
-    props.sidebar.workspaceSessionGroups,
-    syncWorkbench,
-    workspaceName,
-  ]);
+    };
+  }, [props.selectedWorkspaceId, props.sidebar.workspaceSessionGroups, workspaceName]);
+  useEffect(() => {
+    syncWorkbench({ ...workbenchInventory, primarySessionId: props.selectedSessionId });
+  }, [props.selectedSessionId, syncWorkbench, workbenchInventory]);
   useEffect(() => {
     props.onSessionTabsChange?.(sessionTabs);
   }, [sessionTabs, props.onSessionTabsChange]);
@@ -1371,10 +1372,11 @@ export function SessionPage(props: SessionPageProps) {
           selectedSessionId={props.sidebar.selectedSessionId}
           showSessionActions={Boolean(props.onRenameSession || props.onDeleteSession || props.onArchiveSession)}
           sessionStatusById={props.sidebar.sessionStatusById}
+          sessionAttentionLabelById={props.sidebar.sessionAttentionLabelById}
+          sessionAttentionSourceById={props.sidebar.sessionAttentionSourceById}
           connectingWorkspaceId={props.sidebar.connectingWorkspaceId}
           workspaceConnectionStateById={props.sidebar.workspaceConnectionStateById}
           newTaskDisabled={props.sidebar.newTaskDisabled}
-          newTaskDraftScope={props.newTaskComposer?.draftScope ?? null}
           onSelectWorkspace={props.sidebar.onSelectWorkspace}
           onOpenSession={openSessionTab}
           onPrefetchSession={props.sidebar.onPrefetchSession}
@@ -1434,7 +1436,10 @@ export function SessionPage(props: SessionPageProps) {
         />
         <SidebarInset
           className={cn(
-            "min-h-0 overflow-hidden bg-sidebar mac:bg-transparent mac:[&_header]:transition-[padding-left] mac:[&_header]:duration-200 mac:[&_header]:ease-linear mac:peer-data-[state=collapsed]:[&_header]:pl-34 mac:max-md:[&_header]:pl-34",
+            // Below `lg` the sidebar is a mobile sheet, not an inline `peer`, so
+            // the collapsed-peer rule never matches there and the header must
+            // reserve the titlebar clearance itself.
+            "min-h-0 overflow-hidden bg-sidebar mac:bg-transparent mac:[&_header]:transition-[padding-left] mac:[&_header]:duration-200 mac:[&_header]:ease-linear mac:peer-data-[state=collapsed]:[&_header]:pl-34 mac:max-lg:[&_header]:pl-34",
             !shellConfig.sidebar && "mac:[&_header]:pl-34",
           )}
         >
@@ -1454,7 +1459,7 @@ export function SessionPage(props: SessionPageProps) {
               below) is invisible — nothing scrolls beneath either — but each
               one forces an extra full-pane blur pass every frame the transcript
               repaints. Keep the pane as the only backdrop surface. */}
-          <header className="z-10 flex h-9 shrink-0 items-center justify-between border-b border-border px-3 max-lg:h-12 lg:px-6 mac:titlebar-drag @container/titlebar">
+          <header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
             <div className="flex min-w-0 items-center gap-3">
               {shellConfig.sidebar ? <SidebarTrigger className="mac:hidden" /> : null}
               {parentSessionLink && !props.primarySlot && !hasMainContentTakeover ? (
@@ -1479,7 +1484,7 @@ export function SessionPage(props: SessionPageProps) {
                   <TooltipContent>Back to parent chat</TooltipContent>
                 </Tooltip>
               ) : null}
-              <h1 className="truncate text-[13px] font-medium text-dls-text">
+              <h1 className={cn("truncate font-medium text-dls-text", props.mainContentHeaderActionsRef ? "text-base leading-6" : "text-[13px]")}>
                 {props.primaryTitle
                   ? props.primaryTitle
                   : props.mainContentTitle
@@ -1499,19 +1504,21 @@ export function SessionPage(props: SessionPageProps) {
                   <span className="max-w-40 truncate">{workspaceName}</span>
                 </span>
               ) : null}
-              {props.developerMode ? (
+              {props.developerMode && !props.mainContentHeaderActionsRef ? (
                 <span className="hidden text-[12px] text-dls-secondary lg:inline">
                   {props.headerStatus}
                 </span>
               ) : null}
-              {props.busyHint ? (
+              {props.busyHint && !props.mainContentHeaderActionsRef ? (
                 <span className="hidden text-[12px] text-dls-secondary lg:inline">
                   {props.busyHint}
                 </span>
               ) : null}
             </div>
 
-            <div className="flex shrink-0 items-center gap-1.5 text-gray-10 mac:titlebar-no-drag">
+            {props.mainContentHeaderActionsRef ? (
+              <div ref={props.mainContentHeaderActionsRef} className="shrink-0 mac:titlebar-no-drag" />
+            ) : <div className="flex shrink-0 items-center gap-1.5 text-gray-10 mac:titlebar-no-drag">
               <DesktopUpdateButton />
               {!props.primarySlot && findButtonSessionId && !hasMainContentTakeover ? (
                 <Tooltip>
@@ -1620,7 +1627,7 @@ export function SessionPage(props: SessionPageProps) {
                   Reset notifications
                 </Button>
               ) : null}
-            </div>
+            </div>}
           </header>
 
           {showNarrowPaneSwitcher ? (
@@ -1981,12 +1988,12 @@ export function SessionPage(props: SessionPageProps) {
                 size="icon-sm"
                 className={cn(
                   "rounded-xl transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
-                  panelRailActive && hasBrowserTabs && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                  browserRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
                 )}
                 onClick={openBrowserRailPane}
                 title={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
                 aria-label={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
-                aria-pressed={panelRailActive && hasBrowserTabs}
+                aria-pressed={browserRailActive}
                 disabled={!hasBrowserTabs}
               >
                 <Globe size={15} />
@@ -1997,12 +2004,12 @@ export function SessionPage(props: SessionPageProps) {
               size="icon-sm"
               className={cn(
                 "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
-                panelRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                filesRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
               )}
-              onClick={panelRailActive ? closeRightPane : openArtifactRailPane}
+              onClick={filesRailActive ? closeRightPane : openArtifactRailPane}
               title={`Files (${artifactTargetCount})`}
               aria-label={`Files (${artifactTargetCount})`}
-              aria-pressed={panelRailActive}
+              aria-pressed={filesRailActive}
             >
               <FileText size={15} />
               {artifactTargetCount > 0 ? (
