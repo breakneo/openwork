@@ -6,6 +6,12 @@ const safeText = z.string().trim().min(1).max(140).refine(
   'Use sanitized plain text without URLs, credentials, or control characters',
 );
 
+export const videoFormat = { width: 2560, height: 1920, fps: 30 };
+
+export function matchesVideoFormat(width: number, height: number, frameRate: string | undefined) {
+  return width === videoFormat.width && height === videoFormat.height && frameRate === `${videoFormat.fps}/1`;
+}
+
 export const releaseSourcePin = {
   version: '0.18.46',
   tag: 'v0.18.46',

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { buildLabel, journeyBuildKind, manifestSchema, releaseReceiptSchema, releaseSourcePin } from './manifest.ts';
+import { buildLabel, journeyBuildKind, manifestSchema, matchesVideoFormat, releaseReceiptSchema, releaseSourcePin, videoFormat } from './manifest.ts';
 
 // Schema-only input fixtures: never rendered or presented as capture evidence.
 function input() {
@@ -18,6 +18,14 @@ function input() {
     })),
   };
 }
+
+test('fixed readable canvas and output geometry guard agree', () => {
+  assert.deepEqual(videoFormat, { width: 2560, height: 1920, fps: 30 });
+  assert.equal(matchesVideoFormat(2560, 1920, '30/1'), true);
+  assert.equal(matchesVideoFormat(1920, 1080, '30/1'), false);
+  assert.equal(matchesVideoFormat(2560, 1920, '24/1'), false);
+  assert.equal(matchesVideoFormat(2560, 1920, undefined), false);
+});
 
 test('explicit unreleased A/B input is valid, without asserting media authenticity', () => {
   assert.equal(manifestSchema.safeParse(input()).success, true);

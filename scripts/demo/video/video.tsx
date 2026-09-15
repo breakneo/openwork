@@ -1,6 +1,6 @@
 import { Video } from '@remotion/media';
 import { AbsoluteFill, Composition, Img, registerRoot, Sequence, staticFile } from 'remotion';
-import { buildLabel } from './manifest.ts';
+import { buildLabel, videoFormat } from './manifest.ts';
 import type { VideoProps } from './manifest.ts';
 
 function Film({ scenes }: VideoProps) {
@@ -12,15 +12,15 @@ function Film({ scenes }: VideoProps) {
       return <Sequence key={`${from}-${scene.asset}`} from={from} durationInFrames={scene.frames}>
         <AbsoluteFill style={{ padding: 24 }}>
           <div style={{ height: 54, fontSize: 28, fontWeight: 700 }}>
-            ENG-105 · Member {scene.member} desktop · {scene.variant === 'D' ? 'D: actual PNG + Remotion' : 'C: actual screencast / frame'}
+            ENG-105 · PARTIAL PROGRESS — NOT A FULL PASS · Member {scene.member} · {scene.variant === 'D' ? 'D: actual PNG + Remotion' : 'C: actual screencast / frame'}
           </div>
           <div style={{ height: 56, fontSize: 18, lineHeight: 1.3, overflowWrap: 'anywhere', color: '#fcd34d' }}>
             <div>{buildLabel(scene.release.buildKind)} · Desktop {scene.release.desktopVersion} · tag {scene.release.desktopTag} · SHA {scene.release.releaseSha}</div>
             <div>Lane {scene.release.lane} · Den {scene.release.denBuildIdentity} · supplied provenance receipt, not inferred from footage</div>
           </div>
-          <div style={{ height: 604, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ height: 1444, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             {scene.kind === 'png'
-              ? <Img src={staticFile(scene.asset)} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+              ? <Img src={staticFile(scene.asset)} style={{ width: '100%', height: '100%', objectFit: 'contain', backgroundColor: '#ffffff' }} />
               : <Video src={staticFile(scene.asset)} muted style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}
           </div>
           <div style={{ paddingTop: 16, fontSize: 26, lineHeight: 1.2, overflowWrap: 'anywhere' }}>{scene.caption}</div>
@@ -30,7 +30,7 @@ function Film({ scenes }: VideoProps) {
             {' · '}{scene.assertion.state === 'passed' ? 'Reported assertion: passed (external evidence)' : `INCOMPLETE / NOT PASSING PROOF — assertion: ${scene.assertion.state}`}
           </div>
           <div style={{ position: 'absolute', bottom: 14, left: 24, fontSize: 18, color: '#cbd5e1' }}>
-            Capture provenance and redaction are supplied by the operator. Video is not a test verdict. Audio omitted.
+            Supplementary observations, not a test verdict. Audio omitted. PNG alpha: white matte; CDP JPEG dark sidebar retained.
           </div>
         </AbsoluteFill>
       </Sequence>;
@@ -41,7 +41,7 @@ function Film({ scenes }: VideoProps) {
 const defaultProps: VideoProps = { scenes: [] };
 
 function Root() {
-  return <Composition id="ENG105" component={Film} width={1920} height={1080} fps={30}
+  return <Composition id="ENG105" component={Film} width={videoFormat.width} height={videoFormat.height} fps={videoFormat.fps}
     durationInFrames={30} defaultProps={defaultProps}
     calculateMetadata={({ props }) => ({ durationInFrames: Math.max(1, props.scenes.reduce((sum, scene) => sum + scene.frames, 0)) })} />;
 }

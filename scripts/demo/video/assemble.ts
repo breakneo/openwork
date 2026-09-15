@@ -5,7 +5,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { journeyBuildKind, manifestSchema, releaseReceiptSchema } from './manifest.ts';
+import { journeyBuildKind, manifestSchema, matchesVideoFormat, releaseReceiptSchema, videoFormat } from './manifest.ts';
 import type { RenderScene } from './manifest.ts';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -133,7 +133,7 @@ async function main() {
       assetSha256: await hash(normalized), evidenceSha256: item.evidenceSha256,
       releaseEvidenceSha256: item.releaseEvidenceSha256 });
   }
-  const receipt = { version: 1, status: 'prepared-not-rendered', fps: 30, width: 1920, height: 1080,
+  const receipt = { version: 1, status: 'prepared-not-rendered', ...videoFormat,
     inputManifestSha256: createHash('sha256').update(source).digest('hex'),
     provenance: 'Operator-attested actual captures and sanitization. Assembler does not verify test assertions or detect secrets in pixels.',
     scenes: receipts };
@@ -157,8 +157,7 @@ async function main() {
     const seconds = Number(rendered.format.duration);
     const expected = selected.reduce((sum, scene) => sum + scene.frames, 0) / 30;
     if (!Number.isFinite(seconds) || seconds > 180 || Math.abs(seconds - expected) > 0.05
-      || rendered.streams[0].width !== 1920 || rendered.streams[0].height !== 1080
-      || rendered.streams[0].avg_frame_rate !== '30/1') throw new Error('Output duration/geometry/fps validation failed');
+      || !matchesVideoFormat(rendered.streams[0].width, rendered.streams[0].height, rendered.streams[0].avg_frame_rate)) throw new Error('Output duration/geometry/fps validation failed');
     outputs.push({ variant, journey, file, durationSeconds: seconds, sha256: await hash(output) });
     await writeFile(receiptPath, JSON.stringify({ ...receipt, status: 'partial-render-no-test-verdict', outputs }, null, 2));
   }
