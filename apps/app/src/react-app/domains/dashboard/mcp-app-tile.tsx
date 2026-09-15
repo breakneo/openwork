@@ -16,7 +16,7 @@ import { snapshotMcpAppArguments } from "@/components/chat/mcp-app-origin";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/react-app/shell/workspace-provider";
-import { DashboardTileShell } from "./dashboard-tile-shell";
+import { DashboardTileShell, type DashboardTileActions } from "./dashboard-tile-shell";
 import { resolveDashboardMcpApp } from "./dashboard-mcp-app-resolution";
 import {
   DASHBOARD_AUTO_REFRESH_INTERVAL_MS,
@@ -111,7 +111,9 @@ function McpAppTileContent({
   onAutoLaunchEnabled,
   onAutoLaunchDisabled,
   fallbackEndpoints,
+  renderActions,
 }: {
+  renderActions?: DashboardTileActions;
   entry: DashboardMcpAppEntry;
   /** Per-user and per-organization scope for workspace-bound last-known-good dashboard data. */
   cacheScopeKey: string;
@@ -468,6 +470,7 @@ function McpAppTileContent({
   return (
     <DashboardTileShell
       title={entry.title}
+      renderActions={renderActions}
       entryId={entry.id}
       subtitle={entry.serverName}
       badge={badge ? (

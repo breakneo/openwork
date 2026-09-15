@@ -11,6 +11,8 @@ import { AppActionsMenu, getAppUpdatePrompt } from "../apps/app-actions-menu";
 import { GeneratedAppPreview } from "../apps/generated-app-preview";
 import { LiveGeneratedApp, isLiveGeneratedApp } from "../apps/live-generated-app";
 import type { DashboardLaunchEndpoint } from "./mcp-app-tile";
+import { DashboardMasonry } from "./dashboard-masonry";
+import { DashboardTileShell, type DashboardTileActions } from "./dashboard-tile-shell";
 import { ShareDashboardButton } from "./share-dashboard-button";
 
 export type CreateDashboardApp = (prompt: string) => Promise<void>;
@@ -47,9 +49,9 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
     {placement.error && !chooser ? <p role="alert" className="mb-4 text-sm text-destructive">{placement.error.message}</p> : null}
     {available && personal.length ? <section className="mb-8" aria-label="Your apps">
       <h2 className="mb-3 text-sm font-medium">Added by you</h2>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{personal.map((app) => <SavedDashboardApp key={JSON.stringify([...scope, app.view.id])} app={app} fallbackEndpoints={fallbackEndpoints} onCreateApp={onCreateApp}
+      <DashboardMasonry>{personal.map((app) => <SavedDashboardApp key={JSON.stringify([...scope, app.view.id])} app={app} fallbackEndpoints={fallbackEndpoints} onCreateApp={onCreateApp}
         removing={placement.isPending && placement.variables?.appId === app.view.id}
-        onRemove={() => placement.mutate({ appId: app.view.id, added: false })} />)}</div>
+        onRemove={() => placement.mutate({ appId: app.view.id, added: false })} />)}</DashboardMasonry>
     </section> : available ? <section className="mb-8 rounded-xl border border-dashed p-6">
       <div className="flex items-start gap-3"><Sparkles className="mt-0.5 size-5 text-muted-foreground" /><div>
         <h2 className="text-sm font-medium">Make this dashboard yours</h2>
@@ -98,25 +100,26 @@ function SavedDashboardApp({ app, onRemove, removing, onCreateApp, fallbackEndpo
   const updatePrompt = app.canManage && !detail.isError ? getAppUpdatePrompt(isLiveGeneratedApp(app.view) ? { ...app, revision: liveRevision ?? null, html: null, payload: null, previewNotice: null } : detail.data) : undefined;
   const update = useMutation({ mutationFn: onCreateApp });
   const onUpdate = updatePrompt ? () => { if (!update.isPending && !removing) update.mutate(updatePrompt); } : undefined;
-  return <article className="min-w-0 overflow-hidden rounded-xl border bg-background" data-personal-dashboard-app={app.view.id}>
-    <header className="flex items-center gap-2 border-b p-3">
-      <button className="min-w-0 flex-1 text-left" aria-label={`Open ${app.view.title}`} onClick={() => navigate(`/dashboard/apps/${app.view.id}`)}><span className="block truncate text-sm font-medium">{app.view.title}</span><span className="text-xs text-muted-foreground">Open app</span></button>
-      <AppActionsMenu appId={app.view.id} title={app.view.title} canDelete={app.canManage} onRemove={onRemove} onUpdate={onUpdate} busy={removing || update.isPending} />
-    </header>
-    <div className="max-h-[32rem] overflow-auto px-4 pb-4">
-      {liveRevision ? <LiveGeneratedApp view={app.view} revision={liveRevision} fallbackEndpoints={fallbackEndpoints} />
-        : isLiveGeneratedApp(app.view) ? <p role="status" className="py-4 text-sm text-muted-foreground">This app has no saved version ready to open.</p>
+  const renderActions: DashboardTileActions = (props) => <AppActionsMenu appId={app.view.id} title={app.view.title}
+    canDelete={app.canManage} onRemove={onRemove} onUpdate={onUpdate} busy={removing || update.isPending}
+    onOpen={() => navigate(`/dashboard/apps/${app.view.id}`)} {...props} />;
+  const live = liveRevision ? { view: app.view, revision: liveRevision }
+    : !isLiveGeneratedApp(app.view) && !detail.isError && detail.data && isLiveGeneratedApp(detail.data.view) && detail.data.revision ? { view: detail.data.view, revision: detail.data.revision } : null;
+  const hasPreview = !isLiveGeneratedApp(app.view) && Boolean(detail.data?.html && detail.data.payload && detail.data.revision);
+  return <article className="min-w-0" data-personal-dashboard-app={app.view.id}>
+      {live ? <LiveGeneratedApp view={live.view} revision={live.revision} fallbackEndpoints={fallbackEndpoints} renderActions={renderActions} />
+        : <DashboardTileShell title={app.view.title} compact={hasPreview && !detail.isError} renderActions={renderActions}>
+        {isLiveGeneratedApp(app.view) ? <p role="status" className="py-4 text-sm text-muted-foreground">This app has no saved version ready to open.</p>
         : detail.isPending ? <p role="status" className="py-4 text-sm text-muted-foreground">Loading app…</p>
         : detail.isError ? <div className="space-y-3 py-4"><p role="alert" className="text-sm">This app could not be loaded.</p><Button variant="outline" size="sm" onClick={() => void detail.refetch()}>Try again</Button></div>
-        : isLiveGeneratedApp(detail.data.view) && detail.data.revision ? <LiveGeneratedApp view={detail.data.view} revision={detail.data.revision} fallbackEndpoints={fallbackEndpoints} />
         : detail.data.html && detail.data.payload && detail.data.revision ? <>
-          <GeneratedAppPreview html={detail.data.html} payload={detail.data.payload} title={app.view.title} revision={detail.data.revision} />
+          <GeneratedAppPreview html={detail.data.html} payload={detail.data.payload} title={app.view.title} revision={detail.data.revision} presentation="dashboard" />
           <p className="mt-3 text-xs text-muted-foreground">Updated {new Date(detail.data.payload.artifact.generatedAt).toLocaleString()}</p>
         </> : <div className="flex flex-wrap items-center gap-x-3">
           <p className="py-4 text-sm text-muted-foreground">{detail.data.previewNotice}</p>
           {onUpdate ? <Button variant="outline" size="sm" disabled={removing || update.isPending} onClick={onUpdate}>{update.isPending ? "Opening conversation…" : "Update app"}</Button> : null}
         </div>}
+        </DashboardTileShell>}
       {update.isError ? <p role="alert" className="text-sm text-destructive">{update.error instanceof Error ? update.error.message : "Could not start a conversation. Try again."}</p> : null}
-    </div>
   </article>;
 }
