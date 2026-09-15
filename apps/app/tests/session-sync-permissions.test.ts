@@ -34,6 +34,7 @@ import {
   questionKey,
   seedPermissionState,
   seedQuestionState,
+  seedSessionStatus,
   settleQuestionState,
   settlePermissionState,
   seedSessionState,
@@ -689,6 +690,26 @@ describe("independent session status and todo hydration", () => {
 });
 
 describe("incremental interaction hydration", () => {
+  for (const kind of ["permission", "question"]) {
+    test(`idle hydration preserves a pending ${kind} until it settles without affecting another session`, () => {
+      setSystemTime(50);
+      if (kind === "permission") seedPermissionState("workspace-a", "session-a", [permission("pending", "session-a")]);
+      else seedQuestionState("workspace-a", "session-a", [question("pending", "session-a")]);
+      seedPermissionState("workspace-b", "session-b", [permission("other", "session-b")]);
+      const other = useSessionActivityStore.getState().recordsByWorkspaceId["workspace-b"]["session-b"];
+      seedSessionStatus("workspace-a", "session-a", { type: "idle" }, { snapshotStartedAt: 100 });
+      expect(getReactQueryClient().getQueryData(statusKey("workspace-a", "session-a"))).toEqual({ type: "idle" });
+      expect(useSessionActivityStore.getState().getStatus("workspace-a", "session-a")).toBe("waiting");
+      expect(useSessionActivityStore.getState().waitingByWorkspaceId["workspace-a"]["session-a"]).toBe(kind);
+      if (kind === "permission") settlePermissionState("workspace-a", "session-a", "pending");
+      else settleQuestionState("workspace-a", "session-a", "pending");
+      seedSessionStatus("workspace-a", "session-a", { type: "idle" }, { snapshotStartedAt: 200 });
+      expect(useSessionActivityStore.getState().getStatus("workspace-a", "session-a")).toBe("idle");
+      expect(useSessionActivityStore.getState().waitingByWorkspaceId["workspace-a"]?.["session-a"]).toBeUndefined();
+      expect(useSessionActivityStore.getState().recordsByWorkspaceId["workspace-b"]["session-b"]).toBe(other);
+    });
+  }
+
   for (const native of [false, true]) {
     test(`${native ? "v2" : "v1"} adds only the new child and publishes it while a sibling is held`, async () => {
       const held = Promise.withResolvers<Response>();

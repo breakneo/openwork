@@ -37,6 +37,12 @@ function matchesError(error, code, messagePattern) {
     && (!messagePattern || messagePattern.test(error.message));
 }
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise((done) => { resolve = () => done(undefined); });
+  return { promise, resolve };
+}
+
 test("desktop cancellation stays sender-scoped and releases registry entries on every settlement", async () => {
   const registry = createDesktopTransferRegistry();
   const owner = { sender: Object.assign(new EventEmitter(), { id: 1 }) };
@@ -65,8 +71,8 @@ for (const phase of ["headers", "body"]) {
   test(`desktop registry cancellation closes the upstream GET during ${phase}`, { timeout: 5_000 }, async (t) => {
     const registry = createDesktopTransferRegistry();
     const owner = { sender: Object.assign(new EventEmitter(), { id: 1 }) };
-    const arrived = Promise.withResolvers();
-    const closed = Promise.withResolvers();
+    const arrived = deferred();
+    const closed = deferred();
     const server = createServer((_request, response) => {
       response.once("close", closed.resolve);
       if (phase === "body") {
@@ -75,7 +81,7 @@ for (const phase of ["headers", "body"]) {
       }
       arrived.resolve();
     });
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
     t.after(async () => {
       registry.cancel(owner, "history");
       server.closeAllConnections();
@@ -83,7 +89,7 @@ for (const phase of ["headers", "body"]) {
     });
     const address = server.address();
     assert.ok(address && typeof address !== "string");
-    const reading = Promise.withResolvers();
+    const reading = deferred();
     const pending = registry.run(owner, "history", async (signal) => {
       const response = await fetch(`http://127.0.0.1:${address.port}/session/ses_1/message`, { signal });
       reading.resolve();
