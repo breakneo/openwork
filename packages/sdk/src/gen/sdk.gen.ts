@@ -3047,11 +3047,12 @@ export class DenClient extends HeyApiClient {
   /**
    * Open an app or an exact draft preview
    *
-   * Returns the app with the compiled HTML of one revision and the artifact payload it should render. Without revisionId the active saved revision is used; pass revisionId to preview an exact draft revision instead. The data comes from the Workflow's latest successful snapshot, or from the snapshot named by receiptId. When the revision has not finished building, no readable successful result exists, or the result's output schema no longer matches the revision, html and payload are null and previewNotice explains why.
+   * Returns the app with the compiled HTML of one revision and the artifact payload it should render. Without revisionId the active saved revision is used; pass revisionId to preview an exact draft revision instead. Live apps execute the current saved Workflow as the caller with optional IANA timeZone (UTC by default); receiptId is forbidden for live apps. Legacy snapshots use only the caller's receipts. When the revision has not finished building, no readable successful result exists, or the result's output schema no longer matches the revision, html and payload are null and previewNotice explains why.
    */
   public getV1AppsByAppId<ThrowOnError extends boolean = false>(
     parameters: {
       appId: string;
+      timeZone?: string;
       revisionId?: string;
       receiptId?: string;
     },
@@ -3063,6 +3064,7 @@ export class DenClient extends HeyApiClient {
         {
           args: [
             { in: "path", key: "appId" },
+            { in: "query", key: "timeZone" },
             { in: "query", key: "revisionId" },
             { in: "query", key: "receiptId" },
           ],

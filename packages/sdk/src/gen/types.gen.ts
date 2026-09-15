@@ -7819,6 +7819,7 @@ export type GetV1WorkflowsByConfigObjectIdResponses = {
           };
     };
     views: Array<{
+      dataMode?: "live" | "snapshot";
       id: string;
       configObjectId: string;
       title: string;
@@ -7878,6 +7879,7 @@ export type GetV1AppsResponses = {
     sharingEnabled: boolean;
     items: Array<{
       view: {
+        dataMode?: "live" | "snapshot";
         id: string;
         configObjectId: string;
         title: string;
@@ -7965,6 +7967,7 @@ export type GetV1AppsByAppIdData = {
     appId: string;
   };
   query?: {
+    timeZone?: string;
     revisionId?: string;
     receiptId?: string;
   };
@@ -7977,6 +7980,7 @@ export type GetV1AppsByAppIdResponses = {
    */
   200: {
     view: {
+      dataMode?: "live" | "snapshot";
       id: string;
       configObjectId: string;
       title: string;
@@ -8082,6 +8086,9 @@ export type GetV1AppsByAppIdResponses = {
       data: unknown;
     } | null;
     previewNotice: string | null;
+    runError?: {
+      [key: string]: unknown;
+    };
   };
 };
 
@@ -8129,6 +8136,7 @@ export type PostV1AppsByAppIdSaveResponses = {
    * App saved.
    */
   200: {
+    dataMode?: "live" | "snapshot";
     id: string;
     configObjectId: string;
     title: string;
@@ -8203,6 +8211,7 @@ export type GetV1WorkflowsByConfigObjectIdViewsResponses = {
    */
   200: {
     items: Array<{
+      dataMode?: "live" | "snapshot";
       id: string;
       configObjectId: string;
       title: string;
@@ -8279,6 +8288,7 @@ export type PostV1ArtifactViewsByArtifactViewIdRevisionsByRevisionIdActivateResp
    * Artifact view activated.
    */
   200: {
+    dataMode?: "live" | "snapshot";
     id: string;
     configObjectId: string;
     title: string;
@@ -8353,6 +8363,7 @@ export type PostV1ArtifactViewsByArtifactViewIdRetireResponses = {
    * Artifact view retired.
    */
   200: {
+    dataMode?: "live" | "snapshot";
     id: string;
     configObjectId: string;
     title: string;
