@@ -10,6 +10,8 @@ Personal Calendar uses a **demo authorization server — accepts every request**
 
 Run from the demo checkout with its documented toolchain and world prerequisites. Install both workspaces with `pnpm install --frozen-lockfile` and `pnpm --dir evals install --frozen-lockfile`. Use only the world-owned Den URL, desktop CDP endpoints, and separate browser profiles. Never attach to a personal running desktop.
 
+**Required product build: released OpenWork v0.18.46**, source SHA `a0d6bd1de8debf4f09d22b8538e124b2ff45b339`. This script targets the shipped UI: dashboard tiles have a visible header **Refresh** button, not the newer compact App-options menu. The world must report the actual desktop and Den build it launches; a later development checkout is not release proof. Packaged/pinned runtime verification is still pending.
+
 **Placement: local.** The required `acme-demo` / `demo-org` seed has no Daytona placement implementation. Daytona service preflight succeeded, but the required topology was rejected before test execution; the approved proof lane is the exact local world, not a substituted cloud topology.
 
 | App | Hosted MCP endpoint | Launch tool | Authentication |
@@ -30,7 +32,7 @@ Calendar registration must say **OAuth / per-member**, not API key or shared cre
 
 ### Local readiness receipt (historical, stopped)
 
-The initial local smoke at **2026-09-15 00:44 EDT** reached Den API `http://localhost:8790`, Den Web `http://localhost:3005`, Alex CDP port `51858`, and Jordan CDP port `52099`. Both isolated desktops signed in; Jordan was `jordan@acme.test`. Home and World Clocks registrations returned HTTP 201. Calendar OAuth registration was still pending, so this was **not full scenario proof**. The world was stopped and ports released to the proof runner. These CDP ports are historical: obtain fresh outputs after each boot, never attach to these numbers blindly.
+The initial **development-source** local smoke at **2026-09-15 00:44 EDT** reached Den API `http://localhost:8790`, Den Web `http://localhost:3005`, Alex CDP port `51858`, and Jordan CDP port `52099`. Both isolated desktops signed in; Jordan was `jordan@acme.test`. Home and World Clocks registrations returned HTTP 201. Calendar OAuth registration was still pending, so this was **not full scenario proof**. The world was stopped and ports released to the proof runner. These CDP ports are historical: obtain fresh outputs after each boot, never attach to these numbers blindly.
 
 ## Operator script (20 steps)
 
@@ -51,7 +53,7 @@ The initial local smoke at **2026-09-15 00:44 EDT** reached Den API `http://loca
 | 13 | As Jordan, open **My Library → MCPs → Personal Calendar (demo) → Your Connections → Connect**. | OAuth auto-approves Jordan's separate connection and returns connected. No API key, password, or identity picker is required. |
 | 14 | In Jordan's isolated desktop, open **Dashboard**; reload the dashboard if it was already open. | The same shared **Acme Day** dashboard and all three tiles appear without Jordan creating another dashboard. Home is visually neutral. |
 | 15 | Read Jordan's calendar as `J`; compare it with `A`. | `J.name != A.name`, `J.identity != A.identity`, and the meeting sets differ. Both views show real successful tool results. Identical calendars fail ENG-105 even if sharing worked. |
-| 16 | On Alex's calendar, open **App options for Personal Calendar (demo) → Refresh**. | A new tool invocation with the same stored `{}` arguments returns a generation greater than `A.generation`. Alex's identity and meeting set remain Alex's; a mere iframe repaint is insufficient. |
+| 16 | On Alex's calendar, click the visible tile-header **Refresh** button (accessible name **Refresh Personal Calendar (demo)**). | A new tool invocation with the same stored `{}` arguments returns a generation greater than `A.generation`. Alex's identity and meeting set remain Alex's; a mere iframe repaint is insufficient. |
 | 17 | Repeat calendar **Refresh** on Jordan's desktop. | Jordan's generation increases, while Jordan's identity remains unchanged and different from Alex's. No account switch or reconnect is needed. |
 | 18 | On Alex's World Clocks tile, click **Edit**. In **Add a city**, choose a catalog city not already present (for example Tokyo), add it, and increase **Clocks shown** if needed so it is visible. | The selected city's name and IANA timezone appear. The editor is inside the App; this is not an edit to the dashboard's launch arguments. |
 | 19 | Wait for World Clocks' successful save acknowledgment, then click **Done**. | **Saved (shared with everyone)** or **Saved to your account** confirms the `save_preferences` tool call succeeded. **Done** alone is not a save receipt; **Not saved** or **Unsaved changes** fails this step. |
