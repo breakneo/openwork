@@ -77,7 +77,7 @@ function seed(key: string, id: string): Connection {
   };
 }
 
-async function witness(options: { advertisedGet?: boolean; routeStatus?: number; calendarScopes?: string[]; full?: boolean; dashboardApi?: boolean; teammateEmail?: string } = {}) {
+async function witness(options: { advertisedGet?: boolean; routeStatus?: number; calendarScopes?: string[]; full?: boolean; dashboardApi?: boolean; teammateEmail?: string; afterConnect?: boolean } = {}) {
   needs({ commands: ["bash", "curl", "jq"], placement: "local" });
   const root = await mkdtemp(join(tmpdir(), "eng105-setup-script-"));
   const state = join(root, "state");
@@ -119,7 +119,7 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
         "/v1/invitations": { post: {} },
         ...(options.dashboardApi ? {
           "/v1/dashboards": { get: {}, post: {} },
-          "/v1/dashboards/{dashboardId}": { get: {}, delete: {} },
+          "/v1/dashboards/{dashboardId}": { get: {}, delete: {}, patch: {} },
           "/v1/dashboards/{dashboardId}/access": { get: {}, post: {} },
         } : {}),
       } });
@@ -162,6 +162,11 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
       } else {
         if (method === "GET") return reply(200, { item: dashboard });
         if (method === "DELETE") { dashboards.delete(id); return reply(204, null); }
+        if (method === "PATCH") {
+          assert.ok(body && Array.isArray(body.elements));
+          dashboard.elements = body.elements;
+          return reply(200, { item: dashboard });
+        }
       }
     }
     if (method === "GET" && path === listPath) {
@@ -229,10 +234,10 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
     manifestPath,
     setOrganization(id: string) { organizationId = id; },
     async manifest() { return object(JSON.parse(await readFile(manifestPath, "utf8"))); },
-    async run(mode: "--apply" | "--verify" | "--teardown", expectedOrg = org) {
+    async run(mode: "--apply" | "--verify" | "--teardown", expectedOrg = org, afterConnect = options.afterConnect ?? false) {
       const start = requests.length;
       const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
-        execFile("bash", [script, mode, ...(options.full ? [] : ["--connections-only"])], {
+        execFile("bash", [script, mode, ...(options.full ? [] : ["--connections-only"]), ...(afterConnect ? ["--after-connect"] : [])], {
           cwd: root,
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
@@ -610,7 +615,7 @@ test("ENG105 sanitized HTTP errors remain failures while other MCP applies conti
 });
 
 test("ENG105 full API setup creates three discovered Apps with named access once and cleans up only owned resources", async ({ evidence }) => {
-  await using api = await witness({ full: true, dashboardApi: true, teammateEmail: "teammate@example.test" });
+  await using api = await witness({ full: true, dashboardApi: true, teammateEmail: "teammate@example.test", afterConnect: true });
   api.members.push({ id: "member_teammate", user: { email: "teammate@example.test" } });
   api.dashboards.set("dsb_unrelated", { id: "dsb_unrelated", name: "Existing human dashboard", elements: [] });
   const first = await api.run("--apply");
@@ -706,3 +711,60 @@ test("ENG105 an existing teammate invitation is never refreshed, adopted or canc
   assert.equal(rows(teardown.receipts, "teardown-invitation").length, 0);
   evidence.recordAssertionEvidence("Preexisting invitations are preserved", "An existing pending invitation prevented any invite refresh and never entered ownership or cleanup.", true);
 });
+
+test("ENG105 expected Calendar consent creates only shared tiles, then after-connect appends the granted third tile", async ({ evidence }) => {
+  await using api = await witness({ full: true, dashboardApi: true });
+  populate(api.connections);
+  const calendarId = api.connections.get(calendar)?.id;
+  const consent = { error: "connection_not_ready", message: "Connect your account before using this MCP's tools." };
+  api.faults.push({ method: "GET", path: `/v1/mcp-connections/${calendarId}/mcp-apps`, status: 409, body: consent });
+  const stageOne = await api.run("--apply");
+  assert.equal(stageOne.code, 0, stageOne.stderr);
+  const expected = rows(stageOne.receipts, "expected");
+  assert.equal(expected.length, 1);
+  assert.deepEqual(expected.map((row) => [row.status, row.ok, row.expected, row.errorBody]), [[409, false, true, consent]]);
+  assert.match(stageOne.stderr, /Each member: Connections → Personal Calendar → Connect \(auto-approved\)/);
+  const dashboard = [...api.dashboards.values()][0];
+  assert.ok(dashboard);
+  assert.equal(dashboard.elements.length, 2);
+  assert.deepEqual(dashboard.elements.map(object).map((row) => row.toolName), ["acme_home", "show_world_clocks"]);
+  assert.ok(dashboard.elements.map(object).every((row) => row.organizationAutoLaunch === true));
+  const originalGrants = structuredClone(api.grants.get(dashboard.id));
+  const premature = await api.run("--apply", org, true);
+  assert.equal(premature.code, 1, "After-connect cannot claim success without the caller's grant");
+  assert.equal(dashboard.elements.length, 2);
+  assert.equal(mutations(premature.requests).some((row) => row.method === "PATCH"), false);
+  api.faults.splice(0); // Witness now represents the calling member having connected.
+  const stageTwo = await api.run("--apply", org, true);
+  assert.equal(stageTwo.code, 0, stageTwo.stderr);
+  assert.equal(rows(stageTwo.receipts, "dashboard-create").length, 0);
+  assert.equal(rows(stageTwo.receipts, "dashboard-add-calendar").length, 1);
+  assert.equal(dashboard.elements.length, 3);
+  assert.equal(object(dashboard.elements[2]).toolName, "show_calendar");
+  assert.equal(object(dashboard.elements[2]).organizationAutoLaunch, true);
+  assert.deepEqual(api.grants.get(dashboard.id), originalGrants);
+  const repeat = await api.run("--apply", org, true);
+  assert.equal(repeat.code, 0, repeat.stderr);
+  assert.equal(mutations(repeat.requests).some((row) => row.method === "PATCH" || row.method === "POST"), false);
+  const verify = await api.run("--verify", org, true);
+  assert.equal(verify.code, 0, verify.stderr);
+  evidence.recordAssertionEvidence("Explicit shared stage versus consent-complete stage", "Exact Calendar409 remained an expected, unsuccessful discovery receipt. Default created two auto-run shared tiles and named access; premature after-connect made no PATCH. After the caller grant became available, one PATCH appended Calendar without changing identity or grants; repeat made no dashboard writes.", true);
+});
+
+for (const change of ["human-edit", "replaced-id"]) {
+  test(`ENG105 after-connect preserves ${change} instead of blindly replacing a dashboard`, async ({ evidence }) => {
+    await using api = await witness({ full: true, dashboardApi: true });
+    const first = await api.run("--apply");
+    assert.equal(first.code, 0, first.stderr);
+    const dashboard = [...api.dashboards.values()][0];
+    assert.ok(dashboard);
+    if (change === "human-edit") dashboard.elements[0] = { ...object(dashboard.elements[0]), title: "Human edit" };
+    else { api.dashboards.delete(dashboard.id); api.dashboards.set("dsb_replacement", { ...dashboard, id: "dsb_replacement" }); }
+    const before = structuredClone([...api.dashboards]);
+    const second = await api.run("--apply", org, true);
+    assert.equal(second.code, 1);
+    assert.deepEqual([...api.dashboards], before);
+    assert.equal(mutations(second.requests).some((row) => row.method === "PATCH" || row.method === "POST" || row.method === "DELETE"), false);
+    evidence.recordAssertionEvidence("After-connect requires the exact untouched owned stage", `The ${change} was preserved; no dashboard write, replacement allocation, grant change or deletion occurred.`, true);
+  });
+}

@@ -10,13 +10,15 @@ set -euo pipefail
 umask 077
 MODE=apply
 CONNECTIONS_ONLY=false
+AFTER_CONNECT=false
 for arg in "$@"; do
   case "$arg" in
     --apply) MODE=apply ;;
     --verify) MODE=verify ;;
     --teardown) MODE=teardown ;;
     --connections-only) CONNECTIONS_ONLY=true ;;
-    --help) printf '%s\n' 'Usage: setup-eng105-den.sh [--apply|--verify|--teardown] [--connections-only]' 'Credentials: environment DEN_API_URL + DEN_API_KEY only. Keep DEMO_STATE_DIR for safe teardown.'; exit 0 ;;
+    --after-connect) AFTER_CONNECT=true ;;
+    --help) printf '%s\n' 'Usage: setup-eng105-den.sh [--apply|--verify|--teardown] [--connections-only|--after-connect]' 'Credentials: environment DEN_API_URL + DEN_API_KEY only. Keep DEMO_STATE_DIR for safe teardown.'; exit 0 ;;
     *) printf '%s\n' 'Unknown argument; credentials are accepted only through environment.' >&2; exit 2 ;;
   esac
 done
@@ -251,7 +253,7 @@ DASHBOARD_ID=$(jq -r --arg name "$DASHBOARD_NAME" '[.resources[]|select(.kind=="
 if [[ "$MODE" == verify ]]; then
   if [[ -z "$DASHBOARD_ID" ]]; then manual 'No script-owned API dashboard in this manifest; connection verification only.'; exit "$FAILED"; fi
   request "$DASHBOARD_NAME" dashboard-verify GET "/v1/dashboards/$DASHBOARD_ID"
-  if [[ "$OK" != true ]] || ! jq -e --arg id "$DASHBOARD_ID" --arg name "$DASHBOARD_NAME" '.item.id==$id and .item.name==$name and (.item.elements|length)==3' <<< "$BODY" >/dev/null; then fail 'API dashboard verification failed.'; fi
+  if [[ "$OK" != true ]] || ! jq -e --arg id "$DASHBOARD_ID" --arg name "$DASHBOARD_NAME" --argjson after "$AFTER_CONNECT" '.item.id==$id and .item.name==$name and ((.item.elements|length)==3 or ($after==false and (.item.elements|length)==2))' <<< "$BODY" >/dev/null; then fail 'API dashboard verification failed.'; fi
   request "$DASHBOARD_NAME" dashboard-access-verify GET "/v1/dashboards/$DASHBOARD_ID/access"
   [[ "$OK" == true ]] || fail 'Dashboard access read failed.'
   exit "$FAILED"
@@ -261,7 +263,18 @@ if [[ $(jq length <<< "$CONNECTION_IDS") != 3 ]]; then fail 'All three connectio
 ELEMENTS='[]'
 while IFS=$'\t' read -r key id; do
   request "$key" discover-apps GET "/v1/mcp-connections/$id/mcp-apps"
+  if [[ "$key" == "${PREFIX}personal-calendar-demo" && "$STATUS" == 409 ]] && jq -e '.error=="connection_not_ready"' <<< "$BODY" >/dev/null; then
+    # Expected per-member consent enforcement, not a successful discovery or a bug.
+    RECEIPTS=$(jq -c '.[-1] += {phase:"expected",originalPhase:"discover-apps",expected:true,classification:"member_consent_required"}' <<< "$RECEIPTS")
+    manual 'Each member: Connections → Personal Calendar → Connect (auto-approved), then Dashboard → Add → Personal Calendar. Alternatively rerun --after-connect with the same owner manifest as a calling member who has connected; an admin API key alone cannot add a per-member tile.'
+    if [[ "$AFTER_CONNECT" == true ]]; then fail 'After-connect prerequisite not met: the API caller has no member grant.'; fi
+    continue
+  fi
   if [[ "$OK" != true ]]; then fail 'App discovery failed; remaining MCPs can still be inspected.'; continue; fi
+  if [[ "$key" == "${PREFIX}personal-calendar-demo" && "$AFTER_CONNECT" == false ]]; then
+    manual 'Shared tiles are configured first. To add Personal Calendar, rerun --after-connect as a member with a Calendar grant using this owner manifest, or Dashboard → Add → Personal Calendar.'
+    continue
+  fi
   case "$key" in
     "${PREFIX}acme-home-demo") tool=acme_home ;;
     "${PREFIX}personal-calendar-demo") tool=show_calendar ;;
@@ -273,8 +286,10 @@ while IFS=$'\t' read -r key id; do
   }
   ELEMENTS=$(jq -cn --argjson elements "$ELEMENTS" --argjson app "$app" '$elements+[$app]')
 done < <(jq -r '.[]|[.key,.id]|@tsv' <<< "$CONNECTION_IDS")
-if [[ $(jq length <<< "$ELEMENTS") != 3 ]]; then
-  manual "API dashboard not created/changed: three live App bindings are required. $DASHBOARD_MANUAL"
+EXPECTED_ELEMENTS=2
+if [[ "$AFTER_CONNECT" == true ]]; then EXPECTED_ELEMENTS=3; fi
+if [[ $(jq length <<< "$ELEMENTS") != "$EXPECTED_ELEMENTS" ]]; then
+  manual "API dashboard not created/changed: $EXPECTED_ELEMENTS live App bindings are required for this stage. $DASHBOARD_MANUAL"
   exit "$FAILED"
 fi
 if [[ -z "$DASHBOARD_ID" ]]; then
@@ -290,7 +305,20 @@ if [[ -z "$DASHBOARD_ID" ]]; then
   remember dashboard "$DASHBOARD_NAME" "$DASHBOARD_ID"
 fi
 request "$DASHBOARD_NAME" dashboard-verify GET "/v1/dashboards/$DASHBOARD_ID"
-if [[ "$OK" != true ]] || ! jq -e --arg id "$DASHBOARD_ID" --arg name "$DASHBOARD_NAME" --argjson elements "$ELEMENTS" '.item.id==$id and .item.name==$name and .item.elements==$elements' <<< "$BODY" >/dev/null; then
+if [[ "$OK" != true ]] || ! jq -e --arg id "$DASHBOARD_ID" --arg name "$DASHBOARD_NAME" '.item.id==$id and .item.name==$name' <<< "$BODY" >/dev/null; then
+  fail 'Owned dashboard identity differs; preserve replacement.'; exit 1
+fi
+if [[ "$AFTER_CONNECT" == true ]] && jq -e --argjson elements "$ELEMENTS" '(.item.elements|length)==2 and .item.elements==$elements[0:2]' <<< "$BODY" >/dev/null; then
+  if ! jq -e '.paths["/v1/dashboards/{dashboardId}"].patch' <<< "$OPENAPI" >/dev/null; then
+    manual 'Dashboard update API absent; Dashboard → Add → Personal Calendar after member Connect.'; exit "$FAILED"
+  fi
+  # Append only to our exact untouched two-tile stage. Never replace human edits.
+  payload=$(jq -cn --argjson elements "$ELEMENTS" '{elements:$elements}')
+  request "$DASHBOARD_NAME" dashboard-add-calendar PATCH "/v1/dashboards/$DASHBOARD_ID" "$payload"
+  [[ "$OK" == true ]] || { fail 'Calendar tile addition failed.'; exit 1; }
+  request "$DASHBOARD_NAME" dashboard-verify GET "/v1/dashboards/$DASHBOARD_ID"
+fi
+if [[ "$OK" != true ]] || ! jq -e --argjson elements "$ELEMENTS" --argjson after "$AFTER_CONNECT" '.item.elements==$elements or ($after==false and (.item.elements|length)==3 and .item.elements[0:2]==$elements and .item.elements[2].toolName=="show_calendar")' <<< "$BODY" >/dev/null; then
   fail 'Owned dashboard differs; preserve human edits, no replacement.'; exit 1
 fi
 # Named grants only, never org-wide. Keep existing/revoked grants unchanged.
