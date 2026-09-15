@@ -1211,7 +1211,7 @@ export type CreateInstallLinkResponse = {
 
 export type CapabilityDisabledError = {
   error: "capability_disabled";
-  capability: "installLinks" | "mcpConnections" | "modelsAnalytics" | "gatewayDashboard";
+  capability: "installLinks" | "mcpConnections" | "modelsAnalytics" | "gatewayDashboard" | "slackAssistant";
 };
 
 export type CreateInstallLinkRequest = {

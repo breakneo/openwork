@@ -7,8 +7,11 @@ and OpenWork member. Two members in one Slack thread get separate native session
 ## Installation
 
 1. Apply Den migration `0102_slack_assistant` before starting the updated API.
-2. Enable `DEN_SLACK_ASSISTANT_ENABLED=true` for the rollout. Organizations with
-   complimentary Web access also qualify; connector opt-in remains required.
+2. In `/admin`, find the organization and enable **Capabilities → Slack Assistant**,
+   alongside **Gateway dashboard**. This platform capability defaults off and
+   takes effect without a redeploy. The old `DEN_SLACK_ASSISTANT_ENABLED` variable
+   is no longer used; complimentary Web access does not bypass this switch.
+   Connector opt-in and Web access remain required.
 3. Configure an eligible Slack MCP connector in **Individual accounts** mode,
    including the existing Slack app's OAuth client ID and secret. Grant access
    using the connector's existing workspace, team, or member controls.
@@ -26,7 +29,7 @@ The connect card links to Your Connections. Successful member OAuth verifies
 `auth.test` using that member's token, binds its user/team identity, and replays
 pending invocations received within fifteen minutes. Email is never an identity
 source. Membership, Web access, connector grants, credential freshness, and the
-rollout gate are rechecked while processing each turn.
+platform capability are rechecked while processing each turn.
 
 ## Delivery and recovery
 
@@ -105,7 +108,8 @@ Before production rollout, verify with a real Slack sandbox and Daytona runtime:
 The setup screen shows completed, active, unlinked, and failed requests. The setup
 API also returns sampled latency medians and feedback totals for the latest 1,000
 24-hour events. Logs contain event IDs/timing/error codes, never tokens or content.
-Turn off the connector's assistant toggle to stop new routing. Active runs stop
+Turn off **Slack Assistant** for the organization in `/admin` to stop new routing.
+The connector also has an independent assistant toggle. Active runs stop
 publishing on the next access check; already running external tool calls cannot
 be recalled. Socket Mode, approval buttons, Work Objects, and a separate fast lane
 are outside this implementation.

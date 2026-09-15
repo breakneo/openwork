@@ -49,10 +49,9 @@ describe("member and audience boundaries", () => {
     }
     expect(scopeKey("a", "bc")).not.toBe(scopeKey("ab", "c"))
   })
-  test("every gate denies independently; complimentary replaces only rollout", () => {
+  test("the platform capability and every member/connector gate deny independently", () => {
     const allow = {
-      rolloutEnabled: true,
-      complimentary: false,
+      capabilityEnabled: true,
       enabled: true,
       individualAccounts: true,
       mcpEnabled: true,
@@ -63,7 +62,7 @@ describe("member and audience boundaries", () => {
     }
     expect(canUseSlackAssistant(allow)).toBe(true)
     for (const key of [
-      "rolloutEnabled",
+      "capabilityEnabled",
       "enabled",
       "individualAccounts",
       "mcpEnabled",
@@ -73,8 +72,6 @@ describe("member and audience boundaries", () => {
       "connected",
     ])
       expect(canUseSlackAssistant({ ...allow, [key]: false })).toBe(false)
-    expect(canUseSlackAssistant({ ...allow, rolloutEnabled: false, complimentary: true })).toBe(true)
-    expect(canUseSlackAssistant({ ...allow, mcpEnabled: false, complimentary: true })).toBe(false)
   })
   test("keeps the signed actor and invocation separate from a colleague's injected instruction", () => {
     const prompt = buildSlackPrompt({

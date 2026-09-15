@@ -117,7 +117,7 @@ export function SlackAssistantSetup({ connection }: { connection: ExternalMcpCon
       {data && !data.eligible ? <p>Choose Individual accounts mode before enabling the assistant.</p> : null}
       {data && !data.rolloutEnabled ? (
         <p className="text-sm text-gray-500">
-          The Slack assistant rollout has not been enabled for this workspace yet.
+          Ask a platform admin to enable Slack Assistant for this workspace in /admin.
         </p>
       ) : null}
       {data && !data.webAccess ? <p>OpenWork Web access is required for this workspace.</p> : null}
@@ -149,7 +149,7 @@ export function SlackAssistantSetup({ connection }: { connection: ExternalMcpCon
             <input
               type="checkbox"
               checked={data.enabled}
-              disabled={busy || !data.rolloutEnabled || !data.webAccess || (!data.hasSigningSecret && !secret)}
+              disabled={busy || (!data.enabled && (!data.rolloutEnabled || !data.webAccess || (!data.hasSigningSecret && !secret)))}
               onChange={(e) => void save(e.target.checked)}
             />
             Enable @openwork in Slack

@@ -20,7 +20,7 @@ import {
   type ExternalMcpConnectionRow,
 } from "../capability-sources/external-mcp-connections.js"
 import { memberFacingMcpConnectionsEnabled } from "../capability-sources/external-mcp-rollout.js"
-import { hasOpenWorkWebComplimentaryAccess } from "../openwork-web-access.js"
+import { organizationHasCapability } from "../organization-capabilities.js"
 import { getOpenWorkWebRuntimeAccess } from "../openwork-web-runtime-access.js"
 import { listTeamsForMember } from "../orgs.js"
 import { canUseSlackAssistant, scopeKey, slackClient, type SlackEvent } from "./protocol.js"
@@ -30,6 +30,14 @@ export type EventRow = typeof Event.$inferSelect
 export type ThreadRow = typeof Thread.$inferSelect
 export async function getInstallation(connectionId: DenTypeId<"externalMcpConnection">) {
   return (await db.select().from(Installation).where(eq(Installation.connectionId, connectionId)).limit(1))[0] ?? null
+}
+export async function slackAssistantEnabledForInstallation(installation: InstallationRow) {
+  const [organization] = await db
+    .select({ metadata: OrganizationTable.metadata })
+    .from(OrganizationTable)
+    .where(eq(OrganizationTable.id, installation.organizationId))
+    .limit(1)
+  return organizationHasCapability(organization?.metadata, "slackAssistant")
 }
 export function isSlackConnection(connection: ExternalMcpConnectionRow) {
   return (
@@ -155,8 +163,7 @@ export async function resolveSlackActor(installation: InstallationRow, slackUser
   if (
     !organization ||
     !canUseSlackAssistant({
-      rolloutEnabled: process.env.DEN_SLACK_ASSISTANT_ENABLED === "true",
-      complimentary: hasOpenWorkWebComplimentaryAccess(organization.metadata),
+      capabilityEnabled: organizationHasCapability(organization.metadata, "slackAssistant"),
       enabled: installation.enabled,
       individualAccounts: true,
       mcpEnabled: memberFacingMcpConnectionsEnabled(organization.metadata, { gatingEnabled: true }),

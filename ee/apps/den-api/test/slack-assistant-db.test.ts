@@ -121,7 +121,12 @@ suite("Slack assistant: real database and signed HTTP journey", () => {
     ;(await import("../src/slack-assistant/routes.js")).registerSlackAssistantRoutes(app)
     await db
       .insert(OrganizationTable)
-      .values({ id: orgId, name: "Slack test", slug: orgId, metadata: { complimentaryAccess: { openworkWeb: true } } })
+      .values({
+        id: orgId,
+        name: "Slack test",
+        slug: orgId,
+        metadata: { complimentaryAccess: { openworkWeb: true }, capabilities: { slackAssistant: true } },
+      })
     for (let i = 0; i < 2; i++) {
       await db.insert(AuthUserTable).values({ id: users[i], name: `Actor ${i}`, email: `${users[i]}@example.test` })
       await db.insert(MemberTable).values({ id: members[i], organizationId: orgId, userId: users[i], role: "member" })
@@ -341,6 +346,32 @@ suite("Slack assistant: real database and signed HTTP journey", () => {
     } finally {
       for (const id of ids) await db.delete(Event).where(eq(Event.id, id))
     }
+  })
+  test("the platform admin switch blocks ingress and active replies despite the legacy env flag or complimentary Web", async () => {
+    await ingress("EADMINACTIVE", slackUsers[0])
+    await drain(3)
+    const beforeRemote = remoteCalls.length
+    const beforeAppend = slackCalls.filter((call) => call.method === "chat.appendStream").length
+    await db
+      .update(OrganizationTable)
+      .set({ metadata: { complimentaryAccess: { openworkWeb: true }, capabilities: { slackAssistant: false } } })
+      .where(eq(OrganizationTable.id, orgId))
+    await drain()
+    expect(process.env.DEN_SLACK_ASSISTANT_ENABLED).toBe("true")
+    expect(remoteCalls).toHaveLength(beforeRemote)
+    expect(slackCalls.filter((call) => call.method === "chat.appendStream")).toHaveLength(beforeAppend)
+    const beforeEvents = (await db.select().from(Event).where(eq(Event.connectionId, connectionId))).length
+    expect((await ingress("EADMINDISABLED", slackUsers[0])).status).toBe(200)
+    await drain()
+    expect((await db.select().from(Event).where(eq(Event.connectionId, connectionId))).length).toBe(beforeEvents)
+    expect(remoteCalls).toHaveLength(beforeRemote)
+    await db
+      .update(OrganizationTable)
+      .set({ metadata: { complimentaryAccess: { openworkWeb: true }, capabilities: { slackAssistant: true } } })
+      .where(eq(OrganizationTable.id, orgId))
+    await ingress("EADMINREENABLED", slackUsers[0])
+    await drain()
+    expect(remoteCalls.length).toBeGreaterThan(beforeRemote)
   })
   test("a removed member and disabled connector cannot execute", async () => {
     const before = remoteCalls.length

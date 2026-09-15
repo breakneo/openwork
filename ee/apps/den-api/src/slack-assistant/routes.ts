@@ -25,7 +25,7 @@ import {
 import { getExternalMcpConnection } from "../capability-sources/external-mcp-connections.js"
 import { getOrgOAuthClient } from "../capability-sources/oauth-credentials.js"
 import { getOpenWorkWebRuntimeAccess } from "../openwork-web-runtime-access.js"
-import { hasOpenWorkWebComplimentaryAccess } from "../openwork-web-access.js"
+import { organizationHasCapability } from "../organization-capabilities.js"
 import { publicRequestUrl } from "../request-url.js"
 import { getOrganizationContextForUser } from "../orgs.js"
 import { openworkYourConnectionsUrl } from "../mcp/connection-navigation.js"
@@ -43,6 +43,7 @@ import {
   enqueueSlackEvent,
   getInstallation,
   isSlackConnection,
+  slackAssistantEnabledForInstallation,
 } from "./repository.js"
 
 const connectionParams = idParamSchema("connectionId", "externalMcpConnection")
@@ -90,9 +91,7 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
         enabled: installation?.enabled ?? false,
         installed: Boolean(installation?.botToken),
         teamId: installation?.teamId ?? null,
-        rolloutEnabled:
-          process.env.DEN_SLACK_ASSISTANT_ENABLED === "true" ||
-          hasOpenWorkWebComplimentaryAccess(org.organization.metadata),
+        rolloutEnabled: organizationHasCapability(org.organization.metadata, "slackAssistant"),
         hasSigningSecret: Boolean(installation?.signingSecret),
         eligible: isSlackConnection(connection),
         webAccess: web.hasAccess,
@@ -123,6 +122,15 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
           400,
         )
       const body = c.req.valid("json")
+      if (body.enabled && !organizationHasCapability(org.organization.metadata, "slackAssistant")) {
+        return c.json(
+          {
+            error: "slack_assistant_not_enabled",
+            message: "A platform admin must enable Slack Assistant for this workspace in /admin.",
+          },
+          403,
+        )
+      }
       if (body.enabled && !(await getOpenWorkWebRuntimeAccess(org.organization.id)).hasAccess)
         return c.json({ error: "openwork_web_access_required" }, 403)
       const previous = await getInstallation(connectionId)
@@ -310,6 +318,8 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
       )
         return c.json({ ok: true })
       const event = value.event
+      if (isInvocation(event) && !(await slackAssistantEnabledForInstallation(installation)))
+        return c.json({ ok: true })
       if (event.bot_id || event.app_id || event.user === installation.botUserId) return c.json({ ok: true })
       if (
         isInvocation(event) ||

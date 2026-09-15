@@ -6,6 +6,7 @@ import { openworkYourConnectionsUrl } from "../mcp/connection-navigation.js"
 import { executeRemoteSessionCapability, type RemoteSessionAction } from "../mcp/remote-session-capabilities.js"
 import { buildSlackPrompt, SlackApiError, slackClient, slackEventSchema } from "./protocol.js"
 import {
+  slackAssistantEnabledForInstallation,
   admitSlackRun,
   latestSlackContext,
   findSlackThread,
@@ -131,7 +132,11 @@ export async function processSlackEvent(event: EventRow, suppliedDeps = defaultW
   const cp = checkpointSchema.parse(event.checkpoint ? JSON.parse(event.checkpoint) : {})
   const actor = await resolveSlackActor(installation, event.slackUserId)
   if (!actor) {
-    if (event.status === "running" || !installation.enabled) {
+    if (
+      event.status === "running" ||
+      !installation.enabled ||
+      !(await slackAssistantEnabledForInstallation(installation))
+    ) {
       if (cp.streamTs) {
         try {
           await stopSlackStream(slack, { ...cp, finalStatus: "suspended" })
