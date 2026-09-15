@@ -35,6 +35,7 @@ export interface AcmeDemoEng105World extends AcmeDemoWorld {
   registrations: RegistrationReceipt[];
   reapplyRegistrations: RegistrationReceipt[];
   setupExitCodes: number[];
+  mcpUrls: { home: string; clocks: string; calendar: string };
 }
 
 const execFileAsync = promisify(execFile);
@@ -117,6 +118,7 @@ export async function bootAcmeDemoEng105(
     "OPENWORK_EVAL_ELECTRON_BINARY", "OPENWORK_EVAL_DEN_RUNTIME_PREPARED", "ELECTRON_RENDERER_URL"];
   if (overrides.some((key) => process.env[key])) throw new Error("ENG105 refuses shared/attached/prebuilt runtime overrides");
   const homeUrl = endpoint(process.env.ENG105_HOME_MCP_URL ?? "https://acme-home-demo.vercel.app/mcp");
+  const clocksUrl = endpoint(process.env.ENG105_CLOCKS_MCP_URL ?? "https://world-clocks-demo.vercel.app/mcp");
   const calendarUrl = endpoint(process.env.ENG105_CALENDAR_MCP_URL ?? "https://personal-calendar-demo-mcp-app.vercel.app/mcp");
   // Demo invitation mail stays in Den's dev outbox; never inherit a mail provider.
   process.env.RESEND_API_KEY = "";
@@ -168,7 +170,7 @@ export async function bootAcmeDemoEng105(
         env: { ...process.env, DEN_API_URL: den.ref.apiUrl, DEN_API_KEY: apiKey,
           DEMO_STATE_DIR: stateDir, DEMO_EXPECTED_ORG_ID: orgId, DEMO_KEY_PREFIX: "",
           DEMO_TEAMMATE_EMAIL: "", DEMO_HOME_URL: homeUrl, DEMO_CALENDAR_URL: calendarUrl,
-          DEMO_CLOCKS_URL: "https://world-clocks-six.vercel.app/mcp",
+          DEMO_CLOCKS_URL: clocksUrl,
           DEMO_CALENDAR_ISSUER: new URL(calendarUrl).origin },
       }));
     } catch (error) {
@@ -188,7 +190,8 @@ export async function bootAcmeDemoEng105(
   const registrations = await apply();
   // Only reapply a completed setup: an uncertain failure is not automatically retried.
   const reapplyRegistrations = setupExitCodes[0] === 0 ? await apply() : [];
-  return { ...world, orgId, jordanSession, registrations, reapplyRegistrations, setupExitCodes };
+  return { ...world, orgId, jordanSession, registrations, reapplyRegistrations, setupExitCodes,
+    mcpUrls: { home: homeUrl, clocks: clocksUrl, calendar: calendarUrl } };
 }
 
 export async function main(): Promise<void> {
@@ -205,6 +208,9 @@ export async function main(): Promise<void> {
       denApi: output(den.ref.apiUrl, { group: "URLs" }),
       alexCdp: output(alex.handle.cdpUrl, { group: "URLs" }),
       jordanCdp: output(jordan.handle.cdpUrl, { group: "URLs" }),
+      homeMcpUrl: output(world.mcpUrls.home, { group: "Hosted MCP URLs" }),
+      clocksMcpUrl: output(world.mcpUrls.clocks, { group: "Hosted MCP URLs" }),
+      calendarMcpUrl: output(world.mcpUrls.calendar, { group: "Hosted MCP URLs" }),
       alexEmail: output(den.admin.email, { group: "Accounts", note: "Acme org owner, signed in" }),
       alexPassword: secret(den.admin.password, { group: "Accounts" }),
       jordanEmail: output(jordanSession.email, { group: "Accounts", note: "invited member, fresh desktop signed in" }),
