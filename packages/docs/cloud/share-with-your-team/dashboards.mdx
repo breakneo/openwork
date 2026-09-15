@@ -21,7 +21,7 @@ When the feature is enabled for the organization, Dashboards appear in the OpenW
     Open **Dashboards**, click **New dashboard**, enter a **Name** such as `Support overview`, then click **Create dashboard**.
   </Step>
   <Step title="Add apps">
-    Click **Add app**, pick an **MCP**, choose one of its Apps, and click **Add**. MCPs without Apps are hidden. If the app's tool requires input, fill **Launch input (JSON)**. Reorder or remove apps from the list.
+    Click **Add app**, pick an **MCP**, choose one of its Apps, and click **Add**. MCPs without Apps are hidden. If the app's tool requires input, fill **Launch input (JSON)**. Use the up/down arrows beside an app to reorder it, or remove it from the list. Order saves automatically; wait for the arrows to become available before making another move.
   </Step>
   <Step title="Decide how each app runs">
     Apps run on request by default: the member clicks **Run**. Turn on **Run automatically** to run an app on dashboard load and refresh. This also applies to tools that modify data, so enable it only for apps you trust.
@@ -33,9 +33,11 @@ When the feature is enabled for the organization, Dashboards appear in the OpenW
 
 ## What members see
 
-The desktop sidebar shows **Dashboard**, with one section per assigned dashboard labeled **Managed by your organization**.
+The sidebar shows **Dashboard**, with one section per assigned dashboard labeled **From your company**.
 
-Tiles have one of these badges:
+Apps use a compact masonry layout in the saved order. Each app keeps its own height, so shorter apps can stack beside a taller one; narrow windows use one column. Successful apps show their own UI without an extra title bar or card border. Hover over an app or focus its **App options** button to find **Refresh** and its current status. On touch devices the options button stays visible.
+
+Apps awaiting a run or needing recovery keep visible controls and status, including:
 
 - **Organization auto-run**
 - **Run on request**

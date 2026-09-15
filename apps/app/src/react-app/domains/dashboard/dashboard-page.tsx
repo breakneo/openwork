@@ -25,6 +25,7 @@ import {
 } from "./granted-dashboard-store";
 import { McpAppTile, type DashboardLaunchEndpoint } from "./mcp-app-tile";
 import { DashboardApps, type CreateDashboardApp } from "./dashboard-apps";
+import { DashboardMasonry } from "./dashboard-masonry";
 
 /**
  * Personal apps alongside the dashboards shared by the organization.
@@ -79,7 +80,7 @@ export function DashboardPage({ fallbackEndpoints, onCreateApp }: {
   // dashboard payload are final.
   if (denAuth.status === "checking" || (grantedReady && grantedQuery.isPending)) {
     return (
-      <div className="mx-auto w-full max-w-6xl px-6 py-6" data-dashboard-page>
+      <div className="mx-auto w-full max-w-6xl px-3 py-4 sm:px-4" data-dashboard-page>
         <div className="space-y-2 pt-3" role="status" aria-label="Loading dashboard">
           <Skeleton className="h-8 w-1/3" />
           <Skeleton className="h-40 w-full" />
@@ -123,7 +124,7 @@ function DashboardBoard({ consentScopeKey, cacheScopeKey, grantedDashboards, gra
 
   return (
     <div
-      className="mx-auto w-full max-w-6xl px-6 py-6"
+      className="mx-auto w-full max-w-6xl px-3 py-4 sm:px-4"
       data-dashboard-page
       data-dashboard-cache-scope={cacheScopeKey}
       data-dashboard-consent-scope={consentScopeKey}
@@ -143,7 +144,7 @@ function DashboardBoard({ consentScopeKey, cacheScopeKey, grantedDashboards, gra
           {dashboard.elements.length === 0 ? (
             <p className="text-xs text-muted-foreground">This dashboard has no apps yet.</p>
           ) : (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,320px),1fr))] gap-4">
+            <DashboardMasonry>
               {dashboard.elements.map((element) => {
                 const id = grantedEntryId(dashboard.id, element);
                 return (
@@ -158,7 +159,7 @@ function DashboardBoard({ consentScopeKey, cacheScopeKey, grantedDashboards, gra
                   />
                 );
               })}
-            </div>
+            </DashboardMasonry>
           )}
         </section>
       ))}

@@ -305,6 +305,10 @@ export type McpAppSandboxViewProps = {
   initialHeight?: number
   /** Reports app-requested size changes so a host can persist them past this view's lifetime. */
   onHeightChange?: (height: number) => void
+  /** Dashboard widgets own their chrome and may be shorter than chat cards. */
+  presentation?: "inline" | "dashboard"
+  /** Let the dashboard restore visible recovery controls if the sandbox fails. */
+  onError?: () => void
 }
 
 /**
@@ -312,7 +316,7 @@ export type McpAppSandboxViewProps = {
  * bridges it to the workspace MCP App host. Chat messages and dashboard tiles
  * share this exact pipeline so rendering and diagnostics stay identical.
  */
-export function McpAppSandboxView({ origin, app, toolName, inputArguments, result, unavailableNotice, onRequestTeardown, initialHeight, onHeightChange }: McpAppSandboxViewProps) {
+export function McpAppSandboxView({ origin, app, toolName, inputArguments, result, unavailableNotice, onRequestTeardown, initialHeight, onHeightChange, presentation = "inline", onError }: McpAppSandboxViewProps) {
   const openworkServerClient = origin.client
   const workspaceId = origin.workspaceId
   const readOnly = origin.readOnly
@@ -324,6 +328,8 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
   teardownRef.current = onRequestTeardown
   const onHeightChangeRef = useRef(onHeightChange)
   onHeightChangeRef.current = onHeightChange
+  const onErrorRef = useRef(onError)
+  onErrorRef.current = onError
   const setHeight = (next: number) => {
     setHeightState(next)
     onHeightChangeRef.current?.(next)
@@ -365,6 +371,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       }
       console.error(`[OpenWork MCP App] ${code}`, diagnostic)
       setError(diagnostic)
+      onErrorRef.current?.()
     }
     checkpoint("resource-resolved")
     if (!readOnly && !app.launchId) {
@@ -425,7 +432,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     let sizeSettleTimer: number | undefined
     const applyHeight = (requestedHeight: number) => {
       lastSizeEventAt = Date.now()
-      setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(requestedHeight))))
+      setHeight(Math.min(MAX_HEIGHT, Math.max(presentation === "dashboard" ? 1 : MIN_HEIGHT, Math.ceil(requestedHeight))))
     }
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (disposed || failed) return
@@ -649,14 +656,14 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       disposed = true
       stopSandbox?.()
     }
-  }, [app, inputArguments, openworkServerClient, result, toolName, workspaceId, readOnly, origin, requestApproval])
+  }, [app, inputArguments, openworkServerClient, result, toolName, workspaceId, readOnly, origin, requestApproval, presentation])
 
   if (error) return <McpAppDiagnosticNotice error={error} notice={unavailableNotice} />
   return (
     <div
       className={cn(
-        "mt-3 overflow-hidden rounded-xl bg-background",
-        app.prefersBorder && "border border-border",
+        presentation === "dashboard" ? "overflow-hidden" : "mt-3 overflow-hidden rounded-xl bg-background",
+        presentation !== "dashboard" && app.prefersBorder && "border border-border",
       )}
       data-mcp-app-resource={app.resourceUri}
     >

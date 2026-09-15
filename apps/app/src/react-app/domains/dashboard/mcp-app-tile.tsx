@@ -133,6 +133,8 @@ export function McpAppTile({
     : null;
   const [started, setStarted] = useState(!manualLaunch);
   const [nonce, setNonce] = useState(0);
+  const [failedViewNonce, setFailedViewNonce] = useState<number | null>(null);
+  const lastHeight = useRef<number | undefined>(undefined);
   const [state, setState] = useState<TileState>(() => cached && cachedEndpoint
     ? { phase: "ready", app: cached.app, result: cached.result, endpoint: cachedEndpoint, cachedAt: cached.cachedAt }
     : { phase: manualLaunch ? "idle" : "loading" });
@@ -435,6 +437,8 @@ export function McpAppTile({
       ) : undefined}
       onRefresh={run}
       refreshing={refreshState === "refreshing"}
+      compact={state.phase === "ready" && Boolean(interactiveEndpoint) && failedViewNonce !== nonce
+        && (refreshState === "refreshing" || (!origin?.readOnly && refreshState === "idle"))}
     >
       {approvalDialog}
       {state.phase === "idle" ? (
@@ -474,6 +478,10 @@ export function McpAppTile({
             inputArguments={launchArguments}
             result={state.result}
             unavailableNotice="This app view is unavailable."
+            presentation="dashboard"
+            initialHeight={lastHeight.current}
+            onHeightChange={(height) => { lastHeight.current = height; }}
+            onError={() => setFailedViewNonce(nonce)}
             onRequestTeardown={() => { releaseLaunches(); setState({ phase: "closed" }); }}
           />
         : (

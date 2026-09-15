@@ -15,6 +15,7 @@ import {
   type OpenworkServerClient,
 } from "../src/app/lib/openwork-server"
 import { formatMcpAppDiagnostic, safeMcpAppDiagnosticMessage } from "../src/components/chat/mcp-app-diagnostics"
+import type { McpAppSandboxViewProps } from "../src/components/chat/mcp-app-frame"
 
 GlobalRegistrator.register({ url: "https://web.example/" })
 afterAll(() => GlobalRegistrator.unregister())
@@ -50,7 +51,7 @@ function fixture(overrides: Partial<OpenworkMcpAppResource> = {}): OpenworkMcpAp
   }
 }
 
-async function startupFixture() {
+async function startupFixture(options: Pick<McpAppSandboxViewProps, "presentation" | "initialHeight"> = {}) {
   const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT")
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true)
   const container = document.body.appendChild(document.createElement("div"))
@@ -59,6 +60,9 @@ async function startupFixture() {
   const deadlines: number[] = []
   let now = 0
   let timerId = 0
+  const dateSpy = spyOn(Date, "now").mockImplementation(() => 1_000 + now)
+  const heightChanges: Array<{ id: number; height: number }> = []
+  const failures: number[] = []
   const timerSpy = spyOn(window, "setTimeout").mockImplementation((callback, delay = 0, ...args) => {
     if (typeof callback !== "function") throw new Error("Expected a timer callback")
     timers.set(++timerId, { at: now + delay, run: () => callback(...args) })
@@ -85,6 +89,9 @@ async function startupFixture() {
     origin: { client, workspaceId: `workspace-${index % 2}`, sessionId: null, readOnly: true },
     app: fixture({ toolName: `render-${index}` }), toolName: `render-${index}`,
     inputArguments: {}, result: { content: [] }, unavailableNotice: "Unavailable",
+    ...options,
+    onHeightChange: height => { heightChanges.push({ id: index, height }) },
+    onError: () => { failures.push(index) },
   }))
   const render = async (ids: number[]) => { await act(async () => root.render(createElement("div", null, ids.map(id => views[id])))) }
   const frame = (id: number) => {
@@ -92,8 +99,8 @@ async function startupFixture() {
     if (!iframe?.contentWindow) throw new Error(`Missing iframe ${id}`)
     return iframe
   }
-  const notify = async (id: number, method: string, origin = "https://sandbox.example") => {
-    await act(async () => { window.dispatchEvent(new MessageEvent("message", { source: frame(id).contentWindow, origin, data: { method } })) })
+  const notify = async (id: number, method: string, origin = "https://sandbox.example", params: Record<string, unknown> = {}) => {
+    await act(async () => { window.dispatchEvent(new MessageEvent("message", { source: frame(id).contentWindow, origin, data: { method, params } })) })
   }
   const advance = async (ms: number) => {
     const target = now + ms
@@ -107,7 +114,7 @@ async function startupFixture() {
     now = target
   }
   return {
-    render, frame, notify, advance, bridges, deadlines, timers, container, client,
+    render, frame, notify, advance, bridges, deadlines, timers, container, client, heightChanges, failures,
     renderElement: async (element: ReturnType<typeof createElement>) => { await act(async () => root.render(element)) },
     connectSpy, resourceSpy, inputSpy, resultSpy, teardownSpy, closeSpy, errorSpy,
     async dispose() {
@@ -118,7 +125,7 @@ async function startupFixture() {
         const removed = removeListenerSpy.mock.calls.filter(([name]) => name === "message").map(([, listener]) => listener)
         expect(removed).toEqual(expect.arrayContaining(added))
       } finally {
-        for (const spy of [timerSpy, clearSpy, connectSpy, resourceSpy, inputSpy, resultSpy, teardownSpy, closeSpy, errorSpy, addListenerSpy, removeListenerSpy]) spy.mockRestore()
+        for (const spy of [dateSpy, timerSpy, clearSpy, connectSpy, resourceSpy, inputSpy, resultSpy, teardownSpy, closeSpy, errorSpy, addListenerSpy, removeListenerSpy]) spy.mockRestore()
         container.remove()
         Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct)
       }
@@ -230,6 +237,7 @@ describe("MCP App startup scheduling", () => {
       expect(host.inputSpy).not.toHaveBeenCalled()
       expect(host.timers.size).toBe(timerCount)
       expect(host.resourceSpy).toHaveBeenCalledTimes(2)
+      expect(host.failures).toEqual(mode === "teardown" ? [] : mode === "failure" ? [0] : [0, 1])
     } finally { await host.dispose() }
   })
 
@@ -254,6 +262,107 @@ describe("MCP App startup scheduling", () => {
     } finally { finish?.(); await host.dispose() }
   })
 })
+
+describe("MCP App sandbox presentation", () => {
+  test.each([undefined, "dashboard"] satisfies Array<McpAppSandboxViewProps["presentation"]>)("keeps %s chrome, short-height bounds, maximum height and trailing size notifications", async presentation => {
+    const host = await startupFixture({ presentation, initialHeight: 217 });
+    try {
+      await host.render([0]);
+      const iframe = host.frame(0);
+      const wrapper = iframe.parentElement;
+      if (!wrapper) throw new Error("Missing sandbox wrapper");
+      expect(iframe.style.height).toBe("217px");
+      expect(host.heightChanges).toEqual([]);
+      expect(wrapper.classList.contains("overflow-hidden")).toBe(true);
+      for (const token of ["mt-3", "rounded-xl", "bg-background", "border", "border-border"]) {
+        expect(wrapper.classList.contains(token)).toBe(presentation !== "dashboard");
+      }
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready");
+      const bridge = host.bridges[0];
+      await act(async () => { bridge.oninitialized?.(); });
+      const shortHeight = presentation === "dashboard" ? 73 : 160;
+      await act(async () => { bridge.onsizechange?.({ height: 72.25 }); });
+      expect(iframe.style.height).toBe(`${shortHeight}px`);
+      expect(host.heightChanges).toEqual([{ id: 0, height: shortHeight }]);
+      await act(async () => {
+        bridge.onsizechange?.({ height: 410.1 });
+        bridge.onsizechange?.({ height: 450.25 });
+      });
+      await host.advance(99);
+      expect(iframe.style.height).toBe(`${shortHeight}px`);
+      expect(host.heightChanges).toHaveLength(1);
+      await host.advance(1);
+      expect(iframe.style.height).toBe("451px");
+      expect(host.heightChanges).toEqual([{ id: 0, height: shortHeight }, { id: 0, height: 451 }]);
+      const minimum = presentation === "dashboard" ? 1 : 160;
+      const sizes = [[0, minimum], [-20, minimum], [0.25, minimum], [799.25, 800], [1_200, 800]];
+      for (const [height, expected] of sizes) {
+        await host.advance(100);
+        await act(async () => { bridge.onsizechange?.({ height }); });
+        expect(iframe.style.height).toBe(`${expected}px`);
+        expect(host.heightChanges.at(-1)).toEqual({ id: 0, height: expected });
+      }
+      expect(host.heightChanges).toHaveLength(2 + sizes.length);
+      for (const height of [undefined, NaN, Infinity, -Infinity]) {
+        await act(async () => { bridge.onsizechange?.({ height }); });
+      }
+      await host.advance(100);
+      expect(iframe.style.height).toBe("800px");
+      expect(host.heightChanges).toHaveLength(2 + sizes.length);
+      await host.render([0]);
+      expect(host.frame(0)).toBe(iframe);
+      expect(iframe.style.height).toBe("800px");
+      expect(host.connectSpy).toHaveBeenCalledTimes(1);
+      expect(host.failures).toEqual([]);
+      expect(host.errorSpy).not.toHaveBeenCalled();
+    } finally { await host.dispose(); }
+  });
+
+  test.each([undefined, "dashboard"] satisfies Array<McpAppSandboxViewProps["presentation"]>)("notifies %s diagnostic failure once without restarting or applying late size callbacks", async presentation => {
+    const host = await startupFixture({ presentation });
+    try {
+      await host.render([0]);
+      const iframe = host.frame(0);
+      const source = iframe.contentWindow;
+      expect(iframe.style.height).toBe("320px");
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready");
+      const bridge = host.bridges[0];
+      await act(async () => { bridge.oninitialized?.(); bridge.onsizechange?.({ height: 200 }); });
+      await act(async () => { bridge.onsizechange?.({ height: 450 }); });
+      await host.notify(0, "ui/notifications/sandbox-diagnostic", "https://wrong.example");
+      expect(host.failures).toEqual([]);
+      await host.notify(0, "ui/notifications/sandbox-diagnostic", "https://sandbox.example", {
+        code: "MCP_APP_DOCUMENT_RUNTIME_ERROR", message: "View failed: Bearer fixture-secret",
+      });
+      const notice = host.container.querySelector('[role="status"]');
+      expect(notice?.textContent).toContain("Unavailable");
+      expect(notice?.textContent).toContain("MCP_APP_DOCUMENT_RUNTIME_ERROR");
+      expect(notice?.textContent).not.toContain("fixture-secret");
+      expect(host.container.querySelector("iframe")).toBeNull();
+      expect(host.failures).toEqual([0]);
+      expect(host.errorSpy).toHaveBeenCalledTimes(1);
+      expect(host.errorSpy.mock.calls[0]?.[1]).toMatchObject({
+        code: "MCP_APP_DOCUMENT_RUNTIME_ERROR", stage: "app-initialization", toolName: "render-0",
+      });
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent("message", { source, origin: "https://sandbox.example", data: { method: "ui/notifications/sandbox-diagnostic" } }));
+        bridge.oninitialized?.();
+        bridge.onsizechange?.({ height: 700 });
+      });
+      await host.render([0]);
+      await host.advance(60_000);
+      expect(host.failures).toEqual([0]);
+      expect(host.heightChanges).toEqual([{ id: 0, height: 200 }]);
+      expect(host.errorSpy).toHaveBeenCalledTimes(1);
+      expect(host.connectSpy).toHaveBeenCalledTimes(1);
+      expect(host.resourceSpy).toHaveBeenCalledTimes(1);
+      expect(host.inputSpy).toHaveBeenCalledTimes(1);
+      expect(host.resultSpy).toHaveBeenCalledTimes(1);
+      expect(host.deadlines).toEqual([10_000]);
+      expect(host.timers.size).toBe(0);
+    } finally { await host.dispose(); }
+  });
+});
 
 describe("MCP App resolution", () => {
   test.each(["success", "timeout"])("allows slow discovery for sixty seconds while config keeps ten seconds (%s)", async outcome => {

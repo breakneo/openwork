@@ -10,13 +10,18 @@ import { createMcpAppActions } from "../src/components/chat/mcp-app-origin";
 import type { McpAppSandboxViewProps } from "../src/components/chat/mcp-app-frame";
 import type { DashboardMcpAppEntry } from "../src/react-app/domains/dashboard/granted-dashboard-store";
 
+let sandboxView: McpAppSandboxViewProps | undefined;
+
 // Exercise the mounted tile and real action lifetime without starting an iframe or provider.
 mock.module("@/components/chat/mcp-app-frame", () => ({
-  McpAppSandboxView: ({ app, origin }: McpAppSandboxViewProps) => {
+  McpAppSandboxView: (props: McpAppSandboxViewProps) => {
+    sandboxView = props;
+    const { app, origin, presentation, initialHeight } = props;
     const actions = useMemo(() => createMcpAppActions(origin, app), [origin, app]);
     const [message, setMessage] = useState("");
+    const [startingHeight] = useState(initialHeight);
     useLayoutEffect(() => () => actions.dispose(), [actions]);
-    return <div>
+    return <div data-sandbox-view data-presentation={presentation} data-initial-height={startingHeight}>
       <button disabled={origin.readOnly} onClick={() => {
         void actions.callTool("read_detail").then(() => setMessage("Lease usable"), error => setMessage(error.message));
       }}>App action</button>
@@ -35,6 +40,22 @@ const resource: OpenworkMcpAppResource = {
   csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, prefersBorder: true,
 };
 const noRelease = async () => { throw new Error("No lease should be released"); };
+
+async function compactRefreshItem(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="App options for Fixture"]');
+  if (!trigger) throw new Error("Missing compact app menu trigger");
+  expect(container.querySelector('button[aria-label="Refresh Fixture"]')).toBeNull();
+  await act(async () => { trigger.focus(); trigger.click(); });
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  const item = document.querySelector<HTMLElement>('[role="menuitem"][aria-label="Refresh Fixture"]');
+  if (!item) throw new Error("Missing Refresh menu item");
+  return item;
+}
+
+async function refreshCompactTile(container: HTMLElement) {
+  const item = await compactRefreshItem(container);
+  await act(async () => item.click());
+}
 
 test("bounds retries to transient discovery failures", () => {
   for (const code of ["server_unavailable", "mcp_unreachable"]) {
@@ -166,7 +187,7 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
   const entry: DashboardMcpAppEntry = {
     kind: "mcp", id: "approval-tile", title: "Fixture", serverName: "fixture", toolName: "render",
     projectedToolName: "fixture_render", resourceUri: resource.resourceUri,
-    autoLaunch: mode === "automatic", launchApproved: mode === "persisted", launchArguments: { query: "saved input" },
+    autoLaunch: mode === "automatic", launchApproved: mode === "persisted", requiresApproval: mode === "manual", launchArguments: { query: "saved input" },
   };
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
@@ -198,6 +219,9 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
     await act(async () => render());
     if (mode !== "automatic") {
       expect(calls).toEqual([]);
+      expect(container.querySelector("header")?.textContent).toContain("Fixture");
+      expect(container.querySelector('[aria-label="App options for Fixture"]')).toBeNull();
+      if (mode === "manual") expect(container.textContent).toContain("This app modifies data when it runs, so it only runs when you ask.");
       await act(async () => button("Run Fixture").click());
     }
     expect(calls).toEqual([{ workspaceId: "fixture", request }]);
@@ -229,7 +253,13 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
       expect(container.querySelector("[data-action-result]")).not.toBeNull();
       await act(async () => render());
       expect(calls).toHaveLength(2);
-      await act(async () => button("Refresh Fixture").click());
+      expect(container.querySelector("header")).toBeNull();
+      await refreshCompactTile(container);
+      const refreshApproval = document.querySelector('[role="alertdialog"]');
+      expect(refreshApproval?.textContent).toContain("Allow App action?");
+      expect(refreshApproval?.querySelector("pre")?.textContent).toContain("changed after request");
+      await act(async () => render());
+      expect(document.querySelector('[role="alertdialog"]')).toBe(refreshApproval);
       expect(calls).toEqual([
         { workspaceId: "fixture", request },
         { workspaceId: "fixture", request: { ...request, approved: true } },
@@ -334,7 +364,7 @@ test("a mounted tile retains its lease across fallback refreshes, but releases o
     await act(async () => button('[aria-label="Refresh Fixture"]').click());
     expect(resolutions).toBe(2);
     expect(button("button:not([aria-label])").disabled).toBe(false);
-    await act(async () => button('[aria-label="Refresh Fixture"]').click());
+    await refreshCompactTile(container);
     expect(resolutions).toBe(3);
     expect(released).toEqual(["launch-1", "launch-2"]);
   } finally {
@@ -344,4 +374,111 @@ test("a mounted tile retains its lease across fallback refreshes, but releases o
   }
   expect(released).toEqual(["launch-1", "launch-2", "launch-3"]);
   expect(leases.size).toBe(0);
+});
+
+test.each(["sandbox", "refresh", "teardown"])("healthy tiles retain height and restore explicit recovery after %s failure or closure without repeating launch", async mode => {
+  const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const released: string[] = [];
+  let resolutions = 0;
+  let launches = 0;
+  let failRefresh = false;
+  const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
+    resolveMcpApp: async () => ({ app: { ...resource, launchId: `compact-${++resolutions}` } }),
+    callMcpAppTool: async () => {
+      launches++;
+      if (failRefresh) throw new OpenworkServerError(403, "tool_denied", "Refresh denied");
+      return { content: [] };
+    },
+    releaseMcpApp: async (_workspace, id) => { released.push(id); return { released: true }; },
+  };
+  const entry: DashboardMcpAppEntry = {
+    kind: "mcp", id: `compact-${mode}`, title: "Fixture", serverName: "fixture", toolName: "render",
+    projectedToolName: "fixture_render", resourceUri: resource.resourceUri, autoLaunch: true,
+  };
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  const render = async () => {
+    await act(async () => root.render(<WorkspaceProvider client={null} openworkServerClient={client} workspaceId="fixture" selectedWorkspaceRoot="/fixture">
+      <McpAppTile entry={entry} cacheScopeKey={`compact-cache-${mode}`} />
+    </WorkspaceProvider>));
+  };
+  const view = () => {
+    const node = container.querySelector<HTMLElement>("[data-sandbox-view]");
+    if (!node) throw new Error("Missing mocked sandbox view");
+    return node;
+  };
+  const expectHealthy = () => {
+    expect(container.querySelector("header")).toBeNull();
+    expect(container.textContent).not.toContain("Fixture");
+    expect(container.textContent).not.toContain("Updated just now");
+    expect(container.querySelector('[aria-label="Refresh Fixture"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Reload Fixture"]')).toBeNull();
+    expect(container.querySelector("[data-dashboard-entry]")?.getAttribute("aria-label")).toBe("Fixture");
+    expect(container.querySelector('[aria-label="App options for Fixture"]')).not.toBeNull();
+    expect(view().dataset.presentation).toBe("dashboard");
+  };
+  try {
+    await render();
+    expectHealthy();
+    const shell = container.querySelector("[data-dashboard-entry]");
+    const initialView = view();
+    expect(initialView.hasAttribute("data-initial-height")).toBe(false);
+    expect(sandboxView?.onHeightChange).toBeFunction();
+    await act(async () => sandboxView?.onHeightChange?.(73));
+    await render();
+    expect(view()).toBe(initialView);
+    expect(resolutions).toBe(1);
+    expect(launches).toBe(1);
+    await refreshCompactTile(container);
+    expectHealthy();
+    const refreshedView = view();
+    const stableParent = refreshedView.parentElement;
+    expect(refreshedView).not.toBe(initialView);
+    expect(refreshedView.dataset.initialHeight).toBe("73");
+    expect(resolutions).toBe(2);
+    expect(launches).toBe(2);
+    expect(released).toEqual(["compact-1"]);
+
+    if (mode === "sandbox") {
+      expect(sandboxView?.onError).toBeFunction();
+      await act(async () => sandboxView?.onError?.());
+      expect(view()).toBe(refreshedView);
+      expect(view().parentElement).toBe(stableParent);
+      expect(released).toEqual(["compact-1"]);
+    } else if (mode === "refresh") {
+      failRefresh = true;
+      await refreshCompactTile(container);
+      expect(container.querySelector('[data-dashboard-cache-state="failed"]')).not.toBeNull();
+      expect(container.querySelector<HTMLButtonElement>("button:not([aria-label])")?.disabled).toBe(true);
+    } else {
+      expect(sandboxView?.onRequestTeardown).toBeFunction();
+      await act(async () => sandboxView?.onRequestTeardown?.());
+      expect(container.textContent).toContain("This app closed its view. Use refresh to launch it again.");
+      expect(container.querySelector("[data-sandbox-view]")).toBeNull();
+      expect(released).toEqual(["compact-1", "compact-2"]);
+    }
+    const expectedLaunches = mode === "refresh" ? 3 : 2;
+    expect(container.querySelector("[data-dashboard-entry]")).toBe(shell);
+    expect(container.querySelector("header")?.textContent).toContain("Fixture");
+    expect(container.querySelector('[aria-label="App options for Fixture"]')).toBeNull();
+    const recovery = container.querySelector<HTMLButtonElement>('header button[aria-label="Refresh Fixture"]');
+    if (!recovery) throw new Error("Missing visible recovery refresh");
+    expect(recovery.disabled).toBe(false);
+    await render();
+    await render();
+    expect(resolutions).toBe(expectedLaunches);
+    expect(launches).toBe(expectedLaunches);
+    failRefresh = false;
+    await act(async () => recovery.click());
+    expectHealthy();
+    expect(view().dataset.initialHeight).toBe("73");
+    expect(resolutions).toBe(expectedLaunches + 1);
+    expect(launches).toBe(expectedLaunches + 1);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousAct);
+  }
+  expect(released).toEqual(Array.from({ length: resolutions }, (_, index) => `compact-${index + 1}`));
 });
