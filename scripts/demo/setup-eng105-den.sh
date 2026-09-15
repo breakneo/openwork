@@ -52,7 +52,7 @@ fail() { printf '%s\n' "$1" >&2; FAILED=1; }
 # tokens, or curl diagnostics are persisted. Never follow redirects with admin headers.
 request() {
   local key=$1 phase=$2 method=$3 path=$4 payload=${5:-} expected=${6:-200} raw rc=0
-  local args=(--silent --max-time 90 --connect-timeout 10 --config - --request "$method" --write-out $'\n%{http_code}')
+  local args=(-q --silent --max-time 90 --connect-timeout 10 --config - --request "$method" --write-out $'\n%{http_code}')
   [[ -z "$payload" ]] || args+=(--data-binary "$payload")
   raw=$(printf 'header = "x-api-key: %s"\nheader = "Content-Type: application/json"\n' "$DEN_API_KEY" | curl "${args[@]}" "$DEN_API_URL$path" 2>/dev/null) || rc=$?
   STATUS=${raw##*$'\n'}
@@ -137,7 +137,7 @@ lookup() {
 row() {
   local key=$1 obj=$2
   jq -r --arg key "$key" '[$key,.id,.authType,.credentialMode,.access.orgWide,(if has("connected") then .connected else "unknown" end)]|@tsv' <<< "$obj" >&2
-  RECEIPTS=$(jq -cn --argjson rows "$RECEIPTS" --arg key "$key" --arg method "$LOOKUP_METHOD" --argjson o "$obj" '$rows+[{key:$key,phase:"verified-state",url:null,status:200,ok:true,connectionId:$o.id,errorBody:null,lookupMethod:$method,authType:$o.authType,credentialMode:$o.credentialMode,orgWide:$o.access.orgWide,connected:(if $o|has("connected") then $o.connected else "unknown" end)}]')
+  RECEIPTS=$(jq -c --argjson rows "$RECEIPTS" --arg key "$key" --arg method "$LOOKUP_METHOD" '. as $o | $rows+[{key:$key,phase:"verified-state",url:null,status:200,ok:true,connectionId:$o.id,errorBody:null,lookupMethod:$method,authType:$o.authType,credentialMode:$o.credentialMode,orgWide:$o.access.orgWide,connected:(if $o|has("connected") then $o.connected else "unknown" end)}]' <<< "$obj")
 }
 if [[ "$MODE" == teardown ]]; then
   # Dashboard removal comes first; never destroy a preexisting named dashboard.
@@ -203,14 +203,14 @@ for base in acme-home-demo world-clocks-demo personal-calendar-demo; do
     id=$(jq -er '.id|strings|select(length>0)' <<< "$BODY") || { fail 'Missing connection ID; inspect manually, never assume ownership.'; continue; }
     if [[ "$STATUS" == 201 && "$before" == null ]]; then remember mcp "$key" "$id"; fi
     if [[ "$before" != null && $(jq -r .id <<< "$before") != "$id" ]]; then fail 'ID changed unexpectedly; inspect manually.'; continue; fi
-    changed=$(jq -cn --argjson before "$before" --argjson after "$BODY" '["name","url","authType","credentialMode","exposeDirectly","access","authorizationServerIssuer","requestedScopes"]|map(. as $k|select($before[$k]!=$after[$k]))')
+    changed=$(printf '%s\n%s\n' "$before" "$BODY" | jq -cs '.[0] as $before | .[1] as $after | ["name","url","authType","credentialMode","exposeDirectly","access","authorizationServerIssuer","requestedScopes"]|map(. as $k|select($before[$k]!=$after[$k]))')
     printf '%s HTTP%s stableId=%s changedFields=%s\n' "$key" "$STATUS" "$id" "$changed" >&2
     RECEIPTS=$(jq -cn --argjson rows "$RECEIPTS" --argjson changed "$changed" '$rows|.[-1].changedFields=$changed')
     lookup "$key" || { fail 'Post-apply read failed.'; continue; }
   fi
   if [[ "$FOUND" == null ]]; then fail "Missing $key."; continue; fi
   row "$key" "$FOUND"
-  CONNECTION_IDS=$(jq -cn --argjson ids "$CONNECTION_IDS" --argjson found "$FOUND" '$ids+[{key:$found.externalKey,id:$found.id}]')
+  CONNECTION_IDS=$(jq -c --argjson ids "$CONNECTION_IDS" '. as $found | $ids+[{key:$found.externalKey,id:$found.id}]' <<< "$FOUND")
 done
 manual() {
   printf 'MANUAL_STEP: %s\n' "$1" >&2
@@ -265,9 +265,10 @@ while IFS=$'\t' read -r key id; do
   case "$key" in
     "${PREFIX}acme-home-demo") tool=acme_home ;;
     "${PREFIX}personal-calendar-demo") tool=show_calendar ;;
-    *) tool='' ;;
+    "${PREFIX}world-clocks-demo") tool=show_world_clocks ;;
+    *) fail 'Unexpected App key; no binding selected.'; continue ;;
   esac
-  app=$(jq -ce --arg tool "$tool" --arg id "$id" '[.apps[]|select(.connectionId==$id)|select(if $tool=="" then true else .toolName==$tool end)]|select(length==1)|.[0]|select(.requiresInput==false)|{serverName,connectionId,toolName,projectedToolName,resourceUri,title:(.title // .toolName),launchArguments:{},requiresApproval,organizationAutoLaunch:false}' <<< "$BODY") || {
+  app=$(jq -ce --arg tool "$tool" --arg id "$id" '[.apps[]|select(.connectionId==$id)|select(.toolName==$tool)]|select(length==1)|.[0]|select(.requiresInput==false)|{serverName,connectionId,toolName,projectedToolName,resourceUri,title:(.title // .toolName),launchArguments:{},requiresApproval,organizationAutoLaunch:true}' <<< "$BODY") || {
     manual "No unique input-free App exposed for $key. Connect it, then rerun; no invented binding or partial dashboard."; continue;
   }
   ELEMENTS=$(jq -cn --argjson elements "$ELEMENTS" --argjson app "$app" '$elements+[$app]')

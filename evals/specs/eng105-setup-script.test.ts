@@ -189,8 +189,9 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
       const id = path.split("/")[3];
       const connection = [...connections.values()].find((item) => item.id === id);
       assert.ok(connection);
-      const toolName = connection.externalKey === home ? "acme_home" : connection.externalKey === calendar ? "show_calendar" : "world_clock";
-      return reply(200, { apps: [{ serverName: "witness", connectionId: id, toolName, projectedToolName: `mcp:${id}:${toolName}`, resourceUri: `ui://witness/${toolName}.html`, title: toolName, requiresInput: false, requiresApproval: false }] });
+      const toolName = connection.externalKey === home ? "acme_home" : connection.externalKey === calendar ? "show_calendar" : "show_world_clocks";
+      const app = { serverName: "witness", connectionId: id, toolName, projectedToolName: `mcp:${id}:${toolName}`, resourceUri: `ui://witness/${toolName}.html`, title: toolName, requiresInput: false, requiresApproval: false };
+      return reply(200, { apps: [app, ...(connection.externalKey === clocks ? [{ ...app, toolName: "unrelated_clock_app", projectedToolName: `mcp:${id}:unrelated_clock_app`, resourceUri: "ui://witness/unrelated.html" }] : [])] });
     }
     if (method === "GET" && path.startsWith("/v1/mcp-connections/")) {
       const id = path.slice("/v1/mcp-connections/".length);
@@ -621,10 +622,10 @@ test("ENG105 full API setup creates three discovered Apps with named access once
   assert.equal(ownedDashboard.elements.length, 3);
   assert.deepEqual(ownedDashboard.elements.map(object).map((item) => item.projectedToolName), keys.map((key) => {
     const id = api.connections.get(key)?.id;
-    const tool = key === home ? "acme_home" : key === calendar ? "show_calendar" : "world_clock";
+    const tool = key === home ? "acme_home" : key === calendar ? "show_calendar" : "show_world_clocks";
     return `mcp:${id}:${tool}`;
   }));
-  assert.ok(ownedDashboard.elements.map(object).every((item) => item.organizationAutoLaunch === false));
+  assert.ok(ownedDashboard.elements.map(object).every((item) => item.organizationAutoLaunch === true));
   const subjects = api.grants.get(ownedDashboard.id) ?? [];
   assert.deepEqual(subjects.map((item) => item.orgMembershipId).sort(), ["member_admin", "member_teammate"]);
   assert.ok(subjects.every((item) => item.orgWide === false && item.role === "viewer"));
