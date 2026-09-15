@@ -18,15 +18,17 @@ pnpm world up acme-demo-eng105 --detach
 
 For automated execution, launch long boot/test/render commands detached or in an owned background process with a log and exit receipt; poll in short calls. Do not kill or attach to another session's processes. Keep the world alive for the operator run, and stop only your world with `pnpm world down acme-demo-eng105` afterward.
 
-World outputs are authoritative for `releaseTag`, `releaseSha`, `lane`, `denWeb`, `denApi`, both desktop CDP endpoints, account emails, `registrations`, `reapplyRegistrations`, and `setupExitCodes`. Read passwords only from private secret outputs, never copy them to chat, docs, or recordings. Default Den API/Web ports are **8790/3005**. Alex and Jordan must use separate Den browser profiles and different desktop profiles.
+World outputs are authoritative for `releaseTag`, `releaseSha`, `lane`, `denWeb`, `denApi`, `homeMcpUrl`, `clocksMcpUrl`, `calendarMcpUrl`, both desktop CDP endpoints, account emails, `registrations`, `reapplyRegistrations`, and `setupExitCodes`. Read passwords only from private secret outputs, never copy them to chat, docs, or recordings. Default Den API/Web ports are **8790/3005**. Alex and Jordan must use separate Den browser profiles and different desktop profiles.
 
 | App | Hosted MCP endpoint | Launch | Account mode |
 |---|---|---|---|
 | Acme Home | `https://acme-home-demo.vercel.app/mcp` | `acme_home {}` | none/shared |
-| World Clocks | `https://world-clocks-six.vercel.app/mcp` | `show_world_clocks {}` | none/shared |
+| World Clocks | `https://world-clocks-demo.vercel.app/mcp` | `show_world_clocks {}` | none/shared |
 | Personal Calendar | `https://personal-calendar-demo-mcp-app.vercel.app/mcp` | `show_calendar {}` | OAuth/per-member; `calendar:read` |
 
 Home source: [yomgui/acme-home-demo](https://github.com/yomgui/acme-home-demo), verified deployment source `aa0f1b7aaa72fe4d41d9f0ee9408b83c80b53575`; UI resource `ui://acme-home/home.html`. Calendar source is the **private** [yomgui/personal-calendar-demo-mcp-app](https://github.com/yomgui/personal-calendar-demo-mcp-app) repository, verified deployment commit `f7c2d8aef8611af4143f2a294186c5c17c7b1dd8`, resource `ui://personal-calendar/mcp-app.html`, issuer `https://personal-calendar-demo-mcp-app.vercel.app`, with public-client DCR (`token_endpoint_auth_method: none`). Metadata discovery is public; calendar/identity data calls still require a verified token. Direct deployed OAuth/tool tests succeeded for two different synthetic identities; that is not yet proof of isolation through the released OpenWork host.
+
+World Clocks uses the demo-only deployment of canonical source `0e0e70f32163687512c09e24ae68334a5a47dedd`: seven tools, with the launch and three app-only helpers bound to `ui://world-clocks/mcp-app.html`. Write annotations remain intact. Access to the original Vercel team was denied, so only this demo's configuration points to the new `world-clocks-demo` URL; the original `world-clocks-six` deployment and existing organization connector are unchanged. An authorized admin must separately migrate that connector or redeploy the fix to the original team.
 
 ### Calendar's deliberately limited demo authorization
 
@@ -56,16 +58,18 @@ That world is stopped. CDP ports above are historical—never attach blindly. Th
 | 8 | Open **Dashboard** in Alex's isolated desktop. | **Acme Day**, Home, and live World Clocks render under **From your company**. Launch controls may say **Organization auto-run**. |
 | 9 | In a second isolated browser profile, sign in to `denWeb` as Jordan. | Jordan's account is visible; no Alex authentication cookie is reused. |
 | 10 | Open **Dashboard** in Jordan's isolated desktop. | The same shared dashboard, Home, and World Clocks render without Jordan creating a dashboard. |
-| 11 | In Alex's World Clocks, **Edit → Add a city**. Select an absent city, e.g. Tokyo, and increase **Clocks shown** if needed. | The new city and IANA timezone are visible; this edits the App, not stored launch arguments. |
-| 12 | Wait for the successful clock save message, then click **Done**. | **Saved (shared with everyone)** or **Saved to your account** confirms the server tool acknowledged the edit. Done alone is not a save receipt. |
-| 13 | Click the clock tile-header **Refresh** (`Refresh World Clocks`). | A fresh `show_world_clocks {}` result still shows the added city/settings. This does not establish cold-start storage durability. |
-| 14 | As Alex in Den Web, open **My Library → MCPs → Personal Calendar → Your Connections → Connect**. | The demo OAuth redirect auto-approves and returns connected. No typing, identity picker, or shared credential is used. A failed return fails this step. |
-| 15 | As Alex, reopen Acme Day's Den Web detail and add Personal Calendar with `{}`; enable **Auto-run**. | The third App is a real `ui://` Calendar reference. Launch arguments contain no identity, bearer token, or copied payload. Existing named grants remain unchanged. |
-| 16 | As Jordan in the separate Den Web profile, open **Your Connections → Personal Calendar → Connect**. | Jordan's independent OAuth connection returns connected. No code/token from Alex's flow is reused. |
-| 17 | Reopen/reload the dashboard on both desktops to load the new tile. | Both render **Signed in as** with a nonempty synthetic calendar, identity fingerprint, meetings, generation, instance ID, and generated time. |
-| 18 | Record Alex's view as `A` and Jordan's as `J`; compare them. | `A.name != J.name`, `A.identity != J.identity`, and meeting sets differ. Identical calendars fail ENG-105 even when sharing worked. |
-| 19 | Click Alex's visible calendar-header **Refresh** (`Refresh Personal Calendar`). | A new tool call uses unchanged `{}`. Identity/meetings remain Alex's. Generation increases on the same instance; if the instance changed, record its reset explicitly and do not claim durable monotonicity. |
-| 20 | Repeat Calendar **Refresh** on Jordan's desktop and compare again. | Jordan's identity/meetings stay Jordan's and differ from Alex's; the same-instance generation rule holds. No reconnect/account switch is required. |
+| 11 | As Alex in Den Web, open **My Library → MCPs → Personal Calendar → Your Connections → Connect**. | The demo OAuth redirect auto-approves and returns connected. No typing, identity picker, or shared credential is used. A failed return fails this step. |
+| 12 | As Alex, reopen Acme Day's Den Web detail and add the **Personal Calendar** App row with `{}`; enable **Auto-run**. | The third App is a real `ui://` reference. Launch arguments contain no identity, bearer token, or copied payload; named grants remain unchanged. |
+| 13 | As Jordan in the separate Den Web profile, open **Your Connections → Personal Calendar → Connect**. | Jordan's independent OAuth connection returns connected. No code/token from Alex's flow is reused. Attempt this independently even if Alex's connection failed. |
+| 14 | Reopen/reload the dashboard on both desktops to load Calendar. | Both render **Signed in as**, nonempty meetings, identity fingerprint, generation, instance ID, and generated time. Record each member's result separately. |
+| 15 | Record Alex's view as `A` and Jordan's as `J`; compare them. | `A.name != J.name`, `A.identity != J.identity`, and meeting sets differ. Identical calendars fail ENG-105; if a member cannot render, record the comparison as blocked—not passed. |
+| 16 | Click Alex's visible calendar-header **Refresh** (`Refresh Personal Calendar`). | A new tool call uses unchanged `{}`. Identity/meetings remain Alex's. Generation increases on the same instance; if the instance changed, record its reset explicitly and do not claim durable monotonicity. |
+| 17 | Repeat Calendar **Refresh** on Jordan's desktop and compare again. | Jordan's identity/meetings stay Jordan's and differ from Alex's; the same-instance generation rule holds. No reconnect/account switch is required. |
+| 18 | In Alex's World Clocks, **Edit → Add a city**. Select an absent city, e.g. Tokyo, and increase **Clocks shown** if needed. A save confirmation may appear immediately; handle it as in step 19. | The new city and IANA timezone are visible; this edits the App, not stored launch arguments. A clock failure must not hide the preceding Calendar verdicts. |
+| 19 | If the released host shows **“Allow this MCP App to call save_preferences on …?”**, accept only the confirmation for this World Clocks connection. Then wait for the save message and click **Done**. | **Saved (shared with everyone)** or **Saved to your account** confirms the server tool acknowledged the edit. Organization auto-run covers launch, not this write helper; Done alone is not a save receipt. |
+| 20 | Click the clock tile-header **Refresh** (`Refresh World Clocks`). | A fresh `show_world_clocks {}` result still shows the added city/settings. This does not establish cold-start storage durability. |
+
+Record sharing/rendering (1–10), each member's Calendar connection/render/refresh and comparison (11–17), and clock editing (18–20) independently. Continue independent groups after a failure; mark dependent observations blocked with the exact visible cause. Overall Passed requires every required observation to pass.
 
 ## Reproduce on another Den
 

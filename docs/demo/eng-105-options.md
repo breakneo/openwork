@@ -25,6 +25,17 @@ Capture only the world-owned Alex/Jordan desktops and isolated Den Web profile; 
 
 If continuous CDP capture fails, assemble per-step PNGs from the same verified demo run into an explicitly labeled still-frame walkthrough, using Remotion if available. Keep captions aligned with actual observations and identify incomplete steps. This makes the delivered frames easy to watch; it does not prove continuous execution or replace missing test assertions. **Run:** use the same tracked assembler command as Option C, with variant `D` scenes pointing to actual PNGs. Its Remotion composition and manifest guards are committed; real footage and output remain pending. **State: Incomplete.**
 
+## Shipped-host compatibility note
+
+The shipped host drops app-visible tools without `ui.resourceUri` — the external fix is applied in canonical Clock source `0e0e70f32163687512c09e24ae68334a5a47dedd`: seven tools, four UI bindings, with app-only visibility and write annotations preserved. Proposed host improvement only: treat same-server app-only tools as bound to the launching resource. No OpenWork product change is included. The shipped native `save_preferences` confirmation must be accepted; auto-run is not helper-write approval.
+
+**Deployment fork (b) was selected.** Original-team access failed with exact CLI text `Error: The specified scope does not exist`; the original project GET produced sanitized `{"status":403,"error":"forbidden"}`. The approved fallback deployed the fixed source to `prologe/world-clocks-demo`, deployment `CPS8WYLdK6W3PLoFE5Qea1HUDkAF`, URL **https://world-clocks-demo.vercel.app/mcp**. Initialize, seven-tool listing/four bindings, and resource read returned 200. Only tonight's world/setup/doc/spec target changed; `world-clocks-six` and the existing real-organization connector were not modified. Rollback tag `pre-resource-binding` points to `fc86788f0aad5f9ee083f6fdca4a67c43929b74c`. The legacy subtree carries the same code fix at `451d2d2cd39330b62286cbec7dc38947b2697508`.
+
+### Morning actions — in priority order
+
+1. Guillaume: **Connections → World Clocks (`emc_01m2gy1q…`) → change URL to `https://world-clocks-demo.vercel.app/mcp` → Refresh tools (7)**, then verify Edit/save; or Ben grants the ops token access to the original `team_J0n…` so its deployment can be updated. This is an admin follow-up, not an action performed by the demo agent.
+2. Decide visibility and organization transfer for the three demo source repositories: Acme Home public, Personal Calendar private, World Clock Dashboard local. Guillaume decides; transfer to `different-ai` needs Ben. No public Calendar publication or organization transfer occurred tonight.
+
 ## Dropped or deferred forks
 
 - **Two-button identity picker:** deferred; automatic OAuth approval is the final requested primary flow. Build this only after an actual auto-approval failure makes it a necessary alternative, within the six-option cap.
