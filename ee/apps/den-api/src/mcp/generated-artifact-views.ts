@@ -142,9 +142,11 @@ function registerRenderTool(input: {
         content: [{ type: "text" as const, text: workflowArtifactTextFallback(loaded) }],
         structuredContent: loaded.payload,
         _meta: {
-          artifactViewId: input.view.id,
+          ...(input.view.dataMode === "live" ? {} : {
+            artifactViewId: input.view.id,
+            viewRevisionId: input.revision.id,
+          }),
           appTitle: input.view.title,
-          viewRevisionId: input.revision.id,
           resourceDigest: input.revision.resourceDigest,
           resultDigest: loaded.payload.artifact.resultDigest,
         },

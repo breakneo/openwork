@@ -310,6 +310,30 @@ test("live run, render and preview fetch as the caller with strict runtime input
   })
 })
 
+test.each(draftDataModes)("%s render results preserve published desktop routing", async (dataMode) => {
+  await withClient(async (client) => {
+    const catalog = await client.listTools()
+    for (const prefix of dataMode === "live" ? ["run", "render", "preview"] : ["render", "preview"]) {
+      const name = `${prefix}_artifact_${viewId}`
+      const revisionId = prefix === "preview" ? draftRevisionId : activeRevisionId
+      const resourceUri = artifactViewResourceUri(viewId, revisionId)
+      expect(catalog.tools.find((tool) => tool.name === name)?._meta).toMatchObject({ ui: { resourceUri } })
+      const result = await client.callTool({ name, arguments: {} })
+      expect(result.isError).not.toBe(true)
+      expect(result.structuredContent).toEqual(payload)
+      expect(result._meta).toMatchObject({ resourceDigest: digest, resultDigest: payload.artifact.resultDigest })
+      if (dataMode === "live") {
+        expect(result._meta?.artifactViewId).toBeUndefined()
+        expect(result._meta?.viewRevisionId).toBeUndefined()
+      } else {
+        expect(result._meta).toMatchObject({ artifactViewId: viewId, viewRevisionId: revisionId })
+      }
+      const resource = await client.readResource({ uri: resourceUri })
+      expect(resource.contents[0]).toMatchObject({ mimeType: "text/html;profile=mcp-app", text: html })
+    }
+  }, { views: [{ ...view, dataMode }] })
+})
+
 test("live connection failures preserve structured cards and never return retained data", async () => {
   const connectionCard = { state: "needs_connection", message: "Connect your account" }
   await withClient(async (client) => {
