@@ -170,7 +170,7 @@ if [[ "$MODE" == teardown ]]; then
   exit "$FAILED"
 fi
 HOME_URL=${DEMO_HOME_URL:-https://acme-home-demo.vercel.app/mcp}
-CLOCKS_URL=${DEMO_CLOCKS_URL:-https://world-clocks-six.vercel.app/mcp}
+CLOCKS_URL=${DEMO_CLOCKS_URL:-https://world-clocks-demo.vercel.app/mcp}
 CALENDAR_URL=${DEMO_CALENDAR_URL:-https://personal-calendar-demo-mcp-app.vercel.app/mcp}
 ISSUER=${DEMO_CALENDAR_ISSUER:-https://personal-calendar-demo-mcp-app.vercel.app}
 SCOPES=${DEMO_CALENDAR_SCOPES:-'["calendar:read"]'}
