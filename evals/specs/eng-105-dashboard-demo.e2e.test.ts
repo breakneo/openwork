@@ -436,7 +436,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   });
   const readCalendar = (surface: Surface) => eventually(async () => {
     await using view = await frame(surface, "Personal Calendar");
-    return calendarView(view);
+    return await calendarView(view); // Keep the child socket alive until this read settles.
   }, { within: 60_000, intervalMs: 1_000, label: "current Calendar child has rendered personal fields" });
   const renderCalendar = async (surface: Surface, connected: boolean | undefined, member: string) => {
     if (!calendarApp || !connected) throw new Error(`Blocked: ${member} Calendar prerequisites incomplete`);
@@ -502,7 +502,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     await refresh(alex, text(clockApp, "title"));
     const persisted = await eventually(async () => {
       await using current = await frame(alex, "World Clocks");
-      return evaluate(current.client, () => ({
+      return await evaluate(current.client, () => ({
         cities: [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()),
         receipt: document.querySelector(".wc-footer")?.textContent?.trim(),
       }));
