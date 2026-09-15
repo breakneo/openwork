@@ -290,7 +290,13 @@ export type CloudProviderServerSyncState = {
   skippedProviders: Record<string, OpenworkCloudProviderSyncSkippedProvider>;
 };
 
+export type ProviderLoadState = {
+  status: "idle" | "loading" | "ready" | "error";
+  error: string | null;
+};
+
 export type ProviderAuthStoreSnapshot = {
+  providerLoadState: ProviderLoadState;
   providerAuthModalOpen: boolean;
   providerAuthBusy: boolean;
   providerAuthError: string | null;
@@ -326,6 +332,7 @@ type CreateProviderAuthStoreOptions = {
 };
 
 type MutableState = {
+  providerLoadState: ProviderLoadState;
   providerAuthModalOpen: boolean;
   providerAuthBusy: boolean;
   providerAuthError: string | null;
@@ -365,6 +372,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   let lastWorkspaceKey = "";
 
   let state: MutableState = {
+    providerLoadState: { status: "idle", error: null },
     providerAuthModalOpen: false,
     providerAuthBusy: false,
     providerAuthError: null,
@@ -569,6 +577,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
 
   const refreshSnapshot = () => {
     snapshot = {
+      providerLoadState: state.providerLoadState,
       providerAuthModalOpen: state.providerAuthModalOpen,
       providerAuthBusy: state.providerAuthBusy,
       providerAuthError: state.providerAuthError,
@@ -1558,9 +1567,38 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     }
   }
 
+  const isIncompatiblePermissionsConfigError = (error: unknown, depth = 0): boolean => {
+    if (depth > 5) return false;
+    if (typeof error === "string") {
+      try {
+        const parsed: unknown = JSON.parse(error);
+        return isIncompatiblePermissionsConfigError(parsed, depth + 1);
+      } catch {
+        return error.includes("V2 permissions are not supported by OpenCode V1");
+      }
+    }
+    if (!isRecord(error)) return false;
+    return isIncompatiblePermissionsConfigError(error.message, depth + 1)
+      || isIncompatiblePermissionsConfigError(error.data, depth + 1)
+      || (Array.isArray(error.issues) && error.issues.some(
+        (issue) => isRecord(issue) && isIncompatiblePermissionsConfigError(issue.message, depth + 1),
+      ));
+  };
+
+  let providerRefreshGeneration = 0;
+
   async function refreshProviders(optionsArg?: { dispose?: boolean; force?: boolean }, isCurrent = () => !disposed) {
     const c = options.client();
     if (!c || !isCurrent()) return null;
+    const generation = ++providerRefreshGeneration;
+    const baseUrl = options.providerBaseUrl();
+    const directory = options.selectedWorkspaceRoot();
+    const isRefreshCurrent = () => !disposed && isCurrent()
+      && generation === providerRefreshGeneration
+      && baseUrl === options.providerBaseUrl()
+      && directory === options.selectedWorkspaceRoot();
+    const force = Boolean(optionsArg?.dispose || optionsArg?.force || state.providerLoadState.error);
+    setStateField("providerLoadState", { status: "loading", error: state.providerLoadState.error });
 
     if (optionsArg?.dispose) {
       const now = Date.now();
@@ -1619,36 +1657,37 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       }
     }
 
+    if (!isRefreshCurrent()) return null;
     const activeClient = options.client() ?? c;
-    let disabledProviders = options.disabledProviders() ?? [];
     try {
       const config = unwrap(await activeClient.config.get());
-      if (!isCurrent()) return null;
-      disabledProviders = Array.isArray(config.disabled_providers)
+      if (!isRefreshCurrent()) return null;
+      const disabledProviders = Array.isArray(config.disabled_providers)
         ? config.disabled_providers
         : [];
-      options.setDisabledProviders(disabledProviders);
-      refreshSnapshot();
-      emitChange();
-    } catch {
-      // ignore config read failures and continue with current store state
-    }
-
-    if (!isCurrent()) return null;
-    try {
       const updated = filterProviderList(
         await ensureProviderListQuery(getReactQueryClient(), {
           client: activeClient,
-          baseUrl: options.providerBaseUrl(),
-          directory: options.selectedWorkspaceRoot(),
-          force: Boolean(optionsArg?.dispose || optionsArg?.force),
+          baseUrl,
+          directory,
+          force,
         }),
         disabledProviders,
       );
-      if (!isCurrent()) return null;
+      if (!isRefreshCurrent()) return null;
+      options.setDisabledProviders(disabledProviders);
       applyProviderListState(updated);
+      setStateField("providerLoadState", { status: "ready", error: null });
       return updated;
-    } catch {
+    } catch (error) {
+      if (isRefreshCurrent()) {
+        setStateField("providerLoadState", {
+          status: "error",
+          error: t(isIncompatiblePermissionsConfigError(error)
+            ? "settings.provider_load_incompatible_permissions"
+            : "settings.provider_load_error"),
+        });
+      }
       return null;
     }
   }
@@ -2317,6 +2356,19 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       return await removeCloudProvider(trackedImport.cloudProviderId);
     }
 
+    const workspaceKey = currentWorkspaceKey();
+    const baseUrl = options.providerBaseUrl();
+    const isCurrentWorkspace = () => !disposed
+      && workspaceKey === currentWorkspaceKey()
+      && baseUrl === options.providerBaseUrl();
+    const requireDiscovery = (updated: ProviderListResponse | null, requireDisconnected = false) => {
+      if (!isCurrentWorkspace() || !updated || !Array.isArray(updated.all) || !Array.isArray(updated.connected)
+        || (requireDisconnected && updated.connected.includes(resolved))) {
+        throw new Error(t("providers.disconnect_unverified"));
+      }
+      return updated;
+    };
+
     try {
       // OpenCode Zen is built-in / env-backed. Credential removal alone leaves
       // it connected — disable it via runtime OPENCODE_CONFIG injection.
@@ -2326,15 +2378,16 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
         } catch {
           // Zen may have no stored credentials; disable still applies.
         }
+        if (!isCurrentWorkspace()) throw new Error(t("providers.disconnect_unverified"));
         await ensureProjectProviderDisabledState(resolved, true);
-        await refreshProviders({ dispose: true });
+        requireDiscovery(await refreshProviders({ dispose: true }, isCurrentWorkspace), true);
         removeProviderFromState(resolved);
         return `${t("providers.disconnected_prefix")} ${resolved}`;
       }
 
       await removeProviderAuthCredentials(resolved);
-      const updated = await refreshProviders({ dispose: true });
-      if (Array.isArray(updated?.connected) && updated.connected.includes(resolved)) {
+      const updated = requireDiscovery(await refreshProviders({ dispose: true }, isCurrentWorkspace));
+      if (updated.connected.includes(resolved)) {
         const stillConnected = updated.all.find((provider) => provider.id === resolved);
         if (stillConnected && stillConnected.source !== "env") {
           // The provider definition lives in an opencode config file (for
@@ -2343,7 +2396,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
           // exactly like the built-in OpenCode Zen branch above, instead of
           // leaving the Disconnect button a silent no-op.
           await ensureProjectProviderDisabledState(resolved, true);
-          await refreshProviders({ dispose: true });
+          requireDiscovery(await refreshProviders({ dispose: true }, isCurrentWorkspace), true);
           removeProviderFromState(resolved);
           return `${t("providers.disconnected_prefix")} ${resolved}`;
         }
