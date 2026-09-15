@@ -68,10 +68,11 @@ request() {
         elif type=="string" then (if (env.DEN_API_KEY|length)>0 then split(env.DEN_API_KEY)|join("[REDACTED]") else . end)
           |gsub("https?://[^\\s\\\"<>]+";"[URL REDACTED]")
           |gsub("(?i)(bearer|password|token|secret|api[_-]?key)[=: ]+[^ ,;\\s]+";"[REDACTED]") else . end);
-      (try fromjson catch .)|clean')
+      . as $raw | (try fromjson catch $raw)|clean')
     printf 'HTTP %s %s %s: %s\n' "$STATUS" "$method" "$path" "$error" >&2
   fi
   id=$(printf '%s' "$BODY" | jq -c '(.id // .item.id // .invitationId // null)' 2>/dev/null) || id=null
+  [[ -n "$id" ]] || id=null # Successful HTTP 204 has no JSON body.
   RECEIPTS=$(jq -cn --argjson rows "$RECEIPTS" --arg key "$key" --arg phase "$phase" --arg url "$DEN_API_URL$path" --arg status "$STATUS" --argjson ok "$OK" --argjson id "$id" --argjson error "$error" --argjson curlExit "$rc" '$rows+[{key:$key,phase:$phase,url:$url,status:($status|tonumber),ok:$ok,connectionId:$id,errorBody:$error,curlExit:$curlExit}]')
 }
 save_manifest() {
@@ -211,11 +212,105 @@ for base in acme-home-demo world-clocks-demo personal-calendar-demo; do
   row "$key" "$FOUND"
   CONNECTION_IDS=$(jq -cn --argjson ids "$CONNECTION_IDS" --argjson found "$FOUND" '$ids+[{key:$found.externalKey,id:$found.id}]')
 done
-if [[ "$MODE" == verify || "$CONNECTIONS_ONLY" == true ]]; then
-  printf 'MANUAL_STEP: Each member opens Your Connections > Personal Calendar > Connect. Registration is not OAuth readiness.\n' >&2
+manual() {
+  printf 'MANUAL_STEP: %s\n' "$1" >&2
+  RECEIPTS=$(jq -cn --argjson rows "$RECEIPTS" --arg reason "$1" '$rows+[{key:"manual",phase:"manual-step",url:null,status:0,ok:false,connectionId:null,errorBody:null,reason:$reason}]')
+}
+# Inviting is opt-in. Never refresh an existing invitation or change member roles.
+TEAMMATE_ID=''
+if [[ -n "${DEMO_TEAMMATE_EMAIL:-}" && "$MODE" == apply ]]; then
+  if ! jq -e '(.members|type)=="array" and (.invitations|type)=="array"' <<< "$ORG_BODY" >/dev/null; then
+    fail 'Member/invitation inventory unavailable; refusing blind invitation.'
+  else
+    TEAMMATE_ID=$(jq -r --arg email "$DEMO_TEAMMATE_EMAIL" '[.members[]|select((.user.email|ascii_downcase)==($email|ascii_downcase))|.id]|if length==1 then .[0] else empty end' <<< "$ORG_BODY")
+    if [[ -z "$TEAMMATE_ID" ]]; then
+      pending=$(jq -r --arg email "$DEMO_TEAMMATE_EMAIL" '[.invitations[]|select((.email|ascii_downcase)==($email|ascii_downcase))]|length' <<< "$ORG_BODY")
+      if [[ "$pending" == 0 ]]; then
+        if jq -e '.paths["/v1/invitations"].post' <<< "$OPENAPI" >/dev/null; then
+          payload=$(jq -cn --arg email "$DEMO_TEAMMATE_EMAIL" '{email:$email,role:"member"}')
+          request "${PREFIX}teammate-invitation" invite POST /v1/invitations "$payload" '200 201'
+          if [[ "$OK" == true && "$STATUS" == 201 ]]; then
+            invitation_id=$(jq -er '.invitationId|strings|select(test("^[a-zA-Z0-9_-]+$"))' <<< "$BODY") || { fail 'Invitation created without usable ID; inspect manually.'; invitation_id=''; }
+            [[ -z "$invitation_id" ]] || remember invitation "${PREFIX}teammate-invitation" "$invitation_id"
+          elif [[ "$OK" != true ]]; then fail 'Invitation failed or ambiguous; do not resend automatically.'; fi
+        else manual 'Invitation API absent: Den Web > Members > Invite member; enter the configured teammate email and choose Member.'; fi
+      fi
+      manual 'Teammate is not a member yet. Preserve existing invitation; teammate must accept it, then rerun to add named dashboard access.'
+    fi
+  fi
+fi
+printf 'MANUAL_STEP: Each member opens Your Connections > Personal Calendar > Connect. Registration is not OAuth readiness.\n' >&2
+if [[ "$CONNECTIONS_ONLY" == true ]]; then exit "$FAILED"; fi
+DASHBOARD_NAME="${PREFIX}ENG105 API Demo"
+DASHBOARD_MANUAL='Den Web > Manage > Dashboards > New dashboard > Name: ENG105 API Demo > Create dashboard. Add app > choose MCP > choose App > Add, once each for Acme Home, World Clocks, Personal Calendar. In Access leave Everyone in the organization off; add the named member as Viewer. Each member: Your Connections > Personal Calendar > Connect.'
+if ! jq -e '.paths["/v1/dashboards"].get and .paths["/v1/dashboards"].post and .paths["/v1/dashboards/{dashboardId}"].get and .paths["/v1/dashboards/{dashboardId}"].delete and .paths["/v1/dashboards/{dashboardId}/access"].get and .paths["/v1/dashboards/{dashboardId}/access"].post' <<< "$OPENAPI" >/dev/null; then
+  manual "Public dashboard API absent. $DASHBOARD_MANUAL"
   exit "$FAILED"
 fi
-# Full API dashboard setup is deliberately separate from the UI demo world.
-# The next checkpoint fills this public-API-only phase; no hidden UI/DB fallback.
-printf 'MANUAL_STEP: Dashboard API setup pending script checkpoint; Den Web > Dashboards > Create dashboard > ENG105 API Demo > Add App (Acme Home, World Clocks, Personal Calendar) > Share > select named member > Viewer > Add. Each member: Your Connections > Personal Calendar > Connect.\n' >&2
+DASHBOARD_ID=$(jq -r --arg name "$DASHBOARD_NAME" '[.resources[]|select(.kind=="dashboard" and .key==$name)]|if length==1 then .[0].id else empty end' <<< "$OWNED")
+if [[ "$MODE" == verify ]]; then
+  if [[ -z "$DASHBOARD_ID" ]]; then manual 'No script-owned API dashboard in this manifest; connection verification only.'; exit "$FAILED"; fi
+  request "$DASHBOARD_NAME" dashboard-verify GET "/v1/dashboards/$DASHBOARD_ID"
+  if [[ "$OK" != true ]] || ! jq -e --arg id "$DASHBOARD_ID" --arg name "$DASHBOARD_NAME" '.item.id==$id and .item.name==$name and (.item.elements|length)==3' <<< "$BODY" >/dev/null; then fail 'API dashboard verification failed.'; fi
+  request "$DASHBOARD_NAME" dashboard-access-verify GET "/v1/dashboards/$DASHBOARD_ID/access"
+  [[ "$OK" == true ]] || fail 'Dashboard access read failed.'
+  exit "$FAILED"
+fi
+if [[ $(jq length <<< "$CONNECTION_IDS") != 3 ]]; then fail 'All three connections required before API dashboard creation.'; exit "$FAILED"; fi
+# Discover actual projected tool/resource bindings from Den; never synthesize them.
+ELEMENTS='[]'
+while IFS=$'\t' read -r key id; do
+  request "$key" discover-apps GET "/v1/mcp-connections/$id/mcp-apps"
+  if [[ "$OK" != true ]]; then fail 'App discovery failed; remaining MCPs can still be inspected.'; continue; fi
+  case "$key" in
+    "${PREFIX}acme-home-demo") tool=acme_home ;;
+    "${PREFIX}personal-calendar-demo") tool=show_calendar ;;
+    *) tool='' ;;
+  esac
+  app=$(jq -ce --arg tool "$tool" --arg id "$id" '[.apps[]|select(.connectionId==$id)|select(if $tool=="" then true else .toolName==$tool end)]|select(length==1)|.[0]|select(.requiresInput==false)|{serverName,connectionId,toolName,projectedToolName,resourceUri,title:(.title // .toolName),launchArguments:{},requiresApproval,organizationAutoLaunch:false}' <<< "$BODY") || {
+    manual "No unique input-free App exposed for $key. Connect it, then rerun; no invented binding or partial dashboard."; continue;
+  }
+  ELEMENTS=$(jq -cn --argjson elements "$ELEMENTS" --argjson app "$app" '$elements+[$app]')
+done < <(jq -r '.[]|[.key,.id]|@tsv' <<< "$CONNECTION_IDS")
+if [[ $(jq length <<< "$ELEMENTS") != 3 ]]; then
+  manual "API dashboard not created/changed: three live App bindings are required. $DASHBOARD_MANUAL"
+  exit "$FAILED"
+fi
+if [[ -z "$DASHBOARD_ID" ]]; then
+  request "$DASHBOARD_NAME" dashboard-list GET /v1/dashboards
+  [[ "$OK" == true ]] || { fail 'Dashboard inventory unavailable; no blind create.'; exit 1; }
+  if ! jq -e --arg name "$DASHBOARD_NAME" '[.items[]|select(.name==$name)]|length==0' <<< "$BODY" >/dev/null; then
+    fail 'Same-name preexisting dashboard preserved. Choose another prefix or its original owner manifest.'; exit 1
+  fi
+  payload=$(jq -cn --arg name "$DASHBOARD_NAME" --argjson elements "$ELEMENTS" '{name:$name,elements:$elements}')
+  request "$DASHBOARD_NAME" dashboard-create POST /v1/dashboards "$payload" 201
+  [[ "$OK" == true ]] || { fail 'Dashboard creation failed/ambiguous. Inspect before rerunning; do not blindly retry POST.'; exit 1; }
+  DASHBOARD_ID=$(jq -er '.item.id|strings|select(test("^[a-zA-Z0-9_-]+$"))' <<< "$BODY") || { fail 'Created dashboard ID missing; inspect manually.'; exit 1; }
+  remember dashboard "$DASHBOARD_NAME" "$DASHBOARD_ID"
+fi
+request "$DASHBOARD_NAME" dashboard-verify GET "/v1/dashboards/$DASHBOARD_ID"
+if [[ "$OK" != true ]] || ! jq -e --arg id "$DASHBOARD_ID" --arg name "$DASHBOARD_NAME" --argjson elements "$ELEMENTS" '.item.id==$id and .item.name==$name and .item.elements==$elements' <<< "$BODY" >/dev/null; then
+  fail 'Owned dashboard differs; preserve human edits, no replacement.'; exit 1
+fi
+# Named grants only, never org-wide. Keep existing/revoked grants unchanged.
+SUBJECTS=$(jq -ce --arg teammate "$TEAMMATE_ID" '[.currentMember.id,$teammate]|map(select(type=="string" and length>0))|unique' <<< "$ORG_BODY")
+if [[ $(jq length <<< "$SUBJECTS") == 0 ]]; then manual 'No current member ID returned; add the named member manually in Dashboard > Access.'; exit "$FAILED"; fi
+request "$DASHBOARD_NAME" dashboard-access-list GET "/v1/dashboards/$DASHBOARD_ID/access"
+[[ "$OK" == true ]] || { fail 'Cannot read grants; no blind grant writes.'; exit 1; }
+GRANTS=$BODY
+while IFS= read -r member; do
+  existing=$(jq -r --arg member "$member" '[.items[]|select(.orgMembershipId==$member)]|length' <<< "$GRANTS")
+  if [[ "$existing" != 0 ]]; then
+    if ! jq -e --arg member "$member" 'any(.items[];.orgMembershipId==$member and .removedAt==null)' <<< "$GRANTS" >/dev/null; then manual 'Named grant was revoked; preserve it. An admin must explicitly regrant access.'; fi
+    continue
+  fi
+  payload=$(jq -cn --arg member "$member" '{orgMembershipId:$member,role:"viewer"}')
+  request "$DASHBOARD_NAME" dashboard-grant POST "/v1/dashboards/$DASHBOARD_ID/access" "$payload" 201
+  [[ "$OK" == true ]] || fail 'Named access grant failed; dashboard registration is not sharing readiness.'
+done < <(jq -r '.[]' <<< "$SUBJECTS")
+request "$DASHBOARD_NAME" dashboard-access-verify GET "/v1/dashboards/$DASHBOARD_ID/access"
+if [[ "$OK" != true ]] || ! jq -e --argjson subjects "$SUBJECTS" '.items as $grants | all($subjects[];. as $member|any($grants[];.orgMembershipId==$member and .removedAt==null))' <<< "$BODY" >/dev/null; then
+  fail 'Final named grants not confirmed; sharing remains incomplete.'
+fi
+printf 'API configuration receipts emitted; member OAuth and desktop UI are separate proof obligations.\n' >&2
 exit "$FAILED"

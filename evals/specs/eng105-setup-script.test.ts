@@ -77,12 +77,16 @@ function seed(key: string, id: string): Connection {
   };
 }
 
-async function witness(options: { advertisedGet?: boolean; routeStatus?: number; calendarScopes?: string[] } = {}) {
+async function witness(options: { advertisedGet?: boolean; routeStatus?: number; calendarScopes?: string[]; full?: boolean; dashboardApi?: boolean; teammateEmail?: string } = {}) {
   needs({ commands: ["bash", "curl", "jq"], placement: "local" });
   const root = await mkdtemp(join(tmpdir(), "eng105-setup-script-"));
   const state = join(root, "state");
   const manifestPath = join(state, "owner.json");
   const connections = new Map<string, Connection>();
+  const dashboards = new Map<string, { id: string; name: string; elements: unknown[] }>();
+  const grants = new Map<string, Record<string, unknown>[]>();
+  const invitations: { id: string; email: string; status: string; inviteToken: string }[] = [];
+  const members = [{ id: "member_admin", user: { email: "admin@example.test" } }];
   const requests: RequestRecord[] = [];
   const faults: Fault[] = [];
   const unexpected: string[] = [];
@@ -107,10 +111,58 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
     const fault = faults.find((item) => item.method === method && item.path === path);
     if (fault) return reply(fault.status, fault.body);
     if (method === "GET" && path === "/v1/org") {
-      return reply(200, { organization: { id: organizationId }, apiKey: credential });
+      return reply(200, { organization: { id: organizationId }, currentMember: { id: "member_admin" }, members, invitations, apiKey: credential });
     }
     if (method === "GET" && path === "/openapi.json") {
-      return reply(200, { paths: { "/v1/mcp-connections/by-key/{externalKey}": { put: {}, ...(advertisedGet ? { get: {} } : {}) } } });
+      return reply(200, { paths: {
+        "/v1/mcp-connections/by-key/{externalKey}": { put: {}, ...(advertisedGet ? { get: {} } : {}) },
+        "/v1/invitations": { post: {} },
+        ...(options.dashboardApi ? {
+          "/v1/dashboards": { get: {}, post: {} },
+          "/v1/dashboards/{dashboardId}": { get: {}, delete: {} },
+          "/v1/dashboards/{dashboardId}/access": { get: {}, post: {} },
+        } : {}),
+      } });
+    }
+    if (method === "POST" && path === "/v1/invitations") {
+      assert.ok(body && typeof body.email === "string");
+      const invite = { id: `inv_created_${++nextId}`, email: body.email, status: "pending", inviteToken: credential };
+      invitations.push(invite);
+      return reply(201, { invitationId: invite.id, inviteToken: credential });
+    }
+    if (method === "POST" && path.startsWith("/v1/invitations/") && path.endsWith("/cancel")) {
+      const invitation = invitations.find((item) => path === `/v1/invitations/${item.id}/cancel`);
+      assert.ok(invitation);
+      invitation.status = "canceled";
+      return reply(200, { ok: true });
+    }
+    if (path === "/v1/dashboards") {
+      if (method === "GET") return reply(200, { items: [...dashboards.values()] });
+      if (method === "POST") {
+        assert.ok(body && typeof body.name === "string" && Array.isArray(body.elements));
+        const dashboard = { id: `dsb_created_${++nextId}`, name: body.name, elements: body.elements };
+        dashboards.set(dashboard.id, dashboard);
+        grants.set(dashboard.id, []);
+        return reply(201, { item: dashboard });
+      }
+    }
+    if (path.startsWith("/v1/dashboards/")) {
+      const id = path.split("/")[3];
+      assert.ok(id);
+      const dashboard = dashboards.get(id);
+      if (!dashboard) return reply(404, { error: "not_found" });
+      if (path.endsWith("/access")) {
+        if (method === "GET") return reply(200, { items: grants.get(id) ?? [] });
+        if (method === "POST") {
+          assert.ok(body);
+          const grant = { id: `dsg_created_${++nextId}`, ...body, orgWide: false, removedAt: null };
+          grants.set(id, [...(grants.get(id) ?? []), grant]);
+          return reply(201, { item: grant });
+        }
+      } else {
+        if (method === "GET") return reply(200, { item: dashboard });
+        if (method === "DELETE") { dashboards.delete(id); return reply(204, null); }
+      }
     }
     if (method === "GET" && path === listPath) {
       return reply(200, { connections: [...connections.values()].map(({ id, externalKey }) => ({ id, externalKey })) });
@@ -132,6 +184,13 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
       if (method === "DELETE") {
         return reply(200, { ok: true, deleted: connections.delete(key) });
       }
+    }
+    if (method === "GET" && path.startsWith("/v1/mcp-connections/") && path.endsWith("/mcp-apps")) {
+      const id = path.split("/")[3];
+      const connection = [...connections.values()].find((item) => item.id === id);
+      assert.ok(connection);
+      const toolName = connection.externalKey === home ? "acme_home" : connection.externalKey === calendar ? "show_calendar" : "world_clock";
+      return reply(200, { apps: [{ serverName: "witness", connectionId: id, toolName, projectedToolName: `mcp:${id}:${toolName}`, resourceUri: `ui://witness/${toolName}.html`, title: toolName, requiresInput: false, requiresApproval: false }] });
     }
     if (method === "GET" && path.startsWith("/v1/mcp-connections/")) {
       const id = path.slice("/v1/mcp-connections/".length);
@@ -158,6 +217,10 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
 
   return {
     connections,
+    dashboards,
+    grants,
+    invitations,
+    members,
     requests,
     faults,
     api,
@@ -168,7 +231,7 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
     async run(mode: "--apply" | "--verify" | "--teardown", expectedOrg = org) {
       const start = requests.length;
       const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
-        execFile("bash", [script, mode, "--connections-only"], {
+        execFile("bash", [script, mode, ...(options.full ? [] : ["--connections-only"])], {
           cwd: root,
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
@@ -189,6 +252,7 @@ async function witness(options: { advertisedGet?: boolean; routeStatus?: number;
             DEMO_CALENDAR_URL: "https://calendar.example.test/mcp",
             DEMO_CALENDAR_ISSUER: "https://calendar.example.test",
             DEMO_CALENDAR_SCOPES: JSON.stringify(options.calendarScopes ?? ["calendar.read"]),
+            DEMO_TEAMMATE_EMAIL: options.teammateEmail,
           },
         }, (error, stdout, stderr) => {
           if (!error) {
@@ -542,4 +606,102 @@ test("ENG105 sanitized HTTP errors remain failures while other MCP applies conti
   for (const marker of [apiKey, credential, "upstream_unavailable", "oauth.example.test"]) assert.equal(manifest.includes(marker), false);
   assert.deepEqual(await readdir(api.state), ["owner.json"]);
   evidence.recordAssertionEvidence("Sanitized failure does not block independent MCPs", "The first PUT retained HTTP500 and a useful error code but redacted credentials and OAuth URLs; both remaining MCPs were created and verified, with no failure body or credentials persisted.", true);
+});
+
+test("ENG105 full API setup creates three discovered Apps with named access once and cleans up only owned resources", async ({ evidence }) => {
+  await using api = await witness({ full: true, dashboardApi: true, teammateEmail: "teammate@example.test" });
+  api.members.push({ id: "member_teammate", user: { email: "teammate@example.test" } });
+  api.dashboards.set("dsb_unrelated", { id: "dsb_unrelated", name: "Existing human dashboard", elements: [] });
+  const first = await api.run("--apply");
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(rows(first.receipts, "dashboard-create").length, 1);
+  const ownedDashboard = [...api.dashboards.values()].find((item) => item.id !== "dsb_unrelated");
+  assert.ok(ownedDashboard);
+  assert.equal(ownedDashboard.name, `${prefix}ENG105 API Demo`);
+  assert.equal(ownedDashboard.elements.length, 3);
+  assert.deepEqual(ownedDashboard.elements.map(object).map((item) => item.projectedToolName), keys.map((key) => {
+    const id = api.connections.get(key)?.id;
+    const tool = key === home ? "acme_home" : key === calendar ? "show_calendar" : "world_clock";
+    return `mcp:${id}:${tool}`;
+  }));
+  assert.ok(ownedDashboard.elements.map(object).every((item) => item.organizationAutoLaunch === false));
+  const subjects = api.grants.get(ownedDashboard.id) ?? [];
+  assert.deepEqual(subjects.map((item) => item.orgMembershipId).sort(), ["member_admin", "member_teammate"]);
+  assert.ok(subjects.every((item) => item.orgWide === false && item.role === "viewer"));
+  assert.equal(api.invitations.length, 0);
+  const manifest = await readFile(api.manifestPath, "utf8");
+  const second = await api.run("--apply");
+  assert.equal(second.code, 0, second.stderr);
+  assert.deepEqual(rows(second.receipts, "apply").map((item) => [item.status, item.changedFields]), [[200, []], [200, []], [200, []]]);
+  assert.deepEqual(mutations(second.requests).map((item) => item.method), ["PUT", "PUT", "PUT"]);
+  assert.equal(await readFile(api.manifestPath, "utf8"), manifest);
+  const verify = await api.run("--verify");
+  assert.equal(verify.code, 0, verify.stderr);
+  assert.deepEqual(mutations(verify.requests), []);
+  const teardown = await api.run("--teardown");
+  assert.equal(teardown.code, 0, teardown.stderr);
+  assert.equal(api.connections.size, 0);
+  assert.deepEqual([...api.dashboards.keys()], ["dsb_unrelated"]);
+  assert.deepEqual((await api.manifest()).resources, []);
+  evidence.recordAssertionEvidence("Full API setup is separate, idempotent and owner-scoped", "Three live-discovered bindings and two named viewer grants were created once; second apply wrote only unchanged MCP PUTs. Verify was read-only; teardown preserved the unrelated dashboard.", true);
+});
+
+test("ENG105 absent dashboard API exits with explicit manual steps and never allocates a substitute", async ({ evidence }) => {
+  await using api = await witness({ full: true });
+  const applied = await api.run("--apply");
+  assert.equal(applied.code, 0, applied.stderr);
+  assert.ok(rows(applied.receipts, "manual-step").some((row) => row.ok === false));
+  assert.match(applied.stderr, /Public dashboard API absent/);
+  assert.equal(api.dashboards.size, 0);
+  assert.ok(mutations(applied.requests).every((row) => row.method === "PUT"));
+  evidence.recordAssertionEvidence("Missing API remains an explicit manual gap", "Connection configuration succeeded, but receipts and stderr identify manual dashboard work without claiming readiness or creating a substitute.", true);
+});
+
+test("ENG105 full API setup preserves a same-name preexisting dashboard and never claims its ownership", async ({ evidence }) => {
+  await using api = await witness({ full: true, dashboardApi: true });
+  const original = { id: "dsb_preexisting", name: `${prefix}ENG105 API Demo`, elements: [] };
+  api.dashboards.set(original.id, original);
+  const applied = await api.run("--apply");
+  assert.equal(applied.code, 1);
+  assert.deepEqual(api.dashboards.get(original.id), original);
+  assert.ok(mutations(applied.requests).every((row) => row.method === "PUT"));
+  assert.equal(rows(applied.receipts, "dashboard-create").length, 0);
+  const teardown = await api.run("--teardown");
+  assert.equal(teardown.code, 0, teardown.stderr);
+  assert.deepEqual(api.dashboards.get(original.id), original);
+  evidence.recordAssertionEvidence("Same name is not ownership", "The preexisting named dashboard was neither updated, granted, adopted nor deleted; only script-created MCPs were cleaned up.", true);
+});
+
+test("ENG105 optional invitation is created once, redacts its token and cancels only its pending owned ID", async ({ evidence }) => {
+  await using api = await witness({ teammateEmail: "teammate@example.test" });
+  api.invitations.push({ id: "inv_unrelated", email: "other@example.test", status: "pending", inviteToken: credential });
+  const first = await api.run("--apply");
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(rows(first.receipts, "invite").length, 1);
+  assert.equal(api.invitations.length, 2);
+  const second = await api.run("--apply");
+  assert.equal(second.code, 0, second.stderr);
+  assert.equal(rows(second.receipts, "invite").length, 0);
+  const manifest = await readFile(api.manifestPath, "utf8");
+  assert.equal(manifest.includes(credential), false);
+  assert.equal(manifest.includes("teammate@example.test"), false);
+  const teardown = await api.run("--teardown");
+  assert.equal(teardown.code, 0, teardown.stderr);
+  assert.equal(api.invitations.find((item) => item.id === "inv_unrelated")?.status, "pending");
+  assert.equal(api.invitations.find((item) => item.id !== "inv_unrelated")?.status, "canceled");
+  assert.deepEqual((await api.manifest()).resources, []);
+  evidence.recordAssertionEvidence("Invitation idempotence and ownership", "Only an explicitly configured absent teammate was invited; the token stayed out of receipts/state, second apply did not refresh it, and teardown canceled only the newly created pending invitation.", true);
+});
+
+test("ENG105 an existing teammate invitation is never refreshed, adopted or canceled", async ({ evidence }) => {
+  await using api = await witness({ teammateEmail: "teammate@example.test" });
+  api.invitations.push({ id: "inv_preexisting", email: "teammate@example.test", status: "pending", inviteToken: credential });
+  const applied = await api.run("--apply");
+  assert.equal(applied.code, 0, applied.stderr);
+  assert.equal(rows(applied.receipts, "invite").length, 0);
+  const teardown = await api.run("--teardown");
+  assert.equal(teardown.code, 0, teardown.stderr);
+  assert.equal(api.invitations[0]?.status, "pending");
+  assert.equal(rows(teardown.receipts, "teardown-invitation").length, 0);
+  evidence.recordAssertionEvidence("Preexisting invitations are preserved", "An existing pending invitation prevented any invite refresh and never entered ownership or cleanup.", true);
 });
