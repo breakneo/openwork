@@ -3627,6 +3627,10 @@ function createRoutes(
     const serverName = typeof body.serverName === "string" ? body.serverName.trim() : "";
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const resourceUri = typeof body.resourceUri === "string" ? body.resourceUri.trim() : "";
+    const expectedResourceDigest = body.expectedResourceDigest;
+    if (expectedResourceDigest !== undefined && typeof expectedResourceDigest !== "string") {
+      throw new ApiError(400, "invalid_resource_digest", "expectedResourceDigest must be a SHA-256 hex digest.");
+    }
     const args = body.arguments && typeof body.arguments === "object" && !Array.isArray(body.arguments)
       ? body.arguments as Record<string, unknown>
       : {};
@@ -3648,6 +3652,7 @@ function createRoutes(
         serverName,
         name,
         resourceUri,
+        expectedResourceDigest,
         arguments: args,
         approved,
         assertSessionActive: async () => {

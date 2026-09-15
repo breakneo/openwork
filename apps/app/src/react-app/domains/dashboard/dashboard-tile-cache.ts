@@ -1,5 +1,5 @@
 import type { OpenworkMcpAppResource } from "@/app/lib/openwork-server";
-import { DASHBOARD_TILE_CACHE_STORAGE_PREFIX } from "@/app/lib/dashboard-cache-storage";
+import { createDashboardTileCacheStore, DASHBOARD_TILE_CACHE_STORAGE_PREFIX } from "@/app/lib/dashboard-cache-storage";
 import type { PreservedMcpAppResult } from "@/components/chat/mcp-app-frame";
 
 const MAX_CACHE_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -74,6 +74,51 @@ function parseCache(value: unknown, now: number): DashboardTileCache | null {
   } : null;
 }
 
+function parseScope(value: unknown, now: number): Map<string, DashboardTileCache> {
+  const scope = new Map<string, DashboardTileCache>();
+  if (!isRecord(value)) return scope;
+  for (const [entryId, entry] of Object.entries(value)) {
+    const cache = parseCache(entry, now);
+    if (cache) scope.set(entryId, cache);
+  }
+  return scope;
+}
+
+function serializeScope(scope: Map<string, DashboardTileCache>, now: number): string | null {
+  const entries: Array<{ entryId: string; serialized: string }> = [];
+  let size = 2;
+  for (const [entryId, value] of [...scope].sort((left, right) => left[1].cachedAt - right[1].cachedAt)) {
+    const cache = parseCache(value, now);
+    if (!cache) {
+      scope.delete(entryId);
+      continue;
+    }
+    let serialized: string;
+    try {
+      serialized = `${JSON.stringify(entryId)}:${JSON.stringify(cache)}`;
+    } catch {
+      scope.delete(entryId);
+      continue;
+    }
+    if (serialized.length + 2 > MAX_SCOPE_CACHE_BYTES) {
+      scope.delete(entryId);
+      continue;
+    }
+    scope.set(entryId, cache);
+    size += serialized.length + (entries.length > 0 ? 1 : 0);
+    entries.push({ entryId, serialized });
+  }
+  while (size > MAX_SCOPE_CACHE_BYTES) {
+    const oldest = entries.shift();
+    if (!oldest) break;
+    size -= oldest.serialized.length + (entries.length > 0 ? 1 : 0);
+    scope.delete(oldest.entryId);
+  }
+  return entries.length > 0 ? `{${entries.map((entry) => entry.serialized).join(",")}}` : null;
+}
+
+const cacheStore = createDashboardTileCacheStore(parseScope, serializeScope);
+
 export function dashboardTileCacheScopeKey(userId: string | null, organizationId: string | null): string {
   return `${DASHBOARD_TILE_CACHE_STORAGE_PREFIX}.${userId?.trim() || "local"}.${organizationId?.trim() || "none"}`;
 }
@@ -112,52 +157,33 @@ export function readDashboardTileCache(
   entryId: string,
   now = Date.now(),
 ): DashboardTileCache | null {
-  if (typeof window === "undefined") return null;
-  const raw = window.localStorage.getItem(scopeKey);
-  if (raw === null) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return isRecord(parsed) ? parseCache(parsed[entryId], now) : null;
-  } catch {
+  const scope = cacheStore.read(scopeKey, now);
+  const cache = scope?.get(entryId);
+  if (!scope || !cache) return null;
+  if (now - cache.cachedAt > MAX_CACHE_AGE_MS) {
+    scope.delete(entryId);
+    cacheStore.schedule(scopeKey);
     return null;
   }
+  return cache;
 }
 
 export function writeDashboardTileCache(
   scopeKey: string,
   entryId: string,
   cache: DashboardTileCache,
-) {
-  if (typeof window === "undefined") return;
-  try {
-    const raw = window.localStorage.getItem(scopeKey);
-    const parsed: unknown = raw === null ? {} : JSON.parse(raw);
-    const next: Record<string, unknown> = isRecord(parsed) ? { ...parsed } : {};
-    // A live host lease must not survive in persisted HTML/result caches.
-    next[entryId] = { ...cache, app: parseApp(cache.app) };
-
-    const entries = Object.entries(next).sort((left, right) => {
-      const leftAt = isRecord(left[1]) && typeof left[1].cachedAt === "number" ? left[1].cachedAt : 0;
-      const rightAt = isRecord(right[1]) && typeof right[1].cachedAt === "number" ? right[1].cachedAt : 0;
-      return leftAt - rightAt;
-    });
-    let serialized = JSON.stringify(Object.fromEntries(entries));
-    while (serialized.length > MAX_SCOPE_CACHE_BYTES && entries.length > 1) {
-      entries.shift();
-      serialized = JSON.stringify(Object.fromEntries(entries));
-    }
-    if (serialized.length <= MAX_SCOPE_CACHE_BYTES) window.localStorage.setItem(scopeKey, serialized);
-  } catch {
-    // Caching is best-effort. A live result still renders when storage is unavailable.
-  }
+): void {
+  const next = parseCache(cache, Date.now());
+  if (!next) return;
+  const scope = cacheStore.read(scopeKey);
+  if (!scope) return;
+  scope.set(entryId, next);
+  cacheStore.schedule(scopeKey);
 }
 
-export function removeDashboardTileCache(scopeKey: string, entryId: string) {
-  if (typeof window === "undefined") return;
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(scopeKey) ?? "{}");
-    if (!isRecord(parsed)) return;
-    delete parsed[entryId];
-    window.localStorage.setItem(scopeKey, JSON.stringify(parsed));
-  } catch {}
+export function removeDashboardTileCache(scopeKey: string, entryId: string): void {
+  const scope = cacheStore.read(scopeKey);
+  if (!scope) return;
+  scope.delete(entryId);
+  cacheStore.schedule(scopeKey);
 }
