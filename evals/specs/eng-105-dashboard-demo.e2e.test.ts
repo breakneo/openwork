@@ -112,6 +112,7 @@ async function frame(surface: Surface, title: string): Promise<Surface & AsyncDi
 }
 async function checkpoint(surface: Surface, name: string) {
   const artifact = await screenshot(surface);
+  console.log(`[ENG105] captured ${name}`);
   await writeFile(`${reportDirectory}${name}.png`, artifact.png);
   captures.push({ name: `${name}.png`, at: artifact.at,
     actor: name.includes("jordan") ? "Jordan" : "Alex", status: "supplementary observation; see test-run verdict" });
@@ -234,6 +235,7 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
   };
   await signIn(alexBrowser, den.admin);
   await navigate(alexBrowser.client, new URL("/dashboard/mcp-connections", den.ref.webUrl).href);
+  await clickTarget(alexBrowser, { testId: "connectors-open-configured" });
   await see(alexBrowser, "Acme Home");
   await see(alexBrowser, "World Clocks");
   await see(alexBrowser, "Personal Calendar");
