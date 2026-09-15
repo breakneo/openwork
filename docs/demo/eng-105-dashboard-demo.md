@@ -69,7 +69,7 @@ That world is stopped. CDP ports above are historical—never attach blindly. Th
 
 ## Reproduce on another Den
 
-**H status: connection apply/verify/owned teardown implemented; full dashboard/member API setup and live production receipts still pending.** A printed `MANUAL_STEP` is not completed dashboard setup.
+**H status: connection and full dashboard/member API setup are implemented; live full-API/production receipts remain pending.** Default apply creates the separately named **`<prefix>ENG105 API Demo`**, never Acme Day. A printed `MANUAL_STEP` is not completed dashboard setup.
 
 Prerequisites: Den **≥0.18.43**, dashboard feature enabled, a target-org admin API key, Bash, curl, jq, and Infisical configured for your authorized project when using these commands. Check the route:
 
@@ -77,7 +77,7 @@ Prerequisites: Den **≥0.18.43**, dashboard feature enabled, a target-org admin
 curl -sS "$DEN_API_URL/openapi.json" | jq '.paths|has("/v1/mcp-connections/by-key/{externalKey}")'
 ```
 
-Inject `DEN_API_KEY` through the environment, never command arguments or committed files. Set `INFISICAL_DEMO_PATH` to an authorized folder containing it. Preserve a separate private `DEMO_STATE_DIR` for each target/prefix through teardown. Optional `DEMO_EXPECTED_ORG_ID` refuses the wrong org; `DEMO_TEAMMATE_EMAIL` requests member/invitation handling when that phase is available (omit to invite nobody).
+Inject `DEN_API_KEY` through the environment, never command arguments or committed files. Set `INFISICAL_DEMO_PATH` to an authorized folder containing it. Preserve a separate private `DEMO_STATE_DIR` for each target/prefix through teardown. Optional `DEMO_EXPECTED_ORG_ID` refuses the wrong org; `DEMO_TEAMMATE_EMAIL` opts into member/invitation handling and named sharing (omit to invite nobody). Existing invitations are preserved; an invited teammate must accept before a rerun can add their named dashboard grant.
 
 ```sh
 export DEN_API_URL="https://den.example.com"
