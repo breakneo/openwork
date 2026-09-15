@@ -93,8 +93,16 @@ function freshnessLabel(cachedAt: number): string {
   return ageHours === 1 ? "Updated 1 hour ago" : `Updated ${ageHours} hours ago`;
 }
 
+function launchArgumentsSignature(argumentsValue: Record<string, unknown>) {
+  return JSON.stringify(argumentsValue, (_key, value: unknown) => isRecord(value)
+    ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+    : value);
+}
+
 export function McpAppTile(props: ComponentProps<typeof McpAppTileContent>) {
-  return <McpAppTileContent key={JSON.stringify([props.cacheScopeKey, props.entry.id, props.entry.connectionId, props.entry.serverName, props.entry.toolName, props.entry.resourceUri, props.entry.projectedToolName])} {...props} />;
+  const input = props.entry.launchArguments ?? EMPTY_ARGUMENTS;
+  const signature = useMemo(() => launchArgumentsSignature(input), [input]);
+  return <McpAppTileContent key={JSON.stringify([props.cacheScopeKey, props.entry.id, props.entry.connectionId, props.entry.serverName, props.entry.toolName, props.entry.resourceUri, props.entry.projectedToolName, signature])} {...props} />;
 }
 
 function McpAppTileContent({
@@ -135,12 +143,22 @@ function McpAppTileContent({
   )), [fallbackEndpoints, openworkServerClient, workspaceId]);
   // Cached app HTML is interactive, so it follows the same per-user launch
   // consent as a live call and never mounts on a first visit.
-  const cached = runsAutomatically ? readDashboardTileCache(cacheScopeKey, entry.id) : null;
+  const [nonce, setNonce] = useState(0);
+  const nextLaunchArguments = entry.launchArguments ?? EMPTY_ARGUMENTS;
+  const nextArguments = useMemo(() => ({
+    signature: launchArgumentsSignature(nextLaunchArguments),
+    value: snapshotMcpAppArguments(nextLaunchArguments) ?? EMPTY_ARGUMENTS,
+  }), [nextLaunchArguments, nonce]);
+  const argumentsRef = useRef(nextArguments);
+  if (argumentsRef.current.signature !== nextArguments.signature) argumentsRef.current = nextArguments;
+  const launchArguments = argumentsRef.current.value;
+  const argumentsSignature = argumentsRef.current.signature;
+  const savedCache = runsAutomatically ? readDashboardTileCache(cacheScopeKey, entry.id) : null;
+  const cached = savedCache?.argumentsSignature === argumentsSignature ? savedCache : null;
   const cachedEndpoint = cached
     ? launchEndpoints.find((endpoint) => endpoint.workspaceId === cached.workspaceId) ?? null
     : null;
   const [started, setStarted] = useState(!manualLaunch);
-  const [nonce, setNonce] = useState(0);
   const [failedViewNonce, setFailedViewNonce] = useState<number | null>(null);
   const lastHeight = useRef<number | undefined>(undefined);
   const [state, setState] = useState<TileState>(() => cached && cachedEndpoint
@@ -149,7 +167,6 @@ function McpAppTileContent({
   const [refreshState, setRefreshState] = useState<RefreshState>(manualLaunch ? "idle" : "refreshing");
   const refreshStateRef = useRef(refreshState);
   refreshStateRef.current = refreshState;
-  const launchArguments = entry.launchArguments ?? EMPTY_ARGUMENTS;
   const stateRef = useRef(state);
   stateRef.current = state;
   const lastRefreshAtRef = useRef(cachedEndpoint ? cached?.cachedAt ?? 0 : 0);
@@ -196,6 +213,7 @@ function McpAppTileContent({
     }
     const currentLaunch = launchRef.current?.nonce === nonce ? launchRef.current : null;
     if (currentLaunch?.promise === null) return;
+    if (!currentLaunch) lastRefreshAtRef.current = Date.now();
     setRefreshState("refreshing");
     if (stateRef.current.phase !== "ready") setState({ phase: "loading" });
     // Tiles are user-scoped while MCP servers are workspace-scoped: prefer the
@@ -336,6 +354,7 @@ function McpAppTileContent({
             ownedLaunches.current.delete(id);
           }
           writeDashboardTileCache(cacheScopeKey, entry.id, {
+            argumentsSignature,
             cachedAt: next.cachedAt,
             workspaceId: next.endpoint.workspaceId,
             app: next.app,
@@ -389,7 +408,7 @@ function McpAppTileContent({
     return () => {
       cancelled = true;
     };
-  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, manualLaunch, nonce, started, lifetime]);
+  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, argumentsSignature, manualLaunch, nonce, started, lifetime]);
 
   useEffect(() => {
     if (manualLaunch) return;
