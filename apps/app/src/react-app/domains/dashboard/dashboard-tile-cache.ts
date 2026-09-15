@@ -74,47 +74,80 @@ function parseCache(value: unknown, now: number): DashboardTileCache | null {
   } : null;
 }
 
+// Tiles from one App host usually share a single large HTML resource. Storing
+// that resource once per scope keeps every tile inside the size budget instead
+// of evicting the oldest results as soon as a few tiles are added.
+const SHARED_HTML_KEY = "$html";
+const SHARED_ENTRIES_KEY = "$entries";
+
 function parseScope(value: unknown, now: number): Map<string, DashboardTileCache> {
   const scope = new Map<string, DashboardTileCache>();
   if (!isRecord(value)) return scope;
-  for (const [entryId, entry] of Object.entries(value)) {
-    const cache = parseCache(entry, now);
+  const shared = isRecord(value[SHARED_HTML_KEY]) ? value[SHARED_HTML_KEY] : null;
+  const entries = shared && isRecord(value[SHARED_ENTRIES_KEY]) ? value[SHARED_ENTRIES_KEY] : value;
+  for (const [entryId, entry] of Object.entries(entries)) {
+    if (!shared && (entryId === SHARED_HTML_KEY || entryId === SHARED_ENTRIES_KEY)) continue;
+    let candidate: unknown = entry;
+    if (shared && isRecord(entry) && isRecord(entry.app) && typeof entry.app.htmlRef === "string") {
+      const html = shared[entry.app.htmlRef];
+      if (typeof html !== "string") continue;
+      const { htmlRef: _ref, ...app } = entry.app;
+      candidate = { ...entry, app: { ...app, html } };
+    }
+    const cache = parseCache(candidate, now);
     if (cache) scope.set(entryId, cache);
   }
   return scope;
 }
 
+function htmlRefFor(html: string, refs: Map<string, string>): string {
+  let ref = refs.get(html);
+  if (ref === undefined) {
+    ref = `h${refs.size}`;
+    refs.set(html, ref);
+  }
+  return ref;
+}
+
 function serializeScope(scope: Map<string, DashboardTileCache>, now: number): string | null {
-  const entries: Array<{ entryId: string; serialized: string }> = [];
-  let size = 2;
-  for (const [entryId, value] of [...scope].sort((left, right) => left[1].cachedAt - right[1].cachedAt)) {
+  // Newest first so the freshest tiles survive eviction; shared HTML is
+  // charged once, when its first referencing entry is kept.
+  const ordered = [...scope].sort((left, right) => right[1].cachedAt - left[1].cachedAt);
+  const refs = new Map<string, string>();
+  const kept: Array<{ entryId: string; serialized: string }> = [];
+  const keptHtml = new Set<string>();
+  let size = `{"${SHARED_HTML_KEY}":{},"${SHARED_ENTRIES_KEY}":{}}`.length;
+  for (const [entryId, value] of ordered) {
     const cache = parseCache(value, now);
     if (!cache) {
       scope.delete(entryId);
       continue;
     }
+    const ref = htmlRefFor(cache.app.html, refs);
     let serialized: string;
+    let htmlCost = 0;
     try {
-      serialized = `${JSON.stringify(entryId)}:${JSON.stringify(cache)}`;
+      const { html, ...app } = cache.app;
+      serialized = `${JSON.stringify(entryId)}:${JSON.stringify({ ...cache, app: { ...app, htmlRef: ref } })}`;
+      if (!keptHtml.has(ref)) htmlCost = `${JSON.stringify(ref)}:${JSON.stringify(html)},`.length;
     } catch {
       scope.delete(entryId);
       continue;
     }
-    if (serialized.length + 2 > MAX_SCOPE_CACHE_BYTES) {
+    const cost = serialized.length + 1 + htmlCost;
+    if (size + cost > MAX_SCOPE_CACHE_BYTES) {
       scope.delete(entryId);
       continue;
     }
+    size += cost;
+    keptHtml.add(ref);
     scope.set(entryId, cache);
-    size += serialized.length + (entries.length > 0 ? 1 : 0);
-    entries.push({ entryId, serialized });
+    kept.push({ entryId, serialized });
   }
-  while (size > MAX_SCOPE_CACHE_BYTES) {
-    const oldest = entries.shift();
-    if (!oldest) break;
-    size -= oldest.serialized.length + (entries.length > 0 ? 1 : 0);
-    scope.delete(oldest.entryId);
-  }
-  return entries.length > 0 ? `{${entries.map((entry) => entry.serialized).join(",")}}` : null;
+  if (kept.length === 0) return null;
+  const htmlEntries = [...refs].filter(([, ref]) => keptHtml.has(ref))
+    .map(([html, ref]) => `${JSON.stringify(ref)}:${JSON.stringify(html)}`);
+  return `{${JSON.stringify(SHARED_HTML_KEY)}:{${htmlEntries.join(",")}},${JSON.stringify(SHARED_ENTRIES_KEY)}:{${kept.map((entry) => entry.serialized).join(",")}}}`;
 }
 
 const cacheStore = createDashboardTileCacheStore(parseScope, serializeScope);
