@@ -46,11 +46,13 @@ test("ENG105 authorized live setup verifies API configuration and removes only o
     await writeFile(join(output, `${phase}.txt`), result.stderr, { mode: 0o600 });
     return { exitCode: result.exitCode, receipts };
   };
+  const connectionsOnly = process.env.ENG105_LIVE_CONNECTIONS_ONLY === "1";
+  const configArgs = connectionsOnly ? ["--connections-only"] : [];
   const results: Record<string, Awaited<ReturnType<typeof run>>> = {};
   try {
-    results.apply = await run("apply", []);
-    if (results.apply.exitCode === 0 && process.env.ENG105_LIVE_REAPPLY === "1") results.reapply = await run("reapply", []);
-    results.verify = await run("verify", ["--verify"]);
+    results.apply = await run("apply", configArgs);
+    results.verify = await run("verify", ["--verify", ...configArgs]);
+    if (results.apply.exitCode === 0 && process.env.ENG105_LIVE_REAPPLY === "1") results.reapply = await run("reapply", configArgs);
   } finally {
     results.teardown = await run("teardown", ["--teardown"]);
     results.afterTeardown = await run("after-teardown", ["--verify", "--connections-only"]);
@@ -70,17 +72,25 @@ test("ENG105 authorized live setup verifies API configuration and removes only o
   assert.ok(applied.every((row) => row.ok === true && (row.status === 201 || row.status === 200)));
   const createdIds = applied.filter((row) => row.status === 201).map((row) => row.connectionId);
   assert.ok(results.afterTeardown.receipts.filter((row) => row.phase === "verified-state").every((row) => !createdIds.includes(row.connectionId)));
-  const manual = results.apply.receipts.filter((row) => row.phase === "manual-step");
-  evidence.recordAssertionEvidence("Live API dashboard has three discovered bindings and named access", `Manual gaps: ${manual.length}; dashboard create/read/grant receipts: ${results.apply.receipts.filter((row) => typeof row.phase === "string" && row.phase.startsWith("dashboard-")).length}. This does not prove member OAuth or desktop rendering.`, manual.length === 0);
-  assert.deepEqual(manual, [], "Manual-step receipts are incomplete API setup, never readiness");
-  assert.ok(results.apply.receipts.some((row) => row.phase === "dashboard-verify" && row.ok === true));
-  assert.ok(results.apply.receipts.some((row) => row.phase === "dashboard-access-verify" && row.ok === true));
+  const verified = results.verify.receipts.filter((row) => row.phase === "verified-state");
+  assert.deepEqual(verified.map((row) => [row.authType, row.credentialMode, row.orgWide]), [["none", "shared", true], ["none", "shared", true], ["oauth", "per_member", true]]);
   assert.equal(results.verify.exitCode, 0);
+  evidence.recordAssertionEvidence("Live MCP configuration and cleanup", `Three MCP configurations were read back with correct auth, credential mode and org-wide access. Created count: ${createdIds.length}; teardown and post-delete reads confirmed cleanup. Calendar OAuth readiness is not claimed.`, true);
   if (results.reapply) {
     assert.equal(results.reapply.exitCode, 0);
     const reapplied = results.reapply.receipts.filter((row) => row.phase === "apply");
     assert.deepEqual(reapplied.map((row) => row.connectionId), applied.map((row) => row.connectionId));
     assert.deepEqual(reapplied.map((row) => [row.status, row.changedFields]), [[200, []], [200, []], [200, []]]);
     assert.equal(results.reapply.receipts.some((row) => row.phase === "dashboard-create" || row.phase === "dashboard-grant" || row.phase === "invite"), false);
+    evidence.recordAssertionEvidence("Live MCP idempotence", "The second apply returned three HTTP200 responses with identical connection IDs and empty changedFields; no duplicate dashboard, grant or invitation writes.", true);
   }
+  if (connectionsOnly) {
+    evidence.recordAssertionEvidence("Explicit connections-only scope", "This run proves registration, idempotence when enabled, and cleanup only. It does not claim Calendar consent or full dashboard readiness.", true);
+    return;
+  }
+  const manual = results.apply.receipts.filter((row) => row.phase === "manual-step");
+  evidence.recordAssertionEvidence("Full three-App dashboard readiness requires member consent", `Manual prerequisites: ${manual.length}. An expected connection_not_ready response is consent enforcement, not a product bug.`, manual.length === 0);
+  assert.deepEqual(manual, [], "Full three-App readiness is incomplete until the calling member connects");
+  assert.ok(results.apply.receipts.some((row) => row.phase === "dashboard-verify" && row.ok === true));
+  assert.ok(results.apply.receipts.some((row) => row.phase === "dashboard-access-verify" && row.ok === true));
 }, 1_800_000);
