@@ -227,11 +227,14 @@ describe("native Slack run", () => {
     expect(delivered).toBe(answer)
     expect(checkpoint.sentText).toBe(answer)
   })
-  test("long replies roll over using the same chunks mode as task progress", async () => {
+  test("long replies keep recipient routing without exposing identity in continuation chunks", async () => {
     const f = fixture()
     f.cp.phase = "read"
     f.cp.sessionId = "ses_1"
+    f.cp.recipientUserId = "UACTOR1"
+    f.cp.recipientTeamId = "TTEST"
     const calls: Record<string, unknown>[] = []
+    const streams: Record<string, unknown>[] = []
     await advanceSlackRun({
       checkpoint: f.cp,
       messageId: "msg_e",
@@ -243,8 +246,9 @@ describe("native Slack run", () => {
         finalAssistantText: "x".repeat(35_000),
         messages: [{ role: "assistant", toolCalls: [{ id: "tool1", name: "search", status: "completed" }] }],
       }),
-      slack: async (_method, body) => {
+      slack: async (method, body) => {
         calls.push(body)
+        if (method === "chat.startStream") streams.push(body)
         expect(body.markdown_text).toBeUndefined()
         return { ok: true, ts: "3.3" }
       },
@@ -252,6 +256,11 @@ describe("native Slack run", () => {
     expect(f.cp.streamTs).toBe("3.3")
     expect(f.cp.sentText).toHaveLength(35_000)
     expect(calls.some((body) => JSON.stringify(body.chunks ?? []).includes("task_update"))).toBe(true)
+    expect(streams).toHaveLength(1)
+    expect(streams[0]?.recipient_user_id).toBe("UACTOR1")
+    expect(streams[0]?.recipient_team_id).toBe("TTEST")
+    expect(JSON.stringify(streams[0]?.chunks)).not.toContain("UACTOR1")
+    expect(JSON.stringify(streams[0]?.chunks)).not.toContain("<@")
   })
 })
 test("manifest uses the agent surface, streaming permissions, and signed endpoints", () => {

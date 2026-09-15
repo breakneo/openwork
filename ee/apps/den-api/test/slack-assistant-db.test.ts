@@ -119,14 +119,12 @@ suite("Slack assistant: real database and signed HTTP journey", () => {
     db = (await import("../src/db.js")).db
     app = new Hono<{ Variables: OrgRouteVariables }>()
     ;(await import("../src/slack-assistant/routes.js")).registerSlackAssistantRoutes(app)
-    await db
-      .insert(OrganizationTable)
-      .values({
-        id: orgId,
-        name: "Slack test",
-        slug: orgId,
-        metadata: { complimentaryAccess: { openworkWeb: true }, capabilities: { slackAssistant: true } },
-      })
+    await db.insert(OrganizationTable).values({
+      id: orgId,
+      name: "Slack test",
+      slug: orgId,
+      metadata: { complimentaryAccess: { openworkWeb: true }, capabilities: { slackAssistant: true } },
+    })
     for (let i = 0; i < 2; i++) {
       await db.insert(AuthUserTable).values({ id: users[i], name: `Actor ${i}`, email: `${users[i]}@example.test` })
       await db.insert(MemberTable).values({ id: members[i], organizationId: orgId, userId: users[i], role: "member" })
@@ -199,6 +197,12 @@ suite("Slack assistant: real database and signed HTTP journey", () => {
     )[0]
     await repository.bindSlackOAuthMember(connection, members[0], fakeSlack)
     await drain()
+    const streams = slackCalls.filter((call) => call.method === "chat.startStream")
+    expect(streams).toHaveLength(1)
+    expect(streams[0]?.body.recipient_user_id).toBe(slackUsers[0])
+    expect(streams[0]?.body.recipient_team_id).toBe("TTEST")
+    expect(JSON.stringify(streams[0]?.body.chunks)).not.toContain(slackUsers[0])
+    expect(JSON.stringify(streams[0]?.body.chunks)).not.toContain("<@")
     expect(remoteCalls.filter((call) => call.action === "send")).toHaveLength(1)
     expect(remoteCalls.every((call) => call.userId === users[0])).toBe(true)
     expect(

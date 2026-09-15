@@ -238,7 +238,7 @@ export async function processSlackEvent(event: EventRow, suppliedDeps = defaultW
           thread_ts: cp.threadTs,
           recipient_user_id: event.slackUserId,
           recipient_team_id: event.teamId,
-          chunks: [{ type: "markdown_text", text: `Acting as <@${event.slackUserId}>\n\n` }],
+          chunks: [{ type: "markdown_text", text: "OpenWork task\n\n" }],
           task_display_mode: "timeline",
         }),
       )

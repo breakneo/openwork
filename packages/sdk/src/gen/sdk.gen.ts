@@ -297,7 +297,6 @@ import type {
   GetV1InstallConfigErrors,
   GetV1InstallConfigResponses,
   GetV1IntegrationsSlackOauthCallbackErrors,
-  GetV1IntegrationsSlackOauthCallbackResponses,
   GetV1LlmProviderCatalogByProviderIdErrors,
   GetV1LlmProviderCatalogByProviderIdResponses,
   GetV1LlmProviderCatalogErrors,
@@ -12775,6 +12774,8 @@ export class DenClient extends HeyApiClient {
 
   /**
    * Read Slack assistant setup
+   *
+   * Read connector configuration, organization eligibility, recent activity metrics, and the Slack app manifest. Only workspace admins can read setup; stored credentials are never returned.
    */
   public getV1McpConnectionsByConnectionIdSlackAssistant<ThrowOnError extends boolean = false>(
     parameters: {
@@ -12796,6 +12797,8 @@ export class DenClient extends HeyApiClient {
 
   /**
    * Configure Slack assistant installation
+   *
+   * Save the connector's Slack assistant settings and optionally replace its signing secret. Enabling requires the platform capability and OpenWork Web access. Requires a workspace admin browser session and recent verification.
    */
   public putV1McpConnectionsByConnectionIdSlackAssistant<ThrowOnError extends boolean = false>(
     parameters: {
@@ -12841,6 +12844,8 @@ export class DenClient extends HeyApiClient {
 
   /**
    * Start Slack bot installation
+   *
+   * Create a short-lived, single-use OAuth state tied to the installing admin and return the Slack authorization URL. The connector must already have OAuth credentials and a signing secret configured.
    */
   public postV1McpConnectionsByConnectionIdSlackAssistantInstall<ThrowOnError extends boolean = false>(
     parameters: {
@@ -12862,19 +12867,22 @@ export class DenClient extends HeyApiClient {
 
   /**
    * Complete Slack bot installation
+   *
+   * Consume the single-use OAuth state, recheck the installing admin's access, and exchange the Slack authorization code for bot credentials. Redirect to connector settings after a successful installation.
    */
   public getV1IntegrationsSlackOauthCallback<ThrowOnError extends boolean = false>(
     options?: Options<never, ThrowOnError>,
   ) {
-    return (options?.client ?? this.client).get<
-      GetV1IntegrationsSlackOauthCallbackResponses,
-      GetV1IntegrationsSlackOauthCallbackErrors,
-      ThrowOnError
-    >({ url: "/v1/integrations/slack/oauth/callback", ...options });
+    return (options?.client ?? this.client).get<unknown, GetV1IntegrationsSlackOauthCallbackErrors, ThrowOnError>({
+      url: "/v1/integrations/slack/oauth/callback",
+      ...options,
+    });
   }
 
   /**
    * Receive signed Slack assistant events
+   *
+   * Verify the Slack signature and workspace, answer URL verification challenges, and durably enqueue supported events before acknowledging. Disabled or ineligible invocations are acknowledged without routing to a member runtime.
    */
   public postV1IntegrationsSlackByConnectionIdEvents<ThrowOnError extends boolean = false>(
     parameters: {
@@ -12896,6 +12904,8 @@ export class DenClient extends HeyApiClient {
 
   /**
    * Receive Slack commands
+   *
+   * Verify the signed Slack slash command and return an ephemeral link for the member to connect their own account in OpenWork.
    */
   public postV1IntegrationsSlackByConnectionIdCommands<ThrowOnError extends boolean = false>(
     parameters: {
@@ -12917,6 +12927,8 @@ export class DenClient extends HeyApiClient {
 
   /**
    * Receive Slack interactions
+   *
+   * Verify the signed Slack interaction and record supported feedback only for the member who owns the referenced assistant event.
    */
   public postV1IntegrationsSlackByConnectionIdInteractions<ThrowOnError extends boolean = false>(
     parameters: {

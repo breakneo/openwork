@@ -90,7 +90,7 @@ async function appendText(
           thread_ts: checkpoint.threadTs,
           recipient_user_id: checkpoint.recipientUserId,
           recipient_team_id: checkpoint.recipientTeamId,
-          chunks: [{ type: "markdown_text", text: `Acting as <@${checkpoint.recipientUserId}> · continued\n\n` }],
+          chunks: [{ type: "markdown_text", text: "OpenWork task · continued\n\n" }],
           task_display_mode: "timeline",
         }),
       )

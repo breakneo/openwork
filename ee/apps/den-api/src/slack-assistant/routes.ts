@@ -14,6 +14,15 @@ import { normalizeDenTypeId } from "@openwork-ee/utils/typeid"
 import { appLogger } from "../observability/logger.js"
 import { db } from "../db.js"
 import { env } from "../env.js"
+import {
+  forbiddenSchema,
+  invalidRequestSchema,
+  jsonResponse,
+  notFoundSchema,
+  okSchema,
+  textResponse,
+  unauthorizedSchema,
+} from "../openapi.js"
 import { paramValidator, jsonValidator, orgMemberRoute, publicRoute, signedWebhookRoute } from "../middleware/index.js"
 import {
   idParamSchema,
@@ -60,21 +69,68 @@ const configSchema = z.object({
 function publicBase(request: Request) {
   return env.apiPublicUrl ?? publicRequestUrl(request, { trustedOrigins: env.publicUrlTrustedOrigins }).origin
 }
-const routeDescription = (summary: string, tag = "Authentication") =>
-  describeRoute({
-    tags: [tag],
-    summary,
-    responses: {
-      200: { description: "Request handled." },
-      400: { description: "Invalid request." },
-      403: { description: "Access denied." },
-    },
-  })
+const setupResponseSchema = z.object({
+  enabled: z.boolean(),
+  installed: z.boolean(),
+  teamId: z.string().nullable(),
+  rolloutEnabled: z.boolean().describe("Whether the platform admin enabled Slack Assistant for this organization."),
+  hasSigningSecret: z.boolean(),
+  eligible: z.boolean(),
+  webAccess: z.boolean(),
+  channelIds: z.array(z.string()),
+  shadowMode: z.boolean(),
+  dailyLimit: z.number().int(),
+  metrics: z.object({
+    completed: z.number().int(),
+    failed: z.number().int(),
+    active: z.number().int(),
+    awaitingConnection: z.number().int(),
+    helpful: z.number().int(),
+    needsWork: z.number().int(),
+    firstTextMedianMs: z.number().nullable(),
+    finalMedianMs: z.number().nullable(),
+    sampledEvents: z.number().int(),
+  }),
+  manifest: z.record(z.string(), z.unknown()).describe("Slack app manifest to import when configuring the bot."),
+})
+const setupErrorSchema = z.object({
+  error: z.enum([
+    "individual_accounts_required",
+    "signing_secret_required",
+    "setup_required",
+    "browser_session_required",
+    "slack_assistant_not_enabled",
+    "openwork_web_access_required",
+  ]),
+  message: z.string().optional(),
+})
+const adminResponses = {
+  400: jsonResponse("Invalid parameters or incomplete Slack setup.", z.union([invalidRequestSchema, setupErrorSchema])),
+  401: jsonResponse("Authentication required.", unauthorizedSchema),
+  403: jsonResponse(
+    "Admin access, recent verification, or Slack eligibility required.",
+    z.union([forbiddenSchema, setupErrorSchema]),
+  ),
+  404: jsonResponse("Organization or connection not found.", notFoundSchema),
+}
+const rejectedWebhookSchema = z.object({ ok: z.literal(false) })
+const webhookResponses = {
+  400: jsonResponse("Invalid parameters or Slack payload.", z.union([invalidRequestSchema, rejectedWebhookSchema])),
+  401: jsonResponse("Missing installation or invalid Slack signature.", rejectedWebhookSchema),
+  403: jsonResponse("Slack workspace or app does not match this installation.", rejectedWebhookSchema),
+  413: textResponse("Slack payload exceeds the request size limit."),
+}
 
 export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVariables }>(app: Hono<T>) {
   app.get(
     "/v1/mcp-connections/:connectionId/slack-assistant",
-    routeDescription("Read Slack assistant setup"),
+    describeRoute({
+      tags: ["Authentication"],
+      summary: "Read Slack assistant setup",
+      description:
+        "Read connector configuration, organization eligibility, recent activity metrics, and the Slack app manifest. Only workspace admins can read setup; stored credentials are never returned.",
+      responses: { ...adminResponses, 200: jsonResponse("Slack assistant setup.", setupResponseSchema) },
+    }),
     orgMemberRoute(),
     paramValidator(connectionParams),
     async (c) => {
@@ -105,7 +161,17 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
   )
   app.put(
     "/v1/mcp-connections/:connectionId/slack-assistant",
-    routeDescription("Configure Slack assistant installation"),
+    describeRoute({
+      tags: ["Authentication"],
+      summary: "Configure Slack assistant installation",
+      description:
+        "Save the connector's Slack assistant settings and optionally replace its signing secret. Enabling requires the platform capability and OpenWork Web access. Requires a workspace admin browser session and recent verification.",
+      responses: {
+        ...adminResponses,
+        200: jsonResponse("Slack assistant settings saved.", okSchema),
+        409: jsonResponse("Connection changed while saving.", z.object({ error: z.literal("connection_changed") })),
+      },
+    }),
     orgMemberRoute(),
     paramValidator(connectionParams),
     jsonValidator(configSchema),
@@ -160,7 +226,16 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
   )
   app.post(
     "/v1/mcp-connections/:connectionId/slack-assistant/install",
-    routeDescription("Start Slack bot installation"),
+    describeRoute({
+      tags: ["Authentication"],
+      summary: "Start Slack bot installation",
+      description:
+        "Create a short-lived, single-use OAuth state tied to the installing admin and return the Slack authorization URL. The connector must already have OAuth credentials and a signing secret configured.",
+      responses: {
+        ...adminResponses,
+        200: jsonResponse("Slack bot authorization URL.", z.object({ url: z.string().url() })),
+      },
+    }),
     orgMemberRoute(),
     paramValidator(connectionParams),
     async (c) => {
@@ -197,7 +272,22 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
   )
   app.get(
     "/v1/integrations/slack/oauth/callback",
-    routeDescription("Complete Slack bot installation"),
+    describeRoute({
+      tags: ["Authentication"],
+      summary: "Complete Slack bot installation",
+      description:
+        "Consume the single-use OAuth state, recheck the installing admin's access, and exchange the Slack authorization code for bot credentials. Redirect to connector settings after a successful installation.",
+      security: [],
+      responses: {
+        302: {
+          description: "Redirect to the installed connector's settings.",
+          headers: { Location: { schema: { type: "string", format: "uri" } } },
+        },
+        400: textResponse("Installation cancelled, expired, incomplete, or missing required permissions."),
+        403: textResponse("The installing member no longer has admin access."),
+        409: textResponse("Slack workspace conflicts with an existing installation."),
+      },
+    }),
     publicRoute,
     async (c) => {
       const state = c.req.query("state")
@@ -280,7 +370,20 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
 
   app.post(
     "/v1/integrations/slack/:connectionId/events",
-    routeDescription("Receive signed Slack assistant events", "Webhooks"),
+    describeRoute({
+      tags: ["Webhooks"],
+      summary: "Receive signed Slack assistant events",
+      description:
+        "Verify the Slack signature and workspace, answer URL verification challenges, and durably enqueue supported events before acknowledging. Disabled or ineligible invocations are acknowledged without routing to a member runtime.",
+      security: [],
+      responses: {
+        ...webhookResponses,
+        200: jsonResponse(
+          "Event acknowledged or URL verification challenge.",
+          z.union([okSchema, z.object({ challenge: z.string() })]),
+        ),
+      },
+    }),
     signedWebhookRoute,
     paramValidator(connectionParams),
     bodyLimit({ maxSize: 1_000_000 }),
@@ -349,7 +452,22 @@ export function registerSlackAssistantRoutes<T extends { Variables: OrgRouteVari
   for (const action of ["commands", "interactions"]) {
     app.post(
       `/v1/integrations/slack/:connectionId/${action}`,
-      routeDescription(`Receive Slack ${action}`, "Webhooks"),
+      describeRoute({
+        tags: ["Webhooks"],
+        summary: `Receive Slack ${action}`,
+        description:
+          action === "commands"
+            ? "Verify the signed Slack slash command and return an ephemeral link for the member to connect their own account in OpenWork."
+            : "Verify the signed Slack interaction and record supported feedback only for the member who owns the referenced assistant event.",
+        security: [],
+        responses: {
+          ...webhookResponses,
+          200: jsonResponse(
+            action === "commands" ? "Private connection instructions." : "Interaction acknowledged.",
+            action === "commands" ? z.object({ response_type: z.literal("ephemeral"), text: z.string() }) : okSchema,
+          ),
+        },
+      }),
       signedWebhookRoute,
       paramValidator(connectionParams),
       bodyLimit({ maxSize: 100_000 }),
