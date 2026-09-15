@@ -10,7 +10,7 @@ import type {
   WorkflowVersion,
 } from "@openwork/types/workflows"
 import { WorkflowGraph } from "@openwork/codemode"
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, type SQL } from "@openwork-ee/den-db/drizzle"
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql, type SQL } from "@openwork-ee/den-db/drizzle"
 import {
   AutomationRevisionTable,
   AutomationRunTable,
@@ -236,6 +236,14 @@ async function workflowVersions(
   })
 }
 
+function snapshotReadAccess(memberId: DenTypeId<"member">) {
+  if (!memberId) throw new Error("workflow_receipt_member_required")
+  return or(
+    eq(WorkflowRunTable.org_membership_id, memberId),
+    eq(WorkflowRunTable.source, sql`concat('plugin:', ${WorkflowRunTable.plugin_id}, ':', ${WorkflowRunTable.config_object_id})`),
+  )
+}
+
 async function snapshotRows(
   organizationId: DenTypeId<"organization">,
   configObjectId: ConfigObjectId,
@@ -246,7 +254,7 @@ async function snapshotRows(
   if (!memberId) throw new Error("workflow_receipt_member_required")
   const conditions: Array<SQL | undefined> = [
     eq(WorkflowRunTable.organization_id, organizationId),
-    eq(WorkflowRunTable.org_membership_id, memberId),
+    snapshotReadAccess(memberId),
     eq(WorkflowRunTable.config_object_id, configObjectId),
     isNotNull(WorkflowRunTable.config_object_version_id),
   ]
@@ -413,7 +421,7 @@ export async function getWorkflowSnapshot(input: {
     .where(and(
     eq(WorkflowRunTable.id, parseReceiptId(input.receiptId)),
     eq(WorkflowRunTable.organization_id, resource.configObject.organizationId),
-    eq(WorkflowRunTable.org_membership_id, input.context.organizationContext.currentMember.id),
+    snapshotReadAccess(input.context.organizationContext.currentMember.id),
     eq(WorkflowRunTable.config_object_id, resource.configObject.id),
     isNotNull(WorkflowRunTable.config_object_version_id),
   )).limit(1)
