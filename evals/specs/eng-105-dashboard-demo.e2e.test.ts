@@ -497,12 +497,15 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     expect(clockApproval.observed.every(dialog => dialog.expected)).toBe(true);
     expect(clockApproval.approved(), "Real released-host write confirmation").toBeGreaterThan(0);
     evidence.recordAssertionEvidence("Accepted the exact native Clock save confirmation", JSON.stringify(clockApproval.observed), true);
+    await evalIn(clockFrame, () => document.querySelector(".wc-footer")?.scrollIntoView({ block: "end" }));
     await checkpoint(alex, "12-world-clocks-edit-saved");
     await clickTarget(clockFrame, { role: "button", label: "Done" });
     await refresh(alex, text(clockApp, "title"));
     await using fresh = await frame(alex, "World Clocks");
     await see(fresh, city);
     expect(await evalIn(fresh, () => [...document.querySelectorAll(".wc-card__city")].map(node => node.textContent?.trim()))).toContain(city);
+    await evalIn(fresh, browserScript(city => [...document.querySelectorAll(".wc-card__city")]
+      .find(node => node.textContent?.trim() === city)?.closest(".wc-card")?.scrollIntoView({ block: "center" }), [city]));
     await checkpoint(alex, "13-world-clocks-fresh-tool-persisted");
     expect(array(object(await readBoard()).item, "elements")).toEqual(elements);
     return city;
