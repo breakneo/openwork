@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,26 @@ export async function assertReleaseSource(): Promise<void> {
   if (forbidden.length) throw new Error(`ENG105 requires ${RELEASE_TAG} product source; non-overlay changes: ${forbidden.join(", ")}`);
 }
 
+/** Register before boot resources so this runs only after our Den and desktops stop. */
+export async function preserveReleaseGeneratedTypes(stack: AsyncDisposableStack): Promise<void> {
+  const relativePath = "ee/apps/den-web/next-env.d.ts";
+  const path = join(REPO_ROOT, relativePath);
+  const original = await readFile(path, "utf8");
+  const released = (await execFileAsync("git", ["show", `${RELEASE_SHA}:${relativePath}`], { cwd: REPO_ROOT })).stdout;
+  if (original !== released) throw new Error("ENG105 next-env source does not match the release; preserved");
+  const expected = original.replace('import "./.next/dev/types/routes.d.ts";\n',
+    'import "./.next/dev/types/routes.d.ts";\nimport "./.next/dev/types/root-params.d.ts";\n');
+  stack.defer(async () => {
+    const current = await readFile(path, "utf8");
+    if (current !== original) {
+      if (current !== expected) throw new Error("ENG105 preserved unexpected next-env changes; inspect before next boot");
+      await writeFile(path, original);
+    }
+    await assertReleaseSource();
+    console.log("ENG105 teardown: release provenance ready for the next cold boot");
+  });
+}
+
 function isReceipt(value: unknown): value is RegistrationReceipt {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   return typeof Reflect.get(value, "key") === "string"
@@ -101,6 +121,7 @@ export async function bootAcmeDemoEng105(
   // Demo invitation mail stays in Den's dev outbox; never inherit a mail provider.
   process.env.RESEND_API_KEY = "";
   process.env.SMTP_HOST = "";
+  await preserveReleaseGeneratedTypes(stack);
   const world = await bootAcmeDemo(stack, place);
   const { den, jordan } = world;
   const auth = { authorization: `Bearer ${den.admin.token}` };
