@@ -189,9 +189,33 @@ export default function App() {
     }
   }, []);
 
+  const runtimeObservation = useRef(0);
   useEffect(() => {
     void boot();
+    return coworkerBridge.onRuntimeChanged((info) => {
+      runtimeObservation.current += 1;
+      setLiveActivityBySlug({});
+      setActivityBySlug({});
+      setRuntime(info);
+    });
   }, [boot]);
+
+  useEffect(() => {
+    if (!runtime) return;
+    let reading = false;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      if (reading || cancelled) return;
+      reading = true;
+      const observation = runtimeObservation.current;
+      try {
+        const info = await coworkerBridge.runtimeInfo();
+        if (!cancelled && observation === runtimeObservation.current) setRuntime((current) => current && current.readinessKey === info.readinessKey && current.engineManaged === info.engineManaged && current.engineError === info.engineError ? current : info);
+      } catch { }
+      finally { reading = false; }
+    }, 5_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [runtime?.serverUrl]);
 
   useEffect(() => {
     if (!runtime) return;

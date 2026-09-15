@@ -3,6 +3,9 @@ import { test } from "node:test";
 import {
   coalesceCalls,
   connectedModelCatalog,
+  createWorkspaceReadiness,
+  prepareCurrentWorkspace,
+  WORKSPACE_STARTUP_TIMEOUT_MS,
   hasPendingInteractions,
   parseModelPreference,
   recommendModel,
@@ -11,6 +14,64 @@ import {
 } from "./threads.ts";
 import { fixtureCatalog, fixtureModel, fixtureProvider } from "./provider-catalog.fixture.ts";
 import { MODEL_INTELLIGENCE_INDEX, normalizeModelIntelligence } from "./model-intelligence.ts";
+
+test("startup readiness is bounded, cancellation-safe and cannot publish a stale ready result", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  for (const mode of ["timeout", "cancel", "unavailable"]) {
+    let resolve = () => {};
+    let reject = (_cause: Error) => {};
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const deferred = { promise, resolve, reject };
+    let calls = 0;
+    const ready = createWorkspaceReadiness(async () => { calls += 1; await deferred.promise; });
+    const release = ready.retain();
+    release();
+    const retained = ready.retain();
+    const first = ready.wait();
+    const second = ready.wait();
+    const outcomes = Promise.allSettled([first, second]);
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    if (mode === "timeout") t.mock.timers.tick(WORKSPACE_STARTUP_TIMEOUT_MS);
+    else if (mode === "cancel") ready.dispose();
+    else deferred.reject(new Error("The selected model is unavailable"));
+    assert.ok((await outcomes).every((result) => result.status === "rejected"));
+    assert.equal(ready.snapshot().state, "error");
+    deferred.resolve();
+    await Promise.resolve();
+    assert.equal(ready.snapshot().state, "error");
+    await assert.rejects(ready.wait());
+    retained();
+  }
+  let releaseOld = () => {};
+  let reachedOld = () => {};
+  const oldRead = new Promise<void>((resolve) => { releaseOld = resolve; });
+  const oldReached = new Promise<void>((resolve) => { reachedOld = resolve; });
+  const old = createWorkspaceReadiness(async () => {});
+  let scope = { readiness: old, expected: { workspaceId: "fixture", createdAt: "original", readinessKey: "old" } };
+  const draft = "Original request";
+  const writes: string[] = [];
+  const pending = prepareCurrentWorkspace(() => scope, async (signal) => {
+    const key = scope.expected.readinessKey;
+    if (key === "old") { reachedOld(); await oldRead; }
+    signal.throwIfAborted();
+    return { key, draft };
+  }, new AbortController().signal);
+  await oldReached;
+  scope = { ...scope, readiness: createWorkspaceReadiness(async () => {}), expected: { ...scope.expected, readinessKey: "replacement" } };
+  old.dispose();
+  const prepared = await pending;
+  assert.equal(writes.length, 0);
+  assert.equal(prepared.value.draft, draft);
+  assert.equal(prepared.expected.readinessKey, "replacement");
+  prepared.assertCurrent();
+  writes.push(prepared.value.draft);
+  releaseOld();
+  await Promise.resolve();
+  assert.deepEqual(writes, [draft]);
+  scope.readiness.dispose();
+  assert.throws(prepared.assertCurrent);
+});
 
 test("permissions and questions keep the thread waiting for the person", () => {
   const permission = { id: "p1", sessionID: "s1", protocol: "legacy" as const, action: "bash", resources: ["rm -rf build"], canAlways: true };

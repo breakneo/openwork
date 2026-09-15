@@ -15,6 +15,7 @@ export type ExecutionActivity = {
   continuation: boolean;
   retryLabel?: string;
   failure?: string;
+  admission?: { phase: "prepared" | "attempted"; confirmed: boolean; stopped: boolean; refusal: { code: string; status?: number; notSubmitted?: boolean } | null };
   pendingCoworkers: number;
   pendingWorkers: number;
   available: boolean;

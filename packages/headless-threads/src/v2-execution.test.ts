@@ -439,6 +439,35 @@ test("paired context keeps its own uncertainty and cannot replay after preflight
     assert.equal(state.seen.filter((item) => item.path.endsWith("/synthetic")).length, 1);
     assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 0);
   }
+  const { options, state } = await fixture(t);
+  let release = () => {}, entered = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  let generation = 1, boundaries = 0, intents = 0;
+  const client = createHeadlessThreadClientV2({ ...options, onIntent: () => { intents++; }, fetch: async (url, init) => {
+    const response = await fetch(url, init);
+    if (init?.method === "POST" && new URL(url).pathname.endsWith("/synthetic")) { entered(); await held; }
+    return response;
+  } });
+  const input = { messageId: "msg_context_generation", prompt: "Hello", context: "Reference", beforeInput: async () => {
+    boundaries++;
+    if (generation !== 1) throw Object.assign(new Error("Generation changed"), { code: "readiness_changed" });
+  } };
+  const sending = assert.rejects(client.sendTurn(sid, input), { code: "readiness_changed" });
+  await reached;
+  assert.equal(boundaries, 1);
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 0);
+  generation = 2;
+  release();
+  await sending;
+  assert.equal(boundaries, 2);
+  assert.equal(intents, 1);
+  assert.deepEqual(state.inbox.map((item) => item.id), ["msg_context_generation_context"]);
+  const observer = createHeadlessThreadClientV2(options);
+  await assert.rejects(observer.sendTurn(sid, input), { code: "admission_unknown" });
+  await assert.rejects(observer.retryTurn(sid, input), { code: "admission_unknown" });
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/synthetic")).length, 1);
+  assert.equal(state.seen.filter((item) => item.path.endsWith("/prompt")).length, 0);
 });
 
 test("unknown admission stays blocked, recovery never resends, and unsupported masks perform no writes", async (t) => {

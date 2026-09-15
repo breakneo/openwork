@@ -355,6 +355,7 @@ export type RuntimeInfo = {
   deepLinksRegistered: boolean;
   engineManaged: boolean;
   engineError: string;
+  readinessKey?: string;
 };
 
 /** Outcome of one embedded-server provider sync pass for the signed-in account. */
@@ -512,6 +513,7 @@ type BridgeWindow = Window & {
   __COWORKER__?: {
     invoke: (command: string, payload?: unknown) => Promise<BridgeResponse>;
     onDeepLink?: (listener: (urls: string[]) => void) => () => void;
+    onRuntimeChanged?: (listener: (runtime: RuntimeInfo) => void) => () => void;
     onReactionsChanged?: (listener: (change: { scope: MessageReactionScope; revision: number }) => void) => () => void;
   };
 };
@@ -587,7 +589,7 @@ export const coworkerBridge = {
     /** Explicit person recovery may return a NEW messageId and continuation prompt after tool work. */
     selectSkill: (input: { slug: string; uri: string; label: string; account: { baseUrl: string; orgId: string; email: string } }) => invoke<import("./skill-selection.ts").SelectedSkill>("turns.selectSkill", input),
     validateSkills: (slug: string, fields: import("./skill-selection.ts").SkillFields) => invoke<void>("turns.validateSkills", { slug, ...fields }),
-    send: (input: import("./skill-selection.ts").SkillFields & { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<(HeadlessTurnAcceptance & { prompt: string; rejected?: false }) | { rejected: true; messageId: string; error: string }>("turns.send", input),
+    send: (input: import("./skill-selection.ts").SkillFields & { slug: string; threadId: string; prompt: string; messageId: string; model?: HeadlessThreadModel; expectedReadiness?: { workspaceId: string; createdAt: string; readinessKey: string }; retry?: boolean; retryByPerson?: boolean; retryLabel?: string; kind: "discussion" | "assignment" | "worker" }) => invoke<(HeadlessTurnAcceptance & { prompt: string; rejected?: false }) | { rejected: true; messageId: string; error: string; notSubmitted: boolean; code: string; status?: number }>("turns.send", input),
     cancel: (slug: string, threadId: string, messageId?: string) => invoke<{ ok: boolean }>("turns.cancel", { slug, threadId, messageId }),
   },
   templates: {
@@ -596,6 +598,10 @@ export const coworkerBridge = {
     export: (slug: string) => invoke<{ saved: boolean }>("templates.export", { slug }),
   },
   runtimeInfo: () => invoke<RuntimeInfo>("runtime.info"),
+  onRuntimeChanged: (listener: (runtime: RuntimeInfo) => void) => {
+    const host: BridgeWindow = window;
+    return host.__COWORKER__?.onRuntimeChanged?.(listener) ?? (() => undefined);
+  },
   /** Stop and start the local AI service, then report the fresh state. */
   restartRuntime: () => invoke<RuntimeInfo>("runtime.restart"),
   coworkers: {
@@ -606,7 +612,7 @@ export const coworkerBridge = {
       invoke<CoworkerSummary>("coworkers.create", input),
     update: (slug: string, patch: Partial<Pick<CoworkerSummary, "workspaceId" | "conversationThreadId" | "automations" | "mission" | "role" | "model" | "modelVariant" | "useAppModelDefaults" | "thinkingModel" | "thinkingModelVariant" | "deliveryModel" | "deliveryModelVariant" | "modelChosenBy" | "modelMode" | "modelSelectionPreferences" | "effortPreference" | "avatarColor" | "avatarGlasses" | "personality">>) =>
       invoke<CoworkerSummary>("coworkers.update", { slug, patch }),
-    ensureWorkspace: (slug: string) => invoke<CoworkerSummary>("coworkers.ensureWorkspace", { slug }),
+    ensureWorkspace: (slug: string, expected?: { workspaceId: string; createdAt: string; readinessKey: string }) => invoke<CoworkerSummary & { readinessKey: string }>("coworkers.ensureWorkspace", { slug, expected }),
     /** Retire: archive the whole home under `.retired/`; nothing is deleted. */
     remove: (slug: string) => invoke<{ ok: boolean; archiveId: string }>("coworkers.delete", { slug }),
     listRetired: () => invoke<RetiredCoworker[]>("coworkers.retired.list"),

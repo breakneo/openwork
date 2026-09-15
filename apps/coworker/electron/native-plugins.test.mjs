@@ -29,6 +29,8 @@ import { NATIVE_TURN_ROLES } from "./native-turns.mjs";
 import { createCoworkerToolsServer } from "./coworker-tools.mjs";
 import { assertWorkerToolContext, WORKER_MANAGEMENT } from "./worker-controls.mjs";
 import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { createWorkspaceReadiness } from "../src/lib/threads.ts";
+import { createComposerDraftStore } from "../src/lib/skill-selection.ts";
 import { selectCatalogSkill, selectionFields, validateSkillSelections, sameSkillFields, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
 
 // Use the published, pinned packages, not a v1-shaped SDK double. The standalone
@@ -53,7 +55,7 @@ for (const [name, version] of Object.entries(NATIVE_PLUGIN_DEPENDENCIES)) {
 assert.equal(JSON.parse(await readFile(new URL("../native-runtime.json", import.meta.url), "utf8")).opencodeV2Version, NATIVE_PLUGIN_VERSION);
 assert.equal(JSON.parse(await readFile(new URL("../../server/src/opencode-v2-artifacts-beta19271.json", import.meta.url), "utf8")).version, NATIVE_PLUGIN_VERSION);
 
-test("native launch scripts finish prerequisite builds before loading plugin preparation", async () => {
+test("native launch scripts finish prerequisite builds before loading plugin preparation", async (t) => {
   for (const [script, expected] of [
     ["dev.mjs", ["@openwork/headless-threads", "openwork-server"]],
     ["electron-build.mjs", ["@openwork/automations", "@openwork/headless-threads", "openwork-server"]],
@@ -100,23 +102,39 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
   const handle = { managedOpencodeV2: { isAlive: () => true } };
   const coworker = { slug: "fixture", name: "Fixture", workspaceId: "ws_fixture" };
   let reply = () => ready.promise;
+  let generation = "fixture-generation";
   const warm = runInNewContext(`${source}\nrunCoworkerWorkspaceWarmup`, {
     ensureToolsServer: async () => ({}), installNativeCoworkerPlugins: async () => undefined,
     ensurePlatformServer: async () => handle, registerCoworkerTools: async () => undefined,
     toolsRegistered: new Set(), serverHandle: handle, warmedCoworkerWorkspaces, prepareNativeTurnRoles,
+    AbortSignal, warmedCoworkerScopes: new Map(), workspaceReadinessScope: () => generation,
     nativeWorkspaceRequest: async (_handle, _workspaceId, method, route, body) => {
       calls.push({ method, route, body });
       if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "turn-roles", "events", "abilities"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
       if (route === "/api/rpc/coworker.turn-roles/prepare") { reached.resolve(); return reply(); }
     },
   });
-  const warming = warm(coworker);
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const readiness = createWorkspaceReadiness((signal) => warm(coworker, signal));
+  const draft = createComposerDraftStore({ read: () => ({ text: "Original request", skills: [] }), write: () => {} });
+  const original = draft.read("fixture:new");
+  const submissions = [];
+  const warming = readiness.wait().then(() => { submissions.push(original.value.text); });
   await reached.promise;
+  t.mock.timers.tick(30_000);
+  assert.equal(readiness.snapshot().state, "starting");
+  assert.equal(draft.read("fixture:new").value.text, "Original request");
+  draft.update("fixture:new", { text: "Still editable", skills: [] });
+  assert.equal(submissions.length, 0);
+  assert.equal(calls.some((call) => /\/(prompt|synthetic)$/.test(call.route)), false);
   assert.equal(warmedCoworkerWorkspaces.size, 0);
   assert.deepEqual(calls.map((call) => call.route), ["/api/plugin/await-activation", "/api/plugin", "/api/rpc/coworker.turn-roles/prepare"]);
   assert.deepEqual(calls.at(-1).body, { input: {} });
   ready.resolve({ output: { ready: true } });
   await warming;
+  assert.equal(readiness.snapshot().state, "ready");
+  assert.deepEqual(submissions, ["Original request"]);
+  assert.equal(draft.read("fixture:new").value.text, "Still editable");
   assert.equal(warmedCoworkerWorkspaces.has("ws_fixture"), true);
   warmedCoworkerWorkspaces.clear();
   reply = async () => ({ output: { ready: false } });
@@ -124,6 +142,9 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
   assert.equal(warmedCoworkerWorkspaces.size, 0);
   reply = async () => { throw new Error("Readiness failed"); };
   await assert.rejects(warm(coworker), /Readiness failed/);
+  assert.equal(warmedCoworkerWorkspaces.size, 0);
+  reply = async () => { generation = "replacement-generation"; return { output: { ready: true } }; };
+  await assert.rejects(warm(coworker), /changed during workspace preparation/);
   assert.equal(warmedCoworkerWorkspaces.size, 0);
 });
 

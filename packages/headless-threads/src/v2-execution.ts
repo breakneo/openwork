@@ -6,6 +6,7 @@ import type { CreateThreadInput, HeadlessThreadClient, HeadlessThreadClientOptio
 
 export type HeadlessThreadClientV2Options = HeadlessThreadClientOptions & {
   defaultAgent?: string;
+  admissionTimeoutMs?: number;
   /** Persist generated identities before the first native write. Errors retain these IDs too. */
   onIntent?: (intent: { threadId: string; messageId?: string }) => void | Promise<void>;
 };
@@ -302,9 +303,9 @@ export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Opti
           if (!marked) {
             await options.onIntent?.({ threadId, messageId });
             input.signal?.throwIfAborted(); options.signal?.throwIfAborted();
-            await input.beforeInput?.();
-            marked = true;
           }
+          await input.beforeInput?.();
+          marked = true;
           admissions.set(scope, { messageId, uncertain: true, uncertainInput: value });
           submittedInputs.add(`${scope}/${messageId}`);
         });

@@ -34,6 +34,11 @@ if (process.isMainFrame) {
       ipcRenderer.on("coworker:deep-link", handler);
       return () => ipcRenderer.removeListener("coworker:deep-link", handler);
     },
+    onRuntimeChanged: (listener) => {
+      const handler = (_event, info) => listener(info);
+      ipcRenderer.on("coworker:runtime-changed", handler);
+      return () => ipcRenderer.removeListener("coworker:runtime-changed", handler);
+    },
     onReactionsChanged: (listener) => {
       const handler = (_event, change) => {
         const scope = change?.scope;

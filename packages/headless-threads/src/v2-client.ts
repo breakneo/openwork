@@ -210,6 +210,9 @@ export interface NativeV2ClientOptions {
   signal?: AbortSignal;
   /** Bounds a request and the complete reconciliation/stop operation. Default 15s. */
   requestTimeoutMs?: number;
+  admissionTimeoutMs?: number;
+  now?: () => number;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export function createNativeV2Client(options: NativeV2ClientOptions) {
@@ -222,6 +225,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
   const mount = `/workspace/${encodeURIComponent(options.workspaceId)}/opencode2/api`;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const timeoutMs = z.number().int().positive().parse(options.requestTimeoutMs ?? 15_000);
+  const admissionTimeoutMs = options.admissionTimeoutMs === undefined ? undefined : z.number().int().positive().max(120_000).parse(options.admissionTimeoutMs);
   const attempted = new Set<string>();
   const preparing = new Set<string>();
   const headers = { Authorization: `Bearer ${options.token}`, ...(options.hostToken === undefined ? {} : { "X-OpenWork-Host-Token": options.hostToken }) };
@@ -389,14 +393,28 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
     } catch (error) {
       if (!attempted.has(key)) throw error;
       if (error instanceof HeadlessThreadError && (error.code === "input_conflict" || [400, 401, 403, 404, 422].includes(error.status ?? 0))) throw error;
-      // A fresh read deadline can observe a POST whose own deadline expired.
-      // Caller/client cancellation still applies; neither path repeats the POST.
-      try {
-        const reconciled = await reconcileAdmission(id, input.id, signal);
-        if (reconciled.state !== "unobserved") return matching(reconciled, input, path);
-      } catch (reconciliationError) {
-        if (reconciliationError instanceof HeadlessThreadError && reconciliationError.code === "input_conflict") throw reconciliationError;
-      }
+      const budget = admissionTimeoutMs ?? timeoutMs;
+      const now = options.now ?? Date.now;
+      const deadline = now() + budget;
+      const observationSignal = AbortSignal.any([AbortSignal.timeout(budget), ...[signal, options.signal].filter((value): value is AbortSignal => value !== undefined)]);
+      do {
+        if (observationSignal.aborted) break;
+        try {
+          const reconciled = await reconcileAdmission(id, input.id, observationSignal);
+          observationSignal.throwIfAborted();
+          if (reconciled.state !== "unobserved") return matching(reconciled, input, path);
+        } catch (reconciliationError) {
+          if (reconciliationError instanceof HeadlessThreadError && (reconciliationError.code === "input_conflict" || [401, 403, 404].includes(reconciliationError.status ?? 0))) throw reconciliationError;
+        }
+        if (admissionTimeoutMs === undefined || observationSignal.aborted || now() >= deadline) break;
+        const delay = Math.min(500, deadline - now());
+        if (options.sleep) await options.sleep(delay, observationSignal);
+        else await new Promise<void>((resolve) => {
+          const done = () => { clearTimeout(timer); observationSignal.removeEventListener("abort", done); resolve(); };
+          const timer = setTimeout(done, delay);
+          observationSignal.addEventListener("abort", done, { once: true });
+        });
+      } while (now() < deadline);
       throw failure("admission_unknown", "POST", path, "Native admission could not be confirmed. Keep the ID and reconcile; do not resend.");
     } finally { preparing.delete(key); }
   }

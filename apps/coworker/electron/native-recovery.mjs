@@ -1,4 +1,10 @@
-import { cancelNativeV2TurnContext, nativeV2AttachmentsMatch, nativeV2InputSkillsMatch, nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { HeadlessThreadError, cancelNativeV2TurnContext, nativeV2AttachmentsMatch, nativeV2InputSkillsMatch, nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+
+export function nativeAdmissionRefusal(error) {
+  if (!(error instanceof HeadlessThreadError) || error.method !== "POST" || !/\/(prompt|synthetic)$/.test(error.path)
+    || ![400, 401, 403, 404, 422].includes(error.status)) return null;
+  return { code: error.code, status: error.status };
+}
 
 export async function drainNativeTurnContext(client, threadId, turn, signal) {
   if (turn.nativeAdmission !== "attempted" || !client.nativeSkills) return false;
@@ -54,12 +60,12 @@ export function nativeTurnReceipt(snapshot, messageId) {
 /** Only an explicitly prepared, never-attempted input may be sent. The durable
  * marker precedes every native input write (including paired memory context). Older
  * records without a phase are uncertain, not permission to submit again. */
-export async function dispatchNativeTurn({ client, threadId, turn, markAttempted, signal }) {
+export async function dispatchNativeTurn({ client, threadId, turn, markAttempted, validateAdmission = () => {}, signal }) {
   const snapshot = await client.getThreadSnapshot(threadId, { signal });
   if (snapshot.threadId !== threadId) throw new Error("The native thread identity could not be confirmed.");
   if (nativeTurnReceipt(snapshot, turn.messageId).present) {
     await verifyNativeTurnSkills(client, snapshot, turn, signal);
-    if (turn.nativeAdmission !== "attempted") await markAttempted();
+    if (turn.nativeAdmission !== "attempted") await markAttempted({ observed: true });
     return { threadId, messageId: turn.messageId, messageCountBefore: 0, alreadyPresent: true, acceptedAt: Date.now() };
   }
   if (turn.nativeAdmission !== "prepared") throw new Error("The admitted native message is no longer available. Its work will not be replayed; review the earlier execution before continuing.");
@@ -72,9 +78,14 @@ export async function dispatchNativeTurn({ client, threadId, turn, markAttempted
   signal?.throwIfAborted();
   const { messageId, prompt, agent, model, context, skills } = turn;
   let marked = false;
-  const beforeInput = async () => { await markAttempted(); marked = true; };
+  const beforeInput = async () => {
+    if (!marked) await markAttempted();
+    try { validateAdmission(); }
+    catch (error) { if (error?.code === "readiness_changed") error.inputNotSent = !marked; throw error; }
+    marked = true;
+  };
   const acceptance = await client.sendTurn(threadId, { messageId, prompt, agent, ...(skills !== undefined ? { skills } : {}), ...(model ? { model } : {}), ...(context ? { context } : {}), beforeInput, signal });
-  if (!marked && acceptance.alreadyPresent) await markAttempted();
+  if (!marked && acceptance.alreadyPresent) await markAttempted({ observed: true });
   return acceptance;
 }
 

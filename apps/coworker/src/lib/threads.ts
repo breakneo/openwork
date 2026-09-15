@@ -472,6 +472,7 @@ export function hasPendingInteractions(pending: PendingInteractions): boolean {
 
 export type CoworkerThreads = {
   client: HeadlessThreadClient;
+  prepare: (signal: AbortSignal) => Promise<void>;
   /** Assignment threads only; discussions are excluded. */
   listThreads: () => Promise<ThreadListItem[]>;
   /** Every top-level thread in the workspace, discussions included, newest first. */
@@ -493,7 +494,7 @@ export type CoworkerThreads = {
    * `onStream`, when given, also receives the words of a reply as they arrive
    * (the engine writes a text or reasoning part only once it has ended).
    */
-  subscribe: (onEvent: () => void, onStream?: (event: StreamEvent) => void) => () => void;
+  subscribe: (onEvent: () => void, onStream?: (event: StreamEvent) => void, onConfigurationChange?: () => void) => () => void;
 };
 
 function normalizeV2Permission(value: NativeV2Permission): PendingPermission {
@@ -568,6 +569,91 @@ export function coalesceCalls(callback: () => void, windowMs: number, clock: () 
   };
 }
 
+export const WORKSPACE_STARTUP_TIMEOUT_MS = 120_000;
+export type WorkspaceReadiness = { state: "starting" | "ready" | "error"; error: string };
+
+export class WorkspaceChangedError extends Error {}
+
+async function waitForWorkspaceWork<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let cancel = () => {};
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    cancel = () => reject(signal.reason);
+    signal.addEventListener("abort", cancel, { once: true });
+  });
+  try { const value = await Promise.race([work, cancelled]); signal.throwIfAborted(); return value; }
+  finally { signal.removeEventListener("abort", cancel); }
+}
+
+export type WorkspaceReadinessScope = {
+  readiness: ReturnType<typeof createWorkspaceReadiness>;
+  expected: { workspaceId: string; createdAt: string; readinessKey: string };
+};
+
+export async function prepareCurrentWorkspace<T>(current: () => WorkspaceReadinessScope, prepare: (signal: AbortSignal) => Promise<T>, signal: AbortSignal) {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new Error("AI preparation did not settle within two minutes. Your draft is kept; retry preparation in Settings.")), WORKSPACE_STARTUP_TIMEOUT_MS);
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      deadline.signal.throwIfAborted();
+      const scope = current();
+      const scoped = AbortSignal.any([signal, deadline.signal, scope.readiness.signal]);
+      try {
+        await scope.readiness.wait(scoped);
+        const value = await waitForWorkspaceWork(prepare(scoped), scoped);
+        const assertCurrent = () => {
+          scoped.throwIfAborted();
+          if (current().readiness !== scope.readiness) throw new WorkspaceChangedError("The AI configuration changed. Your draft is kept.");
+        };
+        assertCurrent();
+        return { value, expected: scope.expected, assertCurrent };
+      } catch (cause) {
+        signal.throwIfAborted();
+        deadline.signal.throwIfAborted();
+        if (current().readiness === scope.readiness) throw cause;
+      }
+    }
+  } finally { clearTimeout(timer); }
+}
+
+export function createWorkspaceReadiness(prepare: (signal: AbortSignal) => Promise<void>) {
+  const controller = new AbortController();
+  let state: WorkspaceReadiness = { state: "starting", error: "" };
+  let pending: Promise<void> | undefined;
+  let owners = 0;
+  const listeners = new Set<() => void>();
+  const publish = (next: WorkspaceReadiness) => { state = next; for (const listener of listeners) listener(); };
+  return {
+    signal: controller.signal,
+    snapshot: () => state,
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    async wait(signal?: AbortSignal) {
+      controller.signal.throwIfAborted();
+      signal?.throwIfAborted();
+      if (!pending) {
+        const timer = setTimeout(() => controller.abort(new Error("Starting AI took longer than two minutes. Retry preparation or restart AI in Settings. Your draft is kept.")), WORKSPACE_STARTUP_TIMEOUT_MS);
+        pending = waitForWorkspaceWork(Promise.resolve().then(() => { controller.signal.throwIfAborted(); return prepare(controller.signal); }), controller.signal)
+          .then(() => { controller.signal.throwIfAborted(); publish({ state: "ready", error: "" }); })
+          .catch((cause: unknown) => {
+            const message = cause instanceof Error ? cause.message : "AI preparation is unavailable.";
+            publish({ state: "error", error: message.includes("draft is kept") ? message : `${message} Retry preparation or restart AI in Settings. Your draft is kept.` });
+            throw cause;
+          }).finally(() => clearTimeout(timer));
+      }
+      return signal ? waitForWorkspaceWork(pending, signal) : pending;
+    },
+    retain() {
+      owners += 1;
+      return () => {
+        owners -= 1;
+        queueMicrotask(() => { if (owners === 0) controller.abort(new WorkspaceChangedError("AI preparation changed or was cancelled. Your draft is kept.")); });
+      };
+    },
+    dispose: () => controller.abort(new WorkspaceChangedError("AI preparation changed or was cancelled. Your draft is kept.")),
+  };
+}
+
 export function createCoworkerThreads(options: {
   serverUrl: string;
   workspaceId: string;
@@ -599,6 +685,18 @@ export function createCoworkerThreads(options: {
   const native = createNativeV2Client({
     baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token,
   });
+
+  async function prepare(signal: AbortSignal): Promise<void> {
+    const startup = createNativeV2Client({ baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal });
+    const agent = await startup.getAgent("build", signal);
+    if (agent.id !== "build") throw new Error("The native agent identity could not be confirmed.");
+    const model = parsedModel ? { providerID: parsedModel.providerId, id: parsedModel.modelId, variant: options.modelVariant } : agent.model ?? await startup.defaultModel(signal);
+    const catalog = await startup.readCatalog(signal);
+    signal.throwIfAborted();
+    if (!model || !catalog.connectedProviderIds.includes(model.providerID) || !catalog.models.some((item) => item.providerID === model.providerID && item.id === model.id && item.enabled && (!model.variant || model.variant === "default" || item.variants.some((variant) => variant.id === model.variant)))) {
+      throw new Error("The selected AI model is unavailable. Choose or reconnect it in Settings. Your draft is kept.");
+    }
+  }
 
   async function listAllThreads(): Promise<ThreadListItem[]> {
     const [sessions, active] = await Promise.all([
@@ -803,7 +901,7 @@ export function createCoworkerThreads(options: {
     return (await listModelCatalog()).models;
   }
 
-  function subscribe(onEvent: () => void, onStream?: (event: StreamEvent) => void): () => void {
+  function subscribe(onEvent: () => void, onStream?: (event: StreamEvent) => void, onConfigurationChange?: () => void): () => void {
     const controller = new AbortController();
     // A streaming reply raises a message event for every part update; each one
     // used to trigger a full transcript re-read. Message events now collapse into
@@ -814,6 +912,7 @@ export function createCoworkerThreads(options: {
       try {
         for await (const event of native.events(controller.signal)) {
           if (controller.signal.aborted) return;
+          if (event.type === "catalog.updated" || event.type === "integration.updated") onConfigurationChange?.();
           if (onStream && /^session\.(text|reasoning)\.(started|delta|ended)$/.test(event.type)) {
             const part = z.object({ sessionID: z.string(), assistantMessageID: z.string(), ordinal: z.number().int().nonnegative(), delta: z.string().optional(), text: z.string().optional() }).parse(event.data);
             const identity = { threadId: part.sessionID, messageId: part.assistantMessageID, partId: nativeV2PartId(part.assistantMessageID, part.ordinal, event.type.includes(".reasoning.") ? "reasoning" : "text") };
@@ -848,6 +947,7 @@ export function createCoworkerThreads(options: {
 
   return {
     client,
+    prepare,
     listThreads,
     listAllThreads,
     renameThread,

@@ -28,6 +28,9 @@ import {
 } from "@/lib/mcp";
 import {
   createCoworkerThreads,
+  createWorkspaceReadiness,
+  prepareCurrentWorkspace,
+  WorkspaceChangedError,
   describeInteractions,
   stalledRetry,
   hasPendingInteractions,
@@ -36,6 +39,8 @@ import {
   parseModelPreference,
   recommendModel,
   type CoworkerActivity,
+  type WorkspaceReadiness,
+  type WorkspaceReadinessScope,
   type EngineModelOption,
   type PendingInteractions,
   type ThreadListItem,
@@ -247,9 +252,6 @@ function newQueuedId(): string {
   return `next_${Date.now().toString(36)}_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
-/** How long a freshly (re)started AI service may stay silent before it is a problem worth naming. */
-const WORKSPACE_WARMUP_MS = 45_000;
-
 export const NO_TOOL_MODEL_MESSAGE =
   "No connected AI model can use tools. Connect an AI provider in OpenWork, or choose an AI model in Coworker settings.";
 
@@ -417,26 +419,52 @@ export function ThreadsPanel({
         : null,
     [runtime.serverUrl, runtime.ownerToken, coworker.workspaceId, coworker.model, coworker.modelVariant, discussionThreadId, discussionThreadIds, workerThreadIds],
   );
+  const [preparationAttempt, setPreparationAttempt] = useState(0);
+  const readiness = useMemo(() => createWorkspaceReadiness(async (signal) => {
+    if (!runtime.engineManaged || !coworker.workspaceId || !runtime.readinessKey) throw new Error("AI is unavailable. Restart AI in Settings. Your draft is kept.");
+    const expected = { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey };
+    const prepared = await coworkerBridge.coworkers.ensureWorkspace(coworker.slug, expected);
+    signal.throwIfAborted();
+    if (prepared.readinessKey !== expected.readinessKey || prepared.workspaceId !== expected.workspaceId || prepared.createdAt !== expected.createdAt) throw new Error("The AI workspace changed. Retry preparation; your draft is kept.");
+    await createCoworkerThreads({ serverUrl: runtime.serverUrl, token: runtime.ownerToken, workspaceId: coworker.workspaceId, model: coworker.model, modelVariant: coworker.modelVariant }).prepare(signal);
+  }), [runtime.serverUrl, runtime.ownerToken, runtime.engineManaged, runtime.readinessKey, coworker.slug, coworker.createdAt, coworker.workspaceId, coworker.model, coworker.modelVariant, preparationAttempt]);
+  const preparation = useSyncExternalStore(readiness.subscribe, readiness.snapshot);
+  useEffect(() => { if (active) void readiness.wait().catch(() => undefined); }, [active, readiness]);
+  useEffect(() => readiness.retain(), [readiness]);
+  const latestActivity = useRef<CoworkerActivity | null>(null);
+  const currentReadiness = useRef(readiness);
+  currentReadiness.current = readiness;
+  const readinessScope = useRef<WorkspaceReadinessScope>({ readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "" } });
+  readinessScope.current = { readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "" } };
+  const readReadiness = useCallback(() => readinessScope.current, []);
+  const reportActivity = useCallback((activity: CoworkerActivity | null) => {
+    if (currentReadiness.current !== readiness) return;
+    latestActivity.current = activity;
+    const current = readiness.snapshot();
+    onActivityChange(current.state === "ready" || (activity && ["Needs you", "Stopping...", "Stop not confirmed", "Checking confirmation", "Confirmation unavailable", "Awaiting reply"].includes(activity.label)) ? activity : {
+      state: current.state === "starting" ? "starting" : "offline",
+      label: current.state === "starting" ? "Starting AI" : "AI unavailable",
+      detail: current.error, updatedAt: 0,
+    });
+  }, [onActivityChange, readiness]);
+  useEffect(() => { if (active) reportActivity(latestActivity.current); }, [active, reportActivity, preparation]);
   const [discussions, setDiscussions] = useState<ThreadListItem[]>([]);
   const [openThreadId, setOpenThreadId] = useState("");
   const [pendingAssignment, setPendingAssignment] = useState<AssignmentDraft>(assignmentDraft ?? null);
   const [queuedTurn, setQueuedTurn] = useState<QueuedTurn | null>(null);
   const [preparedVoice, setPreparedVoice] = useState<PreparedVoiceDiscussion | null>(null);
   const [error, setError] = useState("");
-  // When the workspace first stops answering; cleared by the next successful read.
-  const [failingSince, setFailingSince] = useState<number | null>(null);
-  const [lastFailureAt, setLastFailureAt] = useState(0);
+  const listingReading = useRef(false);
   const listingGeneration = useRef(0);
   const listingActive = useRef(true);
-  // The AI service restarts to pick up a new workspace and takes a moment to
-  // answer. That is a warm-up, not a problem: show a calm getting-ready state
-  // and only speak up when the workspace still does not answer after a while.
-  const warmingUp = Boolean(error) && runtime.engineManaged && failingSince !== null && lastFailureAt - failingSince < WORKSPACE_WARMUP_MS;
+  const warmingUp = preparation.state === "starting";
   // While the AI service is unavailable the header note already says so; a raw
   // listing error underneath it would only repeat the fact in technical words.
-  const workspaceProblem: WorkspaceProblem | null = error && runtime.engineManaged && !warmingUp
-    ? { message: `${coworker.name}'s workspace is not answering right now.`, technical: error }
-    : null;
+  const workspaceProblem: WorkspaceProblem | null = preparation.state === "error"
+    ? { message: preparation.error, technical: "" }
+    : error && runtime.engineManaged && !warmingUp
+      ? { message: `${coworker.name}'s workspace is not answering right now.`, technical: error }
+      : null;
 
   useEffect(() => {
     setDiscussionThreadId(coworker.conversationThreadId);
@@ -469,7 +497,8 @@ export function ThreadsPanel({
   }, [discussionDraft]);
 
   const refresh = useCallback(async () => {
-    if (!threads || !listingActive.current) return;
+    if (!threads || !listingActive.current || listingReading.current) return;
+    listingReading.current = true;
     const generation = ++listingGeneration.current;
     try {
       const [all, pending, workers, excluded] = await Promise.all([
@@ -493,14 +522,10 @@ export function ThreadsPanel({
       }
       onAssignmentsChange?.(split.assignments, attention);
       setError("");
-      setFailingSince(null);
     } catch (cause) {
       if (generation !== listingGeneration.current) return;
-      const now = Date.now();
       setError(cause instanceof Error ? cause.message : String(cause));
-      setFailingSince((current) => current ?? now);
-      setLastFailureAt(now);
-    }
+    } finally { listingReading.current = false; }
   }, [coworker.slug, discussionThreadIds, onAssignmentsChange, threads]);
 
   // Re-read quickly while the workspace is not answering so the view heals as soon as it does.
@@ -509,7 +534,9 @@ export function ThreadsPanel({
     listingActive.current = true;
     void refresh();
     if (!threads) return;
-    const unsubscribe = threads.subscribe(() => void refresh());
+    const unsubscribe = threads.subscribe(() => void refresh(), undefined, () => {
+      if (readiness.snapshot().state === "ready") setPreparationAttempt((attempt) => attempt + 1);
+    });
     const timer = window.setInterval(() => void refresh(), failing ? 1_500 : 5_000);
     return () => {
       listingActive.current = false;
@@ -517,21 +544,23 @@ export function ThreadsPanel({
       unsubscribe();
       window.clearInterval(timer);
     };
-  }, [failing, threads, refresh]);
+  }, [failing, threads, refresh, readiness]);
 
   // The moment the AI service is back, drop any listing error it caused and re-read.
   useEffect(() => {
     if (!runtime.engineManaged) return;
     setError("");
-    setFailingSince(null);
     void refresh();
   }, [refresh, runtime.engineManaged]);
 
   /** Open a new native thread as this coworker's current discussion and register it. */
-  const startDiscussion = useCallback(async (prepare?: { isCurrent: () => boolean; beforeOpen: (threadId: string) => void }) => {
+  const startDiscussion = useCallback(async (prepare?: { isCurrent: () => boolean; beforeOpen: (threadId: string) => void; signal?: AbortSignal }) => {
     if (!threads) throw new Error("This coworker needs a workspace before it can chat.");
     const selection = ++discussionSelection.current;
-    const discussion = await threads.client.createThread({ title: discussionTitle(coworker.name) });
+    await readiness.wait(prepare?.signal);
+    if (prepare && !prepare.isCurrent()) throw new Error("Starting cancelled. Your draft is kept.");
+    const signal = AbortSignal.any([readiness.signal, ...(prepare?.signal ? [prepare.signal] : [])]);
+    const discussion = await threads.client.createThread({ title: discussionTitle(coworker.name), signal });
     const registered = await registerDiscussion(coworker.slug, discussion.id);
     setRegisteredDiscussions(registered);
     if (selection !== discussionSelection.current || (prepare && !prepare.isCurrent())) return discussion.id;
@@ -541,7 +570,7 @@ export function ThreadsPanel({
       .then((updated) => { if (selection === discussionSelection.current) onCoworkerChanged(updated); })
       .catch((cause) => { if (selection === discussionSelection.current) setError(`The discussion is saved, but its sidebar selection could not be kept: ${cause instanceof Error ? cause.message : String(cause)}`); });
     return discussion.id;
-  }, [coworker.name, coworker.slug, onCoworkerChanged, threads]);
+  }, [coworker.name, coworker.slug, onCoworkerChanged, readiness, threads]);
 
   const ensureDiscussion = useCallback(async () => {
     if (discussionThreadId) return discussionThreadId;
@@ -676,7 +705,9 @@ export function ThreadsPanel({
         onOpenProviders={onOpenProviders}
         session={session}
         onSyncProviders={onSyncProviders}
-        onActivityChange={onActivityChange}
+        onActivityChange={reportActivity}
+        readReadiness={readReadiness}
+        workspacePreparation={preparation}
         onCoworkerChanged={onCoworkerChanged}
         documents={documents}
         summary={summary}
@@ -694,14 +725,14 @@ export function ThreadsPanel({
         headerSlots={headerSlots}
         problem={workspaceProblem}
         warmingUp={warmingUp}
-        onRetry={() => void refresh()}
+        onRetry={() => { setPreparationAttempt((attempt) => attempt + 1); void refresh(); }}
         assignmentDraft={pendingAssignment}
-        onStartDiscussion={async (draft, takeCurrentDraft, isCurrent) => {
+        onStartDiscussion={async (draft, takeCurrentDraft, isCurrent, signal) => {
           const messageId = newMessageId();
           const requestId = Date.now();
           let submission: ComposerDraftSubmission | undefined;
           try {
-            await startDiscussion({ isCurrent, beforeOpen: (threadId) => {
+            await startDiscussion({ isCurrent, signal, beforeOpen: (threadId) => {
               const key = `${coworker.slug}:${coworker.createdAt}:${threadId}`;
               composerDraftStore.transfer(takeCurrentDraft(), key);
               // Bind before the new composer mounts, including the registration/IPC acknowledgement gap.
@@ -771,7 +802,9 @@ export function ThreadsPanel({
       onOpenProviders={onOpenProviders}
       session={session}
       onSyncProviders={onSyncProviders}
-      onActivityChange={onActivityChange}
+      onActivityChange={reportActivity}
+      readReadiness={readReadiness}
+      workspacePreparation={preparation}
       onCoworkerChanged={onCoworkerChanged}
       documents={documents}
       team={team}
@@ -813,7 +846,7 @@ function DiscussionWelcome({
   headerSlots: HeaderSlots;
   /** The teammate who proposed this coworker, when one did: its empty conversation says so. */
   proposerName?: string;
-  onStartDiscussion: (draft: ComposerDraftSnapshot, takeCurrentDraft: () => ComposerDraftSnapshot, isCurrent: () => boolean) => Promise<void>;
+  onStartDiscussion: (draft: ComposerDraftSnapshot, takeCurrentDraft: () => ComposerDraftSnapshot, isCurrent: () => boolean, signal: AbortSignal) => Promise<void>;
   onPrepareVoice: (request: VoicePreparation, takeDraft: () => ComposerDraftSnapshot) => Promise<void>;
   onCreateAssignment: (outcome: string, messages: ReadonlyArray<DiscussionMessage>) => Promise<void>;
   onAssignmentDraftHandled: () => void;
@@ -830,8 +863,9 @@ function DiscussionWelcome({
   const [composerError, setComposerError] = useState("");
   const startingDiscussion = useRef(false);
   const startCancelled = useRef(false);
+  const startController = useRef<AbortController | null>(null);
   const [startingMessage, setStartingMessage] = useState<ComposerDraftSnapshot | null>(null);
-  useEffect(() => () => { startCancelled.current = true; }, []);
+  useEffect(() => () => { startCancelled.current = true; startController.current?.abort(); }, []);
   const voice = useVoice({
     active: active && !assignmentMode && !busy,
     scope: `${coworker.slug}:new`,
@@ -868,12 +902,14 @@ function DiscussionWelcome({
     if (!snapshot.value.text.trim() || startingDiscussion.current) return;
     startingDiscussion.current = true;
     startCancelled.current = false;
+    const controller = new AbortController();
+    startController.current = controller;
     setStartingMessage(snapshot);
     voice.stop("");
     setBusy(true);
     setComposerError("");
     try {
-      await onStartDiscussion(snapshot, () => composerDraftStore.read(draftKey), () => !startCancelled.current);
+      await onStartDiscussion(snapshot, () => composerDraftStore.read(draftKey), () => !startCancelled.current, controller.signal);
       if (!startCancelled.current) acknowledgeCoworker(coworker.slug);
     } catch (cause) {
       setComposerError(cause instanceof Error ? cause.message : String(cause));
@@ -906,7 +942,7 @@ function DiscussionWelcome({
       <HeaderContent
         slots={headerSlots}
         title={<span className="whitespace-normal">New discussion</span>}
-        actions={<Button variant="ghost" disabled={!startingMessage} title={startingMessage ? "Cancel starting this message" : "No active work to stop"} data-testid="coworker-stop" onClick={() => { startCancelled.current = true; setStartingMessage(null); setComposerError("Starting cancelled. Your draft is kept."); }}>Stop</Button>}
+        actions={<Button variant="ghost" disabled={!startingMessage} title={startingMessage ? "Cancel starting this message" : "No active work to stop"} data-testid="coworker-stop" onClick={() => { startCancelled.current = true; startController.current?.abort(new Error("Starting cancelled. Your draft is kept.")); setStartingMessage(null); setComposerError("Starting cancelled. Your draft is kept."); }}>Stop</Button>}
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-8">
         {problem ? <WorkspaceProblemNote problem={problem} onRetry={onRetry} /> : null}
@@ -929,9 +965,6 @@ function DiscussionWelcome({
         onCreateAssignment={() => void assign()}
         busy={busy}
         offerStartingPoints={!problem}
-        // A first message fired at a workspace that is still starting would fail on the way in
-        // and leave a stray thread behind; hold it until the workspace answers.
-        waiting={warmingUp ? `Getting ${coworker.name} ready` : undefined}
         error={composerError}
         coworkerName={coworker.name}
         summary={summary}
@@ -1115,6 +1148,8 @@ function ThreadView({
   session,
   onSyncProviders,
   onActivityChange,
+  readReadiness,
+  workspacePreparation,
   onCoworkerChanged,
   headerSlots,
   documents,
@@ -1162,6 +1197,8 @@ function ThreadView({
   session: DenSession | null;
   onSyncProviders: () => Promise<ProviderSyncRun>;
   onActivityChange: (activity: CoworkerActivity | null) => void;
+  readReadiness: () => WorkspaceReadinessScope;
+  workspacePreparation: WorkspaceReadiness;
   onCoworkerChanged: (coworker: CoworkerSummary) => void;
   documents?: DocumentHooks;
   /** What the coworker holds, for the quiet line under the composer; null hides it. */
@@ -1171,7 +1208,13 @@ function ThreadView({
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const messageReactions = useMessageReactions(kind === "discussion" && browserEligible ? { kind: "private", slug: coworker.slug, threadId } : null, active, coworker.createdAt);
   const [nativeState, setNativeState] = useState<HeadlessThreadSnapshot["native"]>();
+  const latestNativeState = useRef(nativeState);
+  latestNativeState.current = nativeState;
   const [transcriptLoaded, setTranscriptLoaded] = useState(false);
+  const [confirmationUnknown, setConfirmationUnknown] = useState<string | null>(null);
+  const [refusedMessage, setRefusedMessage] = useState<string | null>(null);
+  const currentPreparation = useRef({ coworker, threads, session });
+  currentPreparation.current = { coworker, threads, session };
   const [transcriptReadStartedAt, setTranscriptReadStartedAt] = useState(0);
   const acknowledgedActivity = useRef(0);
   const [activityOpenError, setActivityOpenError] = useState("");
@@ -1238,6 +1281,14 @@ function ThreadView({
   const [nativeActivity, setNativeActivity] = useState<{ scope: string; executions: ExecutionActivity[] }>({ scope: "", executions: [] });
   const activityScope = `${coworker.slug}:${threadId}`;
   const executions = nativeActivity.scope === activityScope ? nativeActivity.executions : EMPTY_EXECUTIONS;
+  const pendingAdmission = executions.find((entry) => entry.messageId === turnState.pending?.messageId);
+  const pendingNativeOutcome = turnState.pending ? nativeState?.turnOutcomes[turnState.pending.messageId] : undefined;
+  const refusedAdmission = Boolean(turnState.pending && turnState.pending.stoppedAt === null && !pendingNativeOutcome && !pendingAdmission?.admission?.confirmed && (refusedMessage === turnState.pending.messageId || (pendingAdmission?.admission?.refusal && pendingAdmission.admission.refusal.notSubmitted !== true && pendingAdmission.admission.phase === "attempted")));
+  const unconfirmedAdmission = Boolean(turnState.pending && turnState.pending.stoppedAt === null && !pendingNativeOutcome && !refusedAdmission
+    && (confirmationUnknown === turnState.pending.messageId || (pendingAdmission?.admission?.phase === "attempted" && !pendingAdmission.admission.confirmed && !pendingAdmission.admission.refusal)));
+  const admissionBlocked = useRef(false);
+  const confirmationReading = useRef(false);
+  admissionBlocked.current = unconfirmedAdmission || refusedAdmission;
   useEffect(() => {
     let disposed = false;
     let reading = false;
@@ -1534,6 +1585,12 @@ function ThreadView({
    */
   const submitTurn = useCallback(async (prompt: string, messageId: string, send: TurnSend, modelOverride?: HeadlessThreadModel, failedModels: readonly string[] = [], originalSelection?: TurnModelSelection) => {
     if (activeTurnRef.current || threadStop(stopScope) || (send.mode === "retry" && !send.byPerson && turnStateRef.current.pending?.stoppedAt != null)) { voiceRef.current?.abandonReply(send.voice ?? null); return; }
+    if (admissionBlocked.current) {
+      if (send.submission) composerDraftStore.finishSubmission(send.submission, false);
+      voiceRef.current?.abandonReply(send.voice ?? null);
+      setError("Check the recorded message again or confirm Stop before sending another request. Your draft is kept.");
+      return;
+    }
     let voiceIntent = send.voice ?? null;
     let voiceFollowup = false;
     let turnModel: HeadlessThreadModel | undefined = modelOverride;
@@ -1624,11 +1681,7 @@ function ThreadView({
     setError("");
     if (send.mode !== "retry" || !send.switchedTo) setProviderRefreshNote("");
     if (resolution?.messageId !== messageId) setResolution(null);
-    commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now(), ...skillFields }), (kept, recorded) => {
-      if (!kept || !send.submission || recorded?.pending?.messageId !== messageId || recorded.pending.prompt !== prompt || !sameSkillFields(recorded.pending, skillFields)) return;
-      try { composerDraftStore.releaseSubmission(send.submission); }
-      catch (cause) { setError(`Your message is recorded; the draft could not be cleared: ${cause instanceof Error ? cause.message : String(cause)}`); }
-    });
+    commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now(), ...skillFields }));
     onActivityChange({
       state: "working",
       label: "Working",
@@ -1664,42 +1717,65 @@ function ThreadView({
       if (!engineKnows) setFailure(message);
     };
     try {
-      const skillsReady = skillFields.skills?.length ? coworkerBridge.turns.validateSkills(coworker.slug, skillFields) : Promise.resolve();
-      if (!turnModel) {
-        const selectionOwner = kind === "discussion" ? coworker : { ...coworker, useAppModelDefaults: false };
+      const preparationController = new AbortController();
+      waitControllerRef.current = preparationController;
+      const prepared = send.mode === "retry" ? null : await prepareCurrentWorkspace(readReadiness, async (signal) => {
+        const current = currentPreparation.current;
+        if (current.coworker.slug !== coworker.slug || current.coworker.createdAt !== coworker.createdAt) throw new WorkspaceChangedError("The coworker changed. Your draft is kept.");
+        const selectionOwner = kind === "discussion" ? current.coworker : { ...current.coworker, useAppModelDefaults: false };
+        const skillsReady = skillFields.skills?.length ? coworkerBridge.turns.validateSkills(coworker.slug, skillFields) : Promise.resolve();
+        const [catalog, settings] = await Promise.all([current.threads.listModelCatalog(), coworkerBridge.settings.get(), skillsReady]);
+        signal.throwIfAborted();
         const inherited = usesAppConversationDefault(selectionOwner);
-        const [catalog, settings] = await Promise.all([threads.listModelCatalog(), coworkerBridge.settings.get(), skillsReady]);
         const modelDefaults = settings.modelDefaults;
-        const automatic = inherited ? !modelDefaults.conversation.model : coworker.modelMode === "auto";
-        const standardId = coworker.model || recommendModel(catalog)?.id || "";
-        // One resolver serves this discussion and native group/review turns.
+        const automatic = inherited ? !modelDefaults.conversation.model : selectionOwner.modelMode === "auto";
+        const standardId = selectionOwner.model || recommendModel(catalog)?.id || "";
         const decision = resolveDiscussionModel(catalog, selectionOwner, prompt, modelDefaults);
         if (!decision.model) {
-          // This is a selection-policy refusal, not a failed provider attempt.
-          // Do not retry it through the model-failure fallback path.
-          const unavailable = inherited ? modelDefaults.conversation.model : coworker.model;
-          setFailure(unavailable && !catalog.models.some((model) => model.id === unavailable) ? describeUnavailableModel(unavailable, catalog.models, session) : decision.reason);
-          return;
+          const unavailable = inherited ? modelDefaults.conversation.model : selectionOwner.model;
+          throw new Error(unavailable && !catalog.models.some((model) => model.id === unavailable) ? describeUnavailableModel(unavailable, catalog.models, current.session) : decision.reason);
         }
         const pick = decision.model;
-        turnModelId = pick.id;
-        selection = { owner: selectionOwner, defaults: modelDefaults, automatic, allowFallback: automatic || (!inherited && wasAutoPicked(coworker, pick.id)), lane: decision.lane, anchor: standardId || pick.id };
-        turnModel = { providerId: pick.providerId, modelId: pick.modelId, ...(decision.variant ? { variant: decision.variant } : {}) };
-        if (automatic && pick.id !== standardId) {
-          markAutoPicked(coworker.slug, pick.id);
-          onActivityChange({ state: "working", label: "Working", detail: describeModelChoice(decision.lane, pick, { tense: "detail" }), updatedAt: Date.now(), threadId });
-        }
-      } else await skillsReady;
+        return {
+          model: { providerId: pick.providerId, modelId: pick.modelId, ...(decision.variant ? { variant: decision.variant } : {}) },
+          selection: { owner: selectionOwner, defaults: modelDefaults, automatic, allowFallback: automatic || (!inherited && wasAutoPicked(selectionOwner, pick.id)), lane: decision.lane, anchor: standardId || pick.id },
+          pick, standardId,
+        };
+      }, preparationController.signal);
+      preparationController.signal.throwIfAborted();
       if (threadStop(stopScope) || turnStateRef.current.pending?.stoppedAt != null) return;
-      // An uncertain IPC response is not permission to send or switch models again.
+      if (prepared) {
+        turnModel = prepared.value.model;
+        turnModelId = prepared.value.pick.id;
+        selection = prepared.value.selection;
+        if (selection.automatic && turnModelId !== prepared.value.standardId) markAutoPicked(coworker.slug, turnModelId);
+        prepared.assertCurrent();
+      }
       admissionAttempted = true;
-      const acceptance = await coworkerBridge.turns.send({ slug: coworker.slug, threadId, kind, prompt, messageId, ...skillFields, model: turnModel, retry: send.mode === "retry", retryByPerson: send.mode === "retry" && send.byPerson === true, retryLabel: send.mode === "retry" ? send.switchedTo : undefined });
+      const acceptance = await coworkerBridge.turns.send({ slug: coworker.slug, threadId, kind, prompt, messageId, ...skillFields, model: turnModel, expectedReadiness: prepared?.expected, retry: send.mode === "retry", retryByPerson: send.mode === "retry" && send.byPerson === true, retryLabel: send.mode === "retry" ? send.switchedTo : undefined });
       if (acceptance.rejected) {
         if (acceptance.messageId !== messageId) throw new Error("This rejection belongs to another message. The recorded turn is kept.");
-        admissionAttempted = false;
-        setFailure(acceptance.error);
+        if (latestNativeState.current?.turnOutcomes[messageId] === "succeeded") {
+          if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
+          setFailure(""); setError("");
+          commitTurnState((state) => state.pending?.messageId === messageId ? clearPending(state) : state);
+          return;
+        }
+        setConfirmationUnknown(null);
+        if (acceptance.notSubmitted) {
+          admissionAttempted = false;
+          setError(acceptance.error);
+          commitTurnState((state) => state.pending?.messageId === messageId ? clearPending(state) : state);
+        } else {
+          admissionBlocked.current = true;
+          setRefusedMessage(messageId);
+          setFailure(acceptance.error);
+        }
+        void refresh();
         return;
       }
+      setRefusedMessage(null);
+      setConfirmationUnknown(null);
       if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
       voiceIntent = voiceRef.current?.rebindExpected(voiceIntent, acceptance.messageId || messageId) ?? null;
       if (acceptance.messageId && acceptance.messageId !== messageId) {
@@ -1780,8 +1856,22 @@ function ThreadView({
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      if (!admissionAttempted) setFailure(message);
-      else await settleFailure(message, null, false);
+      if (latestNativeState.current?.turnOutcomes[messageId] === "succeeded") {
+        if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
+        setFailure(""); setError("");
+        commitTurnState((state) => state.pending?.messageId === messageId ? clearPending(state) : state);
+      } else if (!admissionAttempted) {
+        if (cause instanceof WorkspaceChangedError) {
+          setError(message);
+          commitTurnState((state) => state.pending?.messageId === messageId && state.pending.stoppedAt === null ? clearPending(state) : state);
+        } else if (cause instanceof DOMException && cause.name === "AbortError") setError("Starting cancelled. Your draft is kept.");
+        else setFailure(message);
+      } else {
+        admissionBlocked.current = true;
+        setConfirmationUnknown(messageId);
+        setError("Message confirmation is delayed. Checking its recorded ID; do not send it again. You can Stop this turn.");
+        void refresh();
+      }
     } finally {
       if (!voiceIntent?.admitted && !voiceFollowup) voiceRef.current?.abandonReply(voiceIntent);
       if (send.submission && !voiceFollowup) {
@@ -1795,7 +1885,7 @@ function ThreadView({
         setActiveTurn(null);
       }
     }
-  }, [abortUntilQuiet, commitTurnState, coworker.effortPreference, coworker.model, coworker.modelChosenBy, coworker.modelMode, coworker.modelSelectionPreferences, coworker.modelVariant, coworker.useAppModelDefaults, coworker.name, coworker.slug, defaultDiscussionTitle, kind, onActivityChange, onCoworkerChanged, refresh, resolution?.messageId, session, stopScope, threadId, threads, title, titleDiscussionAfterFirstMessage]);
+  }, [abortUntilQuiet, commitTurnState, readReadiness, coworker.effortPreference, coworker.model, coworker.modelChosenBy, coworker.modelMode, coworker.modelSelectionPreferences, coworker.modelVariant, coworker.useAppModelDefaults, coworker.name, coworker.slug, defaultDiscussionTitle, kind, onActivityChange, onCoworkerChanged, refresh, resolution?.messageId, session, stopScope, threadId, threads, title, titleDiscussionAfterFirstMessage]);
 
   /**
    * After a quit or reload the engine may still be on the turn. Follow it to
@@ -1957,6 +2047,11 @@ function ThreadView({
   const sendText = useCallback((words: string, submission?: ComposerDraftSubmission) => {
     const text = words.trim();
     if (!text) return;
+    if (admissionBlocked.current) {
+      if (submission) composerDraftStore.finishSubmission(submission, false);
+      setError("Check the recorded message again or confirm Stop before sending another request. Your draft is kept.");
+      return;
+    }
     jumpToLatest();
     acknowledgeCoworker(coworker.slug);
     if (activeTurnRef.current || turnStateRef.current.pending || appRetry || engineRunning || threadStop(stopScope) || composerDraftStore.hasOtherSubmission(draftKey, submission?.messageId)) {
@@ -1984,20 +2079,21 @@ function ThreadView({
 
   /** Stop the reply in progress and send this waiting message right away. */
   async function sendQueuedNow(id: string) {
+    if (admissionBlocked.current) { setError("Check the earlier message or confirm Stop before sending Next."); return; }
     if (threadStop(stopScope)) return;
     const requested = turnStateRef.current.next.find((item) => item.id === id);
     if (!requested) return;
     try { await coworkerBridge.turns.validateSkills(coworker.slug, requested); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return; }
     const message = turnStateRef.current.next.find((item) => item.id === id);
-    if (!viewMounted.current || threadStop(stopScope) || !message || JSON.stringify(message) !== JSON.stringify(requested)) return;
+    if (!viewMounted.current || admissionBlocked.current || threadStop(stopScope) || !message || JSON.stringify(message) !== JSON.stringify(requested)) return;
     jumpToLatest();
     voice.stop("");
     if (activeTurnRef.current || appRetry || engineRunning) {
       if (!await stop()) return;
       await untilTurnReleased();
     }
-    if (!viewMounted.current || threadStop(stopScope) || !turnStateRef.current.next.some((item) => item.id === id && JSON.stringify(item) === JSON.stringify(message))) return;
+    if (!viewMounted.current || admissionBlocked.current || threadStop(stopScope) || !turnStateRef.current.next.some((item) => item.id === id && JSON.stringify(item) === JSON.stringify(message))) return;
     // The stopped turn keeps its line in the transcript; the record moves on to this message.
     commitTurnState((state) => clearPending(removeQueued(state, id)));
     void submitTurn(message.text, newMessageId(), { mode: "send", skills: message.skillSelections });
@@ -2128,7 +2224,7 @@ function ThreadView({
     engine: engineStatus,
     reply: pendingReply,
     needsYou,
-    failure,
+    failure: pendingNativeOutcome === "succeeded" ? "" : failure || (refusedAdmission ? pendingAdmission?.failure ?? "The native request was refused. Stop to confirm earlier work is clear before sending another request." : ""),
     appRetry,
     attemptActive: activeTurn !== null,
     waitBudgetMs: WAIT_BUDGET_MS,
@@ -2136,7 +2232,19 @@ function ThreadView({
     recommendedModel: recommendedModel?.modelLabel ?? "",
   });
   const needsContinuation = pendingTurn && (nativeState?.pendingInputIds.includes(pendingTurn.messageId) || messages.some((message) => message.id === pendingTurn.messageId || message.parentId === pendingTurn.messageId));
-  const outcome = stopAttempt ? null : rawOutcome && needsContinuation && ["failed", "stopped-by-you", "cut-off"].includes(rawOutcome.kind)
+  const receiptObserved = Boolean(pendingTurn && nativeState?.inputSkills && Object.hasOwn(nativeState.inputSkills, pendingTurn.messageId) && !nativeState.ambiguousTurns.includes(pendingTurn.messageId));
+  const awaitingReplyConfirmation = unconfirmedAdmission && receiptObserved;
+  const confirmationLabel = awaitingReplyConfirmation ? "Awaiting reply" : activeTurn ? "Checking confirmation" : "Confirmation unavailable";
+  useEffect(() => {
+    if (pendingNativeOutcome !== "succeeded") return;
+    setConfirmationUnknown(null);
+    setRefusedMessage(null);
+    setFailure("");
+    setError("");
+  }, [pendingNativeOutcome]);
+  const outcome = stopAttempt || unconfirmedAdmission ? null : refusedAdmission && rawOutcome
+    ? { ...rawOutcome, choices: [{ id: "stop", label: "Stop" } satisfies TurnChoice] }
+    : rawOutcome && needsContinuation && ["failed", "stopped-by-you", "cut-off"].includes(rawOutcome.kind)
     ? { ...rawOutcome, detail: "Earlier actions and their history are kept. Continue performs only missing work, using a new message in this discussion.", choices: rawOutcome.choices.map((choice): TurnChoice => choice.id === "retry" || choice.id === "continue" ? { ...choice, id: "continue", label: "Continue" } : choice) }
     : rawOutcome;
   // A reply that landed while this view was not driving the turn (after a reload) settles the record.
@@ -2221,7 +2329,7 @@ function ThreadView({
     failedSteps: currentReplies.flatMap((reply) => reply.toolCalls).filter((call) => executionState(call.status) === "failed").length,
   };
 
-  const readableStatus = stopAttempt ? stopPending ? "Stopping..." : "Stop not confirmed" : !transcriptLoaded ? "Loading conversation" : outcome && outcome.kind !== "working" && outcome.kind !== "replied"
+  const readableStatus = stopAttempt ? stopPending ? "Stopping..." : "Stop not confirmed" : unconfirmedAdmission ? confirmationLabel : !transcriptLoaded ? "Loading conversation" : outcome && outcome.kind !== "working" && outcome.kind !== "replied"
     ? outcome.label
     : working
       ? workingLabel
@@ -2235,6 +2343,10 @@ function ThreadView({
       return;
     }
     if (!transcriptLoaded) return;
+    if (unconfirmedAdmission && !needsYou) {
+      onActivityChange({ state: "attention", label: confirmationLabel, detail: "The recorded message is kept. Use Check again to observe its status, or Stop. Do not resend it.", updatedAt: 0, threadId });
+      return;
+    }
     if (needsYou) {
       onActivityChange({
         state: "attention",
@@ -2277,7 +2389,7 @@ function ThreadView({
     // already announced itself; clearing here would leave the header on Ready for one frame.
     if (activeTurnRef.current) return;
     onActivityChange(null);
-  }, [activeToolLabel, kind, needsYou, onActivityChange, outcome?.kind, outcome?.label, outcome?.line, pending, stopAttempt, stopPending, threadId, title, transcriptLoaded, working, workingLabel]);
+  }, [activeToolLabel, unconfirmedAdmission, confirmationLabel, kind, needsYou, onActivityChange, outcome?.kind, outcome?.label, outcome?.line, pending, stopAttempt, stopPending, threadId, title, transcriptLoaded, working, workingLabel]);
 
   const currentDiscussion: ThreadListItem = discussions.find((item) => item.id === threadId)
     ?? { id: threadId, title, createdAt: 0, updatedAt: 0, status: "idle" };
@@ -2312,7 +2424,7 @@ function ThreadView({
           <>
             {kind !== "discussion" ? <Button variant="ghost" onClick={onBack}>Back</Button> : null}
             {kind !== "worker" ? (
-              <Button variant="ghost" disabled={!active || stopPending || (!working && !needsYou && !stopAttempt)} title={working || needsYou || stopAttempt ? "Stop work in this conversation" : "No active work to stop"} data-testid="coworker-stop" onClick={() => void stop()}>{stopLabel}</Button>
+              <Button variant="ghost" disabled={!active || stopPending || (!working && !needsYou && !stopAttempt && !unconfirmedAdmission && !refusedAdmission)} title={working || needsYou || stopAttempt || unconfirmedAdmission || refusedAdmission ? "Stop work in this conversation" : "No active work to stop"} data-testid="coworker-stop" onClick={() => void stop()}>{stopLabel}</Button>
             ) : null}
           </>
         )}
@@ -2323,7 +2435,7 @@ function ThreadView({
       <div className="flex h-full min-h-0 min-w-0 flex-col @min-[760px]/discussion:flex-row">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="coworker-conversation-column">
       <p data-testid="coworker-thread-status" className="sr-only" aria-live="polite" data-state={stopAttempt ? stopPending ? "stopping" : "stop-unconfirmed" : needsYou ? "needs-you" : working ? "working" : "idle"} data-outcome={outcome?.kind ?? ""}>
-        {transcriptLoaded && kind === "discussion" && !stopAttempt && !working && !needsYou && !failed && !settledWord ? "Ready" : readableStatus}
+        {!stopAttempt && !needsYou && !unconfirmedAdmission && workspacePreparation.state !== "ready" ? workspacePreparation.state === "starting" ? "Starting AI" : "AI unavailable" : transcriptLoaded && kind === "discussion" && !stopAttempt && !working && !needsYou && !unconfirmedAdmission && !failed && !settledWord ? "Ready" : readableStatus}
       </p>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div
@@ -2442,7 +2554,13 @@ function ThreadView({
           {providerRefreshNote ? (
             <p className="px-1 text-[11px] leading-relaxed text-mist" data-testid="coworker-provider-refresh">{providerRefreshNote}</p>
           ) : null}
-          {error ? <ErrorNote>{error}</ErrorNote> : null}
+          {unconfirmedAdmission ? <p role="status" className="px-1 text-xs text-mist">{receiptObserved ? "The message is accepted, but its final result is not confirmed." : activeTurn ? "Checking the recorded message confirmation." : "Confirmation is still unavailable after the bounded wait."} Your message is kept; do not resend it. <button type="button" className="underline" onClick={() => {
+            if (confirmationReading.current) return;
+            confirmationReading.current = true;
+            void Promise.all([refresh(), waitForObservation(coworkerBridge.turns.activity(coworker.slug, threadId)).then((executions) => { if (viewMounted.current) setNativeActivity({ scope: activityScope, executions }); })])
+              .catch(() => setError("Status is still unavailable. You can check again or Stop."))
+              .finally(() => { confirmationReading.current = false; });
+          }}>Check again</button> or use Stop.</p> : error || workspacePreparation.error ? <ErrorNote>{error || workspacePreparation.error}</ErrorNote> : null}
           {Object.values(readErrors).some(Boolean) ? <p role="status" className="px-1 text-xs text-mist">{readErrors.transcript || "Some activity could not be refreshed. Shown messages and queued work are kept."} <button type="button" className="underline" onClick={() => void refresh()}>Try again</button></p> : null}
         </div>
       </div>
@@ -2473,6 +2591,7 @@ function ThreadView({
           onCreateAssignment={() => void createAssignmentFromDiscussion()}
           busy={assignmentBusy}
           working={composerWorking}
+          waiting={unconfirmedAdmission || refusedAdmission ? "Check again or confirm Stop before sending another request." : undefined}
           stopPending={stopPending}
           stopLabel={stopLabel}
           onStop={() => void stop()}

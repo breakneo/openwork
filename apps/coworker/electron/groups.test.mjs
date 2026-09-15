@@ -8,6 +8,7 @@ import { marked } from "marked";
 import { z } from "zod";
 import { createCollaboration, nativeMessageId, withAbort } from "./collaboration.mjs";
 import { nativeTurnAgent } from "./native-turns.mjs";
+import { dispatchNativeTurn, nativeAdmissionRefusal } from "./native-recovery.mjs";
 import { HeadlessThreadError } from "@openwork/headless-threads/v2";
 import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS, EVENT_REMINDER_LEAD_MS } from "./activity-inbox.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
@@ -492,27 +493,31 @@ test("Activity parsing failures never fail private completion or group publicati
   });
 });
 
-test("turn submission exposes only definitive never-attempted rejection, not admission uncertainty", async () => {
+test("turn submission preserves definitive refusal and generation checks without erasing uncertainty", async () => {
   const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
   const prefix = '  "turns.send": ';
   const start = source.indexOf(prefix) + prefix.length;
   const end = source.indexOf('\n  },\n  "turns.cancel"', start);
   assert.ok(start >= prefix.length && end > start);
   for (const phase of ["prepared", "attempted", undefined]) {
-    for (const state of ["failed", "running", "cancelled"]) {
-      const entry = { id: "exec_fixture", messageId: "msg_fixture", prompt: "Hello", nativeAdmission: phase, state, error: "Fixture rejection" };
+    for (const state of ["failed", "running", "cancelled"]) for (const status of [undefined, 400, 403, 422, 500]) {
+      const admissionFailure = status === undefined ? null : nativeAdmissionRefusal(new HeadlessThreadError({ code: "request_failed", method: "POST", path: "/session/ses_fixture/prompt", status, message: "Fixture rejection" }));
+      const entry = { id: "exec_fixture", messageId: "msg_fixture", prompt: "Hello", nativeAdmission: phase, state, error: "Fixture rejection", admissionFailure };
       const send = runInNewContext(`(${source.slice(start, end)}\n})`, {
-        privateTurnIntents: new Map(), privateOwner: async () => ({}), collaboration: {
+        privateTurnIntents: new Map(), privateOwner: async () => ({}), assertExpectedReadiness: () => {}, collaboration: {
           submit: async () => entry,
           acceptance: async () => { throw new Error("Admission unconfirmed"); },
           read: async (read) => read({ executions: { [entry.id]: entry } }),
         },
       });
       const result = send({ slug: "fixture", threadId: "ses_fixture", messageId: "msg_fixture", prompt: "Hello" });
-      if (phase === "prepared" && state !== "running") assert.deepEqual(JSON.parse(JSON.stringify(await result)), { rejected: true, messageId: "msg_fixture", error: "Fixture rejection" });
+      if ((phase === "prepared" || admissionFailure) && state !== "running") assert.deepEqual(JSON.parse(JSON.stringify(await result)), {
+        rejected: true, messageId: "msg_fixture", notSubmitted: phase === "prepared", code: admissionFailure?.code ?? "not_submitted", ...(admissionFailure ? { status } : {}), error: "Fixture rejection",
+      });
       else await assert.rejects(result, /Admission unconfirmed/);
     }
   }
+  assert.equal(nativeAdmissionRefusal(new HeadlessThreadError({ code: "request_failed", method: "GET", path: "/session/ses_fixture/message", status: 403, message: "Observation refused" })), null);
   const privateTurnIntents = new Map();
   const release = Promise.withResolvers();
   let ownershipCalls = 0;
@@ -520,29 +525,123 @@ test("turn submission exposes only definitive never-attempted rejection, not adm
     privateTurnIntents, privateOwner: async () => { ownershipCalls++; await release.promise; throw new Error("Owner rejected"); },
   });
   const input = { slug: "fixture", threadId: "ses_fixture", prompt: "Hello" };
-  const pending = Array.from({ length: 64 }, (_, index) => assert.rejects(send({ ...input, messageId: `msg_${index}` }), /Owner rejected/));
+  const pending = Array.from({ length: 64 }, (_, index) => send({ ...input, messageId: `msg_${index}` }).then((result) => { assert.equal(result.rejected, true); assert.equal(result.notSubmitted, true); }));
   await assert.rejects(send({ ...input, messageId: "msg_0" }), /already pending/);
   await assert.rejects(send({ ...input, messageId: "msg_overflow" }), /already pending/);
   assert.equal(ownershipCalls, 64);
   release.resolve(); await Promise.all(pending);
   assert.equal(privateTurnIntents.size, 0);
+  let generation = "old";
+  let submissions = 0;
+  const ownership = Promise.withResolvers();
+  const expectedSource = source.slice(source.indexOf("function assertExpectedReadiness("), source.indexOf("function invalidateWorkspaceReadiness("));
+  const assertExpectedReadiness = runInNewContext(`${expectedSource}\nassertExpectedReadiness`, { readinessKey: () => generation, workspaceReadinessChanges: new Set(), serverHandle: { managedOpencodeV2: { isAlive: () => true } } });
+  const receipt = { threadId: "ses_fixture", messageId: "msg_fixture", acceptedAt: 1, messageCountBefore: 0 };
+  const acceptedEntry = { id: "exec_fixture", prompt: "Hello", acceptance: receipt };
+  const guardedSend = runInNewContext(`(${source.slice(start, end)}\n})`, {
+    privateTurnIntents: new Map(), assertExpectedReadiness,
+    privateOwner: async () => { await ownership.promise; return { workspaceId: "ws_fixture", coworkerCreatedAt: fixtureCreatedAt }; },
+    collaboration: { submit: async () => { submissions++; return acceptedEntry; }, acceptance: async () => { throw new Error("Late acknowledgement"); }, read: async (read) => read({ executions: { exec_fixture: acceptedEntry } }) },
+  });
+  const guardedInput = { slug: "fixture", threadId: "ses_fixture", messageId: "msg_fixture", prompt: "Hello", expectedReadiness: { readinessKey: "old", workspaceId: "ws_fixture", createdAt: fixtureCreatedAt } };
+  const stale = guardedSend(guardedInput);
+  generation = "replacement";
+  ownership.resolve();
+  assert.equal((await stale).code, "readiness_changed");
+  assert.equal(submissions, 0);
+  assert.equal((await guardedSend({ ...guardedInput, expectedReadiness: { ...guardedInput.expectedReadiness, readinessKey: generation } })).messageId, receipt.messageId);
+  assert.equal(submissions, 1);
+  const observed = await dispatchNativeTurn({
+    client: { getThreadSnapshot: async () => ({ threadId: "ses_fixture", messages: [{ id: "msg_fixture", role: "user" }], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }), sendTurn: async () => assert.fail("Observed input must not be replayed") },
+    threadId: "ses_fixture", turn: { messageId: "msg_fixture", nativeAdmission: "prepared" },
+    markAttempted: async (receipt) => assert.equal(receipt.observed, true),
+  });
+  assert.equal(observed.alreadyPresent, true);
+  let marks = 0, boundaries = 0, userPosts = 0;
+  await assert.rejects(dispatchNativeTurn({
+    client: {
+      getThreadSnapshot: async () => ({ threadId: "ses_pair", messages: [], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }),
+      sendTurn: async (_threadId, input) => { await input.beforeInput(); await input.beforeInput(); userPosts++; },
+    },
+    threadId: "ses_pair", turn: { messageId: "msg_pair", prompt: "Hello", context: "Reference", agent: "build", nativeAdmission: "prepared" },
+    markAttempted: async () => { marks++; },
+    validateAdmission: () => { if (++boundaries === 2) throw Object.assign(new Error("Configuration changed after context"), { code: "readiness_changed" }); },
+  }), { code: "readiness_changed", inputNotSent: false });
+  assert.equal(marks, 1);
+  assert.equal(boundaries, 2);
+  assert.equal(userPosts, 0);
+  for (const mode of ["refused", "changed", "changed-after-marker"]) await withHome(async (home) => {
+    const fixture = nativeFixture();
+    let posts = 0;
+    let validations = 0;
+    const service = createCollaboration({ directory: home, pollMs: 5,
+      validateAdmission: () => { validations++; if (mode === "changed" || (mode === "changed-after-marker" && validations === 2)) throw Object.assign(new Error("Configuration changed"), { code: "readiness_changed" }); },
+      clientFor: async (slug) => {
+        const client = await fixture.clientFor(slug);
+        return { ...client,
+          getThreadSnapshot: async (...args) => ({ ...await client.getThreadSnapshot(...args), native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }),
+          sendTurn: async (_threadId, input) => { await input.beforeInput(); posts++; throw new HeadlessThreadError({ code: "request_failed", method: "POST", path: "/session/ses_refused/prompt", status: 403, message: "Native policy refused input" }); },
+          abortThread: async () => { throw new Error("Fixture cleanup unavailable"); },
+        };
+      },
+    });
+    try {
+      const owner = { slug: "scout", threadId: "ses_refused", conversationId: "ses_refused", kind: "private" };
+      const entry = await service.submit({ owner, messageId: "msg_refused", prompt: "Hello", track: true });
+      await eventually(async () => (await service.read((state) => state.executions[entry.id])).state === "failed");
+      const recorded = await service.read((state) => state.executions[entry.id]);
+      assert.equal(recorded.nativeAdmission, mode === "changed" ? "prepared" : "attempted");
+      if (mode !== "refused") assert.equal(recorded.admissionFailure.notSubmitted, true);
+      assert.equal(recorded.admissionFailure.code, mode === "refused" ? "request_failed" : "readiness_changed");
+      assert.equal((await service.activityEntries(owner))[0].admission.refusal.code, recorded.admissionFailure.code);
+      assert.equal(posts, mode === "refused" ? 1 : 0);
+      if (mode === "refused") {
+        await assert.rejects(service.submit({ owner, messageId: "msg_next", prompt: "Do not send yet", track: true }), /earlier native admission is unresolved/);
+        assert.equal(posts, 1);
+      }
+    } finally { await service.stop(); }
+  });
 });
 
-test("foreground submission wakes dispatch without waiting for the periodic tick", async () => {
+test("foreground submission wakes dispatch without waiting for the periodic tick", async (t) => {
   await withHome(async (home) => {
     const fixture = nativeFixture();
-    const service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 60_000 });
+    const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+    const setupTimeoutMs = Number(source.match(/const collaboration = createCollaboration\(\{[\s\S]*?setupTimeoutMs: ([\d_]+)/)?.[1].replaceAll("_", ""));
+    assert.equal(setupTimeoutMs, 120_000);
+    const coldClient = source.slice(source.indexOf("async function collaborationClient("), source.indexOf("async function collaborationCleanupClient("));
+    assert.match(coldClient, /registerCoworkerTools\(coworker, 120_000\)/);
+    const entered = Promise.withResolvers();
+    const prepared = Promise.withResolvers();
+    let setupSignal;
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const clock = t.mock.method(AbortSignal, "timeout", (ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error("Fixture deadline")), ms).unref?.();
+      return controller.signal;
+    });
+    const service = createCollaboration({ directory: home, setupTimeoutMs, pollMs: 60_000,
+      clientFor: async (slug, options) => { setupSignal = options.signal; entered.resolve(); await withAbort(prepared.promise, options.signal); return fixture.clientFor(slug); },
+    });
     try {
       await service.start();
       const input = { owner: { slug: "scout", threadId: "ses_foreground", conversationId: "ses_foreground", kind: "private" }, messageId: "msg_foreground", prompt: "Hello", track: true };
       const [first, duplicate] = await Promise.all([service.submit(input), service.submit(input)]);
       assert.equal(first.id, duplicate.id);
+      t.mock.timers.tick(0);
+      await entered.promise;
+      t.mock.timers.tick(45_000);
+      assert.equal(setupSignal.aborted, false);
+      assert.equal(fixture.requests.length, 0);
+      prepared.resolve();
+      clock.mock.restore();
+      t.mock.timers.reset();
       await eventually(() => fixture.requests.length === 1);
       const acceptance = await service.acceptance(first.id);
       assert.equal(acceptance.messageId, input.messageId);
       assert.equal(fixture.requests.length, 1);
       assert.deepEqual(fixture.aborted, []);
-    } finally { await service.stop(); }
+    } finally { prepared.resolve(); clock.mock.restore(); t.mock.timers.reset(); await service.stop(); }
   });
   const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
   const start = source.indexOf('  "turns.send": ');
@@ -559,7 +658,7 @@ test("foreground submission wakes dispatch without waiting for the periodic tick
     const privateTurnIntents = new Map();
     let ownershipCalls = 0;
     const commands = runInNewContext(`({${source.slice(start, end)}})`, {
-      privateTurnIntents,
+      privateTurnIntents, assertExpectedReadiness: () => {},
       privateOwner: async (slug, threadId, kind) => {
         ownershipCalls++;
         if (gate === "ownership" && ownershipCalls === 1) { entered.resolve(); await release.promise; }
@@ -603,7 +702,7 @@ test("foreground submission wakes dispatch without waiting for the periodic tick
       assert.deepEqual(fixture.requests.map((request) => [request.threadId, request.messageId]).sort(), others.map((request) => [request.threadId, request.messageId]).sort());
       assert.deepEqual(fixture.aborted, []);
       await assert.rejects(commands["turns.cancel"]({ ...input, messageId: "msg_unknown" }), /No matching message/);
-      await assert.rejects(commands["turns.send"]({ ...input, threadId: "ses_forbidden" }), /Foreign native scope/);
+      assert.equal((await commands["turns.send"]({ ...input, threadId: "ses_forbidden" })).notSubmitted, true);
       assert.equal(privateTurnIntents.size, 0);
     } finally { release.resolve(); await blocking; await service.stop(); }
   });
@@ -617,7 +716,7 @@ test("foreground submission wakes dispatch without waiting for the periodic tick
     const input = { slug: "scout", threadId: "ses_existing", messageId: "msg_existing", prompt: "Hello" };
     const owner = { slug: input.slug, threadId: input.threadId, conversationId: input.threadId, kind: "private" };
     const commands = runInNewContext(`({${source.slice(start, end)}})`, {
-      privateTurnIntents: new Map(), collaboration: service, privateOwner: () => service.registerOwner(owner),
+      privateTurnIntents: new Map(), assertExpectedReadiness: () => {}, collaboration: service, privateOwner: () => service.registerOwner(owner),
     });
     try {
       await service.registerOwner(owner);

@@ -943,7 +943,9 @@ export async function startServer(config: ServerConfig): Promise<ServeResult & {
             await engineV2Preview.ensureWorkspaceReady(workspace.path);
             // Reconcile through v2's runtime MCP API before execution admission.
             // The ordinary connection routes remain authoritative.
-            await engineV2Preview.syncWorkspaceMcp(workspace.id, workspace.path);
+            const isSelectionMetadata = request.method === "GET"
+              && /^\/opencode2\/api\/(?:agent\/[^/]+|model(?:\/default)?|provider|integration)$/.test(mount.restPath);
+            if (!isSelectionMetadata) await engineV2Preview.syncWorkspaceMcp(workspace.id, workspace.path);
           }
           const forward = (nativeSkillCatalog?: Awaited<ReturnType<typeof waitForNativeOpenWorkV2Skills>>, assertSkillsCurrent?: () => Promise<void>) => proxyOpencodeV2Request({
             config,

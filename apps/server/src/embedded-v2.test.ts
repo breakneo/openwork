@@ -450,8 +450,9 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
       opencodeV2: { ...item.options.opencodeV2, env: { ...item.options.opencodeV2.env, FIXTURE_CLEANUP_STATE: state } } });
     const engine = engineV2ByConfig.get(handle.config)!;
     const failPreparation = () => { throw new Error("fixture readiness unavailable"); };
+    const workspacePreparation = spyOn(engine, "ensureWorkspaceReady").mockImplementation(failPreparation);
     const preparations = [
-      spyOn(engine, "ensureWorkspaceReady").mockImplementation(failPreparation),
+      workspacePreparation,
       spyOn(engine, "syncWorkspaceMcp").mockImplementation(failPreparation),
       spyOn(engine, "withNativeSkills").mockImplementation(failPreparation),
       spyOn(engine, "refresh").mockImplementation(failPreparation),
@@ -463,6 +464,21 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
     const requests = async () => (await readFile(item.log, "utf8")).trim().split("\n")
       .map((line): { method?: string; path?: string; query?: Record<string, string>; spawn?: boolean } => JSON.parse(line));
     try {
+      const metadata = ["/api/provider", "/api/model", "/api/model/default", "/api/integration", "/api/agent/build"];
+      for (const path of metadata) expect((await fetch(handle.url + mount + path, { headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(500);
+      expect(preparations[0]).toHaveBeenCalledTimes(metadata.length);
+      expect(preparations[1]).not.toHaveBeenCalled();
+      workspacePreparation.mockImplementation(async () => {});
+      for (const path of metadata) {
+        const response = await fetch(handle.url + mount + path, { headers: { authorization: `Bearer ${handle.config.token}` } });
+        expect(response.status).toBe(path === "/api/agent/build" ? 404 : 200);
+      }
+      expect(preparations[1]).not.toHaveBeenCalled();
+      expect((await fetch(handle.url + mount + "/api/model")).status).toBe(401);
+      expect((await fetch(handle.url + mount + "/api/plugin", { headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(500);
+      expect(preparations[1]).toHaveBeenCalledTimes(1);
+      workspacePreparation.mockImplementation(failPreparation);
+      for (const preparation of preparations) preparation.mockClear();
       expect((await fetch(handle.url + mount + `/api/session/${sessionId}`, { headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(200);
       expect(preparations[0]).not.toHaveBeenCalled();
       expect((await fetch(handle.url + mount + `/api/session/${sessionId}/prompt`, { method: "POST", headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(500);

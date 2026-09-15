@@ -167,14 +167,22 @@ test("exact-ID replay is read-only across cursor pages; messages retain native k
   assert.equal(postCount(state), 0);
 });
 
-test("lost POST response reconciles the exact inbox receipt without another submission", async (t) => {
-  const { state, client } = await boundary(t);
-  state.fail = "lost";
-  const result = await client.admitInput(sid, input);
-  assert.equal(result.state, "queued");
-  if (result.state === "queued") assert.deepEqual(result.receipt, {
-    id: input.id, sessionID: sid, type: "user", timeCreated: 3, delivery: "queue", payload: { text: input.text },
+test("lost POST response waits past the first confirmation failure for exact delivered history without resubmission", async (t) => {
+  const { state, options } = await boundary(t);
+  let now = 0;
+  const client = createNativeV2Client({ ...options, admissionTimeoutMs: 60_000, now: () => now,
+    sleep: async (ms) => { now += ms; if (now >= 16_000) state.pages = [[delivered]]; },
+    fetch: async (url, init) => {
+      if (postCount(state) && now < 16_000) throw new Error("First confirmation timed out");
+      return fetch(url, init);
+    },
   });
+  state.fail = "lost";
+  state.persist = "none";
+  const result = await client.admitInput(sid, input);
+  assert.equal(now, 16_000);
+  assert.equal(result.state, "delivered");
+  if (result.state === "delivered") assert.deepEqual(result.message, delivered);
   await client.admitInput(sid, input);
   assert.equal(postCount(state), 1);
   const posted = state.requests.find((request) => request.method === "POST");
