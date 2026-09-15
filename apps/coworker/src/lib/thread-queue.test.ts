@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
 import { transform } from "esbuild";
+import { createWorkspaceReadiness, prepareCurrentWorkspace, WorkspaceChangedError } from "./threads.ts";
 import {
   EMPTY_THREAD_TURNS,
   TURNS_FILE,
@@ -154,7 +155,7 @@ test("initial draft admission is bound before Enter; late send/queue acknowledge
   assert.deepEqual(store.read("discussion").value, { text: "", skills: [] }, "only the acknowledged revision clears");
 });
 
-test("new discussion dispatch waits for registration but not sidebar bookkeeping, and cancelled starts never open", async () => {
+test("new discussion dispatch waits for registration but not sidebar bookkeeping, and cancelled starts never open", { timeout: 5000 }, async () => {
   const source = await readFile(new URL("../ui/threads.tsx", import.meta.url), "utf8");
   const prefix = "  const startDiscussion = useCallback(";
   const start = source.indexOf(prefix) + prefix.length;
@@ -167,17 +168,20 @@ test("new discussion dispatch waits for registration but not sidebar bookkeeping
     const registering = deferred();
     const sidebar = deferred();
     const discussionSelection = { current: 0 };
+    let current = true;
+    const readiness = createWorkspaceReadiness(async () => {});
     const startDiscussion = runInNewContext(script.code, {
-      Error, String, threads: { client: { createThread: async () => ({ id: "ses_new" }) } },
+      Error, String, AbortSignal, readiness, threads: { client: { createThread: async () => ({ id: "ses_new" }) } },
       coworker: { slug: "fixture", name: "Fixture" }, discussionTitle: () => "Discussion", discussionSelection,
       registerDiscussion: () => { events.push("register"); registering.resolve(); return registered.promise; },
       setRegisteredDiscussions: () => events.push("saved"), setDiscussionThreadId: () => events.push("open"),
       coworkerBridge: { coworkers: { update: () => { events.push("sidebar"); return sidebar.promise; } } },
       onCoworkerChanged: () => events.push("selected"), setError: () => {},
     });
-    const started = startDiscussion({ isCurrent: () => !cancelled, beforeOpen: () => events.push("ready") });
+    const started = startDiscussion({ isCurrent: () => current, beforeOpen: () => events.push("ready") });
     await registering.promise;
     assert.deepEqual(events, ["register"]);
+    current = !cancelled;
     registered.resolve();
     assert.equal(await started, "ses_new");
     assert.deepEqual(events, cancelled ? ["register", "saved"] : ["register", "saved", "ready", "open", "sidebar"]);
@@ -187,13 +191,13 @@ test("new discussion dispatch waits for registration but not sidebar bookkeeping
   }
 });
 
-test("the renderer echoes before skill preflight and does not gate observation on refresh; Stop prevents dispatch", async () => {
+test("the renderer keeps drafts through preflight and does not gate observation on refresh; Stop prevents dispatch", { timeout: 5000 }, async () => {
   const source = await readFile(new URL("../ui/threads.tsx", import.meta.url), "utf8");
   const start = source.indexOf("async (prompt: string, messageId: string, send: TurnSend");
   const end = source.indexOf("  }, [abortUntilQuiet", start);
   assert.ok(start > 0 && end > start);
   const script = await transform(`(${source.slice(start, end)}\n})`, { loader: "ts", target: "es2022" });
-  for (const outcome of ["send", "cancel", "reject", "not-recorded", "uncertain"]) {
+  for (const outcome of ["send", "cancel", "reject", "not-submitted", "uncertain"]) {
     const cancel = outcome === "cancel";
     const events: string[] = [];
     const files = new Map<string, ComposerDraft>();
@@ -201,26 +205,36 @@ test("the renderer echoes before skill preflight and does not gate observation o
     store.update("discussion", draft);
     const submission = store.beginSubmission(store.read("discussion"), "msg_first"); assert.ok(submission);
     const validation = deferred();
+    const validating = deferred();
+    const readiness = createWorkspaceReadiness(async () => {});
+    const owner = { slug: "fixture", name: "Fixture", createdAt: "original", model: "fixture/text" };
+    const pick = { id: "fixture/text", providerId: "fixture", modelId: "text" };
+    const admissionBlocked = { current: false };
     const refreshed = deferred();
     const observed = deferred();
     const turnStateRef = { current: EMPTY_THREAD_TURNS };
     const activeTurnRef = { current: null };
     const ignore = () => {};
-    const setters = Object.fromEntries(["setActiveTurn", "clearStall", "setFailure", "setAppRetry", "setRecovered", "setLiveStream", "setError", "setProviderRefreshNote", "setResolution", "setTitle"].map((name) => [name, ignore]));
+    const setters = Object.fromEntries(["setActiveTurn", "clearStall", "setFailure", "setAppRetry", "setRecovered", "setLiveStream", "setError", "setProviderRefreshNote", "setResolution", "setTitle", "setConfirmationUnknown", "setRefusedMessage"].map((name) => [name, ignore]));
     const sandbox = { ...setters, Date, Promise, Error, String, Boolean,
       activeTurnRef, threadStop: () => cancel && turnStateRef.current.pending?.stoppedAt != null,
       stopScope: "discussion", turnStateRef, voiceRef: { current: null }, stallRef: { current: null },
-      coworker: { slug: "fixture", name: "Fixture", model: "fixture/text" }, kind: "discussion",
+      coworker: owner, kind: "discussion", admissionBlocked, latestNativeState: { current: null },
+      prepareCurrentWorkspace, WorkspaceChangedError, DOMException,
+      readReadiness: () => ({ readiness, expected: { workspaceId: "ws_fixture", createdAt: owner.createdAt, readinessKey: "ready" } }),
+      currentPreparation: { current: { coworker: owner, threads: { listModelCatalog: async () => ({ models: [pick] }) } } },
+      usesAppConversationDefault: () => false, wasAutoPicked: () => false,
+      resolveDiscussionModel: () => ({ model: pick, lane: "standard" }),
       firstPromptRef: { current: "Hello" }, titleLoadedRef: { current: true }, title: "Discussion", defaultDiscussionTitle: "New discussion",
       knownMessages: { current: new Map() }, retiredReplies: { current: new Set() }, streamTurn: { current: null }, resolution: null,
       selectionFields, sameSkillFields, composerDraftStore: store, beginPending, clearPending,
-      commitTurnState: (update: (state: ThreadTurnState) => ThreadTurnState, saved?: (kept: boolean, recorded?: ThreadTurnState) => void) => {
-        turnStateRef.current = update(turnStateRef.current); events.push("echo"); saved?.(true, outcome === "not-recorded" ? EMPTY_THREAD_TURNS : turnStateRef.current);
+      commitTurnState: (update: (state: ThreadTurnState) => ThreadTurnState) => {
+        turnStateRef.current = update(turnStateRef.current); events.push("echo");
       }, onActivityChange: ignore,
-      coworkerBridge: { turns: {
-        validateSkills: () => { events.push("validate"); return validation.promise; },
+      coworkerBridge: { settings: { get: async () => ({ modelDefaults: {} }) }, turns: {
+        validateSkills: () => { events.push("validate"); validating.resolve(); return validation.promise; },
         activity: async () => [],
-        send: async () => { events.push("send"); if (outcome === "uncertain") throw new Error("IPC response unavailable"); return outcome === "reject" ? { rejected: true, messageId: "msg_first", error: "Selected skill denied" } : { messageId: "msg_first", prompt: draft.text, acceptedAt: 1 }; },
+        send: async () => { events.push("send"); if (outcome === "uncertain") throw new Error("IPC response unavailable"); return outcome === "reject" || outcome === "not-submitted" ? { rejected: true, notSubmitted: outcome === "not-submitted", messageId: "msg_first", error: "Selected skill denied" } : { messageId: "msg_first", prompt: draft.text, acceptedAt: 1 }; },
       } },
       refresh: () => { events.push("refresh"); return refreshed.promise; },
       threads: { client: { getThreadSnapshot: async () => { throw new Error("Observation unavailable"); }, waitForThread: async () => { events.push("observe"); observed.resolve(); return { outcome: "settled", snapshot: { messages: [], status: { type: "idle" } } }; } } },
@@ -230,22 +244,27 @@ test("the renderer echoes before skill preflight and does not gate observation o
     };
     const submit = runInNewContext(script.code, sandbox);
     const running = submit(draft.text, "msg_first", { mode: "send", submission, skills: draft.skills }, { providerId: "fixture", modelId: "text" });
+    assert.deepEqual(events, ["echo"]);
+    await validating.promise;
     assert.deepEqual(events, ["echo", "validate"]);
-    assert.deepEqual(store.read("discussion").value, outcome === "not-recorded" ? draft : { text: "", skills: [] });
+    assert.deepEqual(store.read("discussion").value, draft);
     if (cancel) turnStateRef.current = markStopped(turnStateRef.current, 1);
     validation.resolve();
-    if (cancel || outcome === "reject") {
+    if (cancel || outcome === "reject" || outcome === "not-submitted") {
       await running;
       assert.equal(events.filter((event) => event === "send").length, cancel ? 0 : 1);
       assert.equal(events.includes("observe"), false);
+      assert.equal(admissionBlocked.current, outcome === "reject");
       assert.deepEqual(store.read("discussion").value, draft);
     } else if (outcome === "uncertain") {
       await running;
       assert.equal(events.filter((event) => event === "send").length, 1);
-      assert.deepEqual(store.read("discussion").value, { text: "", skills: [] });
+      assert.deepEqual(store.read("discussion").value, draft);
+      assert.equal(admissionBlocked.current, true);
       assert.equal(turnStateRef.current.pending?.messageId, "msg_first");
     } else {
       await observed.promise;
+      assert.deepEqual(store.read("discussion").value, { text: "", skills: [] });
       assert.deepEqual(events.slice(0, 5), ["echo", "validate", "send", "refresh", "observe"]);
       assert.equal(events.filter((event) => event === "send").length, 1);
       refreshed.resolve(); await running;
