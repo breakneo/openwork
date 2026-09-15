@@ -16,6 +16,7 @@
     "test:gateway-dashboard:db": "DATABASE_URL=${DEN_TEST_DATABASE_URL:?Set DEN_TEST_DATABASE_URL to an isolated prepared test database} bun test --conditions development test/admin-organization-capabilities.test.ts",
     "test:db": "bun test --conditions development test/member-removal-rejoin.test.ts test/scim-provider-rotation.test.ts test/sso-provider-rotation.test.ts",
     "test:scim-diagnostics": "tsx --conditions=development --test test/scim-diagnostics.test.ts",
+    "test:scim-existing-user-linking": "tsx --conditions=development --test test/scim-existing-user-linking.test.ts",
     "backfill:desktop-policies": "pnpm run build:den-db && tsx scripts/backfill-desktop-policies.ts",
     "migrate:skills-to-plugins": "pnpm run build:den-db && tsx scripts/migrate-skills-to-plugins.ts",
     "test:admin-scale": "bun test test/admin-scale-performance.test.ts",
