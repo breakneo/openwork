@@ -641,7 +641,7 @@ test("context-only attempted recovery drains its own inbox across restart and te
     const messageId = "msg_context", contextId = `${messageId}_context`;
     const model = { providerId: "fixture", modelId: "text" };
     let pending = [], agent, deleted = 0;
-    const options = { directory: home, pollMs: recover ? 5 : 60_000, clientFor: async (slug) => ({
+    const options = { directory: home, pollMs: recover ? 5 : 60_000, setupTimeoutMs: 100, clientFor: async (slug) => ({
       ...await fixture.clientFor(slug),
       getThreadSnapshot: async () => ({ threadId: owner.threadId, status: { type: "idle" }, messages: [], native: { engine: "v2", pendingInputIds: pending.map((item) => item.id), turnOutcomes: {} } }),
       nativeSkills: {
@@ -665,7 +665,14 @@ test("context-only attempted recovery drains its own inbox across restart and te
       if (recover) {
         await service.start();
         await eventually(async () => (await service.read((state) => state.executions[entry.id])).state === "failed");
-      } else await service.cancel(entry.id);
+      } else {
+        pending[0].payload.metadata.headlessTurn.agent = "another-agent";
+        await assert.rejects(service.cancel(entry.id), /could not be confirmed/);
+        assert.equal(deleted, 0, "a mismatched context must not be removed");
+        assert.equal(await service.read((state) => state.executions[entry.id].cleanupPending), true, "idle with the owned inbox input still present is not cessation");
+        pending[0].payload.metadata.headlessTurn.agent = agent;
+        await service.cancel(entry.id);
+      }
       assert.equal(deleted, 1);
       assert.equal(pending.length, 0);
       await service.cancel(entry.id);
@@ -1053,18 +1060,164 @@ test("shutdown drains late setup writes and seals collaboration storage before r
   });
 });
 
+test("shutdown confirms persisted private cleanup with a recovered idle cleanup client without replay", async () => {
+  await withHome(async (home) => {
+    const fixture = nativeFixture();
+    const owner = { ...fixtureIdentity, slug: "scout", workspaceId: "workspace_scout", threadId: "persisted-stop", conversationId: "persisted-stop", kind: "private" };
+    const model = { providerId: "fixture", modelId: "original" };
+    const observations = [];
+    let endings = 0;
+    const options = { directory: home, pollMs: 60_000, setupTimeoutMs: 100,
+      clientFor: async () => { assert.fail("Cleanup must not acquire a warmup client."); },
+      cleanupClientFor: async (slug, options) => {
+        observations.push({ slug, ...options });
+        const client = await fixture.clientFor(slug);
+        return { ...client, getThreadSnapshot: async (id) => ({ ...await client.getThreadSnapshot(id), native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }) };
+      },
+      onExecutionEnd: async () => { endings++; },
+    };
+    let service = createCollaboration(options);
+    const entry = await service.submit({ owner, messageId: "msg_persisted_stop", prompt: "Keep earlier work", model });
+    await service.change((state) => {
+      Object.assign(state.executions[entry.id], { state: "failed", sentAt: 1, nativeAdmission: "attempted", context: null, cleanupPending: true, cleanupError: "Earlier cleanup was unavailable" });
+      state.tasks[entry.taskId].state = "failed";
+    });
+    await service.stop();
+    service = createCollaboration(options);
+    try {
+      await service.start();
+      assert.equal(await service.read((state) => state.executions[entry.id].cleanupPending), true);
+      await service.stop({ requireConfirmed: true });
+      const stopped = await service.read((state) => state.executions[entry.id]);
+      assert.equal(stopped.cleanupPending, false);
+      assert.equal(stopped.cleanupError, "");
+      assert.equal(typeof stopped.nativeStoppedAt, "number");
+      assert.equal(stopped.state, "failed");
+      assert.equal(stopped.sentAt, 1);
+      assert.equal(stopped.messageId, entry.messageId);
+      assert.equal(observations.length, 1);
+      assert.equal(observations[0].slug, owner.slug);
+      assert.equal(observations[0].observationOnly, true);
+      assert.deepEqual(observations[0].model, model);
+      assert.ok(observations[0].signal instanceof AbortSignal);
+      await service.stop({ requireConfirmed: true });
+      assert.equal(observations.length, 1);
+      assert.equal(endings, 1);
+      assert.deepEqual(fixture.requests, []);
+      assert.deepEqual(fixture.aborted, []);
+      await assert.rejects(service.registerOwner({ ...owner, threadId: "late" }), /storage is closed/);
+    } finally { await service.stop(); }
+  });
+});
+
 test("shutdown refuses unconfirmed native cancellation instead of swallowing it", async () => {
   await withHome(async (home) => {
     const fixture = nativeFixture(async ({ threadId }) => { fixture.held.add(threadId); });
-    const service = createCollaboration({ directory: home, pollMs: 5, setupTimeoutMs: 100,
-      clientFor: async (slug) => ({ ...await fixture.clientFor(slug), abortThread: async () => ({ accepted: false }) }),
+    let cleanupCreatedAt = fixtureCreatedAt, aborts = 0;
+    const clientFor = async (slug) => ({ ...await fixture.clientFor(slug), abortThread: async () => { aborts++; return { accepted: false }; } });
+    const service = createCollaboration({ directory: home, pollMs: 5, setupTimeoutMs: 100, clientFor,
+      cleanupClientFor: async (slug) => ({ ...await clientFor(slug), coworkerCreatedAt: cleanupCreatedAt }),
     });
     try {
-      await service.submit({ owner: { slug: "scout", threadId: "shutdown", conversationId: "shutdown", kind: "private" }, prompt: "Hold this step" });
+      const entry = await service.submit({ owner: { ...fixtureIdentity, slug: "scout", workspaceId: "workspace_scout", threadId: "shutdown", conversationId: "shutdown", kind: "private" }, prompt: "Hold this step" });
       await eventually(() => fixture.requests.length === 1);
       await assert.rejects(service.stop({ requireConfirmed: true }), /native cleanup could not be confirmed/);
+      const pending = await service.read((state) => state.executions[entry.id]);
+      assert.equal(pending.cleanupPending, true);
+      assert.equal(pending.nativeStoppedAt ?? null, null);
       assert.equal((await stat(home)).isDirectory(), true);
+      await assert.rejects(service.submit({ owner: entry.owner, prompt: "Do not restart" }), /closing/);
+      await assert.rejects(service.registerOwner({ ...entry.owner, threadId: "late" }), /storage is closed/);
+      const refused = aborts;
+      cleanupCreatedAt = "2026-09-12T00:00:00.000Z";
+      await assert.rejects(service.stop({ requireConfirmed: true }), /native cleanup could not be confirmed/);
+      assert.match(await service.read((state) => state.executions[entry.id].cleanupError), /original coworker/);
+      cleanupCreatedAt = fixtureCreatedAt;
+      fixture.histories.clear();
+      await assert.rejects(service.stop({ requireConfirmed: true }), /native cleanup could not be confirmed/);
+      assert.match(await service.read((state) => state.executions[entry.id].cleanupError), /no unrelated work was stopped/);
+      assert.equal(aborts, refused);
+      fixture.held.clear();
+      await service.stop({ requireConfirmed: true });
+      assert.equal(await service.read((state) => state.executions[entry.id].cleanupPending), false);
+      assert.equal(fixture.requests.length, 1);
     } finally { fixture.held.clear(); await service.stop(); }
+  });
+});
+
+test("shutdown recovers execution-end failures and captures the final Event snapshot with producers closed", async () => {
+  await withHome(async (home) => {
+    let cleanupAvailable = false, reply;
+    const snapshots = [];
+    const document = { id: "late-artifact", title: "Kept work", revision: 1 };
+    const service = await eventFixture(home, { setupTimeoutMs: 200, readArtifact: async () => document,
+      onSend: async (turn) => { reply = turn.reply; },
+      onExecutionEnd: async (_entry, snapshot) => { snapshots.push(snapshot?.status.type); if (!cleanupAvailable) throw new Error("Execution control cleanup unavailable"); },
+    });
+    try {
+      const event = await service.events.create({ ...eventInput(["scout"]), state: "paused" });
+      const run = await service.events.runNow(event.id, "cleanup-recovery");
+      await service.events.tick();
+      await eventually(async () => Object.values(JSON.parse(await readFile(path.join(home, ".collaboration", "state.json"), "utf8")).executions).some((entry) => entry.cleanupPending));
+      await service.events.stop();
+      await service.groups.stop();
+      await assert.rejects(service.collaboration.stop({ requireConfirmed: true }), /native cleanup could not be confirmed/);
+      const entry = await service.collaboration.read((state) => Object.values(state.executions).find((entry) => entry.owner.eventRunId === run.id));
+      assert.equal(entry.state, "succeeded");
+      assert.equal(entry.cleanupPending, true);
+      assert.match(entry.cleanupError, /Execution control cleanup unavailable/);
+      await assert.rejects(service.collaboration.change(() => {}), /storage is closed/);
+      reply.parts.push({ type: "tool", tool: "coworker_document_create", callId: "late-artifact", toolStatus: "completed", toolInput: { title: document.title }, toolMetadata: { structuredContent: { document: { ...document, action: "created" } } } });
+      cleanupAvailable = true;
+      await service.collaboration.stop({ requireConfirmed: true });
+      const recovered = await service.collaboration.read((state) => ({ entry: state.executions[entry.id], run: state.workplaceEvents.runs[run.id] }));
+      assert.equal(recovered.entry.cleanupPending, false);
+      assert.equal(recovered.entry.eventArtifactsCaptured, true);
+      assert.deepEqual(recovered.run.artifactErrors, []);
+      assert.deepEqual(recovered.run.artifacts.map((artifact) => artifact.documentId), [document.id]);
+      assert.equal(recovered.run.artifactReceipts.length, 1);
+      assert.deepEqual(snapshots.slice(-2), [undefined, "idle"]);
+      const captures = snapshots.length;
+      await service.collaboration.stop({ requireConfirmed: true });
+      assert.equal(snapshots.length, captures);
+      assert.equal(service.native.requests.length, 1);
+    } finally { cleanupAvailable = true; await service.stop(); }
+  });
+});
+
+test("shutdown retries a failed late Worker cancellation by its owning task", async () => {
+  await withHome(async (home) => {
+    const release = Promise.withResolvers();
+    let service, requested, spawning = false, cleanupAvailable = false;
+    const stops = [];
+    const fixture = nativeFixture(async ({ input }) => {
+      const entry = await service.read((state) => Object.values(state.executions).find((entry) => entry.messageId === input.messageId));
+      requested = await service.request({ entry, callId: "late-worker" }, "worker", { name: "Late Worker", goal: "Check once" });
+    });
+    service = createCollaboration({ directory: home, clientFor: fixture.clientFor, pollMs: 5, setupTimeoutMs: 200,
+      spawn: async (slug, input) => { spawning = true; await release.promise; return { slug, id: input.id, status: "running" }; },
+      cancelWorker: async (slug, id) => { stops.push({ slug, id }); if (!cleanupAvailable) throw new Error("Worker control cleanup unavailable"); },
+    });
+    try {
+      await service.submit({ owner: { slug: "scout", threadId: "late-worker", conversationId: "late-worker", kind: "private" }, prompt: "Delegate once" });
+      await eventually(() => spawning);
+      const failed = assert.rejects(service.stop({ requireConfirmed: true }), /native cleanup could not be confirmed/);
+      release.resolve();
+      await failed;
+      const childId = requested.structured.collaboration.id;
+      const worker = { slug: "scout", id: requested.structured.worker.id };
+      assert.deepEqual(stops, [worker, worker], "shutdown retries the failed late cancellation only once");
+      assert.equal(await service.read((state) => state.tasks[childId].cleanupPending), true);
+      assert.match(await service.read((state) => state.tasks[childId].cleanupError), /Worker control cleanup unavailable/);
+      await assert.rejects(service.change((state) => { state.tasks[childId].state = "requested"; }), /storage is closed/);
+      cleanupAvailable = true;
+      await service.stop({ requireConfirmed: true });
+      assert.equal(await service.read((state) => state.tasks[childId].cleanupPending), false);
+      assert.equal(await service.read((state) => state.tasks[childId].cleanupError), "");
+      await service.stop({ requireConfirmed: true });
+      assert.deepEqual(stops, [worker, worker, worker]);
+      assert.equal(fixture.requests.length, 1);
+    } finally { cleanupAvailable = true; release.resolve(); await service.stop(); }
   });
 });
 
@@ -1290,6 +1443,7 @@ test("one thinking brief permits a bounded delivery handoff, and unavailable Wor
         assert.equal(spawned.length, before + 1, "an incomplete thinking result never launches delivery");
         assert.match(fixture.requests.at(-1).prompt, /Incomplete:/, "the original coworker receives the incomplete result");
       }
+      await service.stop({ requireConfirmed: true });
     } finally { await service.stop(); }
   });
 });
@@ -1316,13 +1470,16 @@ test("completion before yield, restart delivery, and cancellation do not duplica
       const child = await service.request({ entry: next, callId: "cancel-child" }, "worker", { name: "Cancelled child", goal: "Check" });
       cleanupFails = true;
       await assert.rejects(service.cancel(next.id), /could not be confirmed/);
+      assert.equal(await service.read((state) => state.tasks[child.structured.collaboration.id].cleanupPending), true);
       cleanupFails = false;
       await service.cancel(next.id);
+      assert.equal(await service.read((state) => state.tasks[child.structured.collaboration.id].cleanupPending), false);
       assert.deepEqual(stopped, [child.structured.worker.id, child.structured.worker.id], "repeat Stop repairs cleanup even after the collaboration is terminal");
       await service.completeWorker({ id: child.structured.worker.id, slug: "scout", status: "finished" }, [{ kind: "finding", text: "LATE RESULT" }]);
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal((await service.receipts({ slug: "scout", threadId: "ses_cancel" }))[0].state, "cancelled");
       assert.equal(fixture.requests.some((request) => request.threadId === "ses_cancel" && request.prompt.includes("LATE RESULT")), false);
+      await service.stop({ requireConfirmed: true });
     } finally { await service.stop(); }
   });
 });
@@ -2284,7 +2441,7 @@ async function eventFixture(home, options = {}) {
   const collaboration = createCollaboration({ directory: home, clientFor, pollMs: 5, setupTimeoutMs: options.setupTimeoutMs ?? 30_000,
     validateOwner: (owner) => events.validateOwner(owner), consult: (task) => groups.consultation(task),
     spawn: options.spawn ?? (async (_slug, input) => ({ id: input.id, status: "running" })), cancelWorker: async () => {},
-    onExecutionEnd: (entry, snapshot) => events.captureExecution(entry, snapshot),
+    onExecutionEnd: async (entry, snapshot) => { await options.onExecutionEnd?.(entry, snapshot); await events.captureExecution(entry, snapshot); },
     memoryContext: options.memoryContext,
     executionContext: (owner) => events.context(owner),
     publish: (task) => publishFixture(home, task),

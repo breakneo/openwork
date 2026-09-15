@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { coworkerBridge, type CoworkerSummary } from "@/lib/bridge";
+import { coworkerBridge, FreshStartError, type CoworkerSummary } from "@/lib/bridge";
 import { freshStartLines, resetConfirmation } from "@/lib/fresh-start";
 import { CoworkerAvatar } from "@/ui/coworker-avatar";
 import { Button, ChevronIcon, ErrorNote } from "@/ui/kit";
@@ -16,6 +16,7 @@ export function FactoryResetScreen({ coworkers, onBack }: { coworkers: CoworkerS
   const [previewAttempt, setPreviewAttempt] = useState(0);
   const [phase, setPhase] = useState<"ready" | "resetting" | "restarting" | "failed">("ready");
   const [error, setError] = useState("");
+  const [retryable, setRetryable] = useState(true);
   const [backupPath, setBackupPath] = useState("");
   const [reaction, setReaction] = useState(0);
   const operationRef = useRef(false);
@@ -52,7 +53,7 @@ export function FactoryResetScreen({ coworkers, onBack }: { coworkers: CoworkerS
 
   async function erase() {
     // Guard the event itself, including two clicks before React has rendered the disabled button.
-    if (operationRef.current || !preview || !resetConfirmation(confirmation).confirmed) return;
+    if (operationRef.current || !retryable || !preview || !resetConfirmation(confirmation).confirmed) return;
     operationRef.current = true;
     setPhase("resetting");
     setError("");
@@ -63,6 +64,7 @@ export function FactoryResetScreen({ coworkers, onBack }: { coworkers: CoworkerS
       // Native owns relaunch. Keep this screen locked until that really happens.
     } catch (cause) {
       operationRef.current = false;
+      setRetryable(cause instanceof FreshStartError && cause.retryable);
       setError(cause instanceof Error ? cause.message : String(cause));
       setPhase("failed");
     }
@@ -155,8 +157,8 @@ export function FactoryResetScreen({ coworkers, onBack }: { coworkers: CoworkerS
 
             <div className="fresh-start-actions">
               <Button type="button" onClick={back} disabled={busy}>{phase === "failed" ? "Back to Settings" : "Keep my team"}</Button>
-              <Button type="button" variant="danger" disabled={busy || !preview || !confirmed} onClick={() => void erase()} data-testid="factory-reset-erase">
-                {phase === "resetting" ? "Preparing fresh start..." : phase === "restarting" ? "Waiting for restart..." : phase === "failed" ? "Retry erase & restart" : "Erase & restart"}
+              <Button type="button" variant="danger" disabled={busy || !retryable || !preview || !confirmed} onClick={() => void erase()} data-testid="factory-reset-erase">
+                {phase === "resetting" ? "Preparing fresh start..." : phase === "restarting" ? "Waiting for restart..." : phase === "failed" ? retryable ? "Retry erase & restart" : "Reset blocked" : "Erase & restart"}
               </Button>
             </div>
             <p className="fresh-start-closing">{busy ? "The native app is handling this step." : phase === "failed" ? "Review the native error before choosing your next step." : "A new beginning is optional. Keeping this team is good, too."}</p>

@@ -156,7 +156,7 @@ import { buildOpenworkRuntimeConfigObject, openworkRuntimeConfigFilePath, writeO
 import { findManagedEngineWorkspace } from "./workspaces.js";
 import { startThreadApprovalReplayer, type ThreadApprovalReplayer } from "./thread-approvals.js";
 import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provider-sync.js";
-import { createEngineV2Preview, engineV2ByConfig, type EngineV2Preview } from "./engine-v2-preview.js";
+import { createEngineV2Preview, engineV2ByConfig, type EngineV2Preview, type NativeCleanupRequest } from "./engine-v2-preview.js";
 import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
@@ -732,6 +732,7 @@ const legacyClientFactories = new WeakMap<ServerConfig, typeof createOpencodeCli
 
 export async function startServer(config: ServerConfig): Promise<ServeResult & {
   managedOpencodeV2: { pid: number | null; isAlive(): boolean } | null;
+  nativeCleanupRequest: (input: NativeCleanupRequest) => Promise<Response>;
 }> {
   if (config.engine !== "v2") {
     legacyClientFactories.set(config, (await import("@opencode-ai/sdk/v2/client")).createOpencodeClient);
@@ -1150,8 +1151,10 @@ export async function startServer(config: ServerConfig): Promise<ServeResult & {
   // Policy hooks must receive the listener that actually bound, including
   // ephemeral ports and retries after a port collision.
   const errors: unknown[] = [];
+  const nativeCleanupLifetime = new AbortController();
   let stopPromise: Promise<void> | undefined;
   const stop = () => stopPromise ??= (async () => {
+    nativeCleanupLifetime.abort(new Error("Native cleanup host stopped"));
     try { await taskRecovery?.stop(); } catch (error) { errors.push(error); }
     managedDesktopPolicy(config).onChange = undefined;
     cloudProviderSync.stop();
@@ -1200,6 +1203,10 @@ export async function startServer(config: ServerConfig): Promise<ServeResult & {
   return {
     ...server,
     managedOpencodeV2: config.engine === "v2" ? engineV2Preview.process() : null,
+    nativeCleanupRequest: engineV2Preview.createNativeCleanupRequest(
+      () => !stopPromise && engineV2ByConfig.get(config) === engineV2Preview,
+      nativeCleanupLifetime.signal,
+    ),
     stop,
   };
 }

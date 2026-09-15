@@ -1,8 +1,9 @@
 import { executionRules } from "./managed-policy-rules.js";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, join, sep } from "node:path";
+import { loopbackFetch } from "./server-fetch.js";
 
 import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
 import { CloudNativeSkillSyncError, cloudNativeSkillScopeKey, createCloudNativeSkillSync, EMPTY_CLOUD_NATIVE_SKILL_STATE } from "./cloud-native-skills.js";
@@ -57,6 +58,14 @@ export interface RuntimeProviderRecordLike {
   models?: Record<string, unknown>;
 }
 
+export interface NativeCleanupRequest {
+  workspaceId: string;
+  directory: string;
+  method: string;
+  path: string;
+  signal?: AbortSignal;
+}
+
 export interface EngineV2Preview {
   start(): Promise<void>;
   refresh(): Promise<void>;
@@ -71,6 +80,7 @@ export interface EngineV2Preview {
   assertNativeSkillsScope(expectedScope: string | null): Promise<void>;
   withNativeSkills<T>(directory: string, use: (catalog: Awaited<ReturnType<typeof waitForNativeOpenWorkV2Skills>>, assertCurrent: () => Promise<void>) => Promise<T>, expectedScope?: string | null): Promise<T>;
   request(directory: string, path: string, init?: { method?: string; body?: unknown; timeoutMs?: number }): Promise<{ status: number; json: unknown }>;
+  createNativeCleanupRequest(isCurrent: () => boolean, hostSignal: AbortSignal): (input: NativeCleanupRequest) => Promise<Response>;
   stop(): Promise<void>;
 }
 
@@ -310,6 +320,41 @@ export function mapRuntimeMcpToV2(value: unknown): Record<string, unknown> | und
   } : value.oauth === false ? false : undefined;
   return { type: "remote", url: value.url, headers: strings(value.headers),
     ...(oauth === undefined ? {} : { oauth }), ...shared };
+}
+
+function nativeCleanupRoute(method: string, path: string) {
+  const denied = () => new Error("Only native session cleanup operations are allowed");
+  if (typeof path !== "string" || path.length > 8192 || /[\\#\u0000-\u0020\u007f]/.test(path)) throw denied();
+  const [pathname, search, extra] = path.split("?");
+  if (extra !== undefined || search === "") throw denied();
+  const supplied = new URLSearchParams(search);
+  const query = new URLSearchParams();
+  if (new Set(supplied.keys()).size !== supplied.size) throw denied();
+  if (method === "GET" && pathname === "/api/session/active" && search === undefined) {
+    return { pathname, query, sessionId: null };
+  }
+  const match = pathname.match(/^\/api\/session\/(ses_[A-Za-z0-9_]{1,256})(?:\/(message|inbox|interrupt|wait)(?:\/(msg_[A-Za-z0-9_]{1,256}))?)?$/);
+  if (!match) throw denied();
+  const [, sessionId, resource, messageId] = match;
+  if (method === "GET" && resource === "message" && !messageId) {
+    if ([...supplied.keys()].some((key) => !["limit", "cursor", "order"].includes(key))) throw denied();
+    const limit = supplied.get("limit") ?? "200";
+    const cursor = supplied.get("cursor");
+    const order = supplied.get("order");
+    if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > 200
+      || (cursor !== null && (!cursor || cursor.length > 2048 || /[\u0000-\u001f\u007f]/.test(cursor)))
+      || (order !== null && order !== "asc" && order !== "desc")) throw denied();
+    query.set("limit", limit);
+    if (cursor !== null) query.set("cursor", cursor);
+    if (order !== null) query.set("order", order);
+  } else if (method === "POST" && resource === "interrupt" && !messageId && search === "continue=false") {
+    query.set("continue", "false");
+  } else if (search !== undefined || !(
+    (method === "GET" && (!resource || resource === "inbox") && !messageId)
+    || (method === "POST" && resource === "wait" && !messageId)
+    || (method === "DELETE" && resource === "inbox" && messageId)
+  )) throw denied();
+  return { pathname, query, sessionId };
 }
 
 export function createEngineV2Preview(options: { config: ServerConfig; env?: Pick<EnvService, "list" | "onChange">; deferStart?: boolean }): EngineV2Preview {
@@ -741,6 +786,171 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     return { url: sidecar.url, username: sidecar.username, password: sidecar.password };
   }
 
+  function createNativeCleanupRequest(isCurrent: () => boolean, hostSignal: AbortSignal) {
+    const active = sidecar;
+    if (!mandatory || !active) return async (_input: NativeCleanupRequest): Promise<Response> => {
+      throw new Error("Native cleanup requires an existing v2 engine");
+    };
+    const childPid = active.childPid;
+    const endpoint = active.url;
+    const username = active.username;
+    const password = active.password;
+    const identities = new Map<string, string>();
+    return async ({ workspaceId, directory, method, path, signal: callerSignal }: NativeCleanupRequest): Promise<Response> => {
+      const signal = AbortSignal.any([hostSignal, AbortSignal.timeout(8_000), ...(callerSignal ? [callerSignal] : [])]);
+      const assertCurrent = () => {
+        signal.throwIfAborted();
+        if (config.engine !== "v2" || !isCurrent() || !allowRunning || !enabled || sidecar !== active
+          || typeof childPid !== "number" || !Number.isSafeInteger(childPid) || childPid < 2 || active.childPid !== childPid
+          || !active.isAlive() || active.url !== endpoint || active.username !== username || active.password !== password) {
+          throw new Error("The owned native cleanup generation changed or stopped");
+        }
+        if (method !== "GET" && config.readOnly) throw new Error("Native cleanup server is read-only");
+      };
+      assertCurrent();
+      const route = nativeCleanupRoute(method, path);
+      const scopeError = () => new Error("Native cleanup workspace is unavailable or changed");
+      const run = async (): Promise<Response> => {
+        const workspace = config.workspaces.find((entry) => entry.id === workspaceId);
+        if (!workspace || workspace.workspaceType !== "local" || typeof directory !== "string" || !isAbsolute(directory)
+          || !isAbsolute(workspace.path)) throw scopeError();
+        const workspacePath = workspace.path;
+        const expected = await realpath(workspacePath).catch(() => null);
+        if (!expected) throw scopeError();
+        const assertScope = async () => {
+          assertCurrent();
+          const roots = [...config.authorizedRoots];
+          const [configured, requested, authorized] = await Promise.all([
+            realpath(workspacePath).catch(() => null), realpath(directory).catch(() => null),
+            Promise.all(roots.map((root) => realpath(root).catch(() => null))),
+          ]);
+          assertCurrent();
+          if (config.workspaces.filter((entry) => entry.id === workspaceId).length !== 1
+            || config.workspaces.find((entry) => entry.id === workspaceId) !== workspace
+            || workspace.workspaceType !== "local" || workspace.path !== workspacePath || configured !== expected || requested !== expected
+            || !authorized.some((root, index) => root !== null && config.authorizedRoots.includes(roots[index])
+              && (expected === root || expected.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)))) throw scopeError();
+        };
+        let remainingBytes = 4 * 1024 * 1024;
+        const readNative = async (pathname: string, requestMethod = "GET", query = new URLSearchParams()) => {
+          await assertScope();
+          const target = new URL(endpoint);
+          target.pathname = pathname;
+          target.search = query.toString();
+          target.searchParams.set("location[directory]", expected);
+          let response: Response;
+          assertCurrent();
+          try {
+            response = await loopbackFetch(target.toString(), {
+              method: requestMethod, headers: { authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`, accept: "application/json" },
+              redirect: "error", signal, ...(requestMethod === "GET" ? {} : { keepalive: false }),
+            });
+          } catch {
+            assertCurrent();
+            throw new Error("Native cleanup request failed; completion is unconfirmed");
+          }
+          if (response.redirected || !response.ok || (response.status !== 200 && response.status !== 204)) {
+            void response.body?.cancel().catch(() => undefined);
+            throw new Error("Native cleanup response was not accepted; completion is unconfirmed");
+          }
+          const reader = response.body?.getReader();
+          const cancel = () => { void reader?.cancel().catch(() => undefined); };
+          signal.addEventListener("abort", cancel, { once: true });
+          let json: unknown;
+          try {
+            assertCurrent();
+            const chunks: Uint8Array[] = [];
+            if (reader) for (;;) {
+              const next = await reader.read();
+              assertCurrent();
+              if (next.done) break;
+              remainingBytes -= next.value.byteLength;
+              if (remainingBytes < 0) throw new Error("Native cleanup response exceeded the read bound");
+              chunks.push(next.value);
+            }
+            if (response.status !== 204) {
+              try { json = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+              catch { throw new Error("Native cleanup returned an invalid response"); }
+            }
+          } finally {
+            signal.removeEventListener("abort", cancel);
+            cancel();
+            reader?.releaseLock();
+          }
+          await assertScope();
+          return { status: response.status, json };
+        };
+        const readSession = async (id: string) => {
+          const result = await readNative(`/api/session/${id}`);
+          const data = isRecord(result.json) ? result.json.data : undefined;
+          if (!isRecord(data) || data.id !== id || !isRecord(data.location) || typeof data.location.directory !== "string"
+            || !isAbsolute(data.location.directory) || !isRecord(data.time) || typeof data.time.created !== "number"
+            || !Number.isSafeInteger(data.time.created) || data.time.created < 0 || typeof data.projectID !== "string") {
+            throw new Error("Native cleanup session identity could not be confirmed");
+          }
+          const observed = await realpath(data.location.directory).catch(() => null);
+          await assertScope();
+          if (!observed) throw new Error("Native cleanup session directory could not be confirmed");
+          return { id, directory: observed, createdAt: data.time.created, projectId: data.projectID, json: result.json };
+        };
+        const assertOwned = (session: Awaited<ReturnType<typeof readSession>>) => {
+          assertCurrent();
+          if (session.directory !== expected) throw new Error("Native cleanup session is not owned by this workspace");
+          const identity = JSON.stringify([workspaceId, expected, session.createdAt, session.projectId]);
+          const previous = identities.get(session.id);
+          if (previous !== undefined && previous !== identity) throw new Error("Native cleanup session identity changed");
+          identities.set(session.id, identity);
+        };
+        if (route.sessionId === null) {
+          const result = await readNative(route.pathname);
+          const data = isRecord(result.json) ? result.json.data : undefined;
+          if (!isRecord(data) || Object.keys(data).length > 200) throw new Error("Native cleanup activity could not be confirmed");
+          const scoped: Record<string, { type: "running" }> = {};
+          for (const [id, activity] of Object.entries(data)) {
+            if (!/^ses_[A-Za-z0-9_]{1,256}$/.test(id) || !isRecord(activity) || activity.type !== "running") {
+              throw new Error("Native cleanup activity identity could not be confirmed");
+            }
+            const session = await readSession(id);
+            if (session.directory !== expected) continue;
+            assertOwned(session);
+            scoped[id] = { type: "running" };
+          }
+          await assertScope();
+          return Response.json({ data: scoped });
+        }
+        const before = await readSession(route.sessionId);
+        assertOwned(before);
+        if (route.pathname === `/api/session/${route.sessionId}`) return Response.json(before.json);
+        if (method === "DELETE") {
+          const inbox = await readNative(`/api/session/${route.sessionId}/inbox`);
+          const data = isRecord(inbox.json) ? inbox.json.data : undefined;
+          const messageId = route.pathname.slice(route.pathname.lastIndexOf("/") + 1);
+          if (!Array.isArray(data) || data.some((item) => !isRecord(item) || item.sessionID !== route.sessionId)
+            || !data.some((item) => isRecord(item) && item.id === messageId)) {
+            throw new Error("Native cleanup input is not in the owned session inbox");
+          }
+          assertOwned(await readSession(route.sessionId));
+        }
+        const result = await readNative(route.pathname, method, route.query);
+        assertOwned(await readSession(route.sessionId));
+        if (method === "GET" && route.pathname.endsWith("/inbox")) {
+          const data = isRecord(result.json) ? result.json.data : undefined;
+          if (!Array.isArray(data) || data.some((item) => !isRecord(item) || item.sessionID !== route.sessionId)) {
+            throw new Error("Native cleanup inbox identity could not be confirmed");
+          }
+        }
+        return result.status === 204 ? new Response(null, { status: 204 }) : Response.json(result.json);
+      };
+      let cancel = () => {};
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        cancel = () => reject(signal.reason);
+        signal.addEventListener("abort", cancel, { once: true });
+      });
+      try { return await Promise.race([run(), cancelled]); }
+      finally { signal.removeEventListener("abort", cancel); }
+    };
+  }
+
   async function ensureWorkspaceReady(directory: string): Promise<void> {
     if (mirrorInFlight) await mirrorInFlight;
     if (mandatory && mirrorError) throw mirrorError;
@@ -813,5 +1023,5 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       const managed = sidecar;
       return { pid: managed?.childPid ?? null, isAlive: () => managed?.isAlive() === true };
     },
-    status, setEnabled, setChatRouting, connection, ensureWorkspaceReady, syncWorkspaceMcp, assertNativeSkillsScope, withNativeSkills, stop };
+    status, setEnabled, setChatRouting, connection, ensureWorkspaceReady, syncWorkspaceMcp, assertNativeSkillsScope, withNativeSkills, createNativeCleanupRequest, stop };
 }

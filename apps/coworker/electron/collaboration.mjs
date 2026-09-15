@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -75,7 +76,7 @@ export function continuationPrompt(task, results = [], introduction = "Continue 
 
 /** One commit contains the dependency outcome AND the obligation to continue.
  * Native messages remain in OpenCode; this file never stores reasoning or tool payloads. */
-export function createCollaboration({ directory, clientFor, consult, spawn, selectWorkerSkills = async (_slug, input) => { if (input.skills?.length) throw new Error("Worker skill selection is unavailable."); return skillFields(input); }, cancelWorker, validateOwner = async () => {}, invalidateWorker = () => {}, onExecutionEnd = async () => {}, onSuccess = async () => {}, memoryContext = async () => "", executionContext = async () => "", reactionContext = async () => null, publish = async () => {}, publishExecution = async () => {}, now = Date.now, stepTimeoutMs = 15 * 60_000, dependencyTimeoutMs = 60 * 60_000, personTimeoutMs = 60 * 60_000, pollMs = 750, setupTimeoutMs = 30_000, acceptanceTimeoutMs = 60_000, maxActiveExecutions = 4 }) {
+export function createCollaboration({ directory, clientFor, cleanupClientFor = clientFor, consult, spawn, selectWorkerSkills = async (_slug, input) => { if (input.skills?.length) throw new Error("Worker skill selection is unavailable."); return skillFields(input); }, cancelWorker, validateOwner = async () => {}, invalidateWorker = () => {}, onExecutionEnd = async () => {}, onSuccess = async () => {}, memoryContext = async () => "", executionContext = async () => "", reactionContext = async () => null, publish = async () => {}, publishExecution = async () => {}, now = Date.now, stepTimeoutMs = 15 * 60_000, dependencyTimeoutMs = 60 * 60_000, personTimeoutMs = 60 * 60_000, pollMs = 750, setupTimeoutMs = 30_000, acceptanceTimeoutMs = 60_000, maxActiveExecutions = 4 }) {
   if (!Number.isInteger(maxActiveExecutions) || maxActiveExecutions < 1 || maxActiveExecutions > 16) throw new Error("The collaboration execution limit must be between 1 and 16.");
   for (const value of [stepTimeoutMs, dependencyTimeoutMs, personTimeoutMs, pollMs, setupTimeoutMs, acceptanceTimeoutMs]) if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new Error("Collaboration time limits must be finite positive milliseconds.");
   const file = path.join(directory, ".collaboration", "state.json");
@@ -85,7 +86,10 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
   let pumping = false;
   let closed = false;
   let writesClosed = false;
-  let cleanupError;
+  let cleanupOnly = false;
+  let stopping;
+  const cleanupScope = new AsyncLocalStorage();
+  const cleanupFailures = new Map();
   const pending = new Set();
   function track(work) {
     const task = Promise.resolve(work);
@@ -97,6 +101,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
   const admittedCount = () => [...active.values()].filter((run) => !run.waiting).length;
   const dispatching = new Map();
   const nativeStops = new Map();
+  const workerStops = new Map();
   const cancelIntents = new Set();
   const cancelVersions = new Map();
   let pumpFailures = 0;
@@ -143,7 +148,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
   }
   function change(fn, needed = () => true) {
     const run = tail.then(async () => {
-      if (writesClosed) throw new Error("Collaboration storage is closed.");
+      if (writesClosed || (cleanupOnly && !cleanupScope.getStore())) throw new Error("Collaboration storage is closed.");
       const before = await load();
       // Check inside the write queue so a new admission cannot race an idle tick.
       if (!needed(before)) return;
@@ -161,10 +166,17 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
     tail = run.catch(() => undefined);
     return run;
   }
-  async function read(fn) { if (serviceError) throw new Error(serviceError); await tail; return structuredClone(fn(await load())); }
+  async function read(fn) { if (serviceError && !closed && !cleanupScope.getStore()) throw new Error(serviceError); await tail; return structuredClone(fn(await load())); }
   const threadKey = (owner) => `${owner.slug}:${owner.threadId}`;
-  const hasPendingStops = (state) => Object.values(state.executions).some((entry) => entry.cleanupPending)
+  const cleanupKey = (collection, id) => `${collection}:${id}`;
+  const pendingCleanup = (state, collection) => Object.values(state[collection]).filter((entry) => entry.cleanupPending || cleanupFailures.has(cleanupKey(collection, entry.id)));
+  const hasPendingCleanup = (state) => cleanupFailures.size > 0 || Object.values(state.executions).some((entry) => entry.cleanupPending) || Object.values(state.tasks).some((task) => task.cleanupPending);
+  const hasPendingStops = (state) => hasPendingCleanup(state)
     || Object.values(state.workplaceEvents?.runs ?? {}).some((run) => run.cleanupPending);
+  async function cleanupFailed(collection, id, error) {
+    cleanupFailures.set(cleanupKey(collection, id), error);
+    await change((state) => { Object.assign(state[collection][id], { cleanupPending: true, cleanupError: text(error.message, 2000) }); });
+  }
   function cancelled(state, task) {
     for (let depth = 0; task && depth < 8; depth++, task = state.tasks[task.parentId]) {
       const event = state.workplaceEvents?.runs[task.owner.eventRunId];
@@ -256,7 +268,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
     task.followUpRequested = false;
   }
   function advance(state, task) {
-    if (!task || terminal.has(task.state) || cancelled(state, task)) return;
+    if (closed || !task || terminal.has(task.state) || cancelled(state, task)) return;
     const current = state.executions[task.executionId];
     if (!current || !terminal.has(current.state)) return; // results may arrive before the parent yields
     if (task.followUpRequested) { queueContinuation(state, task); return; }
@@ -290,14 +302,18 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
   }
   function confirmNativeStop(entry, running, snapshot) {
     if (nativeStops.has(entry.id)) return nativeStops.get(entry.id);
-    if (entry.nativeStoppedAt && !entry.cleanupPending) return Promise.resolve();
-    const stopping = (async () => {
+    if (entry.nativeStoppedAt && !entry.cleanupPending && !cleanupFailures.has(cleanupKey("executions", entry.id))) return Promise.resolve();
+    const stopping = cleanupScope.run(true, () => (async () => {
       await change((state) => { state.executions[entry.id].cleanupPending = true; });
       const signal = AbortSignal.timeout(setupTimeoutMs);
       const results = await Promise.allSettled([
         withAbort(track(Promise.resolve().then(() => onExecutionEnd(entry, entry.owner.eventRunId ? undefined : snapshot))), signal),
         (async () => {
-          const client = running?.client ?? await withAbort(track(clientFor(entry.owner.slug, { model: entry.model, observationOnly: true, signal })), signal);
+          const client = cleanupClientFor === clientFor && running?.client ? running.client
+            : await withAbort(track(cleanupClientFor(entry.owner.slug, {
+              owner: entry.owner, workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt,
+              model: entry.model, observationOnly: true, signal,
+            })), signal);
           if (entry.workspaceId && entry.workspaceId !== client.workspaceId) throw new Error("The original native workspace is unavailable; its stop was not confirmed.");
           if (entry.coworkerCreatedAt && entry.coworkerCreatedAt !== client.coworkerCreatedAt) throw new Error("The original coworker is unavailable; its stop was not confirmed.");
           let observed = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal }), signal);
@@ -314,7 +330,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
           for (;;) {
             observed = await withAbort(client.getThreadSnapshot(entry.owner.threadId, { signal }), signal);
             if (observed.threadId !== entry.owner.threadId) throw new Error("Native stop returned another thread.");
-            if (observed.status.type === "idle") return observed;
+            if (observed.status.type === "idle" && !observed.native?.pendingInputIds?.some((id) => id === entry.messageId || id === `${entry.messageId}_context`)) return observed;
             await withAbort(new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, 250))), signal);
           }
         })(),
@@ -323,12 +339,32 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       if (failures.length) throw new AggregateError(failures, `Native stop ${entry.id} (${entry.owner.threadId}) was not confirmed: ${failures.map((error) => error.message).join("; ")}`);
       if (entry.owner.eventRunId) await withAbort(track(Promise.resolve().then(() => onExecutionEnd(entry, results[1].value))), signal);
       await change((state) => { Object.assign(state.executions[entry.id], { cleanupPending: false, cleanupError: "", nativeStoppedAt: now() }); });
+      cleanupFailures.delete(cleanupKey("executions", entry.id));
     })().catch(async (error) => {
-      await change((state) => { Object.assign(state.executions[entry.id], { cleanupPending: true, cleanupError: text(error.message, 2000) }); });
+      await cleanupFailed("executions", entry.id, error);
       throw error;
-    });
+    }));
     nativeStops.set(entry.id, stopping);
     void stopping.finally(() => nativeStops.delete(entry.id)).catch(() => {});
+    return stopping;
+  }
+  function confirmWorkerStop(task) {
+    if (task.kind !== "worker" || !task.workerId || !task.origin?.slug) return Promise.reject(new Error("The original Worker cleanup obligation is unavailable."));
+    const key = cleanupKey("tasks", task.id);
+    const previous = workerStops.get(key);
+    const stopping = cleanupScope.run(true, () => (async () => {
+      if (previous) await previous.catch(() => undefined);
+      await change((state) => { state.tasks[task.id].cleanupPending = true; });
+      await withAbort(track(Promise.resolve().then(() => cancelWorker(task.origin.slug, task.workerId))), AbortSignal.timeout(setupTimeoutMs));
+      if (workerStops.get(key) !== stopping) return;
+      await change((state) => { Object.assign(state.tasks[task.id], { cleanupPending: false, cleanupError: "" }); });
+      cleanupFailures.delete(cleanupKey("tasks", task.id));
+    })().catch(async (error) => {
+      await cleanupFailed("tasks", task.id, error);
+      throw error;
+    }));
+    workerStops.set(key, stopping);
+    void stopping.finally(() => { if (workerStops.get(key) === stopping) workerStops.delete(key); }).catch(() => {});
     return stopping;
   }
   async function pendingFor(entry, client, signal, snapshot) {
@@ -342,8 +378,12 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
     if (contextDrains.has(entry.id)) return contextDrains.get(entry.id);
     const draining = (async () => {
       const signal = AbortSignal.timeout(setupTimeoutMs);
-      client ??= await withAbort(track(clientFor(entry.owner.slug, { observationOnly: true, signal })), signal);
+      client ??= await withAbort(track(cleanupClientFor(entry.owner.slug, {
+        owner: entry.owner, workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt,
+        model: entry.model, observationOnly: true, signal,
+      })), signal);
       if (client.workspaceId !== entry.workspaceId) throw new Error("The original workspace is no longer available. This execution will not be moved or replayed.");
+      if (entry.coworkerCreatedAt && client.coworkerCreatedAt !== entry.coworkerCreatedAt) throw new Error("The original coworker is no longer available. This execution will not be moved or replayed.");
       return withAbort(track(drainNativeTurnContext(client, entry.owner.threadId, entry, signal)), signal);
     })();
     contextDrains.set(entry.id, draining);
@@ -525,7 +565,11 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       try {
         if (!running.cleanupError && (running.mustAbort || controller.signal.aborted) && (running.ownsNative || data.executions[id].cleanupPending)) {
           await confirmNativeStop(data.executions[id], running, snapshot).catch((error) => { running.cleanupError = error; });
-        } else if (!running.cleanupError && running.ownsNative) await onExecutionEnd(data.executions[id], snapshot).catch((error) => { cleanupError = error; return schedulerFailed(COMPUTER_STOP_GUIDANCE); });
+        } else if (!running.cleanupError && running.ownsNative) await withAbort(track(cleanupScope.run(true, () => Promise.resolve().then(() => onExecutionEnd(data.executions[id], snapshot)))), AbortSignal.timeout(setupTimeoutMs)).catch(async (error) => {
+          running.cleanupError = error;
+          await cleanupScope.run(true, () => cleanupFailed("executions", id, error));
+          return schedulerFailed(COMPUTER_STOP_GUIDANCE);
+        });
       } finally {
         if (active.get(threadKey(entry.owner)) === running) active.delete(threadKey(entry.owner));
         released();
@@ -544,7 +588,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
           if (task.parentId && !terminal.has(task.state) && !cancelled(state, task) && task.deadline < now()) {
             task.state = "failed";
             task.error = "The requested work reached its deadline. Review its receipt and ask again if it is still needed.";
-            expired.push({ executionId: task.executionId, workerId: task.workerId, slug: task.origin.slug });
+            expired.push(task);
             const entry = state.executions[task.executionId];
             if (entry && !terminal.has(entry.state)) { entry.state = "failed"; entry.error = task.error; }
             advance(state, state.tasks[task.parentId]);
@@ -566,7 +610,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
         || Object.values(state.threads).some((turns) => turns.next.length > 0));
       for (const task of expired ?? []) {
         for (const run of active.values()) if (run.id === task.executionId) run.controller.abort(new Error("The dependency reached its deadline."));
-        if (task.workerId) await withAbort(track(cancelWorker(task.slug, task.workerId)), AbortSignal.timeout(setupTimeoutMs)).catch((error) => { cleanupError = error; });
+        if (task.workerId) await confirmWorkerStop(task).catch(() => {});
       }
       const tasks = await read((state) => Object.values(state.tasks).filter((task) => task.state === "requested"));
       for (const task of tasks) {
@@ -594,7 +638,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
               await withAbort(validateOwner(claimed.origin), signal);
               const spawning = track(spawn(claimed.owner.slug, { ...claimed.input, id: claimed.workerId, spawnedFromThreadId: claimed.owner.threadId }));
               // A late acknowledgement must not leave a newly created Worker running after cancellation.
-              void track(spawning.then(async () => { if (signal.aborted || closed || cancelled(data, data.tasks[task.id])) await track(cancelWorker(claimed.owner.slug, claimed.workerId)); })).catch((error) => { cleanupError = error; });
+              void track(spawning.then(async () => { if (signal.aborted || closed || cancelled(data, data.tasks[task.id])) await confirmWorkerStop(claimed); }, () => {})).catch(() => {});
               const worker = await withAbort(spawning, signal);
               await change((state) => { if (!signal.aborted && state.tasks[task.id].state === "starting" && !cancelled(state, state.tasks[task.id])) state.tasks[task.id].state = "waiting"; });
               if (terminal.has(worker.status) || ["finished", "failed", "cancelled"].includes(worker.status)) await api.completeWorker(worker, []);
@@ -679,6 +723,45 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
     timer = setTimeout(() => { timer = null; void pump().catch(schedulerFailed).finally(wake); }, pollMs);
     timer.unref?.();
   }
+  async function drainShutdown() {
+    const signal = AbortSignal.timeout(setupTimeoutMs);
+    try {
+      while (pumping || dispatching.size || active.size || pending.size || nativeStops.size || workerStops.size || contextDrains.size) {
+        await withAbort(new Promise((resolve) => setTimeout(resolve, 10)), signal);
+      }
+      await withAbort(tail, signal);
+    } catch (error) {
+      if (signal.aborted) throw new Error("Collaboration did not finish stopping.", { cause: error });
+      throw error;
+    }
+  }
+  async function stop(requireConfirmed) {
+    closed = true;
+    clearTimeout(timer);
+    try {
+      if (!writesClosed) {
+        for (const run of active.values()) run.controller.abort(new Error("The app is closing."));
+        for (const controller of dispatching.values()) controller.abort(new Error("The app is closing."));
+        await drainShutdown();
+        cleanupOnly = true;
+        await withAbort(load(), AbortSignal.timeout(setupTimeoutMs));
+        if (requireConfirmed) {
+          const results = await withAbort(Promise.allSettled([
+            ...pendingCleanup(data, "executions").map((entry) => confirmNativeStop(entry)),
+            ...pendingCleanup(data, "tasks").map(confirmWorkerStop),
+          ]), AbortSignal.timeout(setupTimeoutMs)).catch((error) => { throw new Error("Collaboration native cleanup could not be confirmed.", { cause: error }); });
+          await drainShutdown();
+          const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+          if (failures.length || hasPendingCleanup(data)) throw new Error("Collaboration native cleanup could not be confirmed.", { cause: new AggregateError(failures) });
+        }
+        // Seal before draining the write queue: a late callback cannot enqueue a
+        // successful write behind the promise that stop() is awaiting.
+        writesClosed = true;
+      }
+      await drainShutdown();
+      if (requireConfirmed && hasPendingCleanup(data)) throw new Error("Collaboration native cleanup could not be confirmed.", { cause: new AggregateError([...cleanupFailures.values()]) });
+    } finally { cleanupOnly = true; }
+  }
   const api = {
     change,
     read,
@@ -701,20 +784,14 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
     },
     async start() { await load(); wake(); },
     async stop({ requireConfirmed = false } = {}) {
-      closed = true;
-      clearTimeout(timer);
-      const runs = [...active.values()];
-      for (const run of runs) run.controller.abort(new Error("The app is closing."));
-      for (const controller of dispatching.values()) controller.abort(new Error("The app is closing."));
-      await withAbort(Promise.all(runs.map((run) => run.done)), AbortSignal.timeout(setupTimeoutMs));
-      const deadline = Date.now() + setupTimeoutMs;
-      while ((pumping || dispatching.size || active.size || pending.size) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-      if (pumping || dispatching.size || active.size || pending.size) throw new Error("Collaboration did not finish stopping.");
-      // Seal before draining the write queue: a late callback cannot enqueue a
-      // successful write behind the promise that stop() is awaiting.
-      writesClosed = true;
-      await tail;
-      if (requireConfirmed && (cleanupError || Object.values(data.executions).some((entry) => entry.cleanupPending))) throw new Error("Collaboration native cleanup could not be confirmed.", { cause: cleanupError });
+      if (stopping) {
+        await stopping;
+        if (requireConfirmed && hasPendingCleanup(data)) throw new Error("Collaboration native cleanup could not be confirmed.");
+        return;
+      }
+      const task = stop(requireConfirmed);
+      stopping = task;
+      try { await task; } finally { if (stopping === task) stopping = undefined; }
     },
     async registerOwner(owner) { return change((state) => own(state, owner)); },
     async owner(slug, threadId) { return read((state) => state.owners[`${slug}:${threadId}`] ?? null); },
@@ -917,6 +994,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       }
     },
     async context(slug, context, expected, validate = assertComputerToolContext) {
+      if (closed || serviceError) throw new Error(serviceError || "The collaboration service is closing.");
       if (!context?.sessionID || !context.messageID || !context.callID) throw new Error("Trusted turn context is required.");
       const signal = AbortSignal.timeout(setupTimeoutMs);
       const run = active.get(`${slug}:${context.sessionID}`);
@@ -943,6 +1021,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       return { entry, callId: context.callID };
     },
     async request({ entry, callId }, kind, input, identity = {}) {
+      if (closed || serviceError) throw new Error(serviceError || "The collaboration service is closing.");
       if (kind === "worker") input = { ...input, ...await selectWorkerSkills(entry.owner.slug, input) };
       if (input.control !== undefined) {
         workerControlRequest(input.control);
@@ -1064,6 +1143,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
       return { assertActive };
     },
     async admitEventWorker(worker) {
+      if (closed || serviceError) throw new Error(serviceError || "The collaboration service is closing.");
       const task = await read((state) => Object.values(state.tasks).find((task) => task.workerId === worker.id && task.origin.slug === worker.slug));
       if (task?.origin.conversationIdentity) await validateOwner(task.origin);
       if (!task?.origin.eventRunId) return null;
@@ -1100,7 +1180,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
           entry.state = "cancelled"; entry.error = "Stopped.";
         }
         return {
-          workers: Object.values(state.tasks).filter((task) => ids.has(task.id) && task.workerId).map((task) => ({ slug: task.origin.slug, id: task.workerId })),
+          workers: Object.values(state.tasks).filter((task) => ids.has(task.id) && task.workerId),
           executions: Object.values(state.executions).filter((entry) => ids.has(entry.taskId) && (entry.cleanupPending || observedRuns.has(entry.id) || (entry.nativeAdmission === "attempted" && entry.state !== "succeeded" && !entry.nativeStoppedAt))),
         };
       });
@@ -1115,7 +1195,7 @@ export function createCollaboration({ directory, clientFor, consult, spawn, sele
             if (pending.cleanupPending) throw new Error(pending.cleanupError || "Native cleanup is pending. Retry Stop.");
           } else await confirmNativeStop(entry);
         }),
-        ...targets.workers.map((worker) => withAbort(track(cancelWorker(worker.slug, worker.id)), AbortSignal.timeout(setupTimeoutMs))),
+        ...targets.workers.map(confirmWorkerStop),
       ]);
       const failures = stopped.filter((result) => result.status === "rejected").map((result) => result.reason);
       if (failures.length) throw new AggregateError(failures, `Stopping requested work could not be confirmed: ${failures.map((error) => error.message).join("; ")}. Try Stop again before continuing.`);

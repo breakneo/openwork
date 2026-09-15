@@ -445,7 +445,12 @@ export type GroupTurnPatch = {
   dependsOn?: [string, string][];
 };
 
-type BridgeResponse = { ok: true; result: unknown } | { ok: false; error: string };
+type BridgeResponse = { ok: true; result: unknown } | { ok: false; error: string; maintenanceRetryable?: boolean };
+
+export class FreshStartError extends Error {
+  readonly retryable: boolean;
+  constructor(message: string, retryable: boolean) { super(message); this.retryable = retryable; }
+}
 
 export type BrowserSnapshot = {
   revision: number;
@@ -517,7 +522,10 @@ async function invoke<T>(command: string, payload?: unknown): Promise<T> {
     throw new Error("Open Coworker bridge is unavailable. Launch through the Open Coworker app.");
   }
   const response = await bridge.invoke(command, payload);
-  if (!response.ok) throw new Error(response.error);
+  if (!response.ok) {
+    if (["maintenance.factoryReset", "maintenance.handoffReceived"].includes(command)) throw new FreshStartError(response.error, response.maintenanceRetryable === true);
+    throw new Error(response.error);
+  }
   return response.result as T;
 }
 

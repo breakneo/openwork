@@ -84,6 +84,29 @@ export function createMaintenanceAdmission() {
   };
 }
 
+export function createMaintenanceSteps() {
+  const tasks = new Map();
+  return {
+    async run(label, work, { timeoutMs = 30_000, retry = true } = {}) {
+      let task = tasks.get(label);
+      if (!task) {
+        task = Promise.resolve().then(work);
+        tasks.set(label, task);
+        void task.catch(() => { if (retry && tasks.get(label) === task) tasks.delete(label); });
+      }
+      let timer;
+      let expired = false;
+      try {
+        return await Promise.race([task, new Promise((_, reject) => {
+          timer = setTimeout(() => { expired = true; reject(new Error("Shutdown deadline reached.")); }, timeoutMs);
+        })]);
+      } catch {
+        throw Object.assign(new Error(`${label} ${expired ? "did not finish stopping in time" : "could not confirm shutdown"}. No reset was performed.`), { maintenanceRetryable: expired || retry });
+      } finally { clearTimeout(timer); }
+    },
+  };
+}
+
 async function info(file) {
   try { return await lstat(file); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
 }
@@ -361,17 +384,17 @@ export function createMaintenance({ admission, paths, coworkerCount, stop, relau
         // Discover unsupported schemas before stopping anything, without creating an absent DB.
         db = await openDatabase(plan.historyDb, true);
         try { if (db) await inspectHistory(db, plan.coworkers); } finally { db?.close(); db = null; }
+        const originalPlan = JSON.stringify(plan);
+        if (await stop() !== true) throw new Error("Native shutdown was not confirmed. No reset was performed.");
+        await admission.drain();
+        plan = await paths();
+        if (JSON.stringify(plan) !== originalPlan) throw new Error("Native storage paths changed while stopping. Reset refused.");
         await mkdir(plan.backupDirectory, { recursive: true, mode: 0o700 });
         await chmod(plan.backupDirectory, 0o700);
         backupPath = await mkdtemp(path.join(plan.backupDirectory, "fresh-start-"));
         await chmod(backupPath, 0o700);
         await writePrivate(path.join(backupPath, "intent.json"), { version: 1, createdAt: new Date().toISOString(), entries: plan.entries, historyDb: plan.historyDb });
         await onBackup(backupPath);
-        const originalPlan = JSON.stringify(plan);
-        if (await stop() !== true) throw new Error("Native shutdown was not confirmed. No reset was performed.");
-        await admission.drain();
-        plan = await paths();
-        if (JSON.stringify(plan) !== originalPlan) throw new Error("Native storage paths changed while stopping. Reset refused.");
         await mkdir(path.join(backupPath, "files"), { mode: 0o700 });
         await mkdir(path.join(backupPath, "originals"), { mode: 0o700 });
         const present = [];

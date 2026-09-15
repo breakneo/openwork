@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { cp, link, mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { assertMaintenanceSender, createMaintenance, createMaintenanceAdmission, maintenanceHistoryScope, resolveMaintenanceHistoryDb, validateMaintenancePaths } from "./maintenance.mjs";
+import { createContext, runInContext } from "node:vm";
+import { createHeadlessThreadClientV2, createNativeV2Client } from "@openwork/headless-threads/v2";
+import { withAbort } from "./collaboration.mjs";
+import { coworkerIdentity } from "./event-execution.mjs";
+import { assertMaintenanceSender, assertResetConfirmation, createMaintenance, createMaintenanceAdmission, createMaintenanceSteps, maintenanceHistoryScope, resolveMaintenanceHistoryDb, validateMaintenancePaths } from "./maintenance.mjs";
 import { normalizeSettings, readSettings, updateSettings } from "./settings.mjs";
-import { captureMaintenanceProcesses, maintenanceFailureDetail, maintenanceProcessIdentity, maintenanceLaunchArguments, prepareMaintenanceHandoff, readMaintenanceStartup, waitForMaintenanceExit as waitForCapturedExit } from "./maintenance-handoff.mjs";
+import { captureMaintenanceProcesses, maintenanceFailureDetail, maintenancePreparationFailure, maintenanceProcessIdentity, maintenanceLaunchArguments, prepareMaintenanceHandoff, readMaintenanceStartup, waitForMaintenanceExit as waitForCapturedExit } from "./maintenance-handoff.mjs";
 
 const waitForMaintenanceExit = (pids, timeout) => waitForCapturedExit(captureMaintenanceProcesses(pids), timeout);
 const sessionTables = ["session_message", "session_pending", "session_inbox", "instruction_entry", "instruction_state"];
@@ -227,6 +231,7 @@ test("backup and uncertain native stop failures never remove files or history", 
   for (const overrides of [{ stop: async () => false }, { stop: async () => { throw new Error("Unconfirmed engine stop"); } }, { copy: async () => { throw new Error("Backup disk unavailable"); } }, { copy: async () => {} }]) {
     const f = await fixture(t, overrides);
     await assert.rejects(f.service.factoryReset({ confirmation: "DELETE" }), /preserved/);
+    if (overrides.stop) await assert.rejects(stat(`${f.config.userData}-recovery`), { code: "ENOENT" });
     assert.equal(await readFile(path.join(f.config.userData, "onboarding.json"), "utf8"), "old-onboarding");
     const db = new DatabaseSync(f.config.historyDb);
     try { assert.equal(db.prepare("SELECT count(*) AS n FROM session_v2").get().n, 3); } finally { db.close(); }
@@ -701,4 +706,363 @@ test("Windows engine directory queries use serialized slashes without accepting 
   for (const alias of ["C:/Users/fixture/coworkers/../other", "C:/Users/fixture/coworkers/./writer", "C:\\Users\\fixture\\coworkers\\writer", "c:/Users/fixture/coworkers/writer"]) assert.throws(() => scope.nativeDirectory(alias), /ambiguous/);
   const unc = maintenanceHistoryScope("\\\\host\\share\\coworkers", "win32");
   assert.equal(unc.nativeDirectory("//host/share/coworkers/writer"), "\\\\host\\share\\coworkers\\writer");
+});
+
+async function mainFixture(t) {
+  const mainUrl = new URL("./main.mjs", import.meta.url);
+  const source = await readFile(mainUrl, "utf8");
+  const declaration = (name) => {
+    const found = source.match(new RegExp(`^(?:async )?function ${name}\\([\\s\\S]*?^\\}`, "m"))?.[0];
+    assert.ok(found, `Missing main helper ${name}`);
+    return found;
+  };
+  const timers = new Set();
+  const later = (work, ms) => { const timer = setTimeout(work, ms); timers.add(timer); return timer; };
+  t.after(() => { for (const timer of timers) clearTimeout(timer); });
+  const state = { pid: 1235, alive: true, cleanupPending: true, readFailure: false, preparationFailure: false, cancellation: "confirmed", armFailure: false, commitFailure: false, exitFailure: false, notice: null, workerConfirmed: true, memory: Promise.resolve() };
+  const effects = { requests: [], helpers: [], stops: [], exits: 0, commits: 0, backupWrites: 0, resetWrites: 0, ordinary: 0, exitChecks: 0, alerts: [] };
+  const coworker = { slug: "writer", path: "/fixture/coworkers/writer", workspaceId: "workspace_fixture", createdAt: "2026-01-01T00:00:00.000Z" };
+  const owner = { ...coworker, coworkerCreatedAt: coworker.createdAt, coworkerIdentity: coworkerIdentity(coworker), kind: "private", threadId: "ses_fixture", conversationId: "ses_fixture" };
+  const metadata = { owner, workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt };
+  let currentCoworker = coworker;
+  let transportOptions;
+  let invoke;
+  let beforeQuit;
+  const exitTasks = [];
+  const frame = { url: "file:///fixture/index.html" };
+  const contents = { mainFrame: frame };
+  const handle = {
+    url: "http://127.0.0.1:1",
+    managedOpencodeV2: { get pid() { return state.pid; }, isAlive: () => state.alive },
+    stop: async () => { effects.stops.push("engine"); state.alive = false; state.pid = null; },
+    nativeCleanupRequest: async (request) => {
+      assert.equal(request.workspaceId, coworker.workspaceId);
+      assert.equal(request.directory, coworker.path);
+      effects.requests.push(request);
+      if (state.readFailure) throw new Error("Untrusted diagnostic with private contents must not reach the reset error.");
+      const route = request.path.split("?")[0];
+      if (route === "/api/session/active") return Response.json({ data: {} });
+      if (route === `/api/session/${owner.threadId}`) return Response.json({ data: { id: owner.threadId, projectID: "project_fixture", location: { directory: coworker.path }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 1, updated: 1, idle: 1 } } });
+      if (route.endsWith("/message")) return Response.json({ data: [], cursor: {} });
+      if (route.endsWith("/inbox")) return Response.json({ data: [] });
+      if (route.endsWith("/interrupt")) return Response.json({ interrupted: false });
+      if (route.endsWith("/wait") || request.method === "DELETE") return new Response(null, { status: 204 });
+      assert.fail(`Unexpected cleanup route ${request.method} ${route}`);
+    },
+  };
+  const admission = createMaintenanceAdmission();
+  const context = createContext({
+    Error, URL, path, fileURLToPath, console: { info() {} }, AbortController,
+    AbortSignal: { any: (signals) => AbortSignal.any(signals), timeout: (ms) => { const controller = new AbortController(); later(() => controller.abort(new Error("Fixture deadline")), Math.min(ms, 100)); return controller.signal; } },
+    setTimeout: later, clearTimeout, clearInterval, setImmediate: (work) => exitTasks.push(work),
+    process: { argv: ["fixture-node", "fixture-main.mjs"] }, userDataDir: "/fixture/electron-userdata", coworkersDir: "/fixture/coworkers",
+    serverHandle: handle, ownerToken: "fixture-owner", denSession: null,
+    maintenanceAdmission: admission, resetExitReady: false, resetInProgress: false, resetRetryReady: false, resetBlockedReason: "", quitting: false, quitReady: false,
+    localResponsibilitiesTimer: null, responsibilityAbort: new AbortController(), queuedLocalRuns: [], liveWorkerTurns: new Map(), localRunAdmission: Promise.resolve(),
+    activeLocalRuns: new Set(), startingServer: null, startingToolsServer: null, responsibilityCleanupError: null, nativeProviderGeneration: null, signInAttempts: new Set(),
+    getCoworker: async () => currentCoworker, readCoordinator: async () => assert.fail("A private cleanup must not prepare a coordinator"), coworkerIdentity, withAbort,
+    createHeadlessThreadClient: createHeadlessThreadClientV2,
+    createNativeV2Client: (options) => { transportOptions = options; return createNativeV2Client(options); },
+    createMaintenanceSteps: () => { const steps = createMaintenanceSteps(); return { run: (label, work, options) => steps.run(label, work, { ...options, timeoutMs: 30 }) }; },
+    createCollaboration: (options) => ({
+      stop: async ({ requireConfirmed }) => {
+        assert.equal(requireConfirmed, true);
+        effects.stops.push("collaboration");
+        await assert.rejects(options.clientFor(coworker.slug, metadata), /Fresh start/);
+        const client = await options.cleanupClientFor(coworker.slug, metadata);
+        await client.getThreadSnapshot(owner.threadId);
+        state.cleanupPending = false;
+      },
+    }),
+    events: { stop: async () => { effects.stops.push("events"); } }, groupExecution: { stop: async () => { effects.stops.push("groups"); } },
+    progressSummaries: { stop: () => { effects.stops.push("progress"); } }, conversationMemory: { stop: async () => { effects.stops.push("memory"); await state.memory; } },
+    voice: { reset: () => {} }, workerControls: { reset: async () => { effects.stops.push("workers"); return state.workerConfirmed; } },
+    computerControl: { reset: async () => { effects.stops.push("computer"); return { confirmed: true }; } }, browserControl: { shutdown: async () => { effects.stops.push("browser"); } },
+    toolsServer: { stop: async () => { effects.stops.push("tools"); } },
+    maintenance: { preview: async () => ({}), restoreDefaults: async () => {}, factoryReset: async () => { effects.resetWrites++; effects.backupWrites++; } },
+    maintenanceScope: () => ({ userData: "/fixture/electron-userdata" }), assertResetConfirmation, assertMaintenanceSender, maintenancePreparationFailure,
+    captureMaintenanceProcesses: (pids) => [...new Set(pids)].map((pid) => ({ pid, boot: "fixture-boot", started: `fixture-${pid}` })),
+    prepareMaintenanceHandoff: async ({ input }) => {
+      assertResetConfirmation(input);
+      const helper = { ticket: `fixture-${effects.helpers.length}`, pid: 2000 + effects.helpers.length, backupDirectory: "/fixture/recovery", cancellations: 0,
+        cancel: async () => { helper.cancellations++; if (state.cancellation === "failed") throw new Error("Cancellation refused"); if (state.cancellation === "pending") await new Promise(() => {}); },
+        arm: async () => { if (state.armFailure) throw new Error("Arm acknowledgement was lost"); }, commit: async () => { effects.commits++; if (state.commitFailure) throw new Error("Commit acknowledgement was lost"); },
+      };
+      effects.helpers.push(helper);
+      if (state.preparationFailure) throw Object.assign(new Error("Preparation ended without a cancellation receipt"), { maintenancePreparation: "not-spawned" });
+      return helper;
+    },
+    waitForMaintenanceExit: async (processes) => { effects.exitChecks++; assert.equal(processes.length, 1); assert.equal(processes[0].pid, effects.helpers.at(-1).pid); if (state.exitFailure) throw new Error("Helper exit was not observed"); },
+    readMaintenanceStartup: () => state.notice,
+    dialog: { showErrorBox: (_title, message) => effects.alerts.push(message) }, mainWindow: { webContents: contents }, rendererUrl: () => frame.url,
+    app: { getAppMetrics: () => [{ pid: 1234 }], exit: () => { effects.exits++; }, on: (name, handler) => { assert.equal(name, "before-quit"); beforeQuit = handler; } },
+    ipcMain: { handle: (_name, handler) => { invoke = handler; } }, commands: { ordinary: () => { effects.ordinary++; } },
+  });
+  const collaboration = source.slice(source.indexOf("const collaboration = createCollaboration({"), source.indexOf("const activityInbox ="));
+  const reset = source.slice(source.indexOf("const maintenanceSteps ="), source.indexOf("function registerIpc()"));
+  const quit = source.slice(source.indexOf('  app.on("before-quit",'), source.lastIndexOf("\n}"));
+  runInContext(`${declaration("collaborationCleanupClient")}\n${collaboration}\n${reset}\n${declaration("registerIpc")}\nregisterIpc();\n${quit}`.replaceAll("import.meta.url", JSON.stringify(mainUrl.href)), context);
+  return { state, effects, admission, context, coworker, owner, metadata, handle,
+    client: () => runInContext("collaborationCleanupClient", context)(coworker.slug, metadata),
+    transport: () => transportOptions, replaceCoworker: (value) => { currentCoworker = value; },
+    invoke: (command, payload = {}, event = { sender: contents, senderFrame: frame }) => invoke(event, { command, payload }),
+    quit: () => { let prevented = false; beforeQuit({ preventDefault() { prevented = true; } }); return prevented; },
+    flushExit: () => { for (const work of exitTasks.splice(0)) work(); },
+  };
+}
+
+async function preparationFixture(t) {
+  const source = await readFile(new URL("./maintenance-handoff.mjs", import.meta.url), "utf8");
+  const helpers = ["receive", "send"].map((name) => source.match(new RegExp(`^function ${name}\\([\\s\\S]*?^\\}`, "m"))?.[0]).join("\n");
+  const implementation = source.slice(source.indexOf("const preparationFailures ="), source.indexOf("/** Invoked only by")).replace(/^export /gm, "");
+  const timers = new Set();
+  t.after(() => { for (const timer of timers) clearTimeout(timer); });
+  const state = { preflightFailure: false, spawnFailure: false, exits: true, notice: null };
+  const effects = { spawns: 0, started: 0, cancellations: 0 };
+  const context = createContext({
+    Error, path, randomBytes, assertResetConfirmation, maintenanceLaunchArguments, PREPARE_TIMEOUT: 40,
+    process: { execPath: "/fixture/node", pid: 1234, cwd: () => "/fixture", env: {} },
+    setTimeout: (work, ms) => { const timer = setTimeout(work, Math.min(ms, 40)); timers.add(timer); return timer; }, clearTimeout,
+    validateMaintenancePaths: async () => { if (state.preflightFailure) throw new Error("Pre-spawn scope validation refused"); return { backupDirectory: "/fixture/recovery" }; },
+    readMaintenanceStartup: (_userData, options) => { assert.equal(options.consume, false); return state.notice; },
+    spawn: () => {
+      effects.spawns++;
+      const child = Object.assign(new EventEmitter(), {
+        connected: true, pid: state.spawnFailure ? undefined : 2000,
+        send(message, callback) {
+          if (message.type === "prepare") queueMicrotask(() => {
+            if (state.spawnFailure) {
+              const error = Object.assign(new Error("Native spawn refused"), { code: "ENOENT", syscall: "spawn /fixture/node" });
+              child.connected = false;
+              child.emit("error", error);
+              callback(error);
+            } else {
+              effects.started++;
+              child.emit("spawn");
+              callback(null);
+              child.emit("message", { type: "failed", ticket: message.ticket });
+            }
+          });
+          else { assert.equal(message.type, "cancel"); effects.cancellations++; callback(null); }
+        },
+        disconnect() { child.connected = false; if (state.exits) queueMicrotask(() => child.emit("exit", 0)); },
+        unref() {},
+      });
+      return child;
+    },
+  });
+  const api = runInContext(`${helpers}\n${implementation}\n({ prepareMaintenanceHandoff, maintenancePreparationFailure })`, context);
+  return { state, effects, ...api };
+}
+
+const assertNoResetWrites = (f) => {
+  assert.equal(f.effects.exits, 0);
+  assert.equal(f.effects.backupWrites, 0);
+  assert.equal(f.effects.resetWrites, 0);
+};
+
+test("main cleanup stays identity-scoped behind closed admission without preparing or admitting work", async (t) => {
+  const f = await mainFixture(t);
+  f.admission.close();
+  const client = await f.client();
+  assert.equal((await client.getThreadSnapshot(f.owner.threadId)).status.type, "idle");
+  assert.equal((await client.abortThread(f.owner.threadId)).accepted, true);
+  assert.equal(client.sendTurn, undefined);
+  assert.equal(client.nativeSkills.admitInput, undefined);
+  assert.equal(client.nativeSkills.listSkills, undefined);
+  const before = f.effects.requests.length;
+  await assert.rejects(f.transport().fetch(`${f.handle.url}/workspace/${f.coworker.workspaceId}/opencode2/api/session/${f.owner.threadId}/prompt`, { method: "POST" }), /cleanup operations/);
+  await assert.rejects(client.getThreadSnapshot("ses_other"), /cleanup operations/);
+  f.replaceCoworker({ ...f.coworker, createdAt: "replacement" });
+  await assert.rejects(f.client(), /original coworker/);
+  f.replaceCoworker(f.coworker);
+  f.context.serverHandle = { ...f.handle };
+  await assert.rejects(client.getThreadSnapshot(f.owner.threadId), /changed or stopped/);
+  f.context.serverHandle = f.handle;
+  f.state.alive = false;
+  await assert.rejects(f.client(), /changed or stopped/);
+  assert.equal(f.effects.requests.length, before);
+  assert.equal((await f.invoke("ordinary")).ok, false);
+  assert.equal(f.effects.ordinary, 0);
+  assertNoResetWrites(f);
+});
+
+test("main reset retries safely cancelled cleanup without reopening work or bypassing the renderer handoff", async (t) => {
+  const f = await mainFixture(t);
+  assert.equal((await f.invoke("maintenance.factoryReset", { confirmation: "delete" })).ok, false);
+  assert.equal((await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" }, { sender: { mainFrame: {} }, senderFrame: {} })).ok, false);
+  assert.equal(f.effects.helpers.length, 0);
+  f.state.readFailure = true;
+  const failed = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.maintenanceRetryable, true);
+  assert.match(failed.error, /Collaboration.*safely cancelled/);
+  assert.doesNotMatch(failed.error, /private contents/);
+  assert.equal(f.state.cleanupPending, true);
+  assert.equal(f.effects.helpers[0].cancellations, 1);
+  assert.equal(f.effects.exitChecks, 1);
+  for (const name of ["workers", "computer", "browser"]) assert.ok(f.effects.stops.includes(name));
+  assert.equal((await f.invoke("ordinary")).ok, false);
+  assertNoResetWrites(f);
+  f.state.readFailure = false;
+  const retried = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(retried.ok, true, retried.error);
+  assert.equal(retried.result.phase, "handoff");
+  assert.equal(f.handle.managedOpencodeV2.pid, null);
+  assert.equal(f.handle.managedOpencodeV2.isAlive(), false);
+  assert.equal(f.effects.helpers.length, 2);
+  assert.equal(f.state.cleanupPending, false);
+  assert.equal(f.admission.closed, true);
+  assert.equal(f.effects.commits, 0);
+  assertNoResetWrites(f);
+  assert.equal((await f.invoke("maintenance.handoffReceived", { handoffId: "stale" })).ok, false);
+  assert.equal((await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" })).ok, false);
+  assert.equal(f.effects.helpers.length, 2);
+  f.state.armFailure = true;
+  const unarmed = await f.invoke("maintenance.handoffReceived", { handoffId: retried.result.handoffId });
+  assert.equal(unarmed.ok, false);
+  assert.equal(unarmed.maintenanceRetryable, true);
+  assert.equal(f.effects.commits, 0);
+  assertNoResetWrites(f);
+  f.state.armFailure = false;
+  const finalAttempt = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(finalAttempt.ok, true, finalAttempt.error);
+  assert.equal(f.effects.helpers.length, 3);
+  assert.equal(f.handle.managedOpencodeV2.pid, null);
+  assert.equal(f.effects.stops.filter((name) => name === "engine").length, 1);
+  assert.equal((await f.invoke("maintenance.handoffReceived", { handoffId: finalAttempt.result.handoffId })).ok, true);
+  assert.equal(f.effects.commits, 1);
+  assert.equal(f.effects.exits, 0);
+  f.flushExit();
+  assert.equal(f.effects.exits, 1);
+});
+
+test("main reset blocks retry and quit when helper cancellation, exit or commitment is uncertain", async (t) => {
+  for (const fault of ["prepare", "failed", "pending", "exit", "commit", "receipt"]) {
+    const f = await mainFixture(t);
+    f.state.preparationFailure = fault === "prepare";
+    f.state.readFailure = fault !== "commit";
+    if (["failed", "pending"].includes(fault)) f.state.cancellation = fault;
+    if (fault === "exit") f.state.exitFailure = true;
+    if (fault === "receipt") f.state.notice = { blocked: true };
+    let response = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+    if (fault === "commit") {
+      assert.equal(response.ok, true, response.error);
+      f.state.commitFailure = true;
+      response = await f.invoke("maintenance.handoffReceived", { handoffId: response.result.handoffId });
+    }
+    assert.equal(response.ok, false);
+    assert.equal(response.maintenanceRetryable, false);
+    assert.match(response.error, /Keep this app open; retry and quit are blocked/);
+    assert.equal((await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" })).ok, false);
+    assert.equal(f.effects.helpers.length, 1);
+    assert.equal(f.effects.helpers[0].cancellations, fault === "prepare" ? 0 : 1);
+    assert.equal((await f.invoke("ordinary")).ok, false);
+    assert.equal(f.quit(), true);
+    f.flushExit();
+    assertNoResetWrites(f);
+  }
+});
+
+test("main shutdown bounds failed stops, preserves independent cleanup and joins unfinished steps on retry", async (t) => {
+  const f = await mainFixture(t);
+  const memory = Promise.withResolvers();
+  f.state.memory = memory.promise;
+  f.state.workerConfirmed = false;
+  const failed = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.maintenanceRetryable, true);
+  assert.match(failed.error, /Conversation memory.*in time/);
+  for (const name of ["workers", "computer", "browser"]) assert.ok(f.effects.stops.includes(name));
+  assert.equal(f.effects.stops.includes("engine"), false);
+  assertNoResetWrites(f);
+  f.state.workerConfirmed = true;
+  memory.resolve();
+  const retried = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(retried.ok, true, retried.error);
+  assert.equal(f.effects.stops.filter((name) => name === "memory").length, 1);
+  assert.equal(f.effects.stops.filter((name) => name === "workers").length, 2);
+  assert.equal(f.effects.stops.filter((name) => name === "engine").length, 1);
+  assert.equal(f.effects.commits, 0);
+  assertNoResetWrites(f);
+  const stopping = await mainFixture(t);
+  const completedStop = Promise.withResolvers();
+  stopping.handle.stop = async () => { stopping.effects.stops.push("engine"); stopping.state.alive = false; stopping.state.pid = null; await completedStop.promise; };
+  const timedOut = await stopping.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(timedOut.maintenanceRetryable, true);
+  assert.equal(stopping.handle.managedOpencodeV2.pid, null);
+  let settled = false;
+  const retry = stopping.invoke("maintenance.factoryReset", { confirmation: "DELETE" }).then((response) => { settled = true; return response; });
+  await new Promise(setImmediate);
+  assert.equal(stopping.effects.helpers.length, 2);
+  assert.equal(settled, false, "A null PID cannot substitute for the owned stop promise fulfilling.");
+  assert.equal(stopping.effects.stops.filter((name) => name === "engine").length, 1);
+  completedStop.resolve();
+  assert.equal((await retry).ok, true);
+  assertNoResetWrites(stopping);
+  const blocked = await mainFixture(t);
+  blocked.handle.stop = async () => { blocked.state.alive = false; blocked.state.pid = null; throw new Error("The owned server cached a failed shutdown"); };
+  const rejected = await blocked.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+  assert.equal(rejected.maintenanceRetryable, false);
+  assert.match(rejected.error, /cannot be retried in this app session/);
+  assert.equal((await blocked.invoke("maintenance.factoryReset", { confirmation: "DELETE" })).ok, false);
+  assert.equal(blocked.effects.helpers.length, 1);
+  assertNoResetWrites(blocked);
+});
+
+test("main reset never reuses a confirmed stop receipt for a replacement handle or generation", async (t) => {
+  for (const replacement of ["handle", "native", "pid"]) {
+    const f = await mainFixture(t);
+    const ready = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+    assert.equal(ready.ok, true, ready.error);
+    f.state.armFailure = true;
+    const cancelled = await f.invoke("maintenance.handoffReceived", { handoffId: ready.result.handoffId });
+    assert.equal(cancelled.maintenanceRetryable, true);
+    if (replacement === "handle") f.context.serverHandle = { ...f.handle };
+    if (replacement === "native") f.handle.managedOpencodeV2 = { get pid() { return null; }, isAlive: () => false };
+    if (replacement === "pid") f.state.pid = 9876;
+    const refused = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.maintenanceRetryable, false);
+    assert.equal(f.effects.stops.filter((name) => name === "engine").length, 1);
+    assert.equal(f.effects.commits, 0);
+    assertNoResetWrites(f);
+  }
+});
+
+test("main reset recovers preparation only from branded no-helper or exited-helper receipts", async (t) => {
+  for (const fault of ["preflight", "spawn", "cancelled", "exit", "receipt"]) {
+    const preparation = await preparationFixture(t);
+    preparation.state.preflightFailure = fault === "preflight";
+    preparation.state.spawnFailure = fault === "spawn";
+    preparation.state.exits = fault !== "exit";
+    preparation.state.notice = fault === "receipt" ? { blocked: true } : null;
+    const f = await mainFixture(t);
+    const nextPrepare = f.context.prepareMaintenanceHandoff;
+    f.context.prepareMaintenanceHandoff = preparation.prepareMaintenanceHandoff;
+    f.context.maintenancePreparationFailure = preparation.maintenancePreparationFailure;
+    const failed = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+    const safe = ["preflight", "spawn", "cancelled"].includes(fault);
+    assert.equal(failed.ok, false);
+    assert.equal(failed.maintenanceRetryable, safe, failed.error);
+    assert.equal(f.context.resetInProgress, !safe);
+    assert.equal(f.admission.closed, true);
+    assert.equal((await f.invoke("ordinary")).ok, false);
+    assert.equal(preparation.effects.started, ["preflight", "spawn"].includes(fault) ? 0 : 1);
+    assert.equal(preparation.effects.spawns, fault === "preflight" ? 0 : 1);
+    assertNoResetWrites(f);
+    if (safe) {
+      f.context.prepareMaintenanceHandoff = nextPrepare;
+      const retried = await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" });
+      assert.equal(retried.ok, true, retried.error);
+      assert.equal(f.effects.helpers.length, 1);
+      assert.equal(f.effects.commits, 0);
+      assertNoResetWrites(f);
+    } else {
+      assert.equal(f.quit(), true);
+      assert.equal((await f.invoke("maintenance.factoryReset", { confirmation: "DELETE" })).ok, false);
+      assert.equal(preparation.effects.spawns, 1);
+    }
+  }
 });

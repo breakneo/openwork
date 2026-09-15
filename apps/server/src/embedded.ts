@@ -39,6 +39,7 @@ import { migrateOpenworkCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
 import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
 import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
+import type { NativeCleanupRequest } from "./engine-v2-preview.js";
 import type { EmbeddedOpencodeV2Options, LocalManagedMcpVaultKeyProvider, ServerConfig } from "./types.js";
 
 export type EmbeddedServerOptions = CliArgs & {
@@ -74,6 +75,7 @@ export type EmbeddedServerHandle = {
   managedOpencode: { pid: number | null; isAlive: () => boolean } | null;
   /** The single mandatory v2 process owned by startServer, not a second sidecar. */
   managedOpencodeV2: { pid: number | null; isAlive: () => boolean } | null;
+  nativeCleanupRequest: (input: NativeCleanupRequest) => Promise<Response>;
   /** Current managed-engine generations for desktop diagnostics and acceptance checks. */
   managedOpencodePool: () => EnginePoolSnapshot | null;
   /** Stop the HTTP server and managed OpenCode (if any). */
@@ -102,6 +104,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   let stopRuntimeConfigFileRefresh: (() => void) | null = null;
   let server: Awaited<ReturnType<typeof startServer>> | null = null;
   let stopPromise: Promise<void> | null = null;
+  const nativeCleanupLifetime = new AbortController();
 
   const releaseResources = async (): Promise<void> => {
     const errors: unknown[] = [];
@@ -173,6 +176,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   };
 
   const stop = (): Promise<void> => {
+    nativeCleanupLifetime.abort(new Error("Native cleanup host stopped"));
     stopPromise ??= releaseResources();
     return stopPromise;
   };
@@ -327,12 +331,16 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   }
 
   const initialManagedOpencode = managedOpencode;
+  const initialServer = server;
   return {
     port: server.port,
     url: `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`,
     config,
     managedOpencodeExecution: managedOpencode?.execution ?? null,
     managedOpencodeV2: server.managedOpencodeV2,
+    nativeCleanupRequest: (input) => initialServer.nativeCleanupRequest({ ...input,
+      signal: AbortSignal.any([nativeCleanupLifetime.signal, ...(input.signal ? [input.signal] : [])]),
+    }),
     policyToken: managedDesktopPolicy(config).evaluationToken,
     managedOpencode: initialManagedOpencode
       ? {

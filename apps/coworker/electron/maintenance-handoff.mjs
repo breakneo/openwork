@@ -176,16 +176,38 @@ function send(channel, value) {
   return new Promise((resolve, reject) => channel.send(value, (error) => error ? reject(error) : resolve()));
 }
 
+const preparationFailures = new WeakMap();
+
+export function maintenancePreparationFailure(error) {
+  return preparationFailures.get(error) ?? null;
+}
+
+function refusedPreparation(error, state) {
+  const failure = new Error(error instanceof Error ? error.message : "Fresh start preparation failed.", { cause: error });
+  preparationFailures.set(failure, state);
+  return failure;
+}
+
 /** No CLI paths or environment tickets: the inherited private IPC channel is
  * the capability, and the nonce binds prepare/arm to this one native request. */
-export async function prepareMaintenanceHandoff({ input, scope, helperPath, executable = process.execPath, args, cwd = process.cwd(), env = process.env, ackTimeoutMs = PREPARE_TIMEOUT }) {
-  assertResetConfirmation(input);
-  const plan = await validateMaintenancePaths(scope);
-  const ticket = randomBytes(32).toString("hex");
-  const launch = { executable, args: maintenanceLaunchArguments(args), cwd };
-  const child = spawn(executable, [helperPath], { cwd: path.dirname(executable), env: { ...env, ELECTRON_RUN_AS_NODE: "1" }, shell: false, detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
-  // Always observe asynchronous spawn errors, including after a cancelled wait.
-  child.on("error", () => {});
+export async function prepareMaintenanceHandoff({ input, scope, helperPath, executable = process.execPath, args, cwd, env = process.env, ackTimeoutMs = PREPARE_TIMEOUT }) {
+  let plan;
+  let ticket;
+  let launch;
+  let spawnOptions;
+  try {
+    assertResetConfirmation(input);
+    plan = await validateMaintenancePaths(scope);
+    ticket = randomBytes(32).toString("hex");
+    launch = { executable, args: maintenanceLaunchArguments(args), cwd: cwd === undefined ? process.cwd() : cwd };
+    spawnOptions = { cwd: path.dirname(executable), env: { ...env, ELECTRON_RUN_AS_NODE: "1" }, shell: false, detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] };
+  } catch (error) { throw refusedPreparation(error, "not-spawned"); }
+  const child = spawn(executable, [helperPath], spawnOptions);
+  let spawned = false;
+  let spawnFailed = false;
+  child.once("spawn", () => { spawned = true; });
+  child.on("error", (error) => { if (!spawned && child.pid === undefined && typeof error.syscall === "string" && error.syscall.startsWith("spawn")) spawnFailed = true; });
+  const exited = new Promise((resolve) => child.once("exit", resolve));
   let prepared = false;
   let state = "preparing";
   const cancel = async () => {
@@ -233,7 +255,20 @@ export async function prepareMaintenanceHandoff({ input, scope, helperPath, exec
       },
       cancel,
     };
-  } catch (error) { await cancel(); throw error; }
+  } catch (error) {
+    let failureState = null;
+    let timer;
+    try {
+      failureState = await Promise.race([(async () => {
+        await cancel();
+        if (spawnFailed) return "not-spawned";
+        await exited;
+        return readMaintenanceStartup(scope.userData, { consume: false }) === null ? "cancelled" : null;
+      })(), new Promise((resolve) => { timer = setTimeout(() => resolve(null), 10_000); })]);
+    } catch {} finally { clearTimeout(timer); }
+    if (spawnFailed) failureState = "not-spawned";
+    throw failureState ? refusedPreparation(error, failureState) : error;
+  }
 }
 
 /** Invoked only by the separately bundled helper entry, never by the app CLI. */

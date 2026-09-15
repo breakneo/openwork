@@ -92,7 +92,7 @@ import {
   setDocumentStatus,
   updateDocument,
 } from "./documents.mjs";
-import { ensureCoordinatorHome, updateCoordinator } from "./coordinator.mjs";
+import { ensureCoordinatorHome, readCoordinator, updateCoordinator } from "./coordinator.mjs";
 import { effortForTurn, effortStopOf, replyKindForLane, workerTurnsFor } from "../src/lib/effort.ts";
 import { classifyRequest, resolveDiscussionModel } from "../src/lib/model-choice.ts";
 import {
@@ -122,8 +122,8 @@ import {
 import { detectLocalProviders, listOpenAiCompatibleModels } from "./local-providers.mjs";
 import { resolveBundledOpencodeV2Binary, resolveUserDataDir } from "./runtime-paths.mjs";
 import nativeRuntime from "../native-runtime.json" with { type: "json" };
-import { assertMaintenanceSender, assertResetConfirmation, createMaintenance, createMaintenanceAdmission, resolveMaintenanceHistoryDb, validateMaintenancePaths } from "./maintenance.mjs";
-import { captureMaintenanceProcesses, maintenanceFailureDetail, prepareMaintenanceHandoff, readMaintenanceStartup } from "./maintenance-handoff.mjs";
+import { assertMaintenanceSender, assertResetConfirmation, createMaintenance, createMaintenanceAdmission, createMaintenanceSteps, resolveMaintenanceHistoryDb, validateMaintenancePaths } from "./maintenance.mjs";
+import { captureMaintenanceProcesses, maintenanceFailureDetail, maintenancePreparationFailure, prepareMaintenanceHandoff, readMaintenanceStartup, waitForMaintenanceExit } from "./maintenance-handoff.mjs";
 import { noteProgress, readChanges, trackChange, undoChange, writeTrackedFile } from "./self-memory.mjs";
 import { SETTINGS_FILE, normalizeSettings, readSettings, scheduleGuardrails, updateSettings } from "./settings.mjs";
 import {
@@ -234,6 +234,10 @@ const responsibilityAbort = new AbortController();
 let responsibilityCleanupError;
 let resetExitReady = false;
 let resetInProgress = false;
+let resetRetryReady = false;
+let resetBlockedReason = "";
+let quitting = false;
+let quitReady = false;
 
 /**
  * Deep links use the app's own scheme so a Den handoff never lands in the
@@ -917,6 +921,7 @@ const WORKER_TURN_TIMEOUT_MS = 60 * 60_000;
 const collaboration = createCollaboration({
   directory: coworkersDir,
   clientFor: (slug, options) => maintenanceAdmission.run(() => collaborationClient(slug, options)),
+  cleanupClientFor: collaborationCleanupClient,
   validateOwner: (owner) => events.validateOwner(owner),
   consult: (task) => maintenanceAdmission.run(() => groupExecution.consultation(task)),
   spawn: (slug, input) => maintenanceAdmission.run(() => spawnWorker(slug, input, "coworker")),
@@ -1052,7 +1057,9 @@ const events = createEvents({
   directory: coworkersDir, collaboration, groups: groupExecution,
   coworkerFor: (slug) => getCoworker(coworkersDir, slug),
   coworkers: () => listCoworkers(coworkersDir),
-  readExecution: async (entry) => (await collaborationClient(entry.owner.slug, { model: entry.model, observationOnly: true })).getThreadSnapshot(entry.owner.threadId, { signal: AbortSignal.timeout(10_000) }),
+  readExecution: async (entry) => (await (maintenanceAdmission.closed
+    ? collaborationCleanupClient(entry.owner.slug, { owner: entry.owner, workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt, signal: AbortSignal.timeout(10_000) })
+    : collaborationClient(entry.owner.slug, { model: entry.model, observationOnly: true }))).getThreadSnapshot(entry.owner.threadId, { signal: AbortSignal.timeout(10_000) }),
   resolveContext: (slug, context, expected) => collaboration.context(slug, context, expected, assertEventToolContext),
   readArtifact: async (artifact) => {
     const owner = artifact.owner;
@@ -1097,6 +1104,79 @@ async function collaborationClient(slug, { kind = "reply", requestText, model, a
   client.replyQuestion = interactions.replyQuestion;
   client.rejectQuestion = interactions.rejectQuestion;
   return client;
+}
+
+async function collaborationCleanupClient(slug, { owner, workspaceId, coworkerCreatedAt, signal } = {}) {
+  const handle = serverHandle;
+  const generation = handle?.managedOpencodeV2;
+  const pid = generation?.pid;
+  const request = handle?.nativeCleanupRequest;
+  const createdAt = coworkerCreatedAt ?? owner?.coworkerCreatedAt ?? owner?.coworkerIdentity?.createdAt;
+  if (!owner || owner.slug !== slug || !owner.threadId || !workspaceId
+    || (slug !== ".coordinator" && (typeof createdAt !== "string" || !createdAt))) throw new Error("The original cleanup identity is unavailable. No unrelated work was stopped.");
+  if (typeof request !== "function") throw new Error("Cleanup-only access to the owned AI service is unavailable. Update Open Coworker before retrying Fresh start.");
+  const directory = path.join(path.resolve(coworkersDir), slug);
+  const assertCurrent = () => {
+    signal?.throwIfAborted();
+    if (serverHandle !== handle || handle.managedOpencodeV2 !== generation || generation?.pid !== pid
+      || !Number.isSafeInteger(pid) || pid < 2 || !generation.isAlive() || handle.nativeCleanupRequest !== request
+      || (maintenanceAdmission.closed && maintenanceServer && (maintenanceServer.handle !== handle || maintenanceServer.native !== generation || maintenanceServer.pid !== pid))) throw new Error("The owned AI service changed or stopped. Cleanup was not confirmed.");
+  };
+  const checkOwner = async () => {
+    assertCurrent();
+    const current = await withAbort(slug === ".coordinator" ? readCoordinator(coworkersDir) : getCoworker(coworkersDir, slug),
+      AbortSignal.any([AbortSignal.timeout(8000), ...(signal ? [signal] : [])]));
+    assertCurrent();
+    const expected = owner.coworkerIdentity;
+    if (!current?.path || current.workspaceId !== workspaceId || path.resolve(current.path) !== directory
+      || (owner.workspaceId && owner.workspaceId !== workspaceId)
+      || (slug !== ".coordinator" && (current.slug !== slug || current.createdAt !== createdAt))
+      || (expected && (expected.slug !== slug || expected.path !== directory || expected.createdAt !== createdAt
+        || (expected.workspaceId && expected.workspaceId !== workspaceId)))) throw new Error("The original coworker or workspace changed. No unrelated work was stopped.");
+    return current;
+  };
+  const coworker = await checkOwner();
+  const baseUrl = handle.url.replace(/\/+$/, "");
+  const mount = new URL(`${baseUrl}/workspace/${encodeURIComponent(workspaceId)}/opencode2`);
+  const session = `/api/session/${encodeURIComponent(owner.threadId)}`;
+  const transport = async (url, init = {}) => {
+    const target = new URL(url);
+    const route = target.pathname.slice(mount.pathname.length);
+    const method = init.method ?? "GET";
+    const read = method === "GET" && ([session, `${session}/inbox`, "/api/session/active"].includes(route) ? !target.search
+      : route === `${session}/message` && [...target.searchParams.keys()].every((key) => ["limit", "cursor", "order"].includes(key)));
+    const stop = method === "POST" && (route === `${session}/interrupt` && target.search === "?continue=false" || route === `${session}/wait` && !target.search);
+    const cancel = method === "DELETE" && route.startsWith(`${session}/inbox/`) && /^msg_[A-Za-z0-9_]+$/.test(route.slice(`${session}/inbox/`.length)) && !target.search;
+    if (target.origin !== mount.origin || !target.pathname.startsWith(`${mount.pathname}/`) || target.username || target.password || target.hash
+      || init.body != null || !(read || stop || cancel)) throw new Error("Only the original native session's cleanup operations are allowed.");
+    await checkOwner();
+    const requestSignal = AbortSignal.any([AbortSignal.timeout(8000), ...[signal, init.signal].filter(Boolean)]);
+    requestSignal.throwIfAborted();
+    const response = await withAbort(request.call(handle, { workspaceId, directory, method, path: `${route}${target.search}`, signal: requestSignal }), requestSignal);
+    assertCurrent();
+    return response;
+  };
+  const options = { baseUrl, workspaceId, token: ownerToken, requestTimeoutMs: 8000, signal, fetch: transport };
+  const client = createHeadlessThreadClient(options);
+  const native = createNativeV2Client(options);
+  const checked = (work, scoped = true) => async (...args) => {
+    if (scoped && args[0] !== owner.threadId) throw new Error("Only the original native session's cleanup operations are allowed.");
+    await checkOwner();
+    const value = await work(...args);
+    await checkOwner();
+    return value;
+  };
+  return Object.freeze({
+    workspaceId, coworkerCreatedAt: coworker.createdAt ?? null,
+    ...(slug !== ".coordinator" ? { coworkerIdentity: coworkerIdentity(coworker) } : {}),
+    getThreadSnapshot: checked(async (threadId, input) => {
+      const snapshot = await client.getThreadSnapshot(threadId, input);
+      if (threadId !== owner.threadId || snapshot.threadId !== threadId || !snapshot.directory || path.resolve(snapshot.directory) !== directory) throw new Error("The native cleanup snapshot belongs to another workspace or session.");
+      return snapshot;
+    }),
+    abortThread: checked(client.abortThread),
+    nativeSkills: Object.freeze(Object.fromEntries(["getSession", "readHistory", "readInbox", "readActive", "reconcileInput", "cancelInput"].map((name) => [name, checked(native[name], name !== "readActive")]))),
+  });
 }
 
 async function privateOwner(slug, threadId, kind = "private") {
@@ -2898,100 +2978,175 @@ const maintenance = createMaintenance({
   },
 });
 
+const maintenanceSteps = createMaintenanceSteps();
+let maintenanceServer;
+let maintenanceServerStopped = false;
+
 async function stopForMaintenance() {
+  if (!maintenanceAdmission.closed) throw new Error("Fresh start must close ordinary work before cleanup.");
+  maintenanceServer ??= { handle: serverHandle, native: serverHandle?.managedOpencodeV2, pid: serverHandle?.managedOpencodeV2?.pid };
   if (localResponsibilitiesTimer) clearInterval(localResponsibilitiesTimer);
   localResponsibilitiesTimer = null;
-  await events.stop();
-  progressSummaries.stop();
-  await conversationMemory.stop();
-  voice.reset();
-  if (nativeProviderGeneration) {
-    const { providers } = await nativeProviderGeneration.pending;
-    for (const id of signInAttempts) { await providers.cancel(id); signInAttempts.delete(id); }
-  }
   responsibilityAbort.abort(new Error("Fresh start is stopping local work."));
   queuedLocalRuns.length = 0;
   for (const run of liveWorkerTurns.values()) run.controller.abort(new Error("Fresh start is stopping Workers."));
-  const groupStop = groupExecution.stop();
-  const collaborationStop = collaboration.stop({ requireConfirmed: true });
-  const draining = Promise.all([groupStop, collaborationStop, localRunAdmission]);
-  void draining.catch(() => {});
-  const controls = await workerControls.reset(true);
-  const computer = await computerControl.reset(true);
-  if (!controls || !computer.confirmed) throw new Error("Control cleanup could not be confirmed. No reset was performed.");
-  await browserControl.shutdown();
-  await withAbort(draining, AbortSignal.timeout(30_000));
-  await maintenanceAdmission.drain();
-  if (startingServer || startingToolsServer || activeLocalRuns.size || responsibilityCleanupError || [...liveWorkerTurns.values()].some((run) => run.cleanupError)) throw new Error("Local execution cleanup is unconfirmed. No reset was performed.");
-  if (!serverHandle?.managedOpencodeV2) throw new Error("The managed AI service's ownership could not be confirmed. Restart it before Fresh start.");
-  if (toolsServer) await withAbort(toolsServer.stop(), AbortSignal.timeout(10_000));
-  toolsServer = null;
-  const previous = serverHandle;
-  try { await withAbort(previous.stop(), AbortSignal.timeout(30_000)); }
-  catch { throw new Error("The native AI service could not confirm shutdown. No reset was performed."); }
-  if (previous.managedOpencodeV2.isAlive()) throw new Error("The AI service is still running. No reset was performed.");
-  serverHandle = null;
-  ownerToken = "";
-  denSession = null;
-  // Chromium remains alive here. The helper, not this process, owns the
-  // subsequent backup/reset after all captured application PIDs have exited.
+  const controls = async () => {
+    const failures = [];
+    for (const [label, work] of [
+      ["Worker controls", async () => { if (await workerControls.reset(true) !== true) throw new Error("Worker cleanup is unconfirmed."); }],
+      ["Computer control", async () => { if ((await computerControl.reset(true)).confirmed !== true) throw new Error("Computer cleanup is unconfirmed."); }],
+      ["Browser control", () => browserControl.shutdown()],
+    ]) {
+      try { await maintenanceSteps.run(label, work, { timeoutMs: 10_000 }); }
+      catch (error) { failures.push(error.message); }
+    }
+    if (failures.length) throw Object.assign(new Error(failures.join(" ")), { maintenanceRetryable: true });
+  };
+  const results = await Promise.allSettled([
+    maintenanceSteps.run("Scheduled Events", () => events.stop()),
+    maintenanceSteps.run("Progress notes", () => progressSummaries.stop()),
+    maintenanceSteps.run("Conversation memory", () => conversationMemory.stop()),
+    maintenanceSteps.run("Voice", () => voice.reset()),
+    maintenanceSteps.run("Provider sign-ins", async () => {
+      if (!nativeProviderGeneration || !signInAttempts.size) return;
+      const { providers } = await nativeProviderGeneration.pending;
+      for (const id of signInAttempts) { await providers.cancel(id); signInAttempts.delete(id); }
+    }),
+    maintenanceSteps.run("Group work", () => groupExecution.stop()),
+    maintenanceSteps.run("Collaboration", () => collaboration.stop({ requireConfirmed: true })),
+    maintenanceSteps.run("Local admission", () => localRunAdmission),
+    controls(),
+  ]);
+  const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+  if (failures.length) throw Object.assign(new Error(failures.map((error) => error.message).join(" ")), {
+    maintenanceRetryable: failures.every((error) => error.maintenanceRetryable !== false)
+      && serverHandle === maintenanceServer.handle && serverHandle?.managedOpencodeV2 === maintenanceServer.native
+      && maintenanceServer.native?.pid === maintenanceServer.pid && maintenanceServer.native?.isAlive() === true,
+  });
+  await maintenanceSteps.run("Admitted work", () => maintenanceAdmission.drain());
+  const unresolvedStop = responsibilityCleanupError || [...liveWorkerTurns.values()].some((run) => run.cleanupError);
+  if (startingServer || startingToolsServer || activeLocalRuns.size || unresolvedStop) throw Object.assign(new Error("Local execution cleanup is unconfirmed. No reset was performed."), { maintenanceRetryable: !unresolvedStop });
+  const previous = maintenanceServer;
+  const original = () => serverHandle === previous.handle && previous.handle?.managedOpencodeV2 === previous.native;
+  const exited = () => {
+    const pid = previous.native?.pid;
+    return (pid === null || pid === previous.pid) && previous.native?.isAlive() === false;
+  };
+  if (!previous.handle || !previous.native || !Number.isSafeInteger(previous.pid) || previous.pid < 2
+    || previous.handle.managedOpencodeV2 !== previous.native
+    || (previous.native.pid !== previous.pid && !(previous.stopStarted && exited()))
+    || (serverHandle !== previous.handle && !(maintenanceServerStopped && serverHandle === null))) throw Object.assign(new Error("The original AI service's ownership could not be confirmed. No reset was performed."), { maintenanceRetryable: false });
+  await maintenanceSteps.run("Workspace tools", async () => {
+    if (toolsServer) await toolsServer.stop();
+    toolsServer = null;
+  }, { timeoutMs: 10_000, retry: false });
+  await maintenanceSteps.run("The native AI service", async () => {
+    if (!original() || previous.native.pid !== previous.pid) throw new Error("The original native process changed before shutdown.");
+    previous.stopStarted = true;
+    await previous.handle.stop();
+    if (!original() || !exited()) throw new Error("The original native process's shutdown is unconfirmed.");
+    maintenanceServerStopped = true;
+    serverHandle = null;
+    ownerToken = "";
+    denSession = null;
+  }, { retry: false });
+  if (!maintenanceServerStopped || serverHandle !== null || previous.handle.managedOpencodeV2 !== previous.native || !exited()) throw Object.assign(new Error("The AI service's exit is unconfirmed. No reset was performed."), { maintenanceRetryable: false });
 }
 
 let resetHandoff;
 let resetReceiptTimer;
+
+async function cancelResetAttempt(attempt, error) {
+  if (attempt.cancelling) return attempt.cancelling;
+  attempt.consumed = true;
+  clearTimeout(resetReceiptTimer);
+  if (attempt.preparing && !maintenanceAdmission.closed) maintenanceAdmission.close();
+  const preparation = maintenancePreparationFailure(error);
+  resetBlockedReason = "Fresh start cancellation is unconfirmed. Keep this app open; retry and quit are blocked. Have the recovery status checked before continuing.";
+  attempt.cancelling = (async () => {
+    try {
+      if (attempt.preparing && !attempt.handoff && !["not-spawned", "cancelled"].includes(preparation)) throw new Error("Helper preparation is unconfirmed.");
+      if (attempt.handoff) {
+        await withAbort(attempt.handoff.cancel(), AbortSignal.timeout(10_000));
+        if (attempt.helperProcesses?.length !== 1) throw new Error("The original helper identity is unconfirmed.");
+        await withAbort(waitForMaintenanceExit(attempt.helperProcesses, 10_000), AbortSignal.timeout(12_000));
+        if (readMaintenanceStartup(userDataDir, { consume: false }) !== null) throw new Error("The helper's recovery status is unconfirmed.");
+      }
+    } catch {
+      return Object.assign(new Error(resetBlockedReason), { maintenanceRetryable: false });
+    }
+    if (attempt.commitAttempted) {
+      resetBlockedReason = "The native helper's commitment is unconfirmed. Keep this app open; retry and quit are blocked. Have the recovery status checked before continuing.";
+      return Object.assign(new Error(resetBlockedReason), { maintenanceRetryable: false });
+    }
+    resetHandoff = null;
+    resetInProgress = false;
+    resetRetryReady = error?.maintenanceRetryable !== false;
+    const detail = typeof error?.maintenanceRetryable === "boolean" ? error.message : "The native Fresh start handoff did not finish.";
+    resetBlockedReason = resetRetryReady ? "" : `${detail} This shutdown cannot be retried in this app session. Quit and reopen Open Coworker before another Fresh start.`;
+    return Object.assign(new Error(resetRetryReady
+      ? `${detail} Nothing was erased. ${attempt.handoff || preparation === "cancelled" ? "The helper was safely cancelled. " : preparation === "not-spawned" ? "No helper was started. " : ""}You can retry erase & restart here; ordinary work stays closed after shutdown begins.`
+      : resetBlockedReason), { maintenanceRetryable: resetRetryReady });
+  })();
+  return attempt.cancelling;
+}
+
 commands["maintenance.preview"] = () => maintenance.preview();
 commands["maintenance.restoreDefaults"] = () => maintenance.restoreDefaults();
 commands["maintenance.factoryReset"] = async (input) => {
   assertResetConfirmation(input);
-  if (resetInProgress) throw new Error("Fresh start is already in progress.");
-  maintenanceAdmission.assertOpen();
+  if (quitting || quitReady || resetExitReady) throw new Error("Open Coworker is already closing. Fresh start was not started.");
+  if (resetInProgress) throw new Error(resetBlockedReason || "Fresh start is already in progress.");
+  if (!resetRetryReady) {
+    if (maintenanceAdmission.closed && resetBlockedReason) throw new Error(resetBlockedReason);
+    maintenanceAdmission.assertOpen();
+  }
   resetInProgress = true;
-  let handoff;
+  resetRetryReady = false;
+  resetBlockedReason = "";
+  const attempt = { handoff: null, ready: false, consumed: false, preparing: false, commitAttempted: false };
+  resetHandoff = attempt;
   try {
-    const previousProcesses = captureMaintenanceProcesses(app.getAppMetrics().map((metric) => metric.pid));
-    handoff = await prepareMaintenanceHandoff({ input, scope: maintenanceScope(),
+    attempt.previousProcesses = captureMaintenanceProcesses(app.getAppMetrics().map((metric) => metric.pid));
+    const scope = maintenanceScope();
+    attempt.preparing = true;
+    attempt.handoff = await prepareMaintenanceHandoff({ input, scope,
       helperPath: fileURLToPath(new URL("./maintenance-helper.mjs", import.meta.url)),
       args: process.argv.slice(1),
     });
-    maintenanceAdmission.close();
+    attempt.helperProcesses = captureMaintenanceProcesses([attempt.handoff.pid]);
+    if (attempt.helperProcesses.length !== 1) throw new Error("The original native helper could not be identified.");
+    if (!maintenanceAdmission.closed) maintenanceAdmission.close();
     await stopForMaintenance();
-    resetHandoff = { handoff, previousProcesses, consumed: false };
-    // A renderer crash before acknowledging cannot arm an unattended reset.
+    attempt.ready = true;
     resetReceiptTimer = setTimeout(() => {
-      if (!resetHandoff || resetHandoff.consumed) return;
-      void handoff.cancel().then(() => {
-        resetHandoff = null;
-        resetInProgress = false;
-        dialog.showErrorBox("Fresh start was not started", "The handoff could not be acknowledged. Nothing was erased. Quit and reopen Open Coworker before retrying.");
-      }).catch(() => dialog.showErrorBox("Fresh start cancellation needs attention", "Cancellation could not be confirmed. Keep this app open; ordinary quit remains blocked to protect your data."));
+      if (resetHandoff !== attempt || attempt.consumed) return;
+      void cancelResetAttempt(attempt, new Error("The handoff could not be acknowledged.")).then((failure) => {
+        dialog.showErrorBox(resetInProgress ? "Fresh start cancellation needs attention" : "Fresh start was not started", failure.message);
+      });
     }, 30_000);
-    return { phase: "handoff", backupDirectory: handoff.backupDirectory, handoffId: handoff.ticket };
+    return { phase: "handoff", backupDirectory: attempt.handoff.backupDirectory, handoffId: attempt.handoff.ticket };
   } catch (error) {
-    await handoff?.cancel();
-    resetInProgress = false;
-    throw error;
+    throw await cancelResetAttempt(attempt, error);
   }
 };
 commands["maintenance.handoffReceived"] = async ({ handoffId }) => {
   const pending = resetHandoff;
-  if (!pending || pending.consumed || pending.handoff.ticket !== handoffId) throw new Error("This Fresh start handoff is not current.");
+  if (!pending?.ready || !pending.handoff || pending.consumed || pending.handoff.ticket !== handoffId) throw new Error("This Fresh start handoff is not current.");
   pending.consumed = true;
   clearTimeout(resetReceiptTimer);
   try {
-    await pending.handoff.arm([...pending.previousProcesses, ...captureMaintenanceProcesses(app.getAppMetrics().map((metric) => metric.pid).filter((pid) => pid !== pending.handoff.pid))]);
-    await pending.handoff.commit();
+    await withAbort(pending.handoff.arm([...pending.previousProcesses, ...captureMaintenanceProcesses(app.getAppMetrics().map((metric) => metric.pid).filter((pid) => pid !== pending.handoff.pid))]), AbortSignal.timeout(25_000));
+    pending.commitAttempted = true;
+    await withAbort(pending.handoff.commit(), AbortSignal.timeout(25_000));
     console.info("[fresh-start] Native handoff committed; closing previous app.");
     resetExitReady = true;
-    // This separate IPC call proves the renderer received the HANDOFF receipt.
-    // No completed-backup claim is made before exiting the old application.
     setImmediate(() => app.exit(0));
     return { acknowledged: true };
   } catch (error) {
-    await pending.handoff.cancel();
-    resetHandoff = null;
-    resetInProgress = false;
-    dialog.showErrorBox("Fresh start was not started", "The native helper could not confirm the handoff. Nothing was erased. Quit and reopen Open Coworker before retrying.");
-    throw error;
+    const failure = await cancelResetAttempt(pending, error);
+    dialog.showErrorBox("Fresh start was not started", failure.message);
+    throw failure;
   }
 };
 
@@ -3018,7 +3173,9 @@ function registerIpc() {
         : await maintenanceAdmission.run(() => handler(request?.payload ?? {}));
       return { ok: true, result };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      return { ok: false, error: resetInProgress && resetBlockedReason ? resetBlockedReason : error instanceof Error ? error.message : String(error),
+        ...(["maintenance.factoryReset", "maintenance.handoffReceived"].includes(command)
+          ? { maintenanceRetryable: !resetInProgress && !quitting && !quitReady && !resetExitReady && (!maintenanceAdmission.closed || resetRetryReady) } : {}) };
     }
   });
 }
@@ -3121,9 +3278,9 @@ async function focusMainWindow() {
   // A failed reset seals native work until quit. Its existing window must still
   // be reachable, so the person can read the failure and quit normally.
   if (!mainWindow && maintenanceAdmission.closed) {
-    dialog.showErrorBox("Fresh start needs attention", resetInProgress
+    dialog.showErrorBox("Fresh start needs attention", resetBlockedReason || (resetInProgress
       ? "Fresh start is still stopping the app. It will reopen after the reset finishes."
-      : "Fresh start did not finish. Quit and reopen Open Coworker to review the saved result.");
+      : "Fresh start did not finish. Quit and reopen Open Coworker to review the saved result."));
     return null;
   }
   const window = mainWindow ?? await createMainWindow();
@@ -3204,12 +3361,10 @@ if (!singleInstanceLock) {
     if (process.platform !== "darwin") app.quit();
   });
 
-  let quitting = false;
-  let quitReady = false;
   app.on("before-quit", (event) => {
     voice.reset();
     if (resetExitReady) return;
-    if (resetInProgress && !quitReady) {
+    if (resetInProgress) {
       event.preventDefault();
       return;
     }

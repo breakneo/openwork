@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,7 +41,7 @@ if (!process.env.OPENWORK_EMBEDDED_V2_TEST_ROOT) {
   const { engineV2ByConfig } = await import("./engine-v2-preview.js");
   const { default: constants } = await import("../../../constants.json", { with: { type: "json" } });
   const { default: nativeRuntime } = await import("../../coworker/native-runtime.json", { with: { type: "json" } });
-  const { createNativeV2Client, nativeCatalogProviders } = await import("@openwork/headless-threads/v2");
+  const { createNativeV2Client, createHeadlessThreadClientV2, nativeCatalogProviders } = await import("@openwork/headless-threads/v2");
 
   async function fixture(version?: string) {
     const root = await mkdtemp(join(process.env.OPENWORK_EMBEDDED_V2_TEST_ROOT!, "case-"));
@@ -57,10 +57,14 @@ const config = () => JSON.parse(readFileSync(join(process.env.OPENCODE_CONFIG_DI
 log({ spawn: true, args: process.argv.slice(2), serverUrl: process.env.OPENWORK_SERVER_URL,
   bridge: process.env.NATIVE_BRIDGE, secret: process.env.OPENWORK_ENCRYPTION_KEY ?? null });
 const mcps = new Map();
-const sessions = new Map();
+const cleanup = process.env.FIXTURE_CLEANUP_STATE ? JSON.parse(readFileSync(process.env.FIXTURE_CLEANUP_STATE, "utf8")) : {};
+const sessions = new Map(Object.entries(cleanup.sessions ?? {}));
+const inboxes = new Map(Object.entries(cleanup.inboxes ?? {}));
+const active = new Set(cleanup.active ?? []);
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
   const url = new URL(request.url);
-  log({ method: request.method, path: url.pathname });
+  log({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams) });
+  if (request.headers.get("authorization") !== "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64")) return new Response(null, { status: 401 });
   if (url.pathname === "/api/health") return Response.json({ healthy: true, pid: process.pid, version: process.env.FIXTURE_VERSION });
   if (url.pathname === "/api/plugin/await-activation") return new Response(null, { status: 204 });
   if (url.pathname === "/api/plugin") return Response.json({ data: [] });
@@ -85,8 +89,30 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
   if (url.pathname === "/api/session" && request.method === "POST") {
     const data = await request.json(); sessions.set(data.id, data); return Response.json({ data });
   }
+  if (url.pathname === "/api/session/active") return Response.json({ data: Object.fromEntries([...active].map((id) => [id, { type: "running" }])) });
   const session = url.pathname.match(/^\\/api\\/session\\/([^/]+)$/);
-  if (session) return Response.json({ data: sessions.get(session[1]) });
+  if (session) return sessions.has(session[1]) ? Response.json({ data: sessions.get(session[1]) }, { headers: { "set-cookie": "native-fixture=private", "x-native-private": "fixture" } }) : new Response(null, { status: 404 });
+  const operation = url.pathname.match(/^\\/api\\/session\\/([^/]+)\\/(inbox|message|interrupt|wait)(?:\\/([^/]+))?$/);
+  if (operation && sessions.has(operation[1])) {
+    const [, id, action, messageId] = operation;
+    const inbox = inboxes.get(id) ?? [];
+    if (action === "inbox" && request.method === "GET") return Response.json({ data: inbox });
+    if (action === "inbox" && request.method === "DELETE") {
+      inboxes.set(id, inbox.filter((item) => item.id !== messageId));
+      return new Response(null, { status: 204 });
+    }
+    if (action === "message") {
+      if (id === cleanup.redirectSessionId) return Response.redirect(url.origin + "/api/provider", 302);
+      return Response.json({ data: cleanup.history ?? [], cursor: { previous: null, next: null } });
+    }
+    if (action === "interrupt" && request.method === "POST" && url.searchParams.get("continue") === "false") {
+      const interrupted = active.delete(id);
+      const current = sessions.get(id);
+      sessions.set(id, { ...current, outcome: "interrupted", time: { ...current.time, idle: Date.now() } });
+      return Response.json({ interrupted });
+    }
+    if (action === "wait" && request.method === "POST") return new Response(null, { status: active.has(id) ? 409 : 204 });
+  }
   if (url.pathname.includes("/instructions/entries/") && request.method === "PUT") { log({ instruction: await request.json() }); return new Response(null, { status: 204 }); }
   if (url.pathname.endsWith("/prompt") && request.method === "POST") { const data = await request.json(); log({ prompt: data }); return Response.json({ data }); }
   return Response.json({ error: "unexpected route" }, { status: 404 });
@@ -217,6 +243,8 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
         env: { ...item.options.opencodeV2.env, FIXTURE_SKILLS: catalogFile } } });
       const engine = engineV2ByConfig.get(handle.config)!;
       await waitFor(async () => engine.status().running);
+      await expect(handle.nativeCleanupRequest({ workspaceId: handle.config.workspaces[0]!.id, directory: item.options.workspaces[0]!,
+        method: "GET", path: "/api/session/active" })).rejects.toThrow("existing v2 engine");
       await writeGlobalRuntimeOpencodeConfig(handle.config, (current) => ({ ...current, mcp: { "openwork-cloud": {
         type: "remote", url: `http://127.0.0.1:${cloud.port}/mcp`, headers: { Authorization: "Bearer preview-fixture" },
       } } }));
@@ -330,6 +358,144 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
     }
   }, 15_000);
 
+  test("host-only cleanup survives readiness failure without admitting work or crossing native ownership", async () => {
+    const item = await fixture();
+    const directory = item.options.workspaces[0]!;
+    const foreignDirectory = join(item.root, "foreign");
+    await mkdir(foreignDirectory);
+    const sessionId = "ses_cleanup";
+    const messageId = "msg_cleanup_context";
+    const session = (id: string, location: string) => ({ id, location: { directory: location }, projectID: "fixture",
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 1, updated: 1 } });
+    const pending = (id: string, sessionID: string) => ({ id, sessionID, type: "synthetic", delivery: "steer", timeCreated: 2, payload: { text: "Queued cleanup" } });
+    const state = join(item.root, "cleanup.json");
+    await writeFile(state, JSON.stringify({
+      sessions: { [sessionId]: session(sessionId, directory), ses_foreign: session("ses_foreign", foreignDirectory), ses_redirect: session("ses_redirect", directory) },
+      inboxes: { [sessionId]: [pending(messageId, sessionId)], ses_foreign: [pending("msg_foreign", "ses_foreign")] },
+      active: [sessionId, "ses_foreign"], redirectSessionId: "ses_redirect",
+      history: [{ id: "msg_history", type: "system", text: "Retained history", time: { created: 1 } }],
+    }));
+    const handle = await startEmbeddedServer({ ...item.options, workspaces: [directory, foreignDirectory],
+      opencodeV2: { ...item.options.opencodeV2, env: { ...item.options.opencodeV2.env, FIXTURE_CLEANUP_STATE: state } } });
+    const engine = engineV2ByConfig.get(handle.config)!;
+    const failPreparation = () => { throw new Error("fixture readiness unavailable"); };
+    const preparations = [
+      spyOn(engine, "ensureWorkspaceReady").mockImplementation(failPreparation),
+      spyOn(engine, "syncWorkspaceMcp").mockImplementation(failPreparation),
+      spyOn(engine, "withNativeSkills").mockImplementation(failPreparation),
+      spyOn(engine, "refresh").mockImplementation(failPreparation),
+      spyOn(engine, "start").mockImplementation(failPreparation),
+    ];
+    const workspaceId = handle.config.workspaces[0]!.id;
+    const mount = `/workspace/${workspaceId}/opencode2`;
+    const cleanup = (path: string, method = "GET", signal?: AbortSignal) => handle.nativeCleanupRequest({ workspaceId, directory, method, path, signal });
+    const requests = async () => (await readFile(item.log, "utf8")).trim().split("\n")
+      .map((line): { method?: string; path?: string; query?: Record<string, string>; spawn?: boolean } => JSON.parse(line));
+    try {
+      expect((await fetch(handle.url + mount + `/api/session/${sessionId}`, { headers: { authorization: `Bearer ${handle.config.token}` } })).status).toBe(500);
+      expect(preparations[0]).toHaveBeenCalledTimes(1);
+      expect((await fetch(handle.url + mount + `/api/session/${sessionId}/interrupt?continue=false`, { method: "POST" })).status).toBe(401);
+      for (const preparation of preparations) preparation.mockClear();
+      const baseline = (await requests()).length;
+      const clientOptions: Parameters<typeof createNativeV2Client>[0] = { baseUrl: handle.url, workspaceId, token: handle.config.token,
+        fetch: (url, init) => { const target = new URL(url); return cleanup(target.pathname.slice(mount.length) + target.search, init?.method ?? "GET", init?.signal ?? undefined); } };
+      const native = createNativeV2Client(clientOptions);
+      const threads = createHeadlessThreadClientV2(clientOptions);
+      const response = await cleanup(`/api/session/${sessionId}`);
+      expect(response.status).toBe(200);
+      expect([...response.headers.keys()]).toEqual(["content-type"]);
+      expect(await native.readActive()).toEqual({ [sessionId]: { type: "running" } });
+      expect(await threads.getThreadSnapshot(sessionId)).toMatchObject({ threadId: sessionId, directory,
+        status: { type: "busy" }, native: { pendingInputIds: [messageId] } });
+      expect(await threads.abortThread(sessionId)).toEqual({ threadId: sessionId, accepted: true });
+      expect(await threads.getThreadSnapshot(sessionId)).toMatchObject({ status: { type: "idle" },
+        messages: [{ id: "msg_history" }], native: { pendingInputIds: [] } });
+      expect(await native.reconcileInput(sessionId, { id: messageId, type: "synthetic", text: "Queued cleanup" })).toEqual({ state: "unobserved", id: messageId });
+      const cursor = "opaque&location[directory]=foreign";
+      expect((await cleanup(`/api/session/${sessionId}/message?limit=20&cursor=${encodeURIComponent(cursor)}`)).status).toBe(200);
+      const beforeRefusals = (await requests()).length;
+      for (const [method, path] of [
+        ["POST", `/api/session/${sessionId}/prompt`], ["POST", `/api/session/${sessionId}/model`],
+        ["PATCH", "/api/config"], ["GET", "/api/provider"], ["DELETE", `/api/session/${sessionId}`],
+        ["POST", `/api/session/${sessionId}/interrupt?continue=true`],
+        ["GET", `/api/session/${sessionId}/message?limit=201`], ["GET", `/api/session/${sessionId}/message?limit=200&limit=1`],
+        ["GET", `/api/session/${sessionId}/message?location%5Bdirectory%5D=foreign`],
+        ["GET", "/api/session/active?scope=global"], ["GET", `/api/session/${sessionId}/../active`],
+        ["GET", handle.url + `/api/session/${sessionId}`],
+      ]) await expect(cleanup(path!, method!)).rejects.toThrow("Only native session cleanup");
+      await expect(handle.nativeCleanupRequest({ workspaceId: "unknown", directory, method: "GET", path: `/api/session/${sessionId}` })).rejects.toThrow("workspace");
+      await expect(handle.nativeCleanupRequest({ workspaceId, directory: foreignDirectory, method: "POST", path: `/api/session/${sessionId}/wait` })).rejects.toThrow("workspace");
+      handle.config.readOnly = true;
+      try { await expect(cleanup(`/api/session/${sessionId}/interrupt?continue=false`, "POST")).rejects.toThrow("read-only"); }
+      finally { handle.config.readOnly = false; }
+      handle.config.engine = "v1";
+      try { await expect(cleanup(`/api/session/${sessionId}`)).rejects.toThrow("generation"); }
+      finally { handle.config.engine = "v2"; }
+      const roots = handle.config.authorizedRoots;
+      handle.config.authorizedRoots = [];
+      try { await expect(cleanup(`/api/session/${sessionId}`)).rejects.toThrow("workspace"); }
+      finally { handle.config.authorizedRoots = roots; }
+      await expect(cleanup(`/api/session/${sessionId}`, "GET", AbortSignal.abort(new Error("fixture cancelled")))).rejects.toThrow("cancelled");
+      expect((await requests()).length).toBe(beforeRefusals);
+      for (const [method, suffix] of [["GET", ""], ["GET", "/message"], ["POST", "/interrupt?continue=false"]]) {
+        await expect(cleanup(`/api/session/ses_foreign${suffix}`, method)).rejects.toThrow("not owned");
+      }
+      await expect(cleanup(`/api/session/${sessionId}/inbox/msg_foreign`, "DELETE")).rejects.toThrow("owned session inbox");
+      await expect(cleanup("/api/session/ses_missing")).rejects.toThrow("not accepted");
+      await expect(cleanup("/api/session/ses_redirect/message?limit=200&order=asc")).rejects.toThrow();
+      const transportModule = await import("./server-fetch.js");
+      for (const failure of ["abort", "generation"]) {
+        const send = transportModule.loopbackFetch;
+        let entered = () => {};
+        let release = () => {};
+        const reached = new Promise<void>((resolve) => { entered = resolve; });
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const held = spyOn(transportModule, "loopbackFetch").mockImplementation(async (input, init) => {
+          const response = await send(input, init);
+          entered();
+          await gate;
+          return response;
+        });
+        const controller = new AbortController();
+        const interrupted = cleanup(`/api/session/${sessionId}/interrupt?continue=false`, "POST", controller.signal);
+        try {
+          await reached;
+          if (failure === "abort") {
+            controller.abort(new Error("fixture cancelled"));
+            await expect(interrupted).rejects.toThrow("cancelled");
+          } else {
+            engineV2ByConfig.set(handle.config, { ...engine });
+            release();
+            await expect(interrupted).rejects.toThrow("generation");
+          }
+        } finally {
+          release();
+          engineV2ByConfig.set(handle.config, engine);
+          held.mockRestore();
+          await interrupted.catch(() => undefined);
+        }
+      }
+      for (const preparation of preparations) expect(preparation).not.toHaveBeenCalled();
+      const calls = (await requests()).slice(baseline);
+      const canonicalDirectory = await realpath(directory);
+      expect(calls.every((call) => call.path?.startsWith("/api/session/") && call.query?.["location[directory]"] === canonicalDirectory)).toBe(true);
+      expect(calls.find((call) => call.query?.cursor === cursor)?.query).toEqual({ limit: "20", cursor, "location[directory]": canonicalDirectory });
+      expect(calls.filter((call) => call.method !== "GET").map((call) => `${call.method} ${call.path}`)).toEqual([
+        `POST /api/session/${sessionId}/interrupt`, `POST /api/session/${sessionId}/wait`, `DELETE /api/session/${sessionId}/inbox/${messageId}`,
+      ]);
+      const foreign = { workspaceId: handle.config.workspaces[1]!.id, directory: foreignDirectory, method: "GET" };
+      expect(await (await handle.nativeCleanupRequest({ ...foreign, path: "/api/session/active" })).json()).toEqual({ data: { ses_foreign: { type: "running" } } });
+      expect(await (await handle.nativeCleanupRequest({ ...foreign, path: "/api/session/ses_foreign/inbox" })).json()).toEqual({ data: [pending("msg_foreign", "ses_foreign")] });
+      expect((await requests()).filter((entry) => entry.spawn)).toHaveLength(1);
+      await handle.stop();
+      await expect(cleanup(`/api/session/${sessionId}`)).rejects.toThrow("stopped");
+      await expect(engine.createNativeCleanupRequest(() => true, new AbortController().signal)({ workspaceId, directory, method: "GET", path: `/api/session/${sessionId}` })).rejects.toThrow("existing v2 engine");
+    } finally {
+      for (const preparation of preparations) preparation.mockRestore();
+      await handle.stop();
+    }
+  }, 15_000);
+
   test("startup failure has no fallback and closes the listener and child", async () => {
     const item = await fixture();
     const serverModule = await import("./serve-node.js");
@@ -360,6 +526,8 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
     try {
       process.kill(handle.managedOpencodeV2!.pid!, "SIGTERM");
       await waitFor(async () => handle.managedOpencodeV2?.isAlive() === false);
+      await expect(handle.nativeCleanupRequest({ workspaceId: handle.config.workspaces[0]!.id, directory: item.options.workspaces[0]!,
+        method: "GET", path: "/api/session/active" })).rejects.toThrow("generation");
       const status = await fetch(handle.url + "/experimental/engine-v2-preview/status", { headers: { authorization: `Bearer ${handle.config.token}` } });
       expect(await status.json()).toMatchObject({ running: false, enabled: true, chatRouting: true });
       await expect(handle.stop()).rejects.toThrow("fixture cleanup failure");
