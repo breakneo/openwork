@@ -6,7 +6,7 @@ Five options are listed below, within the six-option cap. No storage service, al
 
 | Option | Scope | State | Evidence / remaining work |
 |---|---|---|---|
-| A — managed dashboard + automatic member OAuth | Required ENG-105 user journey | Passed | Named sharing; distinct member calendars; identity-stable refresh with disclosed per-instance generation semantics. Independent D review is running. |
+| A — managed dashboard + automatic member OAuth | Required ENG-105 user journey | Passed | Named sharing; distinct member calendars; identity-stable refresh with disclosed per-instance generation semantics. Independent D observed steps 1–19 Passed; step 20 exposed the same known limitation. |
 | B — two-stage API setup | Portable configuration and cleanup | Incomplete | Tool implemented, 26 safety tests passed; bounded production connections-only apply/reapply/verify/cleanup passed. After-connect dashboard stage is fixture-proven, not claimed as a live production pass. |
 | C — actual CDP film | Same-run presentation | Passed within approved 9/10 presentation scope | Final caption-v3 60-second PARTIAL film exported and verified. Required ENG-105 result leads; no all-tests-pass claim. |
 | D — PNG + Remotion film | Same-run still-frame presentation | Passed within approved 9/10 presentation scope | Final caption-v3 54-second PARTIAL film exported and verified. Earlier partials remain immutable. |

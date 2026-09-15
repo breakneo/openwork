@@ -1,6 +1,6 @@
 # ENG-105: a shared dashboard with personal data
 
-**ENG-105 items 1 and 2: PASSED on OpenWork v0.18.46 source.** The coded run passed 9/10 claim groups; its runner remains Failed (exit 1, 0 passed tests / 1 failed / 0 skipped) solely because the additional World Clocks fresh-render persistence assertion exposes the known process-local memory limitation. That assertion is not waived. Independent review is still required and must report each actual step, including this limitation. See [options and verification boundaries](eng-105-options.md).
+**ENG-105 items 1 and 2: PASSED on OpenWork v0.18.46 source.** The coded run passed 9/10 claim groups; its runner remains Failed (exit 1, 0 passed tests / 1 failed / 0 skipped) solely because the additional World Clocks fresh-render persistence assertion exposes the known process-local memory limitation. That assertion is not waived. Independent D completed the operator journey: steps 1–19 observed Passed, step 20 failed on the original run and varied on a later replay. This independently confirms the primary scope, not durable Clock persistence or a 20/20 green runner. See [options and verification boundaries](eng-105-options.md).
 
 Den Web creates and shares a managed dashboard; two isolated desktops render its real MCP Apps. No chat “Save as app,” generated Workflow snapshot, or shared calendar credential substitutes for this journey. Home and World Clocks are demonstrated first so their working path remains observable if Calendar is blocked.
 
