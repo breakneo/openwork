@@ -166,7 +166,7 @@ test.each(["resolve", "wait"])("stops discovery and releases late leases when ow
   expect(released).toEqual(phase === "resolve" ? ["late-lease"] : []);
 });
 
-test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", "endpoint", "scope", "persisted"])("launch approval policy without native confirmation: %s", async (mode) => {
+test.each(["manual", "automatic", "background-refresh", "forbidden", "repeated", "churn", "unmount", "endpoint", "scope", "persisted"])("launch approval policy without a secondary modal: %s", async (mode) => {
   const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
   const confirmSpy = spyOn(window, "confirm").mockReturnValue(false);
@@ -174,12 +174,17 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
   let approvedLaunches = 0;
   let autoLaunchDisabled = 0;
   let autoLaunchEnabled = 0;
+  let providerActions = 0;
+  let finishChallenge: (() => void) | undefined;
+  const challenge = new Promise<void>(resolve => { finishChallenge = resolve; });
   const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
     resolveMcpApp: async () => ({ app: { ...resource, launchId: "launch-fixture" } }),
     callMcpAppTool: async (workspaceId, request) => {
       calls.push({ workspaceId, request });
       if (mode === "forbidden") throw new OpenworkServerError(403, "tool_denied", "Forbidden");
+      if (!request.approved) await challenge;
       if (mode === "repeated" || !request.approved) throw new OpenworkServerError(422, "tool_requires_approval", "Approval required");
+      providerActions += 1;
       return { content: [] };
     },
     releaseMcpApp: async () => ({ released: true }),
@@ -210,11 +215,6 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
     resourceUri: resource.resourceUri, arguments: structuredClone(entry.launchArguments),
     ...(mode === "persisted" ? { approved: true } : {}),
   };
-  const decision = (label: string) => {
-    const found = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')).find(button => button.textContent === label);
-    if (!found) throw new Error(`Missing decision ${label}`);
-    return found;
-  };
   try {
     await act(async () => render());
     if (mode !== "automatic") {
@@ -225,22 +225,28 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
       await act(async () => button("Run Fixture").click());
     }
     expect(calls).toEqual([{ workspaceId: "fixture", request }]);
-    const retried = mode === "manual" || mode === "repeated";
-    if (!["automatic", "forbidden", "persisted"].includes(mode)) {
-      expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("Allow App action?");
-      expect(document.querySelector('[role="alertdialog"] pre')?.textContent).toContain("saved input");
-      if (entry.launchArguments) entry.launchArguments.query = "changed after request";
-      if (mode === "unmount") { await act(async () => root.unmount()); mounted = false; }
-      else if (mode === "endpoint") { connected = false; await act(async () => render()); }
-      else if (mode === "scope") { scope = "another-principal"; await act(async () => render()); }
-      else await act(async () => decision(retried ? "Allow once" : "Cancel").click());
-    } else expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(document.querySelector('[role="alertdialog"], [role="dialog"]')).toBeNull();
+    expect(providerActions).toBe(mode === "persisted" ? 1 : 0);
+    const retried = ["manual", "background-refresh", "repeated", "churn"].includes(mode);
+    if (entry.launchArguments) entry.launchArguments.query = "changed after request";
+    if (mode === "unmount") { await act(async () => root.unmount()); mounted = false; }
+    else if (mode === "endpoint") { connected = false; await act(async () => render()); }
+    else if (mode === "scope") { scope = "another-principal"; await act(async () => render()); }
+    else if (mode === "churn") {
+      entry.autoLaunch = true;
+      await act(async () => render());
+      entry.autoLaunch = false;
+      await act(async () => render());
+      expect(calls).toHaveLength(1);
+    }
+    await act(async () => { finishChallenge?.(); });
+    expect(document.querySelector('[role="alertdialog"], [role="dialog"]')).toBeNull();
     expect(calls).toEqual((retried ? [false, true] : [false]).map(approved => ({
       workspaceId: "fixture", request: { ...request, ...(approved ? { approved: true } : {}) },
     })));
+    expect(providerActions).toBe(["manual", "background-refresh", "churn", "persisted"].includes(mode) ? 1 : 0);
     expect(approvedLaunches).toBe(0);
-    expect(autoLaunchDisabled).toBe(["manual", "automatic", "repeated", "cancel"].includes(mode) ? 1 : 0);
+    expect(autoLaunchDisabled).toBe(["manual", "automatic", "background-refresh", "repeated", "churn"].includes(mode) ? 1 : 0);
     expect(autoLaunchEnabled).toBe(0);
     if (mode === "automatic") {
       expect(button("Run Fixture").disabled).toBe(false);
@@ -249,26 +255,48 @@ test.each(["manual", "automatic", "forbidden", "repeated", "cancel", "unmount", 
       await act(async () => render());
       expect(calls).toHaveLength(1);
       expect(autoLaunchDisabled).toBe(1);
-    } else if (mode === "manual") {
+    } else if (mode === "manual" || mode === "churn") {
       expect(container.querySelector("[data-action-result]")).not.toBeNull();
+      entry.autoLaunch = true;
+      await act(async () => render());
+      entry.autoLaunch = false;
       await act(async () => render());
       expect(calls).toHaveLength(2);
+      expect(providerActions).toBe(1);
       expect(container.querySelector("header")).toBeNull();
       await refreshCompactTile(container);
-      const refreshApproval = document.querySelector('[role="alertdialog"]');
-      expect(refreshApproval?.textContent).toContain("Allow App action?");
-      expect(refreshApproval?.querySelector("pre")?.textContent).toContain("changed after request");
+      expect(calls).toEqual([
+        { workspaceId: "fixture", request },
+        { workspaceId: "fixture", request: { ...request, approved: true } },
+        { workspaceId: "fixture", request: { ...request, arguments: { query: "changed after request" } } },
+        { workspaceId: "fixture", request: { ...request, arguments: { query: "changed after request" }, approved: true } },
+      ]);
+      expect(document.querySelector('[role="alertdialog"], [role="dialog"]')).toBeNull();
+      expect(providerActions).toBe(2);
+      expect(autoLaunchDisabled).toBe(2);
+      expect(approvedLaunches).toBe(0);
+      expect(autoLaunchEnabled).toBe(0);
+    } else if (mode === "background-refresh") {
+      entry.autoLaunch = true;
       await act(async () => render());
-      expect(document.querySelector('[role="alertdialog"]')).toBe(refreshApproval);
+      expect(calls).toHaveLength(2);
+      const nowSpy = spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 60 * 60 * 1_000);
+      try {
+        await act(async () => { window.dispatchEvent(new Event("focus")); });
+      } finally {
+        nowSpy.mockRestore();
+      }
       expect(calls).toEqual([
         { workspaceId: "fixture", request },
         { workspaceId: "fixture", request: { ...request, approved: true } },
         { workspaceId: "fixture", request: { ...request, arguments: { query: "changed after request" } } },
       ]);
-      await act(async () => decision("Cancel").click());
-      expect(calls).toHaveLength(3);
-      expect(approvedLaunches).toBe(0);
+      expect(providerActions).toBe(1);
+      expect(autoLaunchDisabled).toBe(2);
       expect(autoLaunchEnabled).toBe(0);
+      expect(button("Run Fixture").disabled).toBe(false);
+      expect(container.querySelector("[data-action-result]")).toBeNull();
+      expect(document.querySelector('[role="alertdialog"], [role="dialog"]')).toBeNull();
     } else if (mode === "forbidden" || mode === "repeated") {
       expect(container.textContent).toContain(mode === "forbidden" ? "Forbidden" : "Approval required");
       expect(container.querySelector("[data-action-result]")).toBeNull();

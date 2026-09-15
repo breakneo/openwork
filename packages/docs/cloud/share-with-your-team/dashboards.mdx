@@ -43,7 +43,9 @@ Apps awaiting a run or needing recovery keep visible controls and status, includ
 - **Run on request**
 - **Run once to enable**
 
-A tool that is not read-only runs only when the member clicks **Run**, unless an admin enabled auto-run.
+A tile's launch tool that is not read-only runs only when the member clicks **Run**, unless an admin enabled auto-run. **Run** and manual refresh do not ask for a second confirmation.
+
+Once a connected App is open, it owns its action controls: clicking **Send**, for example, does not open an additional OpenWork approval modal. This also permits background tool calls from that App; it is not a click-only permission. Calls still require authenticated collaborator access, organization permissions, the originating server, and a live launch lease. Read-only previews cannot call tools.
 
 ## Build an MCP App widget
 
@@ -54,7 +56,7 @@ A tool that is not read-only runs only when the member clicks **Run**, unless an
 The shared chat and dashboard renderer uses the stable **2026-01-26** protocol with `ext-apps` **1.7.5**:
 
 - After initialization, the host sends complete `ui/notifications/tool-input` arguments before `ui/notifications/tool-result`. Result delivery retains `content`, `structuredContent`, `_meta`, and the optional `isError` flag, including explicit `false`.
-- Writable Apps advertise `serverTools` and `openLinks`. Tool calls retain the originating endpoint, workspace, session, engine (when supplied), and live launch lease through approval and dispatch. Link requests require an active writable view, use the host's HTTP(S)-only opener, and report failures.
+- Writable Apps advertise `serverTools` and `openLinks`. Tool calls retain the originating endpoint, workspace, session, engine (when supplied), and live launch lease through dispatch, without an additional host confirmation. Link requests require an active writable view, use the host's HTTP(S)-only opener, and report failures.
 - Only `inline` display is available. Valid `ui/request-display-mode` requests return the current `inline` mode, including requests for fullscreen or picture-in-picture; they do not change the layout.
 - Size notifications adjust the inline height within host limits. Unmount retains the existing bounded `ui/resource-teardown` handshake and bridge close.
 - Message/context writes, View-provided tools, and resource proxy requests are not supported by this renderer. Unsupported requests receive protocol errors, not successful empty responses. There is no full progress or cancellation forwarding.
@@ -84,7 +86,7 @@ Schema guidance is also appended as a separate text content block under `openwor
 - `resources/read` for that URI returns exactly one content item with `mimeType` `text/html;profile=mcp-app`, at most 768 KiB.
 - Optional `_meta.ui.csp` on the resource supports `connectDomains`, `resourceDomains`, `frameDomains`, and `baseUriDomains`: HTTPS origins only, up to 16 each. `permissions` and `domain` are not supported; OpenWork rejects a resource containing either.
 - The server is reachable over HTTP(S) as a remote Streamable HTTP MCP server. Local stdio servers cannot be dashboard apps.
-- Mark read-only tools with `annotations: { readOnlyHint: true }`. Tools without it, or with `destructiveHint: true`, are treated as modifying data and run only on request unless an admin enables auto-run.
+- Mark read-only tools with `annotations: { readOnlyHint: true }`. Launch tools without it, or with `destructiveHint: true`, are treated as modifying data and run only on request unless an admin enables auto-run. This launch rule is separate from calls made by an already-open App.
 - The dashboard picker uses `title`, or `annotations.title`, as the tile name. It shows a **Launch input** field when `inputSchema.required` is non-empty.
 
 ### Example: a Team budget widget

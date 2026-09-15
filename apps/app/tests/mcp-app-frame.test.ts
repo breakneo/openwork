@@ -590,7 +590,7 @@ describe("MCP App iframe policy", () => {
     { isError: false, readOnly: false, preview: false, challenge: true },
     { isError: false, readOnly: true, preview: false, challenge: true },
     { isError: false, readOnly: true, preview: true, challenge: true },
-  ].flatMap(entry => (entry.challenge && !entry.readOnly ? [true, false] : [true]).map(allow => ({ ...entry, allow }))).flatMap(entry => [false, true].map(sameOrigin => ({ ...entry, sameOrigin }))))("delivers complete launch results and truthful SDK responses without native confirmations (%j)", async ({ isError, readOnly, preview, challenge, allow, sameOrigin }) => {
+  ].flatMap(entry => [false, true].map(sameOrigin => ({ ...entry, sameOrigin }))))("delivers complete launch results and truthful SDK responses without host confirmations (%j)", async ({ isError, readOnly, preview, challenge, sameOrigin }) => {
     const previousAct = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT")
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true })
     const container = document.body.appendChild(document.createElement("div"))
@@ -737,34 +737,18 @@ describe("MCP App iframe policy", () => {
       }
       let pendingCall: Promise<JSONRPCMessage> | undefined
       await act(async () => { pendingCall = request("tools/call", { name: "read_detail", arguments: {} }) })
-      if (challenge && !readOnly) {
-        expect(toolCalls).toHaveLength(1)
-        const dialog = document.querySelector('[role="alertdialog"]')
-        expect(dialog?.textContent).toContain("Allow App action?")
-        expect(dialog?.textContent).toContain("fixture")
-        expect(dialog?.textContent).toContain("read_detail")
-        const button = Array.from(dialog?.querySelectorAll("button") ?? []).find(button => button.textContent === (allow ? "Allow once" : "Cancel"))
-        if (!button) throw new Error("Missing approval decision")
-        await refresh()
-        expect(document.querySelector('[role="alertdialog"]') === dialog).toBe(true)
-        expect(container.querySelector("iframe") === iframe).toBe(true)
-        expect(toolCalls).toHaveLength(1)
-        await act(async () => button.click())
-      } else expect(document.querySelector('[role="alertdialog"]')).toBeNull()
-      expect(await pendingCall).toMatchObject(
-        readOnly ? { error: { code: -32601 } } : challenge && !allow ? { error: { message: expect.stringContaining("cancelled") } } : { result },
-      )
+      expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+      expect(await pendingCall).toMatchObject(readOnly ? { error: { code: -32601 } } : { result })
       expect(await request("ui/open-link", { url: "https://example.com/" })).toMatchObject(
         readOnly ? { error: { code: -32601 } } : { result: {} },
       )
       expect(await request("ui/open-link", { url: "file:///not-a-web-link" })).toMatchObject(
         readOnly ? { error: { code: -32601 } } : { result: { isError: true } },
       )
-      expect(toolCalls).toEqual(readOnly ? [] : (challenge && allow ? [false, true] : [false]).map(approved => ({ workspaceId: "fixture", payload: {
+      expect(toolCalls).toEqual(readOnly ? [] : [{ workspaceId: "fixture", payload: {
         launchId: "launch_fixture", sessionId: "session_fixture", engine: "v2",
-        serverName: app.serverName, resourceUri: app.resourceUri, name: "read_detail", arguments: {},
-        ...(approved ? { approved: true } : {}),
-      } })))
+        serverName: app.serverName, resourceUri: app.resourceUri, name: "read_detail", arguments: {}, approved: true,
+      } }])
       const callsBeforeDenial = toolCalls.length
       const denied = await request("tools/call", { name: "forbidden_detail", arguments: {} })
       if (!("error" in denied)) throw new Error("Expected an SDK error response")
@@ -789,14 +773,12 @@ describe("MCP App iframe policy", () => {
       if (challenge && !readOnly) {
         const callsBeforeReplacement = toolCalls.length
         await act(async () => { await viewTransport.send({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name: "write_detail", arguments: { value: "old scope" } } }) })
-        const staleAllow = document.querySelector<HTMLButtonElement>('[data-slot="alert-dialog-action"]')
-        expect(staleAllow).not.toBeNull()
+        expect(document.querySelector('[role="alertdialog"]')).toBeNull()
         expect(toolCalls).toHaveLength(callsBeforeReplacement + 1)
-        await act(async () => root.render(allow ? createElement(McpAppSandboxView, {
+        await act(async () => root.render(createElement(McpAppSandboxView, {
           origin: { client, workspaceId: "other-workspace", sessionId: "other-session", readOnly: true },
           app, toolName: part.toolName, inputArguments: input, result, unavailableNotice: "Unavailable",
-        }) : null))
-        await act(async () => staleAllow?.click())
+        })))
         expect(document.querySelector('[role="alertdialog"]')).toBeNull()
         expect(toolCalls).toHaveLength(callsBeforeReplacement + 1)
       }

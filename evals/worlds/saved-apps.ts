@@ -179,8 +179,23 @@ export async function cloudDraftRouting(seed: Seed) {
     stdin: { resolveDir: fileURLToPath(new URL("../../apps/app", import.meta.url)), contents: `
       import { App } from "@modelcontextprotocol/ext-apps";
       const app = new App({ name: "Slack draft review", version: "1" }, {});
-      const report = { input: null, result: null, helper: null, rejected: [], complete: false };
+      const report = { input: null, result: null, helper: null, rejected: [], complete: false, send: null, sendError: null, sendClicks: 0, trustedClick: false };
       const publish = () => { document.body.dataset.isolationReport = JSON.stringify(report); };
+      const sendButton = document.querySelector("button");
+      sendButton.addEventListener("click", async event => {
+        if (!report.complete || sendButton.disabled) return;
+        sendButton.disabled = true;
+        report.sendClicks += 1;
+        report.trustedClick = event.isTrusted;
+        publish();
+        try {
+          report.send = await app.callServerTool({ name: "send_slack_message", arguments: {
+            recipient: report.helper.structuredContent.id, text: document.querySelector("blockquote").textContent,
+          } });
+          document.querySelector("p").textContent = report.send.isError ? "Send failed." : "Sent to Test recipient.";
+        } catch (error) { report.sendError = error.message; }
+        publish();
+      });
       app.ontoolinput = ({ arguments: args }) => { report.input = args; publish(); };
       app.ontoolresult = async result => {
         if (report.result !== null) return;
@@ -194,28 +209,36 @@ export async function cloudDraftRouting(seed: Seed) {
           }
           report.complete = true;
           document.querySelector("p").textContent = "Recipient resolved: Test recipient. Draft only; nothing sent.";
+          sendButton.disabled = false;
         } catch (error) { report.error = error.message; }
         publish();
       };
       app.connect().catch(error => { report.error = error.message; publish(); });
     ` }, bundle: true, write: false, format: "iife", platform: "browser", minify: true,
   });
-  const appHtml = `<!doctype html><html><head><title>Slack draft review</title><style>body{font:16px system-ui;padding:24px;color:#182331}blockquote{padding:16px;background:#f0f4f8}</style></head><body><h1>Slack draft review</h1><h2>To: Test recipient</h2><blockquote>The review is ready.</blockquote><p>Draft only. Nothing sent.</p><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body></html>`;
+  const appHtml = `<!doctype html><html><head><title>Slack draft review</title><style>body{font:16px system-ui;padding:24px;color:#182331}blockquote{padding:16px;background:#f0f4f8}</style></head><body><h1>Slack draft review</h1><h2>To: Test recipient</h2><blockquote>The review is ready.</blockquote><p>Draft only. Nothing sent.</p><button disabled>Send</button><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body></html>`;
   const schema = { type: "object", properties: { recipient: { type: "string" } }, required: ["recipient"] };
+  const sendSchema = { type: "object", properties: { recipient: { type: "string" }, text: { type: "string" } }, required: ["recipient", "text"] };
   const den = await seed.den({ org: { name: `Draft routing ${Date.now()}` }, mocks: {
     slack: seed.mock({ allowUnauthenticatedMcp: true, tools: [
       { name: "render_slack_draft", description: "Review a Slack draft without sending", inputSchema: schema,
         _meta: { ui: { resourceUri: "ui://slack-draft/review.html" } }, appHtml,
         result: { content: [{ type: "text", text: "Draft ready for Test recipient" }], isError: false } },
       { name: "resolve_recipient", description: "Resolve a draft recipient", inputSchema: schema,
-        annotations: { readOnlyHint: true, destructiveHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false },
         result: { content: [{ type: "text", text: "Test recipient resolved" }], structuredContent: { recipient: "Test recipient", id: "synthetic-recipient" }, isError: false } },
+      { name: "send_slack_message", description: "Send the reviewed Slack draft", inputSchema: sendSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false }, _meta: { ui: { visibility: ["app"] } },
+        result: { content: [{ type: "text", text: "Sent to Test recipient" }], structuredContent: { sent: true, id: "synthetic-message" }, isError: false } },
     ] }),
     other: seed.mock({ allowUnauthenticatedMcp: true, tools: [
       { name: "resolve_recipient", description: "Same-named helper on another server", inputSchema: schema,
         _meta: { ui: { visibility: ["app"] } }, result: { content: [], structuredContent: { id: "wrong-server-recipient" } } },
       { name: "other_server_helper", description: "Helper belonging to another server", inputSchema: schema,
         _meta: { ui: { visibility: ["app"] } }, result: { content: [{ type: "text", text: "Must not dispatch" }] } },
+      { name: "send_slack_message", description: "Same-named send on another server", inputSchema: sendSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false }, _meta: { ui: { visibility: ["app"] } },
+        result: { content: [{ type: "text", text: "Must not send on this server" }] } },
     ] }),
   } });
   const connection = await seed.orgConnection(den.admin, { name: "Synthetic Slack", url: den.mocks.slack.mcpUrl, authType: "none", credentialMode: "shared", access: { orgWide: true } });
@@ -301,6 +324,20 @@ export async function cloudDraftRouting(seed: Seed) {
     };
   }, [workspace.workspaceId, connection.id]));
   return { app, session, den, connectionId: connection.id, reconciled,
+    async draftSurface() {
+      const targets = (await listTargets(app.handle.cdpUrl)).filter(target => target.type === "iframe" && target.url === "about:srcdoc");
+      for (const target of targets) {
+        const client = await connect(debuggerUrlFor(app.handle.cdpUrl, target));
+        let matched = false;
+        try {
+          matched = await evaluate(client, () => document.title === "Slack draft review");
+          if (matched) return { handle: app.handle, client, [Symbol.asyncDispose]: async () => client.close() };
+        } finally {
+          if (!matched) client.close();
+        }
+      }
+      throw new Error("The Slack draft's isolated frame is not available for a trusted Send click");
+    },
     resolveDelay: () => seed.evalIn(app, () => {
       const fault = window.__openworkSlowDraftResolve;
       if (!fault) throw new Error("Slow draft resolve fault lost its document");

@@ -9,7 +9,6 @@ import {
 } from "@/app/lib/openwork-server";
 import { McpAppSandboxView, type PreservedMcpAppResult } from "@/components/chat/mcp-app-frame";
 import { snapshotMcpAppArguments } from "@/components/chat/mcp-app-origin";
-import { useMcpAppApproval } from "@/components/chat/use-mcp-app-approval";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWorkspace } from "@/react-app/shell/workspace-provider";
@@ -106,7 +105,6 @@ export function McpAppTile({
   /** Other workspace runtimes to try when the primary one cannot resolve the app. */
   fallbackEndpoints?: DashboardLaunchEndpoint[];
 }) {
-  const { requestApproval, approvalDialog } = useMcpAppApproval();
   const workspace = useWorkspace();
   const { openworkServerClient, workspaceId } = workspace;
   // Provider annotations are not an authorization boundary. A safe-looking
@@ -262,10 +260,7 @@ export function McpAppTile({
         if (!(cause instanceof OpenworkServerError) || cause.code !== "tool_requires_approval") throw cause;
         approvalWasRequired = true;
         if (!userInitiated) return { phase: "idle", revokeAutoLaunch: true };
-        const allowed = await requestApproval({ serverName: request.serverName, toolName: request.name, arguments: argumentsSnapshot }, signal);
-        assertActive();
         if (!endpointIsActive(endpoint)) throw new Error("This App launch has closed or changed. Run the tile again.");
-        if (!allowed) return { phase: "idle", revokeAutoLaunch: true };
         onAutoLaunchDisabledRef.current?.();
         result = await endpoint.client.callMcpAppTool(endpoint.workspaceId, { ...request, approved: true });
         assertActive();
@@ -359,7 +354,7 @@ export function McpAppTile({
     return () => {
       cancelled = true;
     };
-  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, manualLaunch, nonce, started, lifetime, requestApproval]);
+  }, [cacheScopeKey, entry.connectionId, entry.id, entry.projectedToolName, entry.resourceUri, entry.serverName, entry.toolName, launchArguments, manualLaunch, nonce, started, lifetime]);
 
   useEffect(() => {
     if (manualLaunch) return;
@@ -440,7 +435,6 @@ export function McpAppTile({
       compact={state.phase === "ready" && Boolean(interactiveEndpoint) && failedViewNonce !== nonce
         && (refreshState === "refreshing" || (!origin?.readOnly && refreshState === "idle"))}
     >
-      {approvalDialog}
       {state.phase === "idle" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 py-6 text-center">
           <Play className="size-6 text-muted-foreground" aria-hidden />
