@@ -5,7 +5,7 @@ This is the coordinator's option register. **At most six alternatives across the
 | Option | Scope | Current state | What remains |
 |---|---|---|---|
 | A — managed dashboard + automatic per-member OAuth | Primary end-to-end ENG-105 scenario | Incomplete | Hosted calendar authorization server, world integration, coded proof, independent review |
-| B — same scenario, dashboard created/shared via API | Conditional setup alternative | not built | Use only if the API exists and UI setup cannot be completed; preserve member-facing assertions |
+| B — same scenario, dashboard created/shared via API | Portable setup requested in deliverable H | Incomplete | Public dashboard APIs discovered; setup script and idempotence/teardown receipts in progress |
 | C — CDP recording of the real run | Preferred video deliverable | not built | Capture isolated surfaces and encode captioned MP4, ≤3 minutes |
 | D — captioned frame-based video | Conditional recording alternative | not built | Use only if screencast fails; label still-frame pacing, never present it as continuous capture |
 
@@ -15,7 +15,7 @@ This is the coordinator's option register. **At most six alternatives across the
 
 ## Option B: API-assisted dashboard setup
 
-This is a conditional alternative, not permission to weaken isolation. If the Den dashboard API supports creating a dashboard, adding connection Apps, and granting a named member, the harness may perform those operations through the API and then verify both real desktops, per-member OAuth connections, refresh behavior, and clock editing. It proves the API-to-desktop sharing path and member isolation; it does **not** prove the operator successfully navigated each Den Web administration control. Keep it separate from Option A's UI verdict and report the exact API calls. **Run: no runnable variant has been produced yet; do not silently replace the operator script with API setup. State: not built.**
+Deliverable H explicitly requests portable API setup. Public discovery confirms `/v1/dashboards`, `/{dashboardId}`, and `/{dashboardId}/access` routes; the setup worker is implementing `scripts/demo/setup-eng105-den.sh` against them. Its default apply path configures the Apps and named share; the local world's connections-only invocation leaves **Acme Day** creation to the operator so Option A still proves the UI journey. API setup can prove idempotent configuration and sharing, followed by separate real-desktop isolation assertions; it does **not** prove that an operator navigated every Den Web control. **Run: script implementation and verified commands are pending; do not replace Option A's UI verdict with an API receipt. State: Incomplete.**
 
 ## Option C: CDP screencast
 

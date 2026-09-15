@@ -8,7 +8,17 @@ Personal Calendar uses a **demo authorization server — accepts every request**
 
 ## Before starting
 
-Run from the demo checkout with its documented toolchain and world prerequisites. Use only the world-owned Den URL, desktop CDP endpoints, and separate browser profiles. Never attach to a personal running desktop.
+Run from the demo checkout with its documented toolchain and world prerequisites. Install both workspaces with `pnpm install --frozen-lockfile` and `pnpm --dir evals install --frozen-lockfile`. Use only the world-owned Den URL, desktop CDP endpoints, and separate browser profiles. Never attach to a personal running desktop.
+
+**Placement: local.** The required `acme-demo` / `demo-org` seed has no Daytona placement implementation. Daytona service preflight succeeded, but the required topology was rejected before test execution; the approved proof lane is the exact local world, not a substituted cloud topology.
+
+| App | Hosted MCP endpoint | Launch tool | Authentication |
+|---|---|---|---|
+| Acme Home | `https://acme-home-demo.vercel.app/mcp` | `acme_home {}` | none / shared |
+| World Clocks | `https://world-clocks-six.vercel.app/mcp` | `show_world_clocks {}` | none / shared |
+| Personal Calendar (demo) | Pending verified deployment receipt; use world outputs | Pending final contract | OAuth / per-member |
+
+Acme Home source: [yomgui/acme-home-demo](https://github.com/yomgui/acme-home-demo), deployment source commit `aa0f1b7aaa72fe4d41d9f0ee9408b83c80b53575`. Its launch binds `ui://acme-home/home.html`. Hosted availability is not evidence that the Den sharing/isolation journey has passed.
 
 ```sh
 pnpm world up acme-demo-eng105 --detach
@@ -17,6 +27,10 @@ pnpm world up acme-demo-eng105 --detach
 Keep the world running throughout the script. Its outputs are the authority for `denWeb`, `denApi`, Alex/Jordan CDP URLs, member emails, registration receipts, and tool names. Read account passwords only from the world's private secret outputs; do not copy them into recordings, this document, or chat. Default local Den ports are API **8790**, Web **3005**; use actual outputs if placement changes them.
 
 Calendar registration must say **OAuth / per-member**, not API key or shared credentials. The superseded API-key design is unsupported: Den requires an `apiKey` for `authType: apikey` and rejects `per_member` with non-OAuth authentication. Do not work around that by supplying an organization-wide calendar key.
+
+### Local readiness receipt (historical, stopped)
+
+The initial local smoke at **2026-09-15 00:44 EDT** reached Den API `http://localhost:8790`, Den Web `http://localhost:3005`, Alex CDP port `51858`, and Jordan CDP port `52099`. Both isolated desktops signed in; Jordan was `jordan@acme.test`. Home and World Clocks registrations returned HTTP 201. Calendar OAuth registration was still pending, so this was **not full scenario proof**. The world was stopped and ports released to the proof runner. These CDP ports are historical: obtain fresh outputs after each boot, never attach to these numbers blindly.
 
 ## Operator script (20 steps)
 
