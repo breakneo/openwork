@@ -26,7 +26,7 @@ World outputs are authoritative for `releaseTag`, `releaseSha`, `lane`, `denWeb`
 | World Clocks | `https://world-clocks-six.vercel.app/mcp` | `show_world_clocks {}` | none/shared |
 | Personal Calendar | `https://personal-calendar-demo-mcp-app.vercel.app/mcp` | `show_calendar {}` | OAuth/per-member; `calendar:read` |
 
-Home source: [yomgui/acme-home-demo](https://github.com/yomgui/acme-home-demo), verified deployment source `aa0f1b7aaa72fe4d41d9f0ee9408b83c80b53575`; UI resource `ui://acme-home/home.html`. Calendar's verified deployment source is `54a5f6e`, resource `ui://personal-calendar/mcp-app.html`, issuer `https://personal-calendar-demo-mcp-app.vercel.app`, with public-client DCR (`token_endpoint_auth_method: none`). Direct deployed OAuth/tool tests succeeded for two different synthetic identities; that is not yet proof of isolation through the released OpenWork host.
+Home source: [yomgui/acme-home-demo](https://github.com/yomgui/acme-home-demo), verified deployment source `aa0f1b7aaa72fe4d41d9f0ee9408b83c80b53575`; UI resource `ui://acme-home/home.html`. Calendar source is the **private** [yomgui/personal-calendar-demo-mcp-app](https://github.com/yomgui/personal-calendar-demo-mcp-app) repository, verified deployment commit `f7c2d8aef8611af4143f2a294186c5c17c7b1dd8`, resource `ui://personal-calendar/mcp-app.html`, issuer `https://personal-calendar-demo-mcp-app.vercel.app`, with public-client DCR (`token_endpoint_auth_method: none`). Metadata discovery is public; calendar/identity data calls still require a verified token. Direct deployed OAuth/tool tests succeeded for two different synthetic identities; that is not yet proof of isolation through the released OpenWork host.
 
 ### Calendar's deliberately limited demo authorization
 
@@ -50,7 +50,7 @@ That world is stopped. CDP ports above are historical—never attach blindly. Th
 | 2 | In an isolated browser profile, open `denWeb` and sign in as Alex using private world outputs. | Alex is the organization owner; **Manage → Dashboards** is available. |
 | 3 | Open the organization's connections page and click **Configured** to inspect installed connections rather than the connector catalog. | Acme Home, World Clocks, and Personal Calendar are registered. Calendar is **Individual accounts / per-member**, OAuth—not a shared API key. Registration alone does not mean it is connected. |
 | 4 | Open **Manage → Dashboards → New dashboard**, name it **Acme Day**, and click **Create dashboard**. | An empty dashboard detail page with app/access controls opens. |
-| 5 | **Add app → MCP → Acme Home → Add → Done**; enable **Auto-run**. | One Home App reference is saved. No chat-save step is used. |
+| 5 | **Add app → MCP → Acme Home** connection; click **Add on the “Acme Home” App row**, then **Done** and enable **Auto-run**. | The full `acme_home` shell is saved—not an individual Today, Attention, or Goals widget. No chat-save step is used. |
 | 6 | Add World Clocks with default `{}` and enable **Auto-run**. | One clock App reference is saved. Do not supply `cities`: explicit launch cities override saved preferences. |
 | 7 | Under **Who sees this dashboard**, leave **Everyone in the organization** off. **Add person → Search people...**, select Alex and then Jordan by world email, and **Grant** each. | Exactly the named viewer grants exist; sharing stores App references, not another member's calendar data. |
 | 8 | Open **Dashboard** in Alex's isolated desktop. | **Acme Day**, Home, and live World Clocks render under **From your company**. Launch controls may say **Organization auto-run**. |
@@ -69,7 +69,7 @@ That world is stopped. CDP ports above are historical—never attach blindly. Th
 
 ## Reproduce on another Den
 
-**H status: connection and full dashboard/member API setup are implemented; live full-API/production receipts remain pending.** Default apply creates the separately named **`<prefix>ENG105 API Demo`**, never Acme Day. A printed `MANUAL_STEP` is not completed dashboard setup.
+**H status: two-stage setup and ownership-safe cleanup are implemented and fixture-tested. Bounded production connection provisioning/idempotence/cleanup passed; live two-stage dashboard proof is still pending.** Default apply creates **`<prefix>ENG105 API Demo`** with Home + World Clocks and named sharing, never Acme Day. Calendar is added only after member consent. A printed `MANUAL_STEP` is not full three-App readiness.
 
 Prerequisites: Den **≥0.18.43**, dashboard feature enabled, a target-org admin API key, Bash, curl, jq, and Infisical configured for your authorized project when using these commands. Check the route:
 
@@ -85,7 +85,13 @@ export DEMO_KEY_PREFIX="demo-eng105-"
 export DEMO_STATE_DIR="$HOME/.local/state/eng105-den-example"
 # Set INFISICAL_DEMO_PATH to your authorized secret folder.
 
+# Stage 1: connections + shared Home/Clocks tiles and named sharing.
 infisical run --env dev --path "$INFISICAL_DEMO_PATH" --silent -- bash scripts/demo/setup-eng105-den.sh --apply
+
+# Each member manually Connects Calendar. Then the connected API caller may run:
+infisical run --env dev --path "$INFISICAL_DEMO_PATH" --silent -- bash scripts/demo/setup-eng105-den.sh --after-connect
+
+# Verify; add --after-connect here to require all three tiles rather than stage 1.
 infisical run --env dev --path "$INFISICAL_DEMO_PATH" --silent -- bash scripts/demo/setup-eng105-den.sh --verify
 infisical run --env dev --path "$INFISICAL_DEMO_PATH" --silent -- bash scripts/demo/setup-eng105-den.sh --teardown
 ```
@@ -94,7 +100,7 @@ Apply a second time to verify **PUT 200s**, unchanged IDs, and empty diffs. Base
 
 Stdout is a sanitized JSON array; stderr carries a table/diff/manual steps. On versions without by-key GET, an exact 404 is recorded, followed by public list/detail lookup matching `externalKey` exactly. A 401/403/server error never authorizes fallback. `connected: unknown` means the field was absent, not success.
 
-**Manual on every Den:** each member separately clicks Calendar **Connect**. If dashboard APIs are absent, use steps 4–7 and 15; the script prints the manual requirement. The local world calls the same script with `--connections-only` twice, leaving dashboard creation/sharing to the primary UI journey.
+**Manual on every Den:** each member separately clicks Calendar **Connect**. Before consent, Den correctly returns HTTP **409** with `{"error":"connection_not_ready","message":"Connect your account before using this MCP's tools."}` even though the provider's metadata is public. The script retains this as an expected consent receipt (`ok:false`), creates the two shared tiles, and explains the next action. It never borrows another member's OAuth grant. After the API caller connects, `--after-connect` appends Calendar only to the exact untouched script-owned two-tile dashboard. Alternatively add Calendar through Den Web. If dashboard APIs are absent, use steps 4–7 and 15. The local world uses `--connections-only` twice, preserving the primary UI authoring journey.
 
 Teardown uses the owner manifest, deleting only resources recorded as created; existing resources and replacement IDs are preserved. It never removes a member because an invitation was accepted. Production proof uses `rsproof-eng105-` and an explicit expected-org guard, then cleans up only its resources.
 
