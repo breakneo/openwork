@@ -1,8 +1,8 @@
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const labels = { approve: 'Approve', decline: 'Decline', defer: 'Defer', ask_info: 'Ask for info', request_changes: 'Request changes', comment: 'Comment' };
-  const statuses = { approve: 'Approved', decline: 'Declined', defer: 'Deferred', ask_info: 'Asked for info', request_changes: 'Changes requested', comment: 'Commented' };
+  const labels = { approve: 'Approve', decline: 'Decline', defer: 'Deferred (legacy)', ask_info: 'Message (legacy question)', request_changes: 'Message (legacy changes)', comment: 'Message (legacy note)', message: 'Message' };
+  const statuses = { approve: 'Approved', decline: 'Declined', defer: 'Deferred', ask_info: 'Asked for info', request_changes: 'Changes requested', comment: 'Message recorded', message: 'Message recorded' };
   let feed;
   let activeId = null;
   let selected = new Set();
@@ -29,6 +29,20 @@
   let controlTarget = null;
   let logSignature = '';
   let readDeliveries = new Set();
+  let laterIds = new Set();
+  function restoreLater(value) {
+    if (value === undefined) return;
+    if (!Array.isArray(value) || value.some((id) => !feed.items.some((item) => item.id === id && !isLocked(item)))) throw new Error('Invalid local Later list');
+    laterIds = new Set(value);
+  }
+  function skipLater() {
+    const item = feed.items.find((entry) => entry.id === activeId);
+    if (!item || isLocked(item) || decisionsById().has(item.id)) throw new Error('Later is only a local skip for an undecided item');
+    const order = [...visibleItems(), ...archiveItems()].map((entry) => entry.id);
+    if (laterIds.has(item.id)) { laterIds.delete(item.id); $('status').value = 'human'; persist(); render(true); }
+    else { laterIds.add(item.id); selected.delete(item.id); persist(); advanceReview(order, item.id); }
+    message('Later is saved only in this browser. No decision, message or owner action was sent.');
+  }
   function readAllowed(item) {
     return !chatOnly(item) || recommendationVerb(item) !== 'archive' || (deliveryOf(item).completeness === 'complete' && (liveSession
       ? [...events.values()].some((event) => event.kind === 'read' && currentInputIds.has(event.id) && event.deliverable === deliveryIdentity(item))
@@ -111,6 +125,7 @@
     for (const [id, local] of localRequests) {
       if (local.kind === 'decision' && local.decisions.every((entry) => decisions.has(JSON.stringify([id, entry.id])))) localRequests.delete(id);
     }
+    for (const id of laterIds) if (decisionsById().has(id)) laterIds.delete(id);
     persist();
     if (before !== listState()) renderList(true);
     renderMetrics(); renderPlan(); renderHistory(); renderThreadEvents(); syncControls();
@@ -188,7 +203,7 @@
     return JSON.stringify(envelope);
   }
   function liveRecord() {
-    return { mode: 'live-local-v2', sourceSnapshot: snapshot, drafts, threadDrafts: Object.fromEntries(threadDrafts), localRequests: [...localRequests.values()] };
+    return { mode: 'live-local-v2', sourceSnapshot: snapshot, drafts, threadDrafts: Object.fromEntries(threadDrafts), later: [...laterIds], localRequests: [...localRequests.values()] };
   }
   function restoreLive() {
     try {
@@ -196,6 +211,7 @@
       if (raw) {
         const saved = JSON.parse(raw);
         if (saved.sourceSnapshot !== snapshot) throw new Error('Stored source differs from server source');
+        restoreLater(saved.later);
         validateFeed({ ...feed, drafts: saved.drafts ?? {} });
         validateFeed({ ...feed, drafts: saved.threadDrafts ?? {} });
         let pending = saved.localRequests;
@@ -244,7 +260,7 @@
       if (!liveStorageReady) { $('storage-status').textContent = restoreProblem || 'Recovering the live local audit before saving.'; return; }
     }
     try {
-      localStorage.setItem(savedKey, JSON.stringify(liveSession ? liveRecord() : { sourceSnapshot: snapshot, decisions: feed.decisions, drafts, reads: [...readDeliveries] }));
+      localStorage.setItem(savedKey, JSON.stringify(liveSession ? liveRecord() : { sourceSnapshot: snapshot, decisions: feed.decisions, drafts, reads: [...readDeliveries], later: [...laterIds] }));
       $('storage-status').textContent = 'Saved in this browser for this exact feed. Download JSON for a portable backup; private browsing and previews may clear storage.';
     } catch {
       $('storage-status').textContent = 'Browser storage unavailable. Decisions remain in this tab only: export JSON before closing.';
@@ -256,7 +272,7 @@
     snapshot = sourceSnapshot(feed);
     savedKey = `review-queue-${liveSession ? 'live' : 'v1'}-${fingerprint(snapshot)}`;
     drafts = Object.create(null);
-    readDeliveries = new Set();
+    readDeliveries = new Set(); laterIds = new Set();
     dirty = false;
     if (restore) {
       try {
@@ -265,7 +281,7 @@
           const saved = JSON.parse(raw);
           if (saved.sourceSnapshot !== snapshot) throw new Error('Stored feed does not match this snapshot. No decisions restored.');
           const restored = validateFeed({ ...feed, decisions: saved.decisions, drafts: saved.drafts ?? {} });
-          feed = restored;
+          feed = restored; restoreLater(saved.later);
           if (saved.reads !== undefined) {
             if (!Array.isArray(saved.reads) || saved.reads.some((identity) => !feed.items.some((item) => deliveryIdentity(item) === identity))) throw new Error('Invalid stored read acknowledgement');
             readDeliveries = new Set(saved.reads);
@@ -317,20 +333,25 @@
   function withdrawnIds() { return new Set([...events.values()].filter((event) => event.kind === 'control').map((event) => event.target_id)); }
   function decisionsById() {
     const withdrawn = withdrawnIds();
-    return new Map(reviewHistory().filter((decision) => !withdrawn.has(decision.batch_id)).map((decision) => [decision.id, decision]));
+    return new Map(reviewHistory().filter((decision) => !withdrawn.has(decision.batch_id) && !isMessage(decision.action)).map((decision) => [decision.id, decision]));
   }
   function resultById() {
     const result = new Map();
     const withdrawn = withdrawnIds();
     for (const event of events.values()) {
-      if (!currentInputIds.has(event.decision_id) || withdrawn.has(event.decision_id)) continue;
+      if (!currentInputIds.has(event.decision_id) || withdrawn.has(event.decision_id) || isMessage(event.action)) continue;
       if (['thread', 'read'].includes(event.kind) || (event.status === 'rechecking' && events.get(event.decision_id)?.kind === 'thread')) continue;
       for (const id of event.item_ids) result.set(id, event);
     }
+    const messages = new Map();
+    for (const event of events.values()) {
+      if (isMessage(event.action) && currentInputIds.has(event.decision_id) && event.kind === 'status' && event.status !== 'rechecking') for (const id of event.item_ids) messages.set(id, event);
+    }
+    for (const [id, event] of messages) if (!result.has(id)) result.set(id, event);
     return result;
   }
   function needsHuman(item, decision, result) {
-    if (isLocked(item)) return false;
+    if (isLocked(item) || laterIds.has(item.id)) return false;
     if (result && (!decision || Date.parse(result.at) >= Date.parse(decision.decided_at))) {
       if (['blocked', 'waiting'].includes(result.status)) return true;
       if (['unarchived', 'cancelled', 'no_effect'].includes(result.status)) return !decision && !archiveEligible(item);
@@ -343,7 +364,7 @@
     return (chatOnly(item) && recommendationVerb(item) === 'archive' && !readAllowed(item)) || ['merge', 'review', 'relaunch', 'blockers'].includes(recommendationVerb(item));
   }
   function archiveEligible(item, decisions = decisionsById(), results = resultById()) {
-    return item.kind === 'session' && recommendationVerb(item) === 'archive' && canApprove(item) && readAllowed(item) && !item.protected && !item.archived && !isLocked(item)
+    return !laterIds.has(item.id) && item.kind === 'session' && recommendationVerb(item) === 'archive' && canApprove(item) && readAllowed(item) && !item.protected && !item.archived && !isLocked(item)
       && !decisions.has(item.id) && ![...localRequests.values()].some((local) => local.item_ids.includes(item.id))
       && !['blocked', 'waiting', ...terminalStatuses].includes(results.get(item.id)?.status)
       && ![...events.values()].some((event) => event.kind === 'compensation' && event.item_ids.includes(item.id) && !['unarchived', 'cancelled'].includes([...events.values()].filter((entry) => entry.decision_id === event.id).at(-1)?.status))
@@ -364,7 +385,10 @@
     const results = resultById();
     return filteredItems().filter((item) => $('status').value === 'human'
       ? needsHuman(item, decisions.get(item.id), results.get(item.id))
-      : $('status').value === 'decided' ? decisions.has(item.id)
+      : $('status').value === 'later' ? laterIds.has(item.id)
+        : $('status').value === 'decided' ? decisions.has(item.id)
+        : $('status').value === 'pending' ? !isLocked(item) && !decisions.has(item.id) && !laterIds.has(item.id)
+        : $('status').value === 'message' ? reviewHistory().some((entry) => entry.id === item.id && isMessage(entry.action))
         : !$('status').value || (isLocked(item) ? 'locked' : decisions.get(item.id)?.action ?? 'pending') === $('status').value)
       .sort((a, b) => Number(isLocked(a)) - Number(isLocked(b)));
   }
@@ -398,9 +422,10 @@
     const declined = decisions.filter((d) => d.action === 'decline').length;
     const locked = feed.items.filter(isLocked).length;
     const actionable = feed.items.length - locked;
-    const pending = actionable - decisions.length;
+    const pending = actionable - decisions.length - [...laterIds].filter((id) => !decisions.some((entry) => entry.id === id)).length;
+    $('status').querySelector('option[value="later"]').textContent = `Later (${laterIds.size})`;
     const deferred = decisions.filter((d) => d.action === 'defer').length;
-    const followups = decisions.filter((d) => ['ask_info', 'request_changes', 'comment'].includes(d.action)).length;
+    const followups = reviewHistory().filter((decision) => isMessage(decision.action)).length;
     $('metrics').replaceChildren();
     for (const [count, label] of [[feed.items.length, 'total'], [pending, 'pending'], [approved, 'approved'], [declined, 'declined'], [followups, 'follow-ups / comments'], [deferred, 'deferred'], [locked, 'nothing to decide']]) {
       const metric = element('span'); metric.append(element('strong', String(count)), document.createTextNode(` ${label}`)); $('metrics').append(metric);
@@ -502,7 +527,7 @@
     const delivery = deliveryOf(item);
     root.append(element('strong', deliveryClassification(item)), element('p', delivery ? `Completeness: ${delivery.completeness} · ${delivery.observed_at} · ${delivery.provenance}` : 'Complete answers and delivery type are unknown. A summary is not the delivered answer.', 'small muted'));
     const route = sessionRoute(item);
-    if (isLocked(item)) { root.append(element('pre', route || `Session: ${item.id} · workspace unknown`, 'raw-value')); return; }
+    if (isLocked(item)) { root.append(element('div', route || `Session: ${item.id} · workspace unknown`, 'raw-value')); return; }
     const routeField = element('textarea'); routeField.readOnly = true; routeField.rows = 2; routeField.setAttribute('aria-label', 'Open in OpenWork — copy route and IDs');
     routeField.value = `${route || 'Route unknown'}\nSession: ${item.id} · Workspace: ${item.workspace_id || 'unknown'}`; root.append(routeField);
     if (!delivery) return;
@@ -568,7 +593,7 @@
       const actions = element('div', undefined, 'decision-actions');
       const commentLabel = element('label', 'Comment or follow-up request'); commentLabel.htmlFor = 'comment';
       const comment = element('textarea'); comment.id = 'comment'; comment.dataset.testid = 'comment'; comment.rows = 3; comment.maxLength = 10000; comment.placeholder = 'What should the owner explain or change?'; comment.value = drafts[item.id] ?? ''; comment.addEventListener('input', saveDraft);
-      for (const [action, label] of Object.entries(labels)) {
+      for (const [action, label] of [['approve', 'Approve'], ['decline', 'Decline']]) {
         const row = element('div', undefined, 'decision-action');
         const button = element('button', label, action); button.dataset.action = action;
         button.disabled = unavailable() || (action === 'approve' && (!canApprove(item) || !readAllowed(item)));
@@ -580,11 +605,14 @@
         }
         actions.append(row);
       }
+      const later = element('button', laterIds.has(item.id) ? 'Return to queue' : 'Later'); later.dataset.localAction = 'later'; later.disabled = decisionsById().has(item.id); later.addEventListener('click', guarded(skipLater)); actions.append(later);
+      const send = element('button', liveSession ? 'Send to owner' : 'Record message (offline)'); send.dataset.testid = 'thread-send'; send.disabled = unavailable(); send.addEventListener('click', guarded(() => decide([item.id], 'message', comment.value)));
       const templates = element('div', undefined, 'templates');
-      for (const [title, text] of [['Ask for more info', 'Please provide the missing evidence and current status.'], ['Needs clarification', 'Please explain '], ['More work', 'Please change ']]) {
+      for (const [title, text] of [['Why…?', 'Why '], ['Please change…', 'Please change '], ['Note:', 'Note: '], ['Needs clarification:', 'Needs clarification: ']]) {
         const button = element('button', title); button.addEventListener('click', () => { comment.value = text; saveDraft(); comment.focus(); }); templates.append(button);
       }
-      review.append(actions, commentLabel, comment, templates);
+      review.append(actions, commentLabel, comment, templates, send);
+      if (threadDrafts.has(item.id)) review.append(element('p', `Legacy owner draft retained, not sent: ${threadDrafts.get(item.id)}`, 'raw-value'));
       if (liveSession) { const controls = element('div'); controls.id = 'card-controls'; review.append(controls); renderCardControls(); }
     }
     const evidence = element('section', undefined, 'section'); evidence.dataset.field = 'evidence'; evidence.append(element('h3', 'Evidence checks'));
@@ -647,22 +675,6 @@
       const thread = element('section', undefined, 'section'); thread.dataset.field = 'thread';
       thread.append(element('h3', 'Owner thread'));
       const log = element('div'); log.dataset.testid = 'thread-events'; log.setAttribute('aria-live', 'polite'); thread.append(log);
-      if (!isLocked(item)) {
-        const input = element('textarea'); input.dataset.testid = 'thread-input'; input.rows = 3; input.maxLength = 10000;
-        input.setAttribute('aria-label', 'Message to owner'); input.value = threadDrafts.get(item.id) || ''; input.disabled = !connected;
-        input.addEventListener('input', () => { threadDrafts.set(item.id, input.value); dirty = true; persist(); });
-        const send = element('button', 'Send to owner'); send.dataset.testid = 'thread-send'; send.disabled = unavailable();
-        send.addEventListener('click', guarded(() => {
-          if (unavailable()) throw new Error('Wait for the pending request or inspect the lost connection.');
-          const text = input.value;
-          if (!text.trim() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) throw new Error('Message must be nonempty text without control characters.');
-          const id = crypto.randomUUID();
-          localRequests.set(id, { id, kind: 'thread', item_ids: [item.id], text, action: text.trim().toLowerCase() === 'stop' ? 'stop' : 'ask_info', at: new Date().toISOString(), decisions: [], state: 'Sending — receipt not confirmed' });
-          writing = true; threadDrafts.delete(item.id); input.value = ''; persist(); renderList(true); renderThreadEvents(); syncControls();
-          void postOnce(`/threads/${encodeURIComponent(item.id)}`, { id, text });
-        }));
-        thread.append(input, send, element('p', 'Send exactly “stop” to pause the entire queue when the executor next claims work. Stop is not undo and cannot cancel work already running. Resuming requires human review and a fresh queue directory.', 'small muted'));
-      }
       root.append(thread); renderThreadEvents();
     }
   }
@@ -695,7 +707,7 @@
     const outcomes = lastEvent?.outcomes?.map((entry) => entry.status);
     const knownTargets = outcomes?.length === input.item_ids.length && outcomes.every((status) => ['no_effect', 'archived', 'sent', 'waiting', 'reply'].includes(status));
     const archiveEffect = last === 'archived' || outcomes?.includes('archived');
-    const completedMessage = ['ask_info', 'request_changes', 'comment'].includes(input.action) && [last, ...(outcomes ?? [])].some((status) => ['sent', 'waiting', 'reply'].includes(status));
+    const completedMessage = isMessage(input.action) && [last, ...(outcomes ?? [])].some((status) => ['sent', 'waiting', 'reply'].includes(status));
     const reason = !currentInputIds.has(input.id) ? 'Older snapshot — reconcile first'
       : withdrawnIds().has(input.id) ? 'Withdrawn / changed — follow the linked requests'
         : history.some((event) => event.status === 'merged' || event.outcomes?.some((outcome) => outcome.status === 'merged')) ? 'Merge is not reversible'
@@ -711,7 +723,7 @@
         $('control-title').textContent = mode === 'undo' ? 'Undo this entire decision?' : 'Change this entire decision?';
         $('control-items').replaceChildren(...input.item_ids.map((id) => element('li', `${feed.items.find((item) => item.id === id)?.title || id} · ${id}`)));
         $('replacement-fields').hidden = mode !== 'change';
-        $('replacement-action').value = input.action in labels ? input.action : 'decline';
+        $('replacement-action').value = ['approve', 'decline'].includes(input.action) ? input.action : 'decline';
         $('replacement-comment').value = '';
         $('control-text').value = '';
         $('control-effect').textContent = `${input.item_ids.length} target(s), whole batch only. ${completedMessage ? 'The original message cannot be unsent. Enter the exact cancellation/follow-up message.' : archiveEffect ? 'Queue unarchive only for targets explicitly reported archived, after live rechecks. Explicit no-effect targets need no compensation.' : 'Withdraw only if still unclaimed; running work cannot be interrupted.'} ${mode === 'change' ? 'The replacement waits for successful compensation. Failure or uncertainty blocks it.' : ''} History is append-only.`;
@@ -807,7 +819,7 @@
       const item = feed.items.find((entry) => entry.id === id);
       return item?.kind === 'session' && recommendationVerb(item) === 'archive' && !archiveEligible(item);
     })) throw new Error('Archive approval unavailable: already decided, completed, blocked or awaiting human follow-up. It cannot be included in another archive batch.');
-    if (liveSession && ids.some((id) => [...localRequests.values()].some((entry) => entry.item_ids.includes(id)) || decisionsById().has(id))) throw new Error('Existing or uncertain decision: use Undo/change on its exact request in the action log.');
+    if (liveSession && ids.some((id) => [...localRequests.values()].some((entry) => entry.item_ids.includes(id)) || (!isMessage(action) && decisionsById().has(id)))) throw new Error('Existing or uncertain decision: use Undo/change on its exact request in the action log.');
     if (unavailable()) throw new Error('Wait for the pending request or inspect the lost connection. Nothing was sent.');
     if (action === 'approve' && ids.length > 1 && feed.items.some((item) => ids.includes(item.id) && recommendationVerb(item).toLowerCase().trim() === 'merge')) throw new Error('Bulk merge approval is forbidden.');
   }
@@ -821,15 +833,15 @@
     for (const id of ids) delete drafts[id];
     if (liveSession) {
       writing = true;
-      advances.set(batch, { order, anchor });
+      if (!isMessage(action)) advances.set(batch, { order, anchor });
       localRequests.set(batch, { id: batch, kind: 'decision', item_ids: ids, text: comment, action, at: now, decisions: candidate.decisions.filter((entry) => entry.batch_id === batch), state: 'Sending — receipt not confirmed' });
-    } else feed = candidate;
+    } else { feed = candidate; if (!isMessage(action)) for (const id of ids) laterIds.delete(id); }
     dirty = true; exportStamp = ''; selected.clear(); persist(); render(liveSession); $('detail').focus({ preventScroll: true });
     if (liveSession) {
       message('Recorded locally. Sending once; receipt not yet confirmed.');
       void postOnce('/decisions', { id: batch, ids, action, comment, decided_at: now, snapshot: serverSnapshot });
     } else {
-      advanceReview(order, anchor);
+      if (!isMessage(action)) advanceReview(order, anchor);
       message(`Recorded ${labels[action].toLowerCase()} for ${ids.length} item${ids.length === 1 ? '' : 's'}. Nothing was executed. Undo is available.`);
     }
   }
@@ -915,6 +927,9 @@
   $('export-markdown').addEventListener('click', guarded(() => download('markdown')));
   window.addEventListener('beforeunload', (event) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
   document.addEventListener('keydown', guarded((event) => {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === $('comment') && !$('control-dialog').open && !$('confirm-dialog').open && !unavailable()) {
+      event.preventDefault(); decide([activeId], 'message', $('comment').value); return;
+    }
     if (!feed || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.repeat || event.isComposing || $('confirm-dialog').open || $('control-dialog').open || unavailable()) return;
     if (!(event.target instanceof Element) || event.target.closest('input,textarea,select,button,a,summary,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
     const items = visibleItems(); const index = items.findIndex((item) => item.id === activeId);
@@ -922,6 +937,8 @@
       event.preventDefault(); if (!items.length) return;
       activeId = items[Math.max(0, Math.min(items.length - 1, index + (event.key === 'j' ? 1 : -1)))].id;
       renderList(); renderDetail(); $('detail').focus({ preventScroll: true }); $('list').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'l' && activeId) {
+      event.preventDefault(); skipLater();
     } else if (event.key === ' ' && activeId) {
       event.preventDefault(); if (!items[index] || isLocked(items[index])) { message('Not yours to act on. This item is read-only.'); return; }
       selected.has(activeId) ? selected.delete(activeId) : selected.add(activeId); renderList(); renderBulk();

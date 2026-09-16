@@ -141,12 +141,12 @@
       "type": "object", "additionalProperties": false, "required": ["id", "action", "batch_id", "decided_at"],
       "properties": {
         "id": {"$ref": "#/$defs/itemIdentity"},
-        "action": {"enum": ["approve", "decline", "defer", "ask_info", "request_changes", "comment"]},
+        "action": {"enum": ["approve", "decline", "defer", "ask_info", "request_changes", "comment", "message"]},
         "comment": {"type": "string", "maxLength": 10000, "default": ""},
         "batch_id": {"$ref": "#/$defs/id"},
         "decided_at": {"$ref": "#/$defs/timestamp"}
       },
-      "allOf": [{"if": {"properties": {"action": {"enum": ["ask_info", "request_changes", "comment"]}}}, "then": {"required": ["comment"], "properties": {"comment": {"minLength": 1, "pattern": "\\S"}}}}]
+      "allOf": [{"if": {"properties": {"action": {"enum": ["ask_info", "request_changes", "comment", "message"]}}}, "then": {"required": ["comment"], "properties": {"comment": {"minLength": 1, "pattern": "\\S"}}}}]
     },
     "metadata": {
       "type": "object", "additionalProperties": false,

@@ -155,13 +155,13 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     await page.getByTestId('comment').fill('a d j k ? <script>literal</script>');
     await page.keyboard.press('Space');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(3);
-    await page.locator('#detail [data-action="ask_info"]').click();
+    await page.getByTestId('thread-send').click();
     const followup = validateFeed((await exportJson(page)).data);
-    expect(followup.decisions.at(-1)?.action).toBe('ask_info');
+    expect(followup.decisions.at(-1)?.action).toBe('message');
     expect(followup.decisions.at(-1)?.comment).toContain('<script>literal</script>');
     expect(await page.locator('#agent-plan').inputValue()).toContain('session.send');
     expect(await page.locator('#detail script').count()).toBe(0);
-    await page.locator('#detail [data-action="comment"]').click();
+    await page.getByTestId('thread-send').click();
     expect(await page.locator('#message').textContent()).toContain('nonempty');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(4);
     evidence.recordAssertionEvidence('Follow-up text and keyboard behavior are safe', 'j/k change the focused item; c focuses its text field. Typing action letters and Space records nothing. Ask-info stores literal script-shaped text without creating DOM script nodes, and blank comments are rejected.', true);
@@ -260,7 +260,7 @@ test('ten seeded cards render readable prose in decision order with raw evidence
       expect(await card.locator(':scope > :first-child').getAttribute('data-testid')).toBe('detail-title');
       for (const [name, value] of Object.entries({ purpose: item.purpose, status_on_dev: item.status_on_dev, delivered: item.delivered, why: item.why })) {
         expect(typeof value === 'string' && value.trim().length > 0).toBe(true);
-        expect((await card.locator(`[data-field="${name}"] > p`).textContent()) === expectedProse(value, item, input.items)).toBe(true);
+        expect((await card.locator(`[data-field="${name}"] > p.summary`).textContent()) === expectedProse(value, item, input.items)).toBe(true);
       }
       expect(await card.locator('[data-field="why"] [data-field="recommendation"]').count()).toBe(1);
       expect(await card.locator('[data-field="delivered"] a').count()).toBe(item.links.length);
@@ -357,7 +357,7 @@ test('display prose is readable without changing source identity, evidence excer
     await page.goto(pathToFileURL(path).href);
     await page.locator('#status').selectOption('');
     for (const [name, value] of Object.entries(sourceProse)) {
-      const field = page.locator(`#detail [data-field="${name}"]${name.startsWith('if_') ? '' : ' > p'}`);
+      const field = page.locator(`#detail [data-field="${name}"]${name.startsWith('if_') ? '' : ' > p.summary'}`);
       expect(await field.textContent()).toBe(name === 'if_approved' ? 'archive this session' : name === 'if_declined' ? 'leave this session open' : expected[name]);
       expect(expectedProse(value, input.items[0], input.items)).toBe(expected[name]);
       expect(await page.locator(`[data-prose-source="${name}"]`).textContent()).toBe(value);

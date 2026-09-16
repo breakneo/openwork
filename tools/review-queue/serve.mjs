@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateFeed, applyDecision, isLocked, recommendationVerb, chatOnly, deliveryOf, deliveryIdentity } from './core.mjs';
+import { validateFeed, applyDecision, isLocked, recommendationVerb, chatOnly, deliveryOf, deliveryIdentity, isMessage } from './core.mjs';
 import { buildHtml } from './build.mjs';
 import { writeDeliverables } from './deliverables.mjs';
 import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan, requireDeliveryRead } from './protocol.mjs';
@@ -177,7 +177,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
           if (body.snapshot !== snapshot) fail('Stale snapshot; restart for feed updates and review again', 409);
           const previous = [...feed.decisions, ...entries.filter((entry) => entry.event.kind === 'decision' && entry.snapshot === snapshot).flatMap((entry) => entry.event.decisions)];
           const next = applyDecision({ ...feed, decisions: previous }, body.ids, body.action, body.comment, body.decided_at, body.id);
-          if (outstandingInputs(inputs, events).some((input) => input.item_ids.some((id) => body.ids.includes(id)))) fail('An existing decision or compensation affects this card. Use Undo/change on its exact request', 409);
+          if (!isMessage(body.action) && outstandingInputs(inputs, events).some((input) => input.item_ids.some((id) => body.ids.includes(id)))) fail('An existing decision or compensation affects this card. Use Undo/change on its exact request', 409);
           const items = body.ids.map((id) => feed.items.find((item) => item.id === id));
           if (body.action === 'approve') requireDeliveryRead(items, entries, snapshot);
           if (body.action === 'approve' && items.length > 1 && items.some((item) => recommendationVerb(item).toLowerCase().trim() === 'merge')) fail('Bulk merge approval is forbidden');

@@ -269,17 +269,30 @@ test('bulk append is immutable and constrained to homogeneous kind, group and re
   evidence.recordAssertionEvidence('Bulk decisions are immutable and homogeneous', `Original events: ${original.decisions.length}; accepted bulk events: ${first.decisions.length}. Rejected mixed kind, group or recommendation, empty or duplicate selections, and reused batch ID; rejected attempts left source decisions empty.`, true);
 });
 
-test('last event wins including comment; undo drops exactly one complete batch', async ({ evidence }) => {
+test('new and legacy messages preserve approval while Later is not an executable ledger action', async ({ evidence }) => {
+  let current = applyDecision(feed(), ['ses_exampleA'], 'approve', '', time, 'approval');
+  for (const action of ['message', 'ask_info', 'request_changes', 'comment']) {
+    current = applyDecision(current, ['ses_exampleA'], action, 'Reviewed synthetic message', later, `message-${action}`);
+    expect(latestDecisions(current).map((entry) => entry.action)).toEqual(['approve']);
+  }
+  expect(current.decisions).toHaveLength(5);
+  expect(() => applyDecision(current, ['ses_exampleB'], 'later', '', later, 'not-work')).toThrow();
+  expect(() => applyDecision(current, ['ses_exampleB'], 'message', ' ', later, 'empty-message')).toThrow();
+  expect(JSON.parse(exportDecisions(current, later).json).effective_decisions[0].action).toBe('approve');
+  evidence.recordAssertionEvidence('Messages and disposition are separate', 'Approve followed by each new/legacy message retains approval and all five audit events. Empty message and executable Later reject; export effective approval remains intact.', true);
+});
+
+test('messages remain orthogonal to decisions; undo drops exactly one complete batch', async ({ evidence }) => {
   const original = feed();
   const first = applyDecision(original, ['ses_exampleA', 'ses_exampleB'], 'approve', '', time, 'bulk');
   const second = applyDecision(first, ['ses_exampleA'], 'comment', 'Still a question', later, 'followup');
-  expect(latestDecisions(second).map((event) => event.action)).toEqual(['comment', 'approve']);
+  expect(latestDecisions(second).map((event) => event.action)).toEqual(['approve', 'approve']);
   expect(second.decisions).toHaveLength(3);
   expect(undoLast(second)).toEqual(first);
   expect(undoLast(first)).toEqual(original);
   expect(undoLast(original)).toEqual(original);
   expect(second.decisions).toHaveLength(3);
-  evidence.recordAssertionEvidence('Latest comment wins and undo removes only the last batch', `Effective actions: ${JSON.stringify(latestDecisions(second).map((event) => event.action))}; audit remains ${second.decisions.length} events. Undo restored the preceding bulk, then the original empty history; undo on empty history was a no-op and did not mutate the three-event input.`, true);
+  evidence.recordAssertionEvidence('Legacy message preserves approval and undo removes only the last batch', `Effective actions: ${JSON.stringify(latestDecisions(second).map((event) => event.action))}; audit remains ${second.decisions.length} events. Undo restored the preceding bulk, then the original empty history; undo on empty history was a no-op and did not mutate the three-event input.`, true);
 });
 
 test('imports reject broken append audits, reused batches, duplicates and inconsistent bulk comments', async ({ evidence }) => {
@@ -376,7 +389,7 @@ test('exports preserve exact normalized items, metadata, full audit and effectiv
   expect(JSON.stringify(parsed.items)).toBe(JSON.stringify(last.items));
   expect(parsed.decisions).toHaveLength(3);
   expect(parsed.audit).toEqual(last.decisions);
-  expect(parsed.effective_decisions.map((event: { action: string }) => event.action)).toEqual(['comment', 'approve']);
+  expect(parsed.effective_decisions.map((event: { action: string }) => event.action)).toEqual(['approve', 'approve']);
   expect(parsed.metadata).toEqual(last.metadata);
   expect(validateFeed(parsed)).toEqual(last);
   expect(result.markdown).toContain('## Event audit (3)');

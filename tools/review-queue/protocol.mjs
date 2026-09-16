@@ -2,7 +2,7 @@ import { constants, openSync, closeSync, fstatSync, readSync, writeSync, fsyncSy
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { chatOnly, deliveryOf, deliveryIdentity, recommendationVerb } from './core.mjs';
+import { chatOnly, deliveryOf, deliveryIdentity, recommendationVerb, isMessage } from './core.mjs';
 
 export const MAX_BODY = 8 * 1024 * 1024;
 export const MAX_FEED = 4 * 1024 * 1024;
@@ -224,7 +224,7 @@ export function outstandingInputs(inputs, events) {
   return inputs.filter((input) => {
     if (input.kind === 'control' || controlled.has(input.id) || input.action === 'stop') return false;
     if (input.kind === 'compensation') return !['unarchived', 'cancelled'].includes(workHistory(input, events).at(-1)?.status);
-    return input.kind === 'decision';
+    return input.kind === 'decision' && !isMessage(input.action);
   });
 }
 
@@ -252,7 +252,7 @@ export function reversalPlan(input, inputs, events, mode = 'undo') {
     const status = last.outcomes ? last.outcomes.find((outcome) => outcome.item_id === item.id)?.status : last.status;
     if (status === 'no_effect') continue;
     if (status === 'archived' && input.action === 'approve' && item.kind === 'session' && ['archive', 'review_archive_eligibility'].includes(item.recommended_action)) action = 'unarchive';
-    else if (['ask_info', 'request_changes', 'comment'].includes(input.action) && ['sent', 'waiting', 'reply'].includes(status)) action = 'cancel_followup';
+    else if (isMessage(input.action) && ['sent', 'waiting', 'reply'].includes(status)) action = 'cancel_followup';
     else fail('Outcome is blocked, mixed or unknown; external effects may exist. Reconcile every target before undo/change', 409);
     affected.push(item);
   }

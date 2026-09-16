@@ -1,6 +1,7 @@
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { isMessage } from './core.mjs';
 import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, appendEvent, statusEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
 
 function publishedInputs(directory) {
@@ -29,7 +30,7 @@ export function next(directory = 'reports/review-queue') {
       const state = JSON.parse(readBounded(join(dir, 'feed-state.json'), 16 * 1024 * 1024));
       const entry = entries.find((entry) => entry.event.id === input.id);
       const stale = entry.snapshot !== undefined ? entry.snapshot !== state.snapshot : input.items.some((item) => !state.items.some((current) => isDeepStrictEqual(current, item)));
-      const overlap = input.kind === 'decision' && outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.kind === 'decision' && other.item_ids.some((id) => input.item_ids.includes(id)));
+      const overlap = input.kind === 'decision' && !isMessage(input.action) && outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.kind === 'decision' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (input.action === 'approve') requireDeliveryRead(input.items, entries, entry.snapshot);
       const running = inputs.some((other) => other.id !== input.id && claimed.has(other.id) && workHistory(other, events).at(-1)?.status === 'rechecking' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (running && input.action !== 'stop') continue;

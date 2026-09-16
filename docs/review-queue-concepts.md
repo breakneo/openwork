@@ -67,7 +67,7 @@ Research was time-boxed to the initial design phase. Sources are primary documen
 ## Twelve design principles
 
 1. **Triage before deep review.** Filter kind/group/recommendation, identify unknowns and protected items, then review a small homogeneous set.
-2. **One focused item, fixed verbs.** Approve, decline, defer, ask for info, request changes, comment. Recommendation remains visually distinct from the human's decision.
+2. **One focused item, three actions.** Approve, decline, and browser-local Later. One editor sends independent messages; question/change/note chips only prefill. Messages never supersede approval/decline, including readable legacy message actions. Recommendation remains distinct from the human's decision.
 3. **Evidence above narrative.** Show tests/checks, head/base and source links before summary. Missing evidence says unknown, never green.
 4. **Keyboard-first without accidental actions.** j/k navigate; a/d decide only one focused item; c/? prepare text; Space selects. Native fields/buttons retain their own keys.
 5. **Batch only same-shape items.** Kind, group and recommendation must match. Show count and every selected identity before confirmation. Changing filters clears selection.

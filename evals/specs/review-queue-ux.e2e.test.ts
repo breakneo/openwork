@@ -71,7 +71,10 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     await expect.poll(() => page.getByTestId('detail-title').textContent()).toBe('Synthetic review 1');
     expect(await page.locator('[data-id="ses_fixture0"]').count()).toBe(0);
     await page.getByTestId('comment').fill('Explain the synthetic choice.');
-    await page.locator('[data-action="ask_info"]').click();
+    await page.getByTestId('thread-send').click();
+    await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(2);
+    expect(await page.getByTestId('detail-title').textContent()).toBe('Synthetic review 1');
+    await page.locator('[data-action="decline"]').click();
     await expect.poll(() => page.getByTestId('detail-title').textContent()).toBe('Synthetic review 2');
     await page.locator('#select-visible').check();
     await page.locator('#bulk-action').selectOption('decline');
@@ -82,8 +85,8 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     expect(await page.locator('#detail').textContent()).toContain('No more cards');
     await page.locator('#status').selectOption('decided');
     expect(await page.getByTestId('queue-row').count()).toBe(4);
-    expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(3);
-    expect(await page.locator('[data-log-id]').count()).toBe(3);
+    expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(4);
+    expect(await page.locator('[data-log-id]').count()).toBe(4);
     const work = next(live.directory);
     result(work.id, 'done', 'Synthetic completion receipt', live.directory);
     await expect.poll(() => page.getByTestId('action-log').textContent(), { timeout: 8000 }).toContain('Synthetic completion receipt');
@@ -93,7 +96,7 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     await page.reload();
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     expect(await page.getByTestId('queue-row').count()).toBe(0);
-    expect(await page.locator('[data-log-id]').count()).toBe(3);
+    expect(await page.locator('[data-log-id]').count()).toBe(4);
     expect(await page.getByTestId('action-log').textContent()).toContain('Synthetic completion receipt');
     await page.locator('#status').selectOption('');
     await page.locator('[data-id="ses_uncertain"] .row-open').click();
@@ -102,7 +105,7 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('CONNECTION LOST');
     expect(await page.getByTestId('detail-title').textContent()).toBe('Uncertain fixture');
     expect(await page.getByTestId('thread-events').textContent()).toContain('UNCERTAIN');
-    expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(3);
+    expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(4);
     expect(errors).toEqual([]);
     evidence.recordAssertionEvidence('Confirmed auto-advance, whole-batch scope and uncertainty', 'Isolated synthetic Chromium checks j/k, approve then ask progression, two-card bulk decline, all-decided empty state, Decided/reload persistence, and no advancement or retry after transport failure.', true);
   } finally {
