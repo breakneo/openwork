@@ -1292,11 +1292,14 @@ export function SessionSurface(props: SessionSurfaceProps) {
       const item = useDesktopLoopbackSnapshotRetry
         ? await opencodeSessionNative.composeNativeSessionHistoryWithRetry(
           sessionOwner,
-          () => snapshotTargetRef.current,
+          () => ({
+            ...snapshotTargetRef.current,
+            endpoint: { ...snapshotTargetRef.current.endpoint, desktopTransport: window?.desktopTransport },
+          }),
           { ...window, signal },
         )
         : await opencodeSessionNative.composeNativeSessionHistory(
-          { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken },
+          { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, desktopTransport: window?.desktopTransport },
           props.sessionId,
           { ...window, signal },
         );
@@ -2408,13 +2411,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       // The surface survives navigation; refresh the stopped conversation, not
       // whichever query the observer is showing when cancellation finishes.
       if (isDesktopRuntime() && !isOpencodeV2BaseUrl(props.opencodeBaseUrl)) {
-        await queryClient.cancelQueries({ queryKey: snapshotQueryKey, exact: true });
-        const snapshotStartedAt = Date.now();
-        const snapshot = await opencodeSessionNative.composeNativeSessionHistory({
-          opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, desktopTransport: "main",
-        }, props.sessionId);
-        markSessionSnapshotFetchStart(snapshot, snapshotStartedAt);
-        queryClient.setQueryData(snapshotQueryKey, snapshot);
+        await openingHistory.refreshFullSnapshot({ desktopTransport: "main" });
       } else {
         await queryClient.refetchQueries({ queryKey: snapshotQueryKey, exact: true });
       }
@@ -2426,7 +2423,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       pendingStopsRef.current.delete(sessionOwner);
       setPendingStopSessions([...pendingStopsRef.current]);
     }
-  }, [chatStreaming, clearQueuedDrafts, opencodeClient, props.opencodeBaseUrl, props.openworkToken, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
+  }, [chatStreaming, clearQueuedDrafts, opencodeClient, openingHistory.refreshFullSnapshot, props.opencodeBaseUrl, props.openworkToken, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
 
   const checkUnknownAdmission = useCallback(async (notify = false) => {
     const phase = getQueuedDrainState(props.sessionId).phase;

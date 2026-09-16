@@ -31,6 +31,13 @@ test(`${mode}: ordinary prompt and Stop under sustained renderer SSE pressure`, 
     return { renderer: value, network };
   };
   try {
+    await agent.run("route.settings.appearance");
+    await user.click({ role: "button", label: "Dark" });
+    await probe.eventually(() => probe.eval(() => document.documentElement.dataset.theme), {
+      within: 5_000, label: "fixture uses the selected dark theme for readable screenshots", until: value => value === "dark",
+    });
+    await user.click({ role: "button", label: "Back to app" });
+    await user.see("composer", { editable: true });
     expect(await agent.run("session.open", { sessionId: target.sessionId })).toMatchObject({ ok: true });
     await user.see("composer", { editable: true });
     expect(await world.canary()).toMatchObject({ status: 200, bodyComplete: true });

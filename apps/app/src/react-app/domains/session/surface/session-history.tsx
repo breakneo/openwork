@@ -10,7 +10,7 @@ import { snapshotKey } from "../sync/session-sync";
 import { composerAutoSendScopeKey } from "./composer-auto-send";
 import { getSessionScrollState, useSessionScrollStore, type SessionScrollState } from "./scroll-store";
 
-export type OpeningHistoryWindow = { limit?: number; messageIds?: readonly string[] };
+export type OpeningHistoryWindow = { limit?: number; messageIds?: readonly string[]; desktopTransport?: "main" };
 
 export function sessionHistoryIdentity(input: {
   draftScope: string | null;
@@ -205,11 +205,11 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
         && !hydratingTranscripts.has(client)) reconcile();
     });
   }, [client, entry, input.readLatest, input.transcriptQueryKey, latestKey, latestQuery.isSuccess, readSource]);
-  const readFullSnapshot = useCallback(async (signal: AbortSignal) => {
+  const readFullSnapshot = useCallback(async (signal: AbortSignal, window?: OpeningHistoryWindow) => {
     const cached = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
     const baseline = client.getQueryData<LatestSessionHistory>(latestKey)?.messages
       ?? (cached ? snapshotToUIMessages(cached) : EMPTY_HISTORY);
-    const snapshot = await input.readSnapshot(signal);
+    const snapshot = await input.readSnapshot(signal, window);
     signal.throwIfAborted();
     entry.fullRead = { baseline, updateCount: (client.getQueryState(input.snapshotQueryKey)?.dataUpdateCount ?? 0) + 1 };
     return snapshot;
@@ -243,6 +243,40 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     activeOwner.current = input.owner;
     return () => { activeOwner.current = null; };
   }, [input.owner]);
+  const activeEntry = useRef<typeof entry | null>(entry);
+  activeEntry.current = entry;
+  useEffect(() => {
+    activeEntry.current = entry;
+    return () => { activeEntry.current = null; };
+  }, [entry]);
+  const refreshFullSnapshot = useCallback(async (options?: { desktopTransport: "main" }) => {
+    const filters = { queryKey: input.snapshotQueryKey, exact: true };
+    const query = client.getQueryCache().find<OpenworkSessionHistory>(filters);
+    if (!query) throw new CancelledError();
+    const assertCurrent = () => {
+      if (activeEntry.current !== entry || client.getQueryCache().find(filters) !== query) {
+        throw new CancelledError();
+      }
+    };
+    assertCurrent();
+    await client.cancelQueries(filters);
+    assertCurrent();
+    let requestSignal: AbortSignal | undefined;
+    const snapshot = await query.fetch({
+      ...query.options,
+      queryFn: async ({ signal }) => {
+        requestSignal = signal;
+        assertCurrent();
+        const snapshot = await fullReader(signal, options);
+        signal.throwIfAborted();
+        assertCurrent();
+        return snapshot;
+      },
+    });
+    requestSignal?.throwIfAborted();
+    assertCurrent();
+    return snapshot;
+  }, [client, entry, fullReader, input.snapshotQueryKey]);
   const ensureFullSnapshot = useCallback(async () => {
     const options = {
       queryKey: input.snapshotQueryKey,
@@ -326,6 +360,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       ? !entry.warm || !input.readLatest || !latestQuery.isFetching
       : backgroundOwner === input.owner,
     ensureFullSnapshot,
+    refreshFullSnapshot,
     readSendHistory,
     runWithFullSnapshot,
   };
