@@ -64,6 +64,7 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     const path = join(directory, 'index.html');
     await writeFile(path, html);
     await page.goto(pathToFileURL(path).href);
+    await page.locator('#status').selectOption('');
     expect(await page.getByTestId('queue-row').count()).toBe(216);
     expect(await page.getByTestId('item-select').count()).toBe(214);
     expect(await page.locator('.locked-heading').textContent()).toContain('Nothing to decide');
@@ -95,6 +96,7 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     await expect.poll(async () => page.locator('#message').textContent()).toContain('Restored decision history');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(3);
     await page.reload();
+    await page.locator('#status').selectOption('');
     expect(await page.locator('#metrics').textContent()).toContain('3 approved');
     evidence.recordAssertionEvidence('Undo, JSON restore and browser restart retain explicit history', 'Undo removes the whole batch; importing its downloaded exact-snapshot JSON restores three decisions. Reload recovers the same decisions from browser storage. Markdown downloads separately.', true);
 
@@ -212,6 +214,7 @@ test('ten seeded cards render readable prose in decision order with raw evidence
     const path = join(directory, 'index.html');
     await writeFile(path, html, { mode: 0o600 });
     await page.goto(pathToFileURL(path).href);
+    await page.locator('#status').selectOption('');
     expect(await page.getByTestId('queue-row').count()).toBe(input.items.length);
     expect(await page.getByTestId('item-select').count()).toBe(input.items.filter((item) => !isLocked(item)).length);
     await page.locator('#status').selectOption('pending');
@@ -291,6 +294,7 @@ test('approval guards cover keyboard, batch and restore while focused controls c
     const path = join(directory, 'index.html');
     await writeFile(path, buildHtml(input, await readFile(join(root, 'template.html'), 'utf8'), await readFile(join(root, 'core.mjs'), 'utf8'), await readFile(join(root, 'ui.js'), 'utf8')));
     await page.goto(pathToFileURL(path).href);
+    await page.locator('#status').selectOption('');
     await page.locator('[data-id="proposal-no-outcome"] .row-open').click();
     expect(await page.locator('[data-action="approve"]').isDisabled()).toBe(true);
     await page.locator('#detail').focus();
@@ -356,6 +360,7 @@ test('approval guards cover keyboard, batch and restore while focused controls c
       localStorage.setItem(key, JSON.stringify(saved));
     });
     await page.reload();
+    await page.locator('#status').selectOption('');
     expect(await page.locator('#message').textContent()).toContain('Locked item cannot have a draft');
     expect(await page.locator('#comment').inputValue()).toBe('');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
@@ -396,6 +401,7 @@ test('reconciled night feed shows coverage and read-only history with scoped rev
     const path = realPage || join(directory, 'index.html');
     if (!realPage) await writeFile(path, html);
     await page.goto(pathToFileURL(path).href);
+    await page.locator('#status').selectOption('');
     const counts: Record<string, number> = {};
     for (const item of input.items) counts[recommendationVerb(item)] = (counts[recommendationVerb(item)] ?? 0) + 1;
     expect(await page.getByTestId('queue-row').count()).toBe(input.items.length);
