@@ -7,7 +7,8 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function startInferenceWitness() {
+export async function startInferenceWitness(options: { reportedCostUsd?: number } = {}) {
+  if (options.reportedCostUsd !== undefined && (!Number.isFinite(options.reportedCostUsd) || options.reportedCostUsd < 0)) throw new Error("Invalid fixture reported cost");
   let mode: InferenceFixtureMode = "success";
   let toolFile = "";
   const requests: InferenceWitness[] = [];
@@ -41,7 +42,7 @@ export async function startInferenceWitness() {
       }
       if (mode === "json" || mode === "unfinished-json" || mode === "two-json") {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ choices: Array.from({ length: mode === "two-json" ? 2 : 1 }, (_, index) => ({ index, message: { role: "assistant", content: mode === "two-json" ? `Choice ${index}` : "Complete", tool_calls: null }, finish_reason: mode === "unfinished-json" ? null : "stop" })), usage: { prompt_tokens: 11, completion_tokens: 13, total_tokens: 24 } }));
+        response.end(JSON.stringify({ choices: Array.from({ length: mode === "two-json" ? 2 : 1 }, (_, index) => ({ index, message: { role: "assistant", content: mode === "two-json" ? `Choice ${index}` : "Complete", tool_calls: null }, finish_reason: mode === "unfinished-json" ? null : "stop" })), usage: { prompt_tokens: 11, completion_tokens: 13, total_tokens: 24, ...(options.reportedCostUsd === undefined ? {} : { cost: options.reportedCostUsd }) } }));
         return;
       }
       response.writeHead(200, { "content-type": "text/event-stream" });

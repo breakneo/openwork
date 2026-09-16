@@ -1464,6 +1464,8 @@ export function SessionRoute() {
         modelPicker.setOpen(true);
       },
       providerCatalog,
+      gatewayProviderIds,
+      gatewayUsageProviderScope: sessionProviderAuthSnapshot.gatewayUsageProviderScope ?? null,
       modelPickerOpen: modelPicker.compactOpen,
       // Legacy fallback only; each surface resolves availability for its own
       // effective session model through `resolveModelAvailability`.
@@ -1775,6 +1777,8 @@ export function SessionRoute() {
     modelVariantValue,
     navigate,
     providerCatalog,
+    gatewayProviderIds,
+    sessionProviderAuthSnapshot.gatewayUsageProviderScope,
     openWorkModelsEntitled,
     openWorkModelsSyncing,
     refreshCloudProviderSync,

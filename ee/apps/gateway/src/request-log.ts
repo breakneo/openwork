@@ -41,6 +41,7 @@ export type RequestLogStartInput = {
 }
 
 export type RequestLogUsageInput = {
+  complete?: boolean
   usageSource: GatewayUsageSource
   upstreamModel?: string | null
   inputTokens?: number | null
@@ -90,6 +91,11 @@ export const insertRequestLogIntoDb: InsertRequestLog = async (row) => {
 
 export async function updateRequestLogInDb(row: GatewayRequestLogRow): Promise<boolean> {
   const { db } = await import("./db.js")
+  if (row.route === "org_provider") {
+    const { createGatewayUsageLimits } = await import("@openwork-ee/den-db/gateway-usage-limits")
+    await createGatewayUsageLimits(db).record(row)
+    return true
+  }
   // A transaction/locking read also distinguishes a no-op retry from a missing
   // row without relying on driver-specific affectedRows/CLIENT_FOUND_ROWS.
   return db.transaction(async (tx) => {
@@ -259,6 +265,7 @@ export function createRequestLogRecorder(dependencies: RequestLogRecorderDepende
         metadata: { ...pending.metadata, cost_source: costMicroUsd(usage?.costUsd) !== null ? "upstream" : "catalog_estimate" },
       }
       if (row.cost_micro_usd === null) row.metadata = { ...pending.metadata, cost_source: "unknown" }
+      row.metadata = { ...row.metadata, cost_complete: row.outcome === "ok" && row.cost_micro_usd !== null && usage?.complete !== false && (costMicroUsd(usage?.costUsd) !== null || typeof usage?.inputTokens === "number" && typeof usage?.outputTokens === "number") }
       finishWrite = (async () => {
         if (!await startWrite) return
         const saved = await persist(() => (dependencies.updateRequestLog ?? updateRequestLogInDb)(row), "request_log_update_failed")
