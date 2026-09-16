@@ -222,6 +222,33 @@ test('decisions validate exact bodies, locked items, homogeneous batches, commen
   evidence.recordAssertionEvidence('Decision validation is atomic and shares core policy', 'Exact receipt/core events, homogeneous archive batch and single merge intent accepted; malformed fields, mixed batches, all locked actions, missing outcomes/comments, stale chronology and bulk merge approvals rejected without appends or external execution.', true);
 });
 
+test('fresh change-to-merge retains the exact PR head and rejects bulk replacement approval', async ({ evidence }) => {
+  const pr = 'https://github.com/example/demo/pull/7';
+  await withLive(async (live) => {
+    const original = decision(source(), { ids: [pr], action: 'decline' });
+    expect((await http(live, '/decisions', { body: original })).status).toBe(200);
+    const control = { id: randomUUID(), target_id: original.id, mode: 'change', replacement: { action: 'approve', comment: 'Explicit new approval for this frozen PR/head only.', decided_at: at }, text: 'Change the reviewed decision', snapshot: original.snapshot };
+    const response = await http(live, '/controls', { body: control });
+    expect(response.status).toBe(200);
+    const receipt = JSON.parse(response.text);
+    const claimed = next(live.directory);
+    expect(claimed).toMatchObject({ id: receipt.replacement_id, action: 'approve', target_id: original.id, control_id: control.id, item_ids: [pr] });
+    expect(claimed.items[0]).toMatchObject({ pr_url: pr, head_sha: 'a'.repeat(40) });
+    expect(claimed.decisions[0]).toMatchObject({ action: 'approve', comment: control.replacement.comment, batch_id: claimed.id });
+    expect((await http(live, '/controls', { body: { ...control, id: randomUUID(), target_id: claimed.id, snapshot: 'different head snapshot' } })).status).toBe(409);
+    expect(next(live.directory)).toBeNull();
+  });
+  await withLive(async (live) => {
+    const original = decision(source(), { ids: [pr, 'https://github.com/example/demo/pull/8'], action: 'decline' });
+    expect((await http(live, '/decisions', { body: original })).status).toBe(200);
+    const control = { id: randomUUID(), target_id: original.id, mode: 'change', replacement: { action: 'approve', comment: '', decided_at: at }, text: '', snapshot: original.snapshot };
+    expect((await http(live, '/controls', { body: control })).status).toBe(400);
+    expect(records(live.directory, 'decisions.jsonl')).toHaveLength(1);
+    expect(next(live.directory).action).toBe('decline');
+  });
+  evidence.recordAssertionEvidence('Replacement merge approval is fresh, exact and per-PR', 'New explicit single-PR approval is stored with its original exact PR URL/head and control references, then claimed once. A different snapshot rejects and a homogeneous two-PR declined batch cannot be changed into bulk merge approval. No GitHub mutation is performed.', true);
+});
+
 test('request idempotency is durable and threads use encoded identities, UUIDs and stop priority', async ({ evidence }) => {
   await withLive(async (live) => {
     const body = decision();
