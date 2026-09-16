@@ -604,6 +604,7 @@ test("ENG105 owner manifest refuses reuse for a different organization", async (
 
 test("ENG105 sanitized HTTP errors remain failures while other MCP applies continue", async ({ evidence }) => {
   await using api = await witness();
+  const message = `Denied ${apiKey}; token=${credential}; https://oauth.example.test/callback?code=${credential}`;
   api.faults.push({
     method: "PUT",
     path: `${byKey}${home}`,
@@ -612,7 +613,7 @@ test("ENG105 sanitized HTTP errors remain failures while other MCP applies conti
       error: "upstream_unavailable",
       apiKey,
       nested: { accessToken: credential, password: credential, authorization: `Bearer ${credential}` },
-      message: `Denied ${apiKey}; token=${credential}; https://oauth.example.test/callback?code=${credential}`,
+      message,
     },
   });
   const result = await api.run("--apply");
@@ -626,8 +627,14 @@ test("ENG105 sanitized HTTP errors remain failures while other MCP applies conti
   assert.equal(object(error.nested).accessToken, "[REDACTED]");
   assert.equal(object(error.nested).password, "[REDACTED]");
   assert.equal(object(error.nested).authorization, "[REDACTED]");
-  assert.equal(JSON.stringify(error).includes("https://oauth.example.test"), false);
-  assert.equal(result.stderr.includes("https://oauth.example.test"), false);
+  const hasOAuthOrigin = (text: string) => [...text.matchAll(/https?:\/\/[^\s"\\]+/g)]
+    .some(([url]) => new URL(url).origin === "https://oauth.example.test");
+  assert.equal(hasOAuthOrigin(JSON.stringify({ message })), true);
+  assert.equal(hasOAuthOrigin(message), true);
+  assert.equal(hasOAuthOrigin("https://oauth.example.test.attacker.test/callback"), false);
+  assert.equal(hasOAuthOrigin("https://attacker.test/?next=https://oauth.example.test"), false);
+  assert.equal(hasOAuthOrigin(JSON.stringify(error)), false);
+  assert.equal(hasOAuthOrigin(result.stderr), false);
   assert.equal(api.connections.has(home), false);
   assert.ok(api.connections.has(clocks) && api.connections.has(calendar));
   assert.deepEqual(mutations(result.requests).map((call) => call.path), keys.map((key) => `${byKey}${key}`));
