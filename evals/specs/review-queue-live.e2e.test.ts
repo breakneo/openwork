@@ -356,7 +356,8 @@ test('file mode ignores connection fragments, keeps the human default and render
     const card = page.locator('#detail [data-field="evidence"]');
     expect(await card.locator('table tr').allTextContents()).toEqual(['CheckResult', 'buildSUCCESS', '<script>literal</script>FAILURE']);
     expect((await card.locator('.evidence').filter({ has: page.getByText('Last assistant', { exact: true }) }).locator('.evidence-value').textContent())?.length).toBe(800);
-    expect(await card.getByText('Unverified — not supplied').count()).toBe(5);
+    expect(await card.getByText('Unverified — not supplied').count()).toBe(0);
+    expect(await card.locator('.evidence-label').allTextContents()).toEqual(['PR checks', 'Last assistant']);
     expect(await card.innerText()).not.toContain('NEVER_DISPLAY_THIS_IN_CARD');
     expect(await page.locator('#detail script').count()).toBe(0);
     expect(await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content')).toContain("connect-src 'none'");
@@ -372,7 +373,7 @@ test('file mode ignores connection fragments, keeps the human default and render
     expect(await page.getByTestId('archive-batch').count()).toBe(0);
     expect(await page.getByTestId('item-select').count()).toBe(3);
     expect(network).toEqual([]);
-    evidence.recordAssertionEvidence('Offline default and curated evidence retain their safety boundaries', 'File mode with a token fragment makes zero network requests across approval and reload. Needs-human shows one question plus one archive batch, All items restores ordinary selection, and saved decisions remain offline. JSON check rows display success and failure as literal text, last assistant is bounded to 800 characters, missing curated fields remain unverified, arbitrary raw labels stay collapsed, and offline CSP stays connect-src none.', true);
+    evidence.recordAssertionEvidence('Offline default and curated evidence retain their safety boundaries', 'File mode with a token fragment makes zero network requests across approval and reload. Needs-human shows one question plus one archive batch, All items restores ordinary selection, and saved decisions remain offline. JSON check rows display success and failure as literal text, last assistant is bounded to 800 characters, missing placeholder rows are omitted without inventing passes, arbitrary raw labels stay collapsed, and offline CSP stays connect-src none.', true);
   } finally {
     await browser.close();
     await rm(directory, { recursive: true, force: true });

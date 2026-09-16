@@ -50,6 +50,14 @@ function expectedProse(value: string, item: ReturnType<typeof validateFeed>['ite
   for (const [phrase, readable] of Object.entries(phrases).sort((a, b) => b[0].length - a[0].length)) expected = expected.replace(new RegExp(`\\b${phrase.replaceAll('.', '\\.')}\\b`, 'g'), readable);
   return expected.replace(/`+/g, '');
 }
+function expectedOutcome(item: ReturnType<typeof validateFeed>['items'][number], action: string, items: ReturnType<typeof validateFeed>['items']) {
+  if (action === 'decline') return item.kind === 'session' && !item.archived ? 'leave this session open' : item.kind === 'pr' ? 'leave this PR unchanged' : 'leave this item unchanged';
+  if (!canApprove(item)) return 'unavailable — no actionable approval outcome';
+  if (item.kind === 'session' && recommendationVerb(item) === 'archive') return 'archive this session';
+  if (item.kind === 'pr' && recommendationVerb(item) === 'merge') return 'merge this PR';
+  const clause = expectedProse(item.if_approved || item.question, item, items).replace(/\s+/g, ' ').split(/;|\b(?:only after|subject to|provided that|otherwise)\b|(?<=[.!?])\s/i)[0].trim();
+  return clause.length > 100 ? `${clause.slice(0, 99).replace(/\s+\S*$/, '')}…` : clause;
+}
 async function exportJson(page: Page) {
   const download = page.waitForEvent('download');
   await page.getByTestId('export-json').click();
@@ -268,14 +276,22 @@ test('ten seeded cards render readable prose in decision order with raw evidence
         for (const action of ['approve', 'decline']) {
           const field = action === 'approve' ? 'if_approved' : 'if_declined';
           expect(await card.locator(`.decision-action:has([data-action="${action}"]) [data-field="${field}"]`).count()).toBe(1);
-          if (item[field].trim()) expect((await card.locator(`[data-field="${field}"]`).textContent()) === expectedProse(item[field].trim(), item, input.items)).toBe(true);
+          expect((await card.locator(`[data-field="${field}"]`).textContent()) === expectedOutcome(item, action, input.items)).toBe(true);
+          expect(expectedOutcome(item, action, input.items).length).toBeGreaterThan(0);
+          expect(expectedOutcome(item, action, input.items).length).toBeLessThanOrEqual(100);
+          expect((await card.locator(`[data-prose-source="${field}"]`).textContent()) === item[field]).toBe(true);
+          expect(await card.locator(`[data-field="${field}"]`).evaluate((node) => getComputedStyle(node).whiteSpace)).toBe('nowrap');
         }
       }
+      expect(await card.getByTestId('safety-gates').count()).toBe(1);
+      expect(await card.getByTestId('safety-gates').getAttribute('open')).toBeNull();
+      expect(await card.getByTestId('safety-gates').locator('p').isVisible()).toBe(false);
       const text = await card.innerText();
       const prose = (await card.locator('[data-field="purpose"] > p,[data-field="status_on_dev"] > p,[data-field="delivered"] > p,[data-field="why"] > p,[data-field="question"] > p,[data-field="if_approved"],[data-field="if_declined"]').allTextContents()).join('\n');
       expect(/session\.(?:read|send|archive)|gh pr |git worktree |\{\s*"|ses_[a-zA-Z0-9]{6,}|<script|`/.test(prose)).toBe(false);
       for (const entry of item.evidence.filter((entry) => ['last assistant', 'last message'].includes(entry.label.toLowerCase()))) {
         const value = entry.value?.trim() || 'Unverified — not supplied';
+        if (!entry.url && /^(?:(?:unknown|unverified)(?:[.!]?$|\s*[—:–-]\s*(?:no\b|not\b|.*(?:not supplied|not applicable|unavailable)))|not (?:supplied|applicable)\b|n\/a\b)/i.test(value)) continue;
         const excerpt = value.length > 800 ? `${value.slice(0, 799)}…` : value;
         expect((await card.locator('[data-field="evidence"] .evidence-value').allTextContents()).includes(excerpt)).toBe(true);
       }
@@ -342,7 +358,7 @@ test('display prose is readable without changing source identity, evidence excer
     await page.locator('#status').selectOption('');
     for (const [name, value] of Object.entries(sourceProse)) {
       const field = page.locator(`#detail [data-field="${name}"]${name.startsWith('if_') ? '' : ' > p'}`);
-      expect(await field.textContent()).toBe(expected[name]);
+      expect(await field.textContent()).toBe(name === 'if_approved' ? 'archive this session' : name === 'if_declined' ? 'leave this session open' : expected[name]);
       expect(expectedProse(value, input.items[0], input.items)).toBe(expected[name]);
       expect(await page.locator(`[data-prose-source="${name}"]`).textContent()).toBe(value);
       expect(await page.locator(`[data-prose-source="${name}"]`).isVisible()).toBe(false);
@@ -358,6 +374,61 @@ test('display prose is readable without changing source identity, evidence excer
     expect(approved.decisions.map((entry) => entry.id)).toEqual(['ses_displaySelf']);
     expect(requests).toEqual([]);
     evidence.recordAssertionEvidence('Display normalization preserves meaning and immutable source', 'Seven prose/outcome fields have exact independently specified readable text: self/known/unknown session references, tool names and command phrases are normalized while issue identifiers, report paths, conditional wording and unrelated API names remain. Raw prose and exported items retain exact originals; last-assistant code is a literal bounded excerpt. Field order, action identity and zero network traffic verified.', true);
+  } finally {
+    await browser.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('short actions have one collapsed safety footer and evidence distinguishes non-code from unverified PRs', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-queue-presentation-'));
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ acceptDownloads: true, viewport: { width: 1440, height: 1000 } });
+  const placeholders = ['PR checks', 'Diff stat', 'Spec results', 'Warden', 'Conflicts'].map((label) => ({ label, value: 'Unknown — not supplied' }));
+  const input = validateFeed({ items: [
+    { ...baseItem, id: 'ses_note', kind: 'session', title: 'Synthetic Notion note', purpose: 'Retain the Notion page.', status_on_dev: 'No runtime change.', if_approved: 'Archive this session only after LIVE ownership, permissions, workspace identity, running work and clean-worktree checks pass; otherwise leave unchanged.', evidence: [...placeholders, { label: 'Last message', value: '2026-09-16 09:30 EDT' }, { label: 'Last assistant', value: 'Literal session.send example retained.' }] },
+    { ...baseItem, id: 'pr-unknown', kind: 'pr', title: 'Unverified synthetic PR', recommended_action: 'merge', evidence: placeholders },
+    { ...baseItem, id: 'ses_revise', kind: 'session', title: 'Specific revision', recommended_action: 'review', if_approved: 'Ask the owner to revise the example only after fresh authorization; otherwise retain the old text.' },
+    { ...baseItem, id: 'ses_retry', kind: 'session', title: 'Specific relaunch', recommended_action: 'relaunch', if_approved: 'Relaunch the failed synthetic run only after checking its current state.' },
+  ], decisions: [] });
+  try {
+    const path = join(directory, 'index.html');
+    await writeFile(path, buildHtml(input, await readFile(join(root, 'template.html'), 'utf8'), await readFile(join(root, 'core.mjs'), 'utf8'), await readFile(join(root, 'ui.js'), 'utf8')));
+    await page.goto(pathToFileURL(path).href);
+    await page.locator('#status').selectOption('');
+    await page.locator('[data-id="ses_note"] .row-open').click();
+    expect(await page.locator('[data-field="if_approved"]').textContent()).toBe('archive this session');
+    expect(await page.locator('[data-field="if_declined"]').textContent()).toBe('leave this session open');
+    for (const field of ['if_approved', 'if_declined']) {
+      expect(await page.locator(`[data-field="${field}"]`).evaluate((node) => node.getBoundingClientRect().height < 30 && getComputedStyle(node).whiteSpace === 'nowrap')).toBe(true);
+    }
+    expect(await page.getByTestId('safety-gates').count()).toBe(1);
+    expect(await page.getByTestId('safety-gates').getAttribute('open')).toBeNull();
+    expect(await page.getByTestId('safety-gates').locator('p').isVisible()).toBe(false);
+    expect(await page.locator('#detail').innerText()).not.toContain('clean-worktree checks');
+    expect(await page.locator('[data-prose-source="if_approved"]').textContent()).toBe(input.items[0].if_approved);
+    const checks = page.locator('[data-field="evidence"]');
+    expect(await checks.locator('.evidence-label').allTextContents()).toEqual(['Last message', 'Last assistant']);
+    expect(await checks.innerText()).toContain('No code checks apply to this item');
+    expect(await checks.innerText()).toContain('2026-09-16 09:30 EDT');
+    expect(await checks.innerText()).toContain('Literal session.send example retained.');
+    expect(await checks.innerText()).not.toContain('Unknown');
+    await page.getByTestId('safety-gates').locator('summary').click();
+    expect(await page.getByTestId('safety-gates').locator('p').isVisible()).toBe(true);
+    expect(await page.getByTestId('safety-gates').textContent()).toContain('Never automatically archive OpenWork Chat');
+    await page.locator('[data-id="pr-unknown"] .row-open').click();
+    expect(await page.locator('[data-field="if_approved"]').textContent()).toBe('merge this PR');
+    expect(await checks.innerText()).toContain('Code checks not supplied — recheck before approving');
+    expect(await checks.innerText()).not.toContain('No code checks apply');
+    expect(await checks.locator('.evidence').count()).toBe(0);
+    expect(await page.getByTestId('safety-gates').textContent()).toContain('exact head and base');
+    for (const [id, action] of [['ses_revise', 'Ask the owner to revise the example'], ['ses_retry', 'Relaunch the failed synthetic run']]) {
+      await page.locator(`[data-id="${id}"] .row-open`).click();
+      expect(await page.locator('[data-field="if_approved"]').textContent()).toBe(action);
+      expect(await page.getByTestId('safety-gates').getAttribute('open')).toBeNull();
+    }
+    expect(validateFeed((await exportJson(page)).data)).toEqual(input);
+    evidence.recordAssertionEvidence('Concise actions, collapsed gates and applicable evidence', 'Archive and decline outcomes occupy one short line; full outcomes remain in collapsed raw originals. Exactly one collapsed kind-specific safety footer is expandable. Non-code Notion notes omit five unknown code rows while preserving a dated last message and literal assistant quote. Missing PR checks produce an explicit recheck warning, never a no-checks claim. Review and relaunch retain their specific source actions; exports are unchanged.', true);
   } finally {
     await browser.close();
     await rm(directory, { recursive: true, force: true });

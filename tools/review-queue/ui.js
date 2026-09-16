@@ -429,6 +429,23 @@
       .replace(/\bgit worktree(?: (add|remove|list|prune))?\b/g, (_, action) => treeActions[action] || 'working copy')
       .replace(/`+/g, '');
   }
+  function shortOutcome(item, action) {
+    if (action === 'decline') return item.kind === 'session' && !item.archived ? 'leave this session open' : item.kind === 'pr' ? 'leave this PR unchanged' : 'leave this item unchanged';
+    if (!canApprove(item)) return 'unavailable — no actionable approval outcome';
+    const verb = recommendationVerb(item);
+    if (verb === 'archive' && item.kind === 'session') return 'archive this session';
+    if (verb === 'merge' && item.kind === 'pr') return 'merge this PR';
+    const clause = displayProse(item.if_approved || item.question, item).replace(/\s+/g, ' ').split(/;|\b(?:only after|subject to|provided that|otherwise)\b|(?<=[.!?])\s/i)[0].trim();
+    return clause.length > 100 ? `${clause.slice(0, 99).replace(/\s+\S*$/, '')}…` : clause;
+  }
+  function suppliedEvidence(entry) {
+    const value = entry.value?.trim();
+    return Boolean(entry.url || (value && !/^(?:(?:unknown|unverified)(?:[.!]?$|\s*[—:–-]\s*(?:no\b|not\b|.*(?:not supplied|not applicable|unavailable)))|not (?:supplied|applicable)\b|n\/a\b)/i.test(value)));
+  }
+  function nonCodeItem(item) {
+    return item.kind !== 'pr' && !item.pr_url && !item.links.some((link) => /\/pull\//.test(link.url))
+      && /\b(?:non-code|documentation only|no runtime change|no (?:code|product-code) change|(?:review )?report only|Notion (?:page|note|document))\b/i.test(`${item.status_on_dev} ${item.purpose}`);
+  }
   function renderDetail() {
     const root = $('detail'); root.replaceChildren();
     const item = feed.items.find((candidate) => candidate.id === activeId);
@@ -456,7 +473,6 @@
     if (isLocked(item)) {
       review.append(element('p', `Nothing to decide. Not yours to act on; this reference is read-only. ${item.lock_reason || 'Separate ownership and authorization checks required.'}`, 'locked-banner'));
     } else {
-      if (item.protected) review.append(element('p', 'Protected item: decisions here never override pin, running-state or permission restrictions.', 'small muted'));
       const actions = element('div', undefined, 'decision-actions');
       const commentLabel = element('label', 'Comment or follow-up request'); commentLabel.htmlFor = 'comment';
       const comment = element('textarea'); comment.id = 'comment'; comment.dataset.testid = 'comment'; comment.rows = 3; comment.maxLength = 10000; comment.placeholder = 'What should the owner explain or change?'; comment.value = drafts[item.id] ?? ''; comment.addEventListener('input', saveDraft);
@@ -467,7 +483,7 @@
         button.addEventListener('click', guarded(() => decide([item.id], action, comment.value))); row.append(button);
         if (action === 'approve' || action === 'decline') {
           const name = action === 'approve' ? 'if_approved' : 'if_declined';
-          const outcome = element('span', displayProse(item[name].trim(), item) || (action === 'approve' ? 'Unavailable: no approval outcome supplied.' : 'Records disagreement only; no external action.'), 'outcome');
+          const outcome = element('span', shortOutcome(item, action), 'outcome');
           outcome.dataset.field = name; outcome.id = `${action}-outcome`; button.setAttribute('aria-describedby', outcome.id); row.append(outcome);
         }
         actions.append(row);
@@ -480,10 +496,13 @@
     }
     const evidence = element('section', undefined, 'section'); evidence.dataset.field = 'evidence'; evidence.append(element('h3', 'Evidence checks'));
     const curated = ['PR checks', 'Diff stat', 'Spec results', 'Warden', 'Conflicts', 'Last message', 'Last assistant'];
+    const codeLabels = ['PR checks', 'Diff stat', 'Spec results', 'Warden', 'Conflicts'];
+    const suppliedCode = item.evidence.some((entry) => codeLabels.some((label) => entry.label.toLowerCase() === label.toLowerCase()) && suppliedEvidence(entry));
+    if (!suppliedCode) evidence.append(element('p', nonCodeItem(item) ? 'No code checks apply to this item' : 'Code checks not supplied — recheck before approving', 'muted small'));
     for (const label of curated) {
-      const entries = item.evidence.filter((entry) => entry.label.toLowerCase() === label.toLowerCase());
+      const entries = item.evidence.filter((entry) => entry.label.toLowerCase() === label.toLowerCase() && suppliedEvidence(entry));
+      if (!entries.length) continue;
       const row = element('div', undefined, 'evidence'); row.append(element('div', label, 'evidence-label'));
-      if (!entries.length) row.append(element('div', 'Unverified — not supplied', 'evidence-value muted'));
       for (const entry of entries) {
         const value = entry.value?.trim() || 'Unverified — not supplied';
         const checks = label === 'PR checks' ? checkRows(value) : [];
@@ -499,7 +518,7 @@
       }
       evidence.append(row);
     }
-    for (const entry of item.evidence.filter((entry) => /^(?:workspace|pinned|status|state|base|checks|proof|freshness|verification)$/i.test(entry.label) && entry.value !== undefined && /^(?:openwork|yes|no|idle|running|busy|open|closed|merged|dev|passed|failed|incomplete|unknown|unverified|not run|not verified)$/i.test(entry.value))) {
+    for (const entry of item.evidence.filter((entry) => suppliedEvidence(entry) && /^(?:workspace|pinned|status|state|base|checks|proof|freshness|verification)$/i.test(entry.label) && entry.value !== undefined && /^(?:openwork|yes|no|idle|running|busy|open|closed|merged|dev|passed|failed|incomplete|unknown|unverified|not run|not verified)$/i.test(entry.value))) {
       const row = element('div', undefined, 'evidence'); row.append(element('div', entry.label, 'evidence-label'), element('div', entry.value, 'evidence-value')); evidence.append(row);
     }
     root.append(evidence);
@@ -515,13 +534,22 @@
       if (entry.url) row.append(safeLink('Open source', entry.url)); raw.append(row);
     }
     for (const name of ['purpose', 'delivered', 'status_on_dev', 'why', 'question', 'if_approved', 'if_declined']) {
-      if (displayProse(item[name], item) === item[name]) continue;
+      if (!name.startsWith('if_') && displayProse(item[name], item) === item[name]) continue;
       const original = element('pre', item[name], 'raw-value'); original.dataset.proseSource = name;
       raw.append(element('h3', `Original ${name.replaceAll('_', ' ')}`), original);
     }
     raw.append(element('h3', 'Decision history'));
     const history = element('div'); history.id = 'decision-history'; raw.append(history);
     root.append(raw); renderHistory();
+    const safety = element('details', undefined, 'section safety-gates'); safety.dataset.testid = 'safety-gates';
+    safety.append(element('summary', 'Safety gates'));
+    const gates = item.kind === 'pr'
+      ? 'Recheck the exact head and base, open state, required checks, specs, reviews and conflicts. Merge requires current explicit authorization; declining never closes a PR.'
+      : item.kind === 'session'
+        ? 'Recheck ownership, workspace identity, pins, running and descendant work, captured learnings, pending decisions and a clean worktree. Never automatically archive OpenWork Chat or another owner’s sessions. Follow-ups and relaunches require an explicit owner and reviewed scope.'
+        : 'Recheck ownership, current evidence, permissions and the exact requested scope. Proposals and worktree changes require separate authorization.';
+    safety.append(element('p', `${gates} Protected items remain protected. ${liveSession ? 'New decisions are sent once for recheck, not proof of completion; they cannot be unsent.' : 'Offline decisions record intent only; nothing is executed.'}`, 'small muted'));
+    root.append(safety);
     if (liveSession) {
       const thread = element('section', undefined, 'section'); thread.dataset.field = 'thread';
       thread.append(element('h3', 'Owner thread'));
