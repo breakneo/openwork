@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { releaseTag, safeEnvironment } from "../src/mysql-upgrade.ts";
-import { assertReadOnlyQueries, recoveryApplyArgs } from "../src/mysql-recovery.ts";
+import { assertReadOnlyQueries, mysqlClientArgs, recoveryApplyArgs } from "../src/mysql-recovery.ts";
 
 test("upgrade accepts only exact release tag syntax", () => {
   assert.equal(releaseTag("v0.18.35"), "v0.18.35");
@@ -23,6 +23,15 @@ test("bootstrap environment is an allowlist rather than inherited credentials", 
 
 test("recovery CLI write invocation requires all explicit acknowledgments", () => {
   assert.deepEqual(recoveryApplyArgs("isolated_fixture"), ["--apply", "--non-interactive", "--confirm-database", "isolated_fixture", "--backup-confirmed", "--writers-stopped"]);
+});
+
+test("mysql client invocation keeps the password out of argv and targets the exact database over TCP", () => {
+  const client = mysqlClientArgs("mysql://root:synthetic%2Fsecret@127.0.0.1:33061/recovery_fixture");
+  assert.deepEqual(client.args, ["--protocol=tcp", "-h127.0.0.1", "-P33061", "-uroot", "recovery_fixture"]);
+  assert.deepEqual(client.env, { MYSQL_PWD: "synthetic/secret" });
+  assert.ok(client.args.every(arg => !arg.includes("secret")));
+  assert.equal(mysqlClientArgs("mysql://root:pw@127.0.0.1/db").args[2], "-P3306");
+  for (const url of ["postgres://root:pw@127.0.0.1/db", "mysql://root:pw@127.0.0.1/db;drop", "mysql://root:pw@127.0.0.1/"]) assert.throws(() => mysqlClientArgs(url));
 });
 
 test("SQL trace guard rejects writes, session changes and named locks", () => {

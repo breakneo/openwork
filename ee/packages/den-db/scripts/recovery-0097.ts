@@ -63,7 +63,8 @@ export function validateServer(server: Record<string, unknown> | undefined, data
     || !String(server?.mode).split(",").some((mode) => ["STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"].includes(mode))
     || Number(server?.readOnly) !== 0 || Number(server?.superReadOnly) !== 0
     || Number(server?.autocommit) !== 1 || server?.db !== database) {
-    throw new MigrationSafetyError("Unsupported server: require native writable MySQL 8.0.16–8.0.46 or 8.4.0–8.4.11, strict mode, autocommit and the exact selected database.")
+    const observed = (value: unknown) => JSON.stringify(String(value ?? "").slice(0, 96))
+    throw new MigrationSafetyError(`Unsupported server: require native writable MySQL 8.0.16–8.0.46 or 8.4.0–8.4.11, strict mode, autocommit and the exact selected database. Observed VERSION()=${observed(server?.version)} @@version_comment=${observed(server?.platform)}; report these values to support.`)
   }
 }
 

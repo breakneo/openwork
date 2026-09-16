@@ -1,6 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
-import { generateMySQLDrizzleJson, generateMySQLMigration } from "drizzle-kit/api"
 import { readMigrationFiles } from "drizzle-orm/migrator"
 import { ORGANIZATION_REPAIRS, type Executor } from "../src/schema-repairs.ts"
 
@@ -267,6 +266,7 @@ export async function preflightRepairs(executor: Executor, shape: Map<string, st
 export async function foundationSql(plan: MigrationPlan) {
   const source = plan.find((entry) => entry.tag.startsWith("0096_"))?.snapshot
   if (!source) throw new MigrationSafetyError("Missing 0096 foundation snapshot")
+  const { generateMySQLDrizzleJson, generateMySQLMigration } = await import("drizzle-kit/api")
   const foundation = structuredClone(source)
   const sql = plan.map((entry) => entry.sql.join("\n")).join("\n")
   const owned = new Set([...sql.matchAll(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`([^`]+)`|RENAME\s+TABLE\s+`[^`]+`\s+TO\s+`([^`]+)`/gi)].map((match) => match[1] || match[2]))

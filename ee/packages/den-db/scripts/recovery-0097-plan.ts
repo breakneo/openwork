@@ -44,7 +44,13 @@ export function verifyRecoveryFiles(read: (relativePath: string) => string) {
 }
 
 export function loadRecoveryArtifacts(folder: string) {
-  verifyRecoveryFiles((relativePath) => readFileSync(path.join(folder, relativePath), "utf8"))
+  verifyRecoveryFiles((relativePath) => {
+    try {
+      return readFileSync(path.join(folder, relativePath), "utf8")
+    } catch {
+      throw new MigrationSafetyError("Missing recovery artifacts: the drizzle folder must stay next to the tool exactly as shipped (paths withheld).")
+    }
+  })
   return projectRecovery(loadMigrationPlan(folder))
 }
 

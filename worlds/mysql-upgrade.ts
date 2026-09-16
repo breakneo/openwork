@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { runMysqlUpgrade } from "../evals/packages/env/src/mysql-upgrade.ts";
 import { hold } from "../packages/world/src/hold.ts";
@@ -13,12 +13,21 @@ export async function main(): Promise<void> {
     "pnpm-entry": { type: "string" },
     "temporary-parent": { type: "string" },
     recovery: { type: "boolean", default: false },
+    "recovery-bundle": { type: "string" },
+    "recovery-node": { type: "string" },
   } });
   const pnpmEntry = values["pnpm-entry"] ?? process.env.npm_execpath;
   if (!pnpmEntry) throw new Error("Pass --pnpm-entry pointing to the installed pnpm.cjs");
+  const bundle = values["recovery-bundle"] ? resolve(values["recovery-bundle"]) : undefined;
+  if (values["recovery-node"] && !bundle) throw new Error("--recovery-node requires --recovery-bundle");
   const outputDir = join("evals/results", `mysql-upgrade-${resolveStage(process.env) ?? "default"}`);
   await mkdir(outputDir, { recursive: true });
-  await using world = await runMysqlUpgrade({ from: values.from, to: values.to, pnpmEntry, temporaryParent: values["temporary-parent"], recoveryReport: values.recovery ? join(outputDir, "recovery.json") : undefined });
+  await using world = await runMysqlUpgrade({
+    from: values.from, to: values.to, pnpmEntry, temporaryParent: values["temporary-parent"],
+    recoveryReport: values.recovery || bundle ? join(outputDir, "recovery.json") : undefined,
+    recoveryCli: bundle ? { node: values["recovery-node"] ?? process.execPath, args: [join(bundle, "bin/recover-0097.mjs")], label: "recovery bundle" } : undefined,
+    recoverySqlFile: bundle ? join(bundle, "sql/0097-complete.sql") : undefined,
+  });
   const report = join(outputDir, "report.json");
   await writeFile(report, `${JSON.stringify(world.report, null, 2)}\n`, { mode: 0o600 });
   const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();

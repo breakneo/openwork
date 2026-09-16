@@ -12,6 +12,7 @@ import { killLocalPid } from "@openwork/hosts";
 import { trackResource } from "@openwork/world";
 import { createConnection } from "mysql2/promise";
 import type { RowDataPacket } from "mysql2";
+import type { RecoveryCli } from "./mysql-recovery.ts";
 import { ephemeralDatabaseName, resolvePlace } from "./place.ts";
 
 const exec = promisify(execFile);
@@ -106,10 +107,11 @@ async function inspect(url: string) {
   } finally { await sql.end(); }
 }
 
-export async function runMysqlUpgrade(input: { from: string; to: string; temporaryParent?: string; pnpmEntry: string; recoveryReport?: string }) {
+export async function runMysqlUpgrade(input: { from: string; to: string; temporaryParent?: string; pnpmEntry: string; recoveryReport?: string; recoveryCli?: RecoveryCli; recoverySqlFile?: string }) {
   releaseTag(input.from);
   releaseTag(input.to);
   if (input.recoveryReport && (input.from !== "v0.18.35" || input.to !== "v0.18.48")) throw new Error("Recovery validation requires exact v0.18.35 -> v0.18.48 releases");
+  if ((input.recoveryCli || input.recoverySqlFile) && !input.recoveryReport) throw new Error("Recovery CLI or SQL overrides require recovery validation");
   const stack = new AsyncDisposableStack();
   try {
     const root = await mkdtemp(join(input.temporaryParent ?? tmpdir(), "ow-mysql-"));
@@ -202,7 +204,7 @@ export async function runMysqlUpgrade(input: { from: string; to: string; tempora
       }
     }
     const recovery = input.recoveryReport ? await (await import("./mysql-recovery.ts")).runMysqlRecovery({
-      admin, env, reportPath: input.recoveryReport,
+      admin, env, reportPath: input.recoveryReport, cli: input.recoveryCli, sqlFile: input.recoverySqlFile,
       bootstrap: databaseUrl => bootstrap(to.db, databaseUrl, false, env),
       fixture: async required => {
         await admin.query(`SET GLOBAL sql_require_primary_key=${required ? "ON" : "OFF"}`);
@@ -224,7 +226,7 @@ export async function runMysqlUpgrade(input: { from: string; to: string; tempora
       },
     }) : undefined;
     if (recovery) checks.push(...recovery.cases.map(result => result.name));
-    const report = { from, to, runtime: process.version, dependencies, checks, results, recovery: recovery ? { report: input.recoveryReport, status: recovery.status, counts: recovery.counts } : undefined, limitations: ["Source-built release bootstrap and SQL; not published container bytes", "Uses installed workspace dependency versions, not fresh release lockfile installs", "Synthetic organization marker only; no production data or populated inference fixture", "Local native MySQL; not managed MySQL or Docker deployment"] };
+    const report = { from, to, runtime: process.version, dependencies, checks, results, recovery: recovery ? { report: input.recoveryReport, status: recovery.status, counts: recovery.counts, cli: recovery.cli, bundle: recovery.bundle } : undefined, limitations: ["Source-built release bootstrap and SQL; not published container bytes", "Uses installed workspace dependency versions, not fresh release lockfile installs", "Synthetic organization marker only; no production data or populated inference fixture", "Local native MySQL; not managed MySQL or Docker deployment"] };
     return { report, root, async [Symbol.asyncDispose]() { await stack.disposeAsync(); } };
   } catch (error) { await stack.disposeAsync(); throw error; }
 }

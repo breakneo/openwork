@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
@@ -8,7 +8,7 @@ import { MigrationSafetyError, record } from "./migration-baseline.ts"
 import { loadRecoveryArtifacts } from "./recovery-0097-plan.ts"
 import { applyRecovery, inspectRecovery, parseRecoveryArgs, requireApplyConfirmations, sanitizedFailure, validateTerminal, type RecoveryOptions } from "./recovery-0097.ts"
 
-export const recoveryHelp = `0097 partial MySQL upgrade recovery (source checkout only)
+export const recoveryHelp = `0097 partial MySQL upgrade recovery (reviewed source checkout or recovery bundle)
 Default: --dry-run; reads only, no named locks or session SETs.
 Options: --dry-run | --interactive | --apply
          --non-interactive --confirm-database NAME --backup-confirmed --writers-stopped
@@ -30,8 +30,9 @@ export function recoveryConnectionConfig(databaseUrl: string, ca?: string) {
     for (const [key, value] of url.searchParams) {
       if (seen.has(key)) throw new Error()
       seen.add(key)
-      if (key === "sslaccept" ? value !== "strict" : ["sslmode", "ssl-mode"].includes(key)
-        ? !["verify-full", "verify-ca", "require"].includes(value) : true) throw new Error()
+      const mode = value.trim().toLowerCase()
+      if (key === "sslaccept" ? mode !== "strict" : ["sslmode", "ssl-mode"].includes(key)
+        ? !["verify-full", "verify-ca", "require", "required"].includes(mode) : true) throw new Error()
     }
     if (seen.has("sslmode") && seen.has("ssl-mode")) throw new Error()
     if (config.host === "[::1]") config.host = "::1"
@@ -150,7 +151,16 @@ export async function main(args = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export function invokedDirectly(entry: string | undefined, moduleUrl: string) {
+  if (!entry) return false
+  try {
+    return realpathSync(path.resolve(entry)) === realpathSync(fileURLToPath(moduleUrl))
+  } catch {
+    return false
+  }
+}
+
+if (invokedDirectly(process.argv[1], import.meta.url)) {
   main().catch((error: unknown) => {
     console.error(`[den-db recovery] ${sanitizedFailure(error)} Rerun --dry-run before further action.`)
     process.exitCode = 1

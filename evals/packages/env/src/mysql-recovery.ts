@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createConnection } from "mysql2/promise";
 import type { Connection, RowDataPacket } from "mysql2/promise";
 import { record } from "../../../../ee/packages/den-db/scripts/migration-baseline.ts";
 import { loadRecoveryArtifacts } from "../../../../ee/packages/den-db/scripts/recovery-0097-plan.ts";
+import { receiptSql, sqlStatements } from "../../../../ee/packages/den-db/scripts/recovery-0097-sql.ts";
 import { applyRecovery, parseRecoveryArgs } from "../../../../ee/packages/den-db/scripts/recovery-0097.ts";
 import type { DbHandle } from "./place.ts";
 
@@ -16,6 +18,7 @@ const dbPackage = join(repo, "ee/packages/den-db");
 const cli = "scripts/recover-mysql-0097.ts";
 type ProcessResult = { code: number | null; signal?: string | null; stdout: string; stderr: string };
 type Prompt = { prompt: string; reply: string };
+export type RecoveryCli = { node: string; args: string[]; label: string };
 
 export function recoveryApplyArgs(database: string): string[] {
   return ["--apply", "--non-interactive", "--confirm-database", database, "--backup-confirmed", "--writers-stopped"];
@@ -25,12 +28,26 @@ export function assertReadOnlyQueries(queries: string[]): void {
   assert.ok(queries.every(sql => /^(SELECT|SHOW)\b/i.test(sql) && !/GET_LOCK|RELEASE_LOCK|FOR UPDATE|INTO\s+(?:OUTFILE|DUMPFILE)/i.test(sql)), "Read-only CLI must not write, SET, acquire locks or export data");
 }
 
-async function processRun(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<ProcessResult> {
-  const child = spawn(bin, args, { cwd: dbPackage, env, stdio: ["ignore", "pipe", "pipe"] });
+export function mysqlClientArgs(url: string): { args: string[]; env: { MYSQL_PWD: string } } {
+  const parsed = new URL(url);
+  assert.equal(parsed.protocol, "mysql:");
+  const database = parsed.pathname.slice(1);
+  assert.match(database, /^[a-zA-Z0-9_]+$/);
+  return {
+    args: ["--protocol=tcp", `-h${parsed.hostname}`, `-P${parsed.port || "3306"}`, `-u${decodeURIComponent(parsed.username)}`, database],
+    env: { MYSQL_PWD: decodeURIComponent(parsed.password) },
+  };
+}
+
+async function processRun(bin: string, args: string[], env: NodeJS.ProcessEnv, stdinFile?: string): Promise<ProcessResult> {
+  const child = stdinFile
+    ? spawn(bin, args, { cwd: dbPackage, env, stdio: ["pipe", "pipe", "pipe"] })
+    : spawn(bin, args, { cwd: dbPackage, env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", chunk => { stdout += String(chunk); });
   child.stderr.on("data", chunk => { stderr += String(chunk); });
+  if (stdinFile && child.stdin) createReadStream(stdinFile).pipe(child.stdin);
   const timer = setTimeout(() => child.kill("SIGKILL"), 110_000);
   try {
     return await new Promise((resolve, reject) => {
@@ -76,26 +93,48 @@ type RecoveryInput = {
   admin: Connection;
   env: NodeJS.ProcessEnv;
   reportPath: string;
+  cli?: RecoveryCli;
+  sqlFile?: string;
   fixture(required: boolean): Promise<DbHandle>;
   bootstrap(url: string): Promise<ProcessResult>;
 };
+
+async function sha256File(file: string) {
+  return createHash("sha256").update(await readFile(file)).digest("hex");
+}
+
+async function describeBundle(cli: RecoveryCli, sqlFile: string | undefined) {
+  const script = cli.args.at(-1);
+  assert.ok(script, "CLI override needs the bundled script path as its last argument");
+  const dir = dirname(dirname(script));
+  const sums = await readFile(join(dir, "SHA256SUMS"), "utf8").catch(() => null);
+  const scriptSha256 = await sha256File(script);
+  if (sums !== null) assert.ok(sums.includes(`${scriptSha256}  bin/recover-0097.mjs`), "SHA256SUMS must list the bundled CLI that is being exercised");
+  return { dir, label: cli.label, node: cli.node, args: cli.args, scriptSha256, sha256sums: sums, sqlFile, sqlFileSha256: sqlFile ? await sha256File(sqlFile) : undefined };
+}
 
 export async function runMysqlRecovery(input: RecoveryInput) {
   const artifacts = loadRecoveryArtifacts(join(dbPackage, "drizzle"));
   assert.equal(artifacts.safeSteps.length, 43);
   const sources: Record<string, string> = {};
-  for (const name of [cli, "scripts/recovery-0097.ts", "scripts/recovery-0097-plan.ts", "scripts/migration-baseline.ts", "src/mysql-config.ts"]) {
-    sources[name] = createHash("sha256").update(await readFile(join(dbPackage, name))).digest("hex");
+  for (const name of [cli, "scripts/recovery-0097.ts", "scripts/recovery-0097-plan.ts", "scripts/recovery-0097-sql.ts", "scripts/migration-baseline.ts", "src/mysql-config.ts"]) {
+    sources[name] = await sha256File(join(dbPackage, name));
   }
+  const cliNode = input.cli?.node ?? process.execPath;
+  const cliArgs = input.cli?.args ?? ["--import", "tsx", cli];
+  const bundle = input.cli ? await describeBundle(input.cli, input.sqlFile) : undefined;
+  const plannedCases = 33 + (input.sqlFile ? 1 : 0);
   const cases: { name: string; status: string; error?: string }[] = [];
-  const commands: { label: string; command: string[]; result: ProcessResult; queries: string[]; pty?: boolean }[] = [];
+  const commands: { label: string; command: string[]; result: ProcessResult; queries: string[]; pty?: boolean; stdin?: string }[] = [];
   const snapshots: { label: string; state: Awaited<ReturnType<typeof snapshot>> }[] = [];
   const injections: { label: string; executed: string[]; completedSteps: number }[] = [];
   const metadataDrifts: { label: string; prefix: number; receiptCount: number; healthy: RowDataPacket[]; changed: RowDataPacket[]; mutationSql: string[]; restoreSql: string[] }[] = [];
   const report = {
     status: "running", runtime: process.version, sources, cases, commands, snapshots, injections, metadataDrifts,
-    plannedCases: 33,
-    counts: { passed: 0, failed: 0, skipped: 0, unexecuted: 33 },
+    cli: { label: input.cli?.label ?? "source checkout", node: cliNode, args: cliArgs },
+    bundle,
+    plannedCases,
+    counts: { passed: 0, failed: 0, skipped: 0, unexecuted: plannedCases },
     limitations: [
       "Native isolated MySQL only; no remote TLS, managed database, container, Helm or application health validation",
       "Exact release-tag source builds use installed dependency versions, not release-lockfile installs",
@@ -129,31 +168,40 @@ export async function runMysqlRecovery(input: RecoveryInput) {
   const adminId = Number(adminRows[0]?.id);
   assert.ok(Number.isInteger(adminId));
   await input.admin.query("SET GLOBAL log_output='TABLE'");
-  async function run(label: string, database: DbHandle, args: string[], prompts?: Prompt[]) {
+  async function traced(label: string, database: DbHandle, command: string[], execute: () => Promise<ProcessResult>, options: { pty?: boolean; stdin?: string } = {}) {
     await input.admin.query("TRUNCATE TABLE mysql.general_log");
     await input.admin.query("SET GLOBAL general_log=ON");
     let result: ProcessResult;
     try {
-      const env = { ...input.env, DATABASE_URL: database.url };
-      const nodeArgs = ["--import", "tsx", cli, ...args];
-      if (prompts) {
-        const wrapper = await processRun("python3", [join(repo, "evals/packages/env/src/mysql-recovery-pty.py"), JSON.stringify(prompts), process.execPath, ...nodeArgs], env);
-        assert.equal(wrapper.code, 0, wrapper.stderr);
-        const value: unknown = JSON.parse(wrapper.stdout);
-        assert.ok(record(value) && typeof value.code === "number" && typeof value.stdout === "string" && typeof value.stderr === "string");
-        assert.equal(value.pty, true);
-        assert.equal(value.timedOut, false, value.stdout);
-        assert.equal(value.answeredPrompts, prompts.length, value.stdout);
-        result = { code: value.code, stdout: value.stdout, stderr: value.stderr };
-      } else result = await processRun(process.execPath, nodeArgs, env);
+      result = await execute();
     } finally { await input.admin.query("SET GLOBAL general_log=OFF"); }
-    assert.ok(!result.stdout.includes(new URL(database.url).password) && !result.stderr.includes(new URL(database.url).password), "CLI leaked synthetic credential");
+    const password = new URL(database.url).password;
+    assert.ok(!result.stdout.includes(password) && !result.stderr.includes(password), "Process leaked synthetic credential");
     const [rows] = await input.admin.query<RowDataPacket[]>("SELECT argument FROM mysql.general_log WHERE command_type='Query' AND thread_id<>? ORDER BY event_time", [adminId]);
     const queries = rows.map(row => String(row.argument));
-    commands.push({ label, command: [process.execPath, "--import", "tsx", cli, ...args], result, queries, ...(prompts ? { pty: true } : {}) });
+    commands.push({ label, command, result, queries, ...(options.pty ? { pty: true } : {}), ...(options.stdin ? { stdin: options.stdin } : {}) });
     assert.ok(!queries.some(sql => /PRIMARY KEY|sql_require_primary_key\s*=|SET\s+GLOBAL/i.test(sql)), "Recovery must not mutate PKs or global settings");
     await save();
     return { ...result, queries };
+  }
+  async function run(label: string, database: DbHandle, args: string[], prompts?: Prompt[]) {
+    const env = { ...input.env, DATABASE_URL: database.url };
+    const nodeArgs = [...cliArgs, ...args];
+    return traced(label, database, [cliNode, ...nodeArgs], async () => {
+      if (!prompts) return processRun(cliNode, nodeArgs, env);
+      const wrapper = await processRun("python3", [join(repo, "evals/packages/env/src/mysql-recovery-pty.py"), JSON.stringify(prompts), cliNode, ...nodeArgs], env);
+      assert.equal(wrapper.code, 0, wrapper.stderr);
+      const value: unknown = JSON.parse(wrapper.stdout);
+      assert.ok(record(value) && typeof value.code === "number" && typeof value.stdout === "string" && typeof value.stderr === "string");
+      assert.equal(value.pty, true);
+      assert.equal(value.timedOut, false, value.stdout);
+      assert.equal(value.answeredPrompts, prompts.length, value.stdout);
+      return { code: value.code, stdout: value.stdout, stderr: value.stderr };
+    }, { pty: Boolean(prompts) });
+  }
+  async function runSqlFile(label: string, database: DbHandle, file: string) {
+    const client = mysqlClientArgs(database.url);
+    return traced(label, database, ["mysql", ...client.args], () => processRun("mysql", client.args, { ...input.env, ...client.env }, file), { stdin: file });
   }
   async function unchanged(label: string, database: DbHandle, args: string[], code: number, output: RegExp, prompts?: Prompt[]) {
     const before = await capture(`${label}:before`, database.url);
@@ -387,8 +435,47 @@ export async function runMysqlRecovery(input: RecoveryInput) {
         assert.equal(restored.applicationDataSha256, healthy.applicationDataSha256);
       });
     }
+    if (input.sqlFile) {
+      const sqlFile = input.sqlFile;
+      await check("bundled sql/0097-complete.sql through the mysql client matches the CLI recovery byte for byte", async () => {
+        const statements = sqlStatements(await readFile(sqlFile, "utf8"));
+        assert.deepEqual(statements, [...artifacts.safeSteps.map(step => step.sql), receiptSql]);
+        const byCli = await input.fixture(true);
+        const bySql = await input.fixture(true);
+        const initial = await capture("sql parity:A initial", byCli.url);
+        const initialSql = await capture("sql parity:B initial", bySql.url);
+        assert.equal(initialSql.schemaSha256, initial.schemaSha256);
+        assert.deepEqual(initialSql.ledger, initial.ledger);
+        await complete("sql parity:A cli apply", byCli);
+        const result = await runSqlFile("sql parity:B mysql client", bySql, sqlFile);
+        assert.equal(result.code, 0, result.stderr || result.stdout);
+        assert.doesNotMatch(result.stderr, /ERROR/);
+        assert.deepEqual(result.queries.filter(sql => /^(ALTER|CREATE) /i.test(sql)), artifacts.safeSteps.map(step => step.sql.replace(/;$/, "")));
+        assert.equal(result.queries.filter(sql => /^INSERT INTO `__drizzle_migrations`/.test(sql)).length, 1);
+        assert.ok(!result.queries.some(sql => /^(START TRANSACTION|BEGIN|COMMIT|ROLLBACK|DROP|DELETE|UPDATE)\b/i.test(sql)));
+        const recovered = await capture("sql parity:A recovered", byCli.url);
+        const recoveredSql = await capture("sql parity:B recovered", bySql.url);
+        assert.equal(recoveredSql.schemaSha256, recovered.schemaSha256);
+        assert.deepEqual(recoveredSql.ledger, recovered.ledger);
+        assert.equal(recoveredSql.ledger.length, 97);
+        assert.deepEqual(recoveredSql.ledger.slice(0, 96), initialSql.ledger);
+        assert.deepEqual(recoveredSql.primaryKeys, recovered.primaryKeys);
+        assert.deepEqual(recoveredSql.primaryKeys, initialSql.primaryKeys);
+        assert.equal(recoveredSql.applicationDataSha256, recovered.applicationDataSha256);
+        assert.equal(recoveredSql.applicationDataSha256, initialSql.applicationDataSha256);
+        assert.deepEqual(recoveredSql.marker, initialSql.marker);
+        assert.deepEqual(recoveredSql.settings, initialSql.settings);
+        assert.equal(recoveredSql.settings[0]?.globalPk, 1);
+        assert.equal(recoveredSql.settings[0]?.sessionPk, 1);
+        await unchanged("sql parity:B dry-run", bySql, ["--dry-run"], 0, /97-receipt history/);
+      });
+    }
     await check("recovery source bytes unchanged throughout verification", async () => {
-      for (const [name, hash] of Object.entries(sources)) assert.equal(createHash("sha256").update(await readFile(join(dbPackage, name))).digest("hex"), hash);
+      for (const [name, hash] of Object.entries(sources)) assert.equal(await sha256File(join(dbPackage, name)), hash);
+      if (bundle) {
+        assert.equal(await sha256File(input.cli?.args.at(-1) ?? ""), bundle.scriptSha256);
+        if (input.sqlFile) assert.equal(await sha256File(input.sqlFile), bundle.sqlFileSha256);
+      }
     });
     report.status = "passed";
     await save();

@@ -1,15 +1,17 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { PassThrough } from "node:stream"
 import { test } from "node:test"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { inspectSchema, journalTable, snapshotShape, stateTable } from "../scripts/migration-baseline.ts"
 import { exactShape, loadRecoveryArtifacts, originalHash, originalTimestamp, projectRecovery, recognizeRecovery, validatePlan, verifyRecoveryFiles } from "../scripts/recovery-0097-plan.ts"
+import { completionSql, preflightSql, receiptSql, sqlStatements, tailObjects } from "../scripts/recovery-0097-sql.ts"
 import { applyRecovery, inspectRecovery, parseRecoveryArgs, recoveryLockName, requireApplyConfirmations, sanitizedFailure, validateServer, validateTerminal } from "../scripts/recovery-0097.ts"
-import { recoveryConnectionConfig, terminalWizard, wizard } from "../scripts/recover-mysql-0097.ts"
+import { invokedDirectly, recoveryConnectionConfig, terminalWizard, wizard } from "../scripts/recover-mysql-0097.ts"
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const artifacts = loadRecoveryArtifacts(path.join(packageDir, "drizzle"))
@@ -222,9 +224,15 @@ test("remote TLS requires trust and hostname verification, insecure aliases neve
   assert.equal(remote.multipleStatements, false)
   assert.equal(remote.connectTimeout, 10_000)
   assert.equal(recoveryConnectionConfig("mysql://operator:synthetic-secret@[::1]/recovery_copy").host, "::1")
-  for (const suffix of ["ssl=false", "sslmode=disable", "sslaccept=accept_invalid_certs", "sslmode=require&sslaccept=loose", "rejectUnauthorized=false", "sslmode=require&sslmode=disable", "ssl-mode=require&sslmode=require", "verifyIdentity=false", "socketPath=/tmp/mysql.sock"]) {
+  for (const suffix of ["ssl=false", "sslmode=disable", "sslmode=DISABLE", "sslmode=prefer", "sslmode=requiredd", "sslmode=requir", "SSLMODE=require", "sslaccept=accept_invalid_certs", "sslmode=require&sslaccept=loose", "rejectUnauthorized=false", "sslmode=require&sslmode=disable", "ssl-mode=require&sslmode=require", "verifyIdentity=false", "socketPath=/tmp/mysql.sock"]) {
     assert.throws(() => recoveryConnectionConfig(`mysql://operator:synthetic-secret@db.example.test/recovery_copy?${suffix}`), (error) => !sanitizedFailure(error).includes("synthetic-secret"))
   }
+  for (const suffix of ["sslmode=require", "sslmode=REQUIRE", "sslmode=required", "ssl-mode=Required", "sslmode=verify-FULL", "ssl-mode=Verify-Ca", "sslaccept=STRICT", "sslaccept=strict&ssl-mode=required"]) {
+    for (const host of ["db.example.test", "127.0.0.1"]) {
+      assert.deepEqual(recoveryConnectionConfig(`mysql://operator:synthetic-secret@${host}/recovery_copy?${suffix}`).ssl, { rejectUnauthorized: true, verifyIdentity: true }, `${host}?${suffix}`)
+    }
+  }
+  assert.equal(recoveryConnectionConfig("mysql://operator:synthetic-secret@127.0.0.1/recovery_copy").ssl, undefined)
   assert.equal(recoveryConnectionConfig("mysql://operator:synthetic-secret@db.example.test/recovery_copy?sslmode=require", "CA").ssl?.ca, "CA")
   for (const url of ["not-a-url-synthetic-secret", "postgres://operator:synthetic-secret@localhost/db", "mysql://operator:synthetic-secret@localhost/db%0Asecret", "mysql://operator:synthetic-secret@localhost/db#secret"]) assert.throws(() => recoveryConnectionConfig(url))
 })
@@ -237,7 +245,52 @@ test("platform bounds and strict session requirements are explicit", () => {
     { version: "5.7.44" }, { version: "8.0.15" }, { version: "8.0.47" }, { version: "8.4.12" }, { version: "9.0.0" },
     { version: "8.0.40-TiDB" }, { version: "10.11-MariaDB" }, { platform: "Aurora MySQL" }, { platform: "Vitess" },
     { mode: "NO_ENGINE_SUBSTITUTION" }, { db: "wrong" }, { readOnly: 1 }, { superReadOnly: 1 }, { autocommit: 0 },
-  ]) assert.throws(() => validateServer({ ...server, ...change }, database), /Unsupported server/)
+  ]) {
+    const observed = { ...server, ...change }
+    assert.throws(() => validateServer(observed, database), (error) => {
+      const message = sanitizedFailure(error)
+      return /^Unsupported server/.test(message) && message.includes(`Observed VERSION()=${JSON.stringify(observed.version)} @@version_comment=${JSON.stringify(observed.platform)}`)
+    })
+  }
+  assert.throws(() => validateServer({ ...server, platform: `${"x".repeat(200)}\n\u0000secret-tail` }, database), (error) => {
+    const message = sanitizedFailure(error)
+    return message.includes(`@@version_comment=${JSON.stringify("x".repeat(96))}`) && !message.includes("secret-tail") && !message.includes("\n")
+  })
+  assert.throws(() => validateServer(undefined, database), /Observed VERSION\(\)="" @@version_comment=""/)
+})
+
+test("bundle SQL: completion is exactly the safe tail plus the original receipt and preflight is read-only", () => {
+  const completion = completionSql(artifacts)
+  assert.deepEqual(sqlStatements(completion), [...artifacts.safeSteps.map((step) => step.sql), receiptSql])
+  assert.equal(receiptSql, `INSERT INTO \`${journalTable}\` (hash, created_at) VALUES ('${originalHash}', ${originalTimestamp});`)
+  assert.equal(sqlStatements(completion).filter((statement) => statement.startsWith("INSERT")).length, 1)
+  assert.doesNotMatch(completion.split("\n").filter((line) => !line.startsWith("--")).join("\n"), /DROP|PRIMARY KEY|IF NOT EXISTS|DELETE|UPDATE |sql_require_primary_key|START TRANSACTION|BEGIN|COMMIT|SET /)
+  assert.match(completion, /^-- .*completion SQL/)
+  for (const line of completion.split("\n")) assert.ok(/^(--(?: .*)?|[^-].*|\s*)$/.test(line) && !/\s$/.test(line), JSON.stringify(line))
+  const preflight = preflightSql(artifacts)
+  const statements = sqlStatements(preflight)
+  assert.equal(statements.length, 9)
+  for (const statement of statements) {
+    assert.match(statement, /^(SELECT|SHOW)\b/)
+    assert.doesNotMatch(statement, /\b(?:GET_LOCK|RELEASE_LOCK|FOR UPDATE|LOCK IN SHARE MODE|INTO\s+(?:OUTFILE|DUMPFILE)|SET|INSERT|ALTER|CREATE|DROP|DELETE|UPDATE)\b/i)
+  }
+  assert.ok(preflight.includes(artifacts.plan[95].hash) && preflight.includes(String(artifacts.plan[95].folderMillis)) && !preflight.includes(originalHash))
+  for (const table of [...artifacts.affected, ...artifacts.primaryTables]) assert.ok(preflight.includes(`'${table}'`), table)
+  assert.match(preflight, /Expected: receipts = 96/)
+  assert.match(preflight, /Expected: 12 rows, every has_rows = 0/)
+  assert.match(preflight, /Expected: tail_objects_present = 0/)
+  const tail = tailObjects(artifacts)
+  assert.deepEqual([tail.columns.length, tail.indexes.length, tail.checks.length], [13, 28, 1])
+  for (const mutate of [
+    (plan: typeof artifacts.safeSteps) => { plan[0].sql = plan[0].sql.slice(0, -1) },
+    (plan: typeof artifacts.safeSteps) => { plan[5].sql = plan[5].sql.replace("ADD", "DROP") },
+    (plan: typeof artifacts.safeSteps) => { plan.pop() },
+  ]) {
+    const mutated = structuredClone(artifacts)
+    mutate(mutated.safeSteps)
+    assert.throws(() => completionSql(mutated), /does not match the pinned artifacts/)
+  }
+  assert.throws(() => loadRecoveryArtifacts(path.join(packageDir, "missing-recovery-artifacts")), /Missing recovery artifacts/)
 })
 
 test("pinned metadata projects exactly line 85 and every safe prefix without PK changes", () => {
@@ -601,6 +654,22 @@ test("driver errors never reveal SQL, URLs, credentials, paths or row contents",
   assert.match(output, /code=ER_DUP_ENTRY, errno=1062, sqlState=23000/)
   assert.doesNotMatch(output, /synthetic-secret|mysql:\/\/|secret SQL|secret row/)
   assert.doesNotMatch(sanitizedFailure({ code: "secret-password", errno: "secret", sqlState: "secret-password" }), /secret-password/)
+})
+
+test("entry detection follows symlinked and relative invocations without running on import", () => {
+  const cli = path.join(packageDir, "scripts/recover-mysql-0097.ts")
+  const url = pathToFileURL(cli).href
+  assert.equal(invokedDirectly(cli, url), true)
+  assert.equal(invokedDirectly(path.relative(process.cwd(), cli), url), true)
+  assert.equal(invokedDirectly(undefined, url), false)
+  assert.equal(invokedDirectly(path.join(packageDir, "scripts/recovery-0097.ts"), url), false)
+  assert.equal(invokedDirectly(path.join(packageDir, "missing.mjs"), url), false)
+  const directory = mkdtempSync(path.join(tmpdir(), "ow-recovery-entry-"))
+  try {
+    symlinkSync(path.dirname(cli), path.join(directory, "linked"))
+    assert.equal(invokedDirectly(path.join(directory, "linked", "recover-mysql-0097.ts"), url), true)
+    assert.equal(invokedDirectly(path.join(directory, "linked", "recovery-0097.ts"), url), false)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
 test("CLI help needs no database and noninteractive invalid apply fails without prompting or credential output", () => {
