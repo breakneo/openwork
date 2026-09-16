@@ -71,7 +71,7 @@ describe("App conversation ownership", () => {
         expect(requests).toHaveLength(3);
         expect(delays).toEqual([1_000, 3_000]);
         expect(retryCallbacks).toEqual([]);
-        expect(container.querySelector('[role="status"]')?.textContent).toBe("View unavailable");
+        expect(container.querySelector('[role="status"]')?.textContent).toBe("Interactive view unavailable");
         const details = container.querySelector("details");
         expect(details?.open).toBe(false);
         const button = details?.querySelector<HTMLButtonElement>("button");

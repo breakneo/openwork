@@ -284,9 +284,9 @@ export function McpAppDiagnosticNotice({ error, notice, onReloadView }: { error:
   // McpAppFrame routes authoritative connection payloads to ConnectionCard first.
   return (
     <div className="mt-2 text-xs text-muted-foreground">
-      <span role="status">View unavailable</span>
-      <details className="mt-1">
-        <summary className="cursor-pointer select-none">Technical details</summary>
+      <span className="sr-only" role="status">Interactive view unavailable</span>
+      <details>
+        <summary className="cursor-pointer select-none">Interactive view unavailable</summary>
         <p className="mt-1">{notice}</p>
         <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[11px] text-foreground">{details}</pre>
         {canReload && onReloadView ? (

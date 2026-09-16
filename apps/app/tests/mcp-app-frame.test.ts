@@ -801,7 +801,7 @@ describe("MCP App sandbox presentation", () => {
         code: "MCP_APP_DOCUMENT_RUNTIME_ERROR", message: "View failed: Bearer fixture-secret",
       });
       const notice = host.container.querySelector('[role="status"]');
-      expect(notice?.textContent).toBe("View unavailable");
+      expect(notice?.textContent).toBe("Interactive view unavailable");
       const details = host.container.querySelector("details");
       expect(details?.open).toBe(false);
       expect(details?.textContent).toContain("MCP_APP_DOCUMENT_RUNTIME_ERROR");
@@ -928,7 +928,7 @@ describe("MCP App resolution", () => {
     try {
       await host.render()
       const status = host.container.querySelector('[role="status"]')
-      expect(status?.textContent).toBe("View unavailable")
+      expect(status?.textContent).toBe("Interactive view unavailable")
       const details = host.container.querySelector("details")
       expect(details?.open).toBe(false)
       expect(details?.textContent).toContain("Interactive view unavailable. The normal tool result is still available.")

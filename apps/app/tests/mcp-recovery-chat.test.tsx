@@ -25,7 +25,7 @@ test("a signed-out view does not replace the task answer or invent a reconnect a
     await act(async () => root.render(<RecoveryChatFixture client={client} />));
     expect(container.textContent).toContain("Find the release blockers");
     expect(container.textContent).toContain("Both need verification before the release.");
-    expect(container.textContent).toContain("View unavailable");
+    expect(container.querySelector("summary")?.textContent).toBe("Interactive view unavailable");
     expect(container.textContent).not.toContain("Settings");
     expect(container.textContent).not.toContain("Connection needs sign-in");
     expect([...container.querySelectorAll("button")].some(button => /^(Retry|Reload view|Connect|Reconnect)$/.test(button.textContent ?? ""))).toBe(false);
@@ -50,8 +50,10 @@ test("an authoritative connection payload gets one existing contextual card, not
     await act(async () => root.render(<RecoveryChatFixture client={client} messages={connectionMessages} />));
     expect(container.querySelectorAll('[data-testid="desktop-connection-card"]')).toHaveLength(1);
     expect(container.querySelector('[aria-label="Notes connection"]')).not.toBeNull();
+    expect(container.textContent).toContain("Checked Notes connection");
+    expect(container.textContent).not.toContain("Used *");
     expect(container.textContent).toContain("The release checklist has not been read yet.");
-    expect(container.textContent).not.toContain("View unavailable");
+    expect(container.textContent).not.toContain("Interactive view unavailable");
     expect(container.textContent).not.toContain("Reload view");
     expect(resolutions).toBe(0);
   } finally { await act(async () => root.unmount()); }

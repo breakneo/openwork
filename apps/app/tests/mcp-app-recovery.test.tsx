@@ -34,11 +34,16 @@ test.each(["mcp_auth_required", "mcp_permission_denied", "mcp_unreachable"])("%s
     await act(async () => root.render(<McpAppDiagnosticNotice notice="Interactive view unavailable." error={{ code: "MCP_APP_RESOLVE_FAILED", causeCode, stage: "resource-resolution", message: "diagnostic-only-message", toolName: "fixture_render", elapsedMs: 10, checkpoints: [] }} />));
     const details = container.querySelector("details");
     expect(details?.open).toBe(false);
-    expect(details?.querySelector("summary")?.textContent).toBe("Technical details");
+    expect(details?.querySelector("summary")?.textContent).toBe("Interactive view unavailable");
     expect(details?.textContent).toContain("diagnostic-only-message");
     expect(container.querySelector("p")?.textContent).not.toContain("diagnostic-only-message");
     expect(container.textContent).not.toContain("Copy diagnostic identifier");
-    expect(container.querySelector('[role="status"]')?.textContent).toBe("View unavailable");
+    const status = container.querySelector('[role="status"]');
+    expect(status?.textContent).toBe("Interactive view unavailable");
+    expect(status?.classList.contains("sr-only")).toBe(true);
+    expect(container.querySelectorAll("summary")).toHaveLength(1);
+    expect(container.textContent).not.toContain("Technical details");
+    expect(Array.from(container.firstElementChild?.children ?? []).filter(child => !child.classList.contains("sr-only"))).toEqual([details]);
     expect(container.textContent).not.toContain("Settings");
     expect(container.textContent).not.toContain("Retry");
     expect([...container.querySelectorAll("button")].every(button => button.closest("details") === details)).toBe(true);

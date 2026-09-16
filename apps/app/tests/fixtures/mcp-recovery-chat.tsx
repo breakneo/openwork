@@ -21,7 +21,7 @@ export const connectionMessages: UIMessage[] = [
   { id: "fixture-user", role: "user", parts: [{ type: "text", text: "Connect Notes so I can summarize the release checklist." }] },
   { id: "fixture-connection", role: "assistant", parts: [
     { type: "dynamic-tool", toolCallId: "fixture-status", toolName: "openwork-cloud_execute_capability", state: "output-available",
-      input: { name: "mcp:emc_notes:*" },
+      input: { name: "mcp:emc_notes:check_Notes_connection" },
       output: { schemaVersion: "1", connectionId: "emc_notes", connectionName: "Notes", state: "needs_connection",
         actor: "member", message: "Connect Notes to continue.",
         action: { type: "connect", label: "Connect Notes", surface: "openwork_your_connections" } } },
