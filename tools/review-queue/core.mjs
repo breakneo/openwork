@@ -7,6 +7,14 @@
  * @property {string} kind
  * @property {string} title
  * @property {string} summary
+ * @property {string} purpose
+ * @property {string} delivered
+ * @property {string} status_on_dev
+ * @property {string} why
+ * @property {string} if_approved
+ * @property {string} if_declined
+ * @property {string} question
+ * @property {Evidence[]} raw_evidence
  * @property {Evidence[]} evidence
  * @property {string} recommended_action
  * @property {Link[]} links
@@ -144,7 +152,20 @@ export function recommendationVerb(item) {
 }
 
 export function isLocked(item) {
-  return item.locked === true || item.group === 'external-mission' || recommendationVerb(item) === 'worktree';
+  return item.locked === true || item.kind === 'worktree' || item.group?.toLowerCase().trim() === 'external-mission' ||
+    ['none', 'worktree'].includes(recommendationVerb(item).toLowerCase().trim()) ||
+    /\bNIGHT[\s_-]+REVIEW\b/i.test(item.title) || /^SUPAUD-20260915-A/i.test(item.title) ||
+    item.title === 'Identify client making initial inquiry';
+}
+
+export function hasConcreteQuestion(item) {
+  const question = item.question?.trim();
+  return Boolean(question && !/^(?:none|unknown|n\/?a|tbd|not supplied|no (?:concrete )?question(?: supplied)?|review|[?]+)[.!?]*$/i.test(question));
+}
+
+export function canApprove(item) {
+  return !isLocked(item) && typeof item.if_approved === 'string' && Boolean(item.if_approved.trim()) &&
+    (recommendationVerb(item) !== 'review' || hasConcreteQuestion(item));
 }
 
 function itemIdentity(value, kind, label) {
@@ -183,7 +204,7 @@ export function validateFeed(feed) {
   const ids = new Set();
   const items = list(feed.items, 'items', 10000).map((raw, index) => {
     const label = `items[${index}]`;
-    object(raw, label, ['id', 'kind', 'title', 'summary', 'evidence', 'recommended_action', 'links', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived']);
+    object(raw, label, ['id', 'kind', 'title', 'summary', 'purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence', 'evidence', 'recommended_action', 'links', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived']);
     const id = itemIdentity(raw.id, raw.kind, `${label}.id`);
     if (ids.has(id)) throw new Error(`Duplicate item id: ${id}`);
     ids.add(id);
@@ -193,6 +214,14 @@ export function validateFeed(feed) {
       kind: enumeration(raw.kind, KINDS, `${label}.kind`),
       title: text(raw.title, `${label}.title`, 500, true),
       summary: text(raw.summary ?? '', `${label}.summary`, 20000),
+      purpose: text(raw.purpose === undefined ? 'Purpose not supplied.' : raw.purpose, `${label}.purpose`, 20000),
+      delivered: text(raw.delivered === undefined ? 'No delivery summary supplied.' : raw.delivered, `${label}.delivered`, 20000),
+      status_on_dev: text(raw.status_on_dev === undefined ? 'Not verified on dev.' : raw.status_on_dev, `${label}.status_on_dev`, 20000),
+      why: text(raw.why === undefined ? 'No rationale supplied.' : raw.why, `${label}.why`, 20000),
+      if_approved: text(raw.if_approved === undefined ? '' : raw.if_approved, `${label}.if_approved`, 20000),
+      if_declined: text(raw.if_declined === undefined ? '' : raw.if_declined, `${label}.if_declined`, 20000),
+      question: text(raw.question === undefined ? '' : raw.question, `${label}.question`, 20000),
+      raw_evidence: validateEvidence(raw.raw_evidence === undefined ? raw.evidence ?? [] : raw.raw_evidence, `${label}.raw_evidence`),
       evidence: validateEvidence(raw.evidence ?? [], `${label}.evidence`),
       recommended_action: text(raw.recommended_action ?? 'review', `${label}.recommended_action`, 200, true),
       links: list(raw.links ?? [], `${label}.links`, 100).map((entry) => {
@@ -203,6 +232,12 @@ export function validateFeed(feed) {
       risk: enumeration(raw.risk ?? 'unknown', RISKS, `${label}.risk`),
       group: text(raw.group ?? 'ungrouped', `${label}.group`, 200, true),
     };
+    if (recommendationVerb(item) === 'review' && !hasConcreteQuestion(item)) {
+      item.recommended_action = 'keep';
+      item.why = `${item.why.slice(0, 19800)}${item.why ? ' ' : ''}Kept for reference: no concrete question was supplied for review.`;
+      item.if_approved = '';
+      item.question = '';
+    }
     for (const key of ['workspace_id', 'owner_session_id']) {
       if (raw[key] !== undefined) item[key] = identifier(raw[key], `${label}.${key}`);
     }
@@ -244,6 +279,7 @@ export function validateFeed(feed) {
     if (time < previousTime) throw new Error('Decision timestamps must be in append order');
     previousTime = time;
     if (isLocked(item)) throw new Error(`Locked item cannot have decisions: ${id}`);
+    if (action === 'approve' && !canApprove(item)) throw new Error(`Approve requires a nonempty if_approved outcome: ${id}`);
     const signature = JSON.stringify([item.kind, item.group, item.recommended_action]);
     const batch = batches.get(batch_id);
     if (batch) {

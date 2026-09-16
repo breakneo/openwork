@@ -13,7 +13,7 @@ const describe = (value) => value === undefined || value === null ? 'unknown' : 
 export function tableCells(line) {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'));
 }
-function tables(markdown) {
+export function tables(markdown) {
   const lines = markdown.split(/\r?\n/);
   const result = [];
   let heading = '';
@@ -40,7 +40,7 @@ function tables(markdown) {
   }
   return result;
 }
-function linksIn(value) {
+export function linksIn(value) {
   const links = [];
   for (const match of value.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g)) {
     const url = safeUrl(match[2]);
@@ -97,7 +97,8 @@ export function convertReport(markdown, prsJsonl = '', source = 'report.md') {
         const detail = actionIndex >= 0 ? clean(row.cells[actionIndex]) : 'unknown — no recommendation column';
         const tag = detail.split(';')[0].trim();
         const recommendation = ({ A: 'archive', Archive: 'archive', D: 'review', Decision: 'review', L: 'relaunch', Relaunch: 'relaunch', Keep: 'keep' })[tag] ?? 'review';
-        const external = externalSession(title);
+        const groupIndex = column(table.headers, /^group$/i);
+        const external = externalSession(title) || (groupIndex >= 0 && clean(row.cells[groupIndex]).toLowerCase() === 'external-mission') || /^External mission\b/i.test(table.heading);
         const group = external ? 'external-mission' : table.workspace?.name ?? 'unknown workspace';
         const item = {
           id, kind: 'session', title,
@@ -224,18 +225,23 @@ function nativeItem(raw) {
   nativeText(raw.id, 'Supplement id', 4096);
   if (!['session', 'pr', 'proposal', 'worktree'].includes(raw.kind)) throw new Error('Invalid supplement kind');
   const item = {};
-  for (const key of ['id', 'kind', 'title', 'summary', 'recommended_action', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived']) {
+  for (const key of ['id', 'kind', 'title', 'summary', 'purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'recommended_action', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived']) {
     if (raw[key] !== undefined) item[key] = raw[key];
   }
   // Pick only documented label/value/url data. Never copy arbitrary command/action objects.
-  for (const key of ['evidence', 'links']) {
+  for (const key of ['evidence', 'raw_evidence', 'links']) {
+    if (raw[key] === undefined && key === 'raw_evidence') continue;
     if (raw[key] !== undefined && (!Array.isArray(raw[key]) || raw[key].length > 100)) throw new Error(`Invalid supplement ${key}`);
     item[key] = (raw[key] ?? []).flatMap((entry) => {
       nativeObject(entry, `Supplement ${key} entry`);
       nativeText(entry.label, 'Supplement label', 200);
-      if (key === 'evidence' && /command|instruction|execute|script/i.test(entry.label)) return [];
+      if (!entry.label.trim()) throw new Error('Supplement label must be nonempty');
+      if (key !== 'links' && entry.value === undefined && entry.url === undefined) throw new Error('Supplement evidence requires value or url');
+      if (entry.value !== undefined) nativeText(entry.value, 'Supplement evidence value');
+      if (entry.url !== undefined && !safeUrl(entry.url)) throw new Error('Supplement evidence URL must be safe');
+      if (key !== 'links' && /command|instruction|execute|script/i.test(entry.label)) return [];
       const selected = { label: entry.label };
-      if (key === 'evidence' && entry.value !== undefined) selected.value = entry.value;
+      if (key !== 'links' && entry.value !== undefined) selected.value = entry.value;
       if (entry.url !== undefined) selected.url = entry.url;
       return [selected];
     });
@@ -300,7 +306,16 @@ export function supplementReport(feed, raw) {
     if (previous?.kind === 'pr' && previous.pr_url && (incoming.pr_url === undefined || nativePrUrl(previous.pr_url).url.toLowerCase() !== incoming.pr_url.toLowerCase())) throw new Error('Supplement PR number collides across repositories');
     if (!previous) { items.set(incoming.id, incoming); continue; }
     // Canonical Markdown/JSONL identity, title, head, recommendation and evidence win.
-    const merged = { ...previous, evidence: [...previous.evidence], links: [...previous.links] };
+    const merged = { ...previous, evidence: [...previous.evidence], raw_evidence: [...previous.raw_evidence], links: [...previous.links] };
+    const original = feed.items.find((item) => item.id === previous.id);
+    const defaults = { purpose: 'Purpose not supplied.', delivered: 'No delivery summary supplied.', status_on_dev: 'Not verified on dev.', why: 'No rationale supplied.', if_approved: '', if_declined: '', question: '' };
+    for (const [key, fallback] of Object.entries(defaults)) {
+      if (source[key] !== undefined && (!original?.[key] || original[key] === fallback || (key === 'why' && original[key].startsWith('No rationale supplied.')))) merged[key] = incoming[key];
+    }
+    if (merged.question && original?.recommended_action && ['review', 'review_decision', 'review_blockers'].includes(original.recommended_action)) merged.recommended_action = original.recommended_action;
+    for (const entry of incoming.raw_evidence) {
+      if (!merged.raw_evidence.some((existing) => JSON.stringify(existing) === JSON.stringify(entry))) merged.raw_evidence.push(entry);
+    }
     const addEvidence = (entry) => {
       if (!merged.evidence.some((existing) => JSON.stringify(existing) === JSON.stringify(entry))) merged.evidence.push(entry);
     };

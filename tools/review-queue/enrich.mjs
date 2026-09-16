@@ -1,0 +1,360 @@
+import { readFileSync, existsSync, copyFileSync, chmodSync, constants } from 'node:fs';
+import { resolve, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { validateFeed, safeUrl, isLocked, recommendationVerb, hasConcreteQuestion } from './core.mjs';
+import { tables, linksIn, parseQueueArgs, privateOutputPath, writePrivateOutput } from './convert.mjs';
+
+const fields = ['purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question'];
+const defaults = new Set(['Purpose not supplied.', 'No delivery summary supplied.', 'Not verified on dev.', 'No rationale supplied.']);
+const clean = (text) => text.replace(/\[([^\]]+)\]\((?:https?:\/\/)[^\s)]+\)/g, '$1').replace(/\*\*|`/g, '').trim();
+const bounded = (text, max = 20000) => text.length > max ? text.slice(0, max - 14) + ' … [truncated]' : text;
+const fact = (label, value) => ({ label, value: bounded(String(value ?? 'Unknown — not supplied.')) });
+const useful = (value) => typeof value === 'string' && value.trim() && !defaults.has(value) && !value.startsWith('No rationale supplied.');
+const unique = (entries) => [...new Map(entries.map((entry) => [JSON.stringify(entry), entry])).values()];
+const rawFacts = (entries) => {
+  const result = unique(entries);
+  return result.length <= 100 ? result : [...result.slice(0, 99), fact('Additional source facts', `${result.length - 99} omitted; consult original inputs.`)];
+};
+function textInput(value, label, max = 20000000) {
+  if (typeof value !== 'string' || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) throw new Error(`${label} must be bounded text`);
+  return value;
+}
+function object(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error(`${label} must be an object`);
+  return value;
+}
+function evidenceList(value, label) {
+  if (!Array.isArray(value) || value.length > 100) throw new Error(`${label} must be a bounded evidence array`);
+  return validateFeed({ items: [{ id: 'validation', kind: 'proposal', title: 'Validation', recommended_action: 'keep', evidence: value }] }).items[0].evidence;
+}
+function prNumber(item) {
+  const url = item.pr_url ?? (item.kind === 'pr' && item.id.startsWith('https://') ? item.id : undefined);
+  if (url) {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'github.com') return Number(parsed.pathname.match(/\/pull\/(\d+)\/?$/)?.[1]) || undefined;
+  }
+  return item.kind === 'pr' ? Number(item.id.match(/^pr-(\d+)$/)?.[1]) || undefined : undefined;
+}
+export function parsePrRecords(jsonl = '') {
+  textInput(jsonl, 'PR JSONL', 50000000);
+  const records = new Map();
+  for (const [index, line] of jsonl.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    let value;
+    try { value = JSON.parse(line); } catch { throw new Error(`Invalid PR JSONL at line ${index + 1}`); }
+    object(value, `PR line ${index + 1}`);
+    if (!Number.isSafeInteger(value.number) || value.number < 1) throw new Error(`Invalid PR identity at line ${index + 1}`);
+    for (const key of ['state', 'title', 'headRefOid', 'baseRefName', 'headRefName', 'mergeStateStatus', 'mergeable', 'reviewDecision', 'capturedAt', 'mergedAt']) {
+      if (value[key] !== undefined && value[key] !== null) textInput(value[key], `PR ${key}`, 20000);
+    }
+    for (const key of ['isDraft', 'wardenAtHead']) if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new Error(`PR ${key} must be boolean`);
+    for (const key of ['failingChecks', 'pendingChecks']) if (value[key] !== undefined && (!Array.isArray(value[key]) || value[key].length > 1000)) throw new Error(`PR ${key} must be a bounded array`);
+    if (value.url !== undefined) {
+      const safe = safeUrl(value.url);
+      if (!safe) throw new Error('PR URL must be safe');
+      const url = new URL(safe);
+      if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.port || url.search || url.hash || !new RegExp(`^/[^/]+/[^/]+/pull/${value.number}/?$`).test(url.pathname)) throw new Error('PR URL disagrees with its identity');
+    }
+    const previous = records.get(value.number);
+    if (previous?.url && value.url && previous.url.toLowerCase() !== value.url.toLowerCase()) throw new Error('PR number collides across repositories');
+    const before = Date.parse(previous?.capturedAt);
+    const after = Date.parse(value.capturedAt);
+    if (!Number.isFinite(before) || !Number.isFinite(after) || after >= before) records.set(value.number, value);
+  }
+  return records;
+}
+function reportIndex(markdown) {
+  const sessions = new Map();
+  const prs = new Map();
+  const models = new Map();
+  const rowNames = new Map();
+  for (const table of tables(markdown)) {
+    const headers = table.headers;
+    const session = headers.findIndex((header) => /^Session(?: ID)?$/i.test(header));
+    const pr = headers.findIndex((header) => /^PR$/i.test(header));
+    const key = headers.findIndex((header) => /^Key$/i.test(header));
+    for (const row of table.rows) {
+      const values = Object.fromEntries(headers.map((header, index) => [header, clean(row.cells[index])]));
+      if (key >= 0 && headers.includes('providerId') && headers.includes('modelId')) models.set(clean(row.cells[key]), values);
+      if (session >= 0) {
+        const id = clean(row.cells[session]);
+        if (!/^ses_[A-Za-z0-9]+$/.test(id)) continue;
+        if (values.Row && values.Title) rowNames.set(values.Row, { id, title: values.Title });
+        const previous = sessions.get(id) ?? [];
+        sessions.set(id, [...previous, { values, line: row.line, heading: table.heading, links: linksIn(row.cells.join(' ')) }]);
+      }
+      if (pr >= 0) {
+        const number = Number(clean(row.cells[pr]).match(/^#?(\d+)\b/)?.[1]);
+        if (number) prs.set(number, [...(prs.get(number) ?? []), { values, line: row.line, heading: table.heading, links: linksIn(row.cells.join(' ')) }]);
+      }
+    }
+  }
+  const prose = new Map();
+  let excluded = false;
+  for (const block of markdown.split(/\r?\n\s*\r?\n/)) {
+    if (/^#{1,6} /.test(block)) excluded = /External mission|prior .*findings|STALE-BOUND|reclaimable candidates/i.test(block);
+    if (excluded || block.trim().startsWith('|') || block.includes('```')) continue;
+    for (const line of block.split(/\r?\n/)) {
+      if (/^#{1,6} /.test(line)) continue;
+      const owners = new Set([...line.matchAll(/\bses_[A-Za-z0-9]+\b/g)].map((match) => match[0]));
+      for (const match of line.matchAll(/\b[OC]\d{2}\b/g)) if (rowNames.has(match[0])) owners.add(rowNames.get(match[0]).id);
+      if (owners.size !== 1) continue;
+      const [id] = owners;
+      prose.set(id, [...(prose.get(id) ?? []), clean(line.replace(/^\s*[-*]\s*/, ''))]);
+    }
+  }
+  return { sessions, prs, models, rowNames, prose };
+}
+function human(text, index) {
+  return bounded(clean(text).replace(/^(?:[ADL]|Archive|Decision|Relaunch|Keep);\s*/i, '').replace(/\b[OC]\d{2}\b/g, (key) => index.rowNames.get(key)?.title ?? 'another report row').replace(/\bSTALE-BOUND\b/g, 'bound to a stale provider').replace(/\bCONCLUDED\b/g, 'conversation concluded (not product certification)').replace(/\bINTERRUPTED\b/g, 'conversation interrupted').replace(/\bDIRTY\b/g, 'conflicting').replace(/\bBLOCKED\b/g, 'blocked on merge or review gates').replace(/\bMERGED\b/g, 'merged').replace(/\bCLOSED\b/g, 'closed').replace(/\bOPEN\b/g, 'open'));
+}
+function changeTitle(title, index) {
+  return human(title.replace(/^#\d+\s*(?:[—–-]\s*)?/, '').replace(/^(?:feat|fix|chore|docs|test|ci)(?:\([^)]*\))?:\s*/, ''), index);
+}
+function cells(rows, pattern) {
+  return rows.flatMap((row) => Object.entries(row.values).filter(([key]) => pattern.test(key)).map(([, value]) => value));
+}
+function friendlyModel(value, index, stale) {
+  const code = typeof value === 'string' ? value.match(/(?:^|;\s*)(IC|IA|IY|BP)\s*(?:\/|$)/)?.[1] ?? value.split(/\s*\/\s*/)[0].trim() : undefined;
+  const model = typeof value === 'object' && value !== null ? value : index.models.get(code);
+  if (stale || model?.providerId?.startsWith('lpr_') || (typeof value === 'string' && /\blpr_/.test(value))) return 'Stale provider — deleted 09-11; no new provider test was made.';
+  if (['IC', 'IA', 'IY'].includes(code)) return 'Organization default GPT — exact alias not established.';
+  if (code === 'BP' || model?.modelId === 'big-pickle') return 'Big Pickle';
+  if (code === 'null' || value === null) return 'No model binding in the snapshot.';
+  if (model?.displayName) return model.displayName;
+  if (model?.providerId?.startsWith('ipr_') || model?.modelId?.startsWith('gwm_')) return 'Organization-provided model — friendly name unknown.';
+  if (model?.modelId) return `${model.modelId}${model.providerId ? ` (${model.providerId})` : ''}`;
+  return 'Unknown — no readable model binding supplied.';
+}
+function summariesIndex(raw, ids) {
+  if (raw === undefined) return new Map();
+  object(raw, 'Summaries');
+  const items = raw.items === undefined ? Object.entries(raw).map(([id, entry]) => ({ ...object(entry, 'Summary entry'), id })) : raw.items;
+  if (!Array.isArray(items) || items.length > 10000) throw new Error('Summaries items must be a bounded array');
+  const result = new Map();
+  for (const entry of items) {
+    object(entry, 'Summary entry');
+    textInput(entry.id, 'Summary ID', 4096);
+    if (!ids.has(entry.id)) throw new Error('Summary ID is not in the input feed');
+    if (result.has(entry.id)) throw new Error('Duplicate summary ID');
+    const selected = {};
+    for (const key of [...fields, 'last_user', 'last_assistant', 'source', 'observed_at']) if (entry[key] !== undefined) selected[key] = textInput(entry[key], `Summary ${key}`, key.startsWith('last_') ? 200000 : 20000);
+    for (const key of ['evidence', 'raw_evidence']) if (entry[key] !== undefined) selected[key] = evidenceList(entry[key], `Summary ${key}`);
+    if (entry.links !== undefined) selected.links = validateFeed({ items: [{ id: 'validation', kind: 'proposal', title: 'Validation', recommended_action: 'keep', links: entry.links }] }).items[0].links;
+    if (entry.options !== undefined) {
+      if (!Array.isArray(entry.options) || entry.options.length > 12 || !selected.question?.trim()) throw new Error('Summary options require a question and at most 12 text choices');
+      selected.options = entry.options.map((option) => textInput(option, 'Summary option', 2000));
+    }
+    if (entry.model !== undefined) {
+      if (entry.model === null || typeof entry.model === 'string') selected.model = entry.model === null ? null : textInput(entry.model, 'Summary model', 2000);
+      else {
+        object(entry.model, 'Summary model');
+        selected.model = {};
+        for (const key of ['providerId', 'modelId', 'displayName', 'variant']) if (entry.model[key] !== undefined && entry.model[key] !== null) selected.model[key] = textInput(entry.model[key], `Summary model ${key}`, 2000);
+      }
+    }
+    result.set(entry.id, selected);
+  }
+  return result;
+}
+function checks(pr) {
+  if (!pr) return 'Unknown — no PR check snapshot supplied.';
+  const names = (values) => values.map((value) => typeof value === 'string' ? value : value?.name ?? 'unnamed check').join(', ');
+  const failing = Array.isArray(pr.failingChecks) ? pr.failingChecks : undefined;
+  const pending = Array.isArray(pr.pendingChecks) ? pr.pendingChecks : undefined;
+  if (!failing || !pending) return 'Unknown — failing and pending check inventories were not both supplied.';
+  return `${failing.length ? `Failing: ${names(failing)}` : 'No failing checks recorded'}; ${pending.length ? `pending: ${names(pending)}` : 'no pending checks recorded'}. Snapshot only; not proof of required-test coverage.`;
+}
+function warden(pr) {
+  if (pr?.wardenAtHead === true) return 'Approved at the captured PR head (source register). Not human approval.';
+  if (pr?.wardenAtHead === false) return 'No Warden approval at the captured PR head.';
+  return 'Unknown — exact-head Warden approval not supplied.';
+}
+function reportProof(rows, pr) {
+  return rows.flatMap((row) => {
+    const results = cells([row], /Fresh local result|Actual final.head checks|Remaining gate|Fresh verification/i);
+    const heads = cells([row], /^(?:Exact head|Published head|Head)$/i).filter((value) => /^[a-f0-9]{7,40}$/i.test(value));
+    const mismatch = pr?.headRefOid && heads.some((head) => !pr.headRefOid.startsWith(head));
+    return results.map((result) => `${mismatch ? 'Historical proof at a different head; not verification of this head: ' : 'Report: '}${result}`);
+  }).join('\n');
+}
+function prStatus(pr, rows) {
+  const result = reportProof(rows, pr);
+  if (!pr) return `Unknown — no PR state snapshot supplied.${result ? ` Report says: ${result}` : ''}`;
+  const collected = typeof pr.capturedAt === 'string' ? ` Captured ${pr.capturedAt}; not live.` : ' Collection time unknown; not live.';
+  if (pr.state === 'MERGED') return `Merged ${typeof pr.mergedAt === 'string' ? pr.mergedAt : '(date unknown)'} into ${pr.baseRefName ?? 'an unknown base'}.${pr.baseRefName === 'dev' ? ' Recorded as landed on dev; deployment and current behavior are not verified.' : ' Presence on dev is unknown.'}${collected}`;
+  if (pr.state === 'CLOSED') return `Closed without a recorded merge; do not treat this PR as landed on dev.${collected}`;
+  if (pr.state !== 'OPEN') return `Unknown PR state; presence on dev is not verified.${collected}`;
+  const gates = [];
+  if (pr.isDraft === true) gates.push('draft, not ready for merge');
+  else if (pr.isDraft !== false) gates.push('draft status unknown');
+  if (pr.mergeStateStatus === 'DIRTY' || pr.mergeable === 'CONFLICTING') gates.push('conflicts at the captured base');
+  else if (pr.mergeStateStatus && pr.mergeStateStatus !== 'CLEAN') gates.push(`merge gate: ${pr.mergeStateStatus.toLowerCase().replaceAll('_', ' ')}`);
+  if (pr.baseRefName !== 'dev') gates.push(pr.baseRefName ? `stacked on ${pr.baseRefName}; dev integration not implied` : 'base unknown');
+  if (pr.wardenAtHead !== true) gates.push(warden(pr));
+  if (pr.reviewDecision === 'REVIEW_REQUIRED') gates.push('review required');
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') gates.push('changes requested');
+  const green = Array.isArray(pr.failingChecks) && !pr.failingChecks.length && Array.isArray(pr.pendingChecks) && !pr.pendingChecks.length;
+  return bounded(`Open${green ? ' with no failing or pending checks recorded' : ''}; not recorded as merged. ${checks(pr)}${gates.length ? ` Remaining gates: ${gates.join('; ')}.` : ''}${result ? ` Applicable proof/report: ${result}` : ' Applicable spec results unknown.'}${collected}`);
+}
+function historicalTracker(markdown, number) {
+  if (!number) return [];
+  const result = [];
+  for (const line of markdown.split(/\r?\n/)) {
+    const refs = [...line.matchAll(/#(\d+)\b/g)];
+    for (let index = 0; index < refs.length; index++) {
+      if (Number(refs[index][1]) !== number) continue;
+      const fragment = clean(line.slice(refs[index].index, refs[index + 1]?.index));
+      if (fragment.length > String(number).length + 2) result.push(fragment);
+    }
+  }
+  return result;
+}
+function diffStat(pr, historical) {
+  if (Number.isSafeInteger(pr?.additions) && pr.additions >= 0 && Number.isSafeInteger(pr?.deletions) && pr.deletions >= 0) return `+${pr.additions} / −${pr.deletions}${Number.isSafeInteger(pr.changedFiles) ? `; ${pr.changedFiles} files` : ''} (captured PR diff).`;
+  const entry = historical.findLast((line) => /\+[\d,]+\s*\/\s*[−-][\d,]+/.test(line));
+  return entry ? `${entry.match(/\+[\d,]+\s*\/\s*[−-][\d,]+/)[0]} — historical tracker; current-head diff not verified.` : 'Unknown — diff counts were not supplied.';
+}
+function sourceQuestion(text) {
+  return text.split(/\n|(?<=[.!])\s+/).find((line) => /\?\s*$/.test(line) && /\b(should|would you|do you want|which|shall|can you confirm)\b/i.test(line)) ?? '';
+}
+export function enrichFeed(input, { report = '', prs = '', tracker = '', summaries } = {}) {
+  textInput(report, 'Report');
+  textInput(tracker, 'Tracker');
+  const normalized = validateFeed(input);
+  if (normalized.decisions.length || input.audit?.length || input.effective_decisions?.length || Object.keys(input.drafts ?? {}).length) throw new Error('Enrichment requires an undecided source feed; preserve decision exports separately and never replay them into changed evidence');
+  const index = reportIndex(report);
+  const records = parsePrRecords(prs);
+  const details = summariesIndex(summaries, new Set(normalized.items.map((item) => item.id)));
+  const items = normalized.items.map((item, position) => {
+    const original = input.items[position];
+    const external = item.group.toLowerCase().trim() === 'external-mission' || /^SUPAUD-\d{8}-/i.test(item.title) || /external mission|owned elsewhere/i.test(item.lock_reason ?? '');
+    const locked = external || isLocked(item);
+    const extra = external ? {} : details.get(item.id) ?? {};
+    const rows = external ? [] : index.sessions.get(item.id) ?? [];
+    const number = prNumber(item);
+    const pr = external ? undefined : records.get(number);
+    if (pr?.url && item.pr_url && safeUrl(pr.url) !== safeUrl(item.pr_url)) throw new Error('PR metadata belongs to a different repository or identity');
+    const prRows = external ? [] : index.prs.get(number) ?? [];
+    const historical = external ? [] : historicalTracker(tracker, number);
+    const linkedNumbers = external ? [] : item.links.flatMap((link) => {
+      const url = new URL(link.url);
+      const linked = url.hostname === 'github.com' ? Number(url.pathname.match(/\/pull\/(\d+)\/?$/)?.[1]) : undefined;
+      const record = records.get(linked);
+      return linked && (!record?.url || new URL(record.url).pathname.replace(/\/$/, '') === url.pathname.replace(/\/$/, '')) ? [linked] : [];
+    });
+    const worktreeScope = item.kind === 'worktree' ? `Retain the local working copy${linkedNumbers.length === 1 && records.get(linkedNumbers[0])?.title ? ` for “${changeTitle(records.get(linkedNumbers[0]).title, index)}”` : ` named “${item.title}”`} until a separate ownership and removal review.` : '';
+    const reportText = cells(rows, /deliverable|decision|recommendation/i).map((value) => human(value, index)).join('\n');
+    const prose = external ? [] : index.prose.get(item.id) ?? [];
+    const ownSummary = human(item.summary, index);
+    const prDelivery = item.kind === 'pr' ? `PR change: ${changeTitle(pr?.title ?? item.title, index)}. ${pr?.state === 'MERGED' ? 'The register records this as merged, not independently verified in production.' : pr?.state === 'CLOSED' ? 'The register records this as closed without a merge.' : 'This is a proposed change, not a verified delivery on dev.'}` : '';
+    const delivered = extra.delivered ?? (useful(original.delivered) ? original.delivered : extra.last_assistant ? `Assistant reported: ${bounded(extra.last_assistant, 800)}` : reportText || [prDelivery, reportProof(prRows, pr)].filter(Boolean).join('\n') || ownSummary);
+    const purpose = extra.purpose ?? (useful(original.purpose) ? original.purpose : extra.last_user ? `Last recorded request: ${bounded(extra.last_user, 800)}` : worktreeScope || `Scope: ${changeTitle(pr?.title ?? item.title, index)}.`);
+    const raw = [...item.raw_evidence, ...item.evidence, ...(extra.raw_evidence ?? [])];
+    for (const row of [...rows, ...prRows]) raw.push(fact('Report source', `${row.heading}, line ${row.line}`), ...Object.entries(row.values).map(([key, value]) => fact(key, value)));
+    for (const text of prose) raw.push(fact('Report prose', text));
+    for (const text of historical) raw.push(fact('Historical tracker', text));
+    if (pr) raw.push(fact('PR snapshot', JSON.stringify(pr)));
+    if (extra.source) raw.push(fact('Summary source', extra.source));
+    if (extra.observed_at) raw.push(fact('Summary observed at', extra.observed_at));
+    const modelValue = extra.model !== undefined ? extra.model : cells(rows, /^Model|Observed state/i)[0] ?? item.evidence.find((entry) => /^Model(?: \/ variant)?$/i.test(entry.label))?.value;
+    if (modelValue !== undefined) {
+      raw.push(fact('Model binding', typeof modelValue === 'string' ? modelValue : JSON.stringify(modelValue)));
+      const binding = typeof modelValue === 'string' ? index.models.get(modelValue.split(/\s*\/\s*/)[0]) : undefined;
+      if (binding) raw.push(fact('Model key', JSON.stringify(binding)));
+    }
+    const oldFacts = [...item.evidence, ...item.raw_evidence];
+    const suppliedFact = (label) => extra.evidence?.find((entry) => entry.label.toLowerCase() === label.toLowerCase()) ?? oldFacts.find((entry) => entry.label.toLowerCase() === label.toLowerCase());
+    const readEvidence = (label, fallback) => suppliedFact(label) ?? fact(label, fallback);
+    const specEvidence = (record, proofRows) => {
+      const proof = reportProof(proofRows, record);
+      if (proof) return proof;
+      const historicalProof = historicalTracker(tracker, record?.number).findLast((line) => /\b(?:spec|tests?|typechecks?|assertions|skips?)\b/i.test(line));
+      return historicalProof ? `Historical tracker, not current-head verification: ${bounded(historicalProof, 2000)}` : 'Unknown — applicable spec results not supplied.';
+    };
+    const specResults = reportProof(prRows, pr);
+    const related = [...new Set([...linkedNumbers, ...[...(reportText + '\n' + ownSummary).matchAll(/#(\d+)\b/g)].map((match) => Number(match[1]))])];
+    const associated = related.map((id) => ({ id, record: records.get(id) }));
+    let status = prStatus(pr, prRows);
+    if (item.kind !== 'pr') status = associated.length ? associated.map(({ id, record }) => `Referenced PR #${id}: ${prStatus(record, index.prs.get(id) ?? [])}`).join('\n') : item.kind === 'worktree' ? 'Worktree reference only. Dev inclusion and safe removal are not independently verified.' : 'No linked PR establishes delivery on dev. Reported conversation or external-service outcomes are not dev verification.';
+    const associatedFact = (describe) => associated.map(({ id, record }) => `Referenced PR #${id}: ${describe(record, index.prs.get(id) ?? [])}`).join('\n');
+    const currentEvidence = (label, describe, fallback) => pr ? fact(label, describe(pr, prRows)) : associated.length ? fact(label, associatedFact(describe)) : readEvidence(label, fallback);
+    const conflicts = (record) => record?.mergeStateStatus === 'DIRTY' || record?.mergeable === 'CONFLICTING' ? 'Conflicts reported at the captured PR base.' : record?.mergeStateStatus === 'CLEAN' ? `No GitHub merge conflict at captured base ${record.baseRefName ?? '(unknown)'}. This is not a dev integration test.` : 'Unknown — current dev conflict check not supplied.';
+    let question = extra.question ?? (hasConcreteQuestion(item) ? item.question : sourceQuestion(reportText || ownSummary));
+    if (extra.options?.length) question += `\nOptions from source: ${extra.options.join(' / ')}`;
+    let action = original.recommended_action ?? item.recommended_action;
+    let why = extra.why ?? (useful(original.why) ? original.why : delivered ? `The source reports: ${delivered}` : 'There is no per-item outcome in the supplied sources; retain this item until its owner supplies a summary.');
+    let approved = extra.if_approved ?? (useful(original.if_approved) ? original.if_approved : '');
+    let declined = extra.if_declined ?? (useful(original.if_declined) ? original.if_declined : 'Leave the item and its deliverables unchanged. Declining does not close a PR, delete files, or send a message.');
+    const verb = recommendationVerb({ recommended_action: action });
+    if (verb === 'review' && !hasConcreteQuestion({ question })) {
+      action = 'keep'; question = ''; approved = '';
+      why += ' Kept for reference: no concrete human question or source-backed choices were supplied. A coordinator summary is needed before review.';
+    } else if (!approved && verb === 'archive') approved = item.group === 'OpenWork Chat' ? 'Record an archive recommendation only; this workspace requires a separate human decision before archival.' : 'Authorize checking archive eligibility for this conversation. Archive only after current ownership, pin, running-work, captured learnings, pending-decision and clean-worktree gates pass.';
+    else if (!approved && verb === 'merge') approved = 'Authorize a current merge-readiness review of this PR, not an unconditional merge. Recheck exact head, base, required checks, complete proof, reviews and explicit merge authorization.';
+    else if (!approved && verb === 'relaunch') approved = 'Record interest in the described follow-up. Confirm it has not already run and agree a separate scoped instruction before starting work.';
+    if (locked) {
+      question = ''; approved = '';
+      declined = 'No decision is available; leave this read-only reference untouched.';
+      why = item.lock_reason ?? (external ? 'External mission owned elsewhere; title/identity inventory only. No transcript enrichment or follow-up.' : 'Read-only reference. No approval, clarification, archive, relaunch or removal is allowed from this queue.');
+    }
+    const curated = external ? [fact('Ownership', 'External mission; metadata only. No transcript reads or actions.')] : [
+      currentEvidence('PR checks', checks, checks()),
+      pr ? fact('Diff stat', diffStat(pr, historical)) : readEvidence('Diff stat', diffStat(undefined, historical)),
+      currentEvidence('Spec results', specEvidence, specResults || 'Unknown — no applicable per-item spec results supplied. Changed spec filenames alone are not results.'),
+      currentEvidence('Warden', warden, warden()),
+      currentEvidence('Conflicts', conflicts, conflicts()),
+      extra.last_user ? fact('Last message', bounded(extra.last_user, 800)) : readEvidence('Last message', 'Unknown — last user message not supplied; coordinator summary read required.'),
+      extra.last_assistant ? fact('Last assistant', bounded(extra.last_assistant, 800)) : readEvidence('Last assistant', 'Unknown — last assistant reply not supplied; report prose is not a transcript.'),
+      ...(item.kind === 'session' ? [fact('Model', friendlyModel(modelValue, index, item.stale_bound))] : []),
+      ...(extra.evidence ?? []).filter((entry) => !['PR checks', 'Diff stat', 'Spec results', 'Warden', 'Conflicts', 'Last message', 'Last assistant'].includes(entry.label)),
+    ];
+    const links = [...item.links];
+    for (const link of [...(extra.links ?? []), ...rows.flatMap((row) => row.links), ...prRows.flatMap((row) => row.links)]) if (!links.some((existing) => existing.url === link.url && existing.label === link.label)) links.push(link);
+    const enriched = { ...item, purpose: bounded(purpose), delivered: bounded(external ? 'Identity/title inventory only; mission deliverables deliberately not inspected.' : delivered || 'Unknown — no deliverable summary supplied.'), status_on_dev: bounded(external ? 'Not inspected; external mission is read-only.' : pr ? status : extra.status_on_dev ?? (useful(original.status_on_dev) ? original.status_on_dev : status)), why: bounded(why), question: bounded(question), if_approved: bounded(approved), if_declined: bounded(declined), recommended_action: action, evidence: unique(curated).map((entry) => /^(?:Last message|Last assistant)$/i.test(entry.label) && entry.value !== undefined ? { ...entry, value: bounded(entry.value, 800) } : entry), raw_evidence: rawFacts(raw), links };
+    if (locked) { enriched.locked = true; enriched.protected = true; }
+    if (external) { enriched.group = 'external-mission'; enriched.recommended_action = 'none'; }
+    if (pr) {
+      if (typeof pr.headRefOid === 'string') enriched.head_sha = pr.headRefOid;
+      else delete enriched.head_sha;
+      if (pr.state !== 'OPEN' || pr.isDraft !== false) enriched.protected = true;
+      if (pr.state === 'MERGED' || pr.state === 'CLOSED') { enriched.recommended_action = locked ? action : 'keep'; enriched.if_approved = ''; enriched.question = ''; }
+    }
+    return enriched;
+  });
+  const externalOwners = new Set(items.filter((item) => item.group === 'external-mission').map((item) => item.id));
+  for (const item of items) {
+    if (externalOwners.has(item.owner_session_id)) {
+      item.locked = true; item.protected = true; item.group = 'external-mission'; item.recommended_action = 'none';
+      item.if_approved = ''; item.question = '';
+      item.why = 'Owner is an external mission; reference only. No follow-up or decisions permitted.';
+      item.if_declined = 'Leave this read-only reference untouched.';
+    }
+  }
+  return validateFeed({ ...normalized, items, metadata: { ...normalized.metadata, collection_caveat: bounded([normalized.metadata?.collection_caveat, 'Offline enrichment only. JSONL capture times and report/tracker claims are historical, not live verification. Summaries are display data, never authorization. No decisions are imported; changed evidence requires a new review.'].filter(Boolean).join('\n\n')) } });
+}
+export function writeEnrichedOutput(output, content, inputs = [], options = {}) {
+  const target = privateOutputPath(output, inputs, options);
+  if (existsSync(target)) {
+    const previous = target.endsWith('.json') ? target.slice(0, -5) + '.prev.json' : target + '.prev.json';
+    privateOutputPath(previous, [...inputs, target]);
+    copyFileSync(target, previous, constants.COPYFILE_EXCL);
+    chmodSync(previous, 0o600);
+  }
+  return writePrivateOutput(target, content, inputs, options);
+}
+function main(args) {
+  const check = args.includes('--check');
+  if (args.filter((arg) => arg === '--check').length > 1) throw new Error('Duplicate option: --check');
+  const options = parseQueueArgs(args.filter((arg) => arg !== '--check'), ['--report', '--prs', '--prs-updated', '--tracker', '--summaries']);
+  const inputs = [options.input, ...['report', 'prs', 'prs-updated', 'tracker', 'summaries'].map((key) => options[key]).filter(Boolean)];
+  if (!check) privateOutputPath(options.output, inputs, options);
+  const read = (key) => options[key] ? readFileSync(options[key], 'utf8') : '';
+  const feed = enrichFeed(JSON.parse(readFileSync(options.input, 'utf8')), { report: read('report'), prs: [read('prs'), read('prs-updated')].filter(Boolean).join('\n'), tracker: read('tracker'), ...(options.summaries ? { summaries: JSON.parse(read('summaries')) } : {}) });
+  if (!check) writeEnrichedOutput(options.output, JSON.stringify(feed, null, 2) + '\n', inputs, options);
+  const missing = feed.items.filter((item) => !isLocked(item) && item.kind === 'session' && item.evidence.some((entry) => entry.label === 'Last assistant' && entry.value?.startsWith('Unknown'))).length;
+  console.log(`${check ? 'Validated without writing' : `Enriched into ${basename(options.output)}`}: ${feed.items.length} items. ${missing} non-locked sessions lack assistant summaries. No live reads, decisions or external actions.`);
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { main(process.argv.slice(2)); } catch (error) { console.error(error.message); process.exitCode = 1; }
+}

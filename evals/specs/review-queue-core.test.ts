@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Script } from 'node:vm';
-import { validateFeed, applyDecision, undoLast, latestDecisions, exportDecisions, safeUrl, isLocked, recommendationVerb } from '../../tools/review-queue/core.mjs';
+import { validateFeed, applyDecision, undoLast, latestDecisions, exportDecisions, safeUrl, isLocked, recommendationVerb, canApprove, hasConcreteQuestion } from '../../tools/review-queue/core.mjs';
 import { convertReport, supplementReport, privateOutputPath, writePrivateOutput, parseQueueArgs, tableCells } from '../../tools/review-queue/convert.mjs';
 import { buildHtml } from '../../tools/review-queue/build.mjs';
 
@@ -22,6 +22,9 @@ function findItem(source: ReturnType<typeof validateFeed>, id: string) {
 }
 function item(id = 'ses_exampleA') {
   return { id, kind: 'session', title: 'Synthetic task', summary: 'Fictional evidence only',
+    purpose: 'Explain a fictional setting.', delivered: 'A concise explanation.', status_on_dev: 'No runtime change.',
+    why: 'The requested explanation is complete.', if_approved: 'Record archive intent after current-state checks.',
+    if_declined: 'Keep the session available.', question: 'Should this explanation be retained for follow-up?', raw_evidence: [],
     evidence: [{ label: 'Workspace', value: 'openwork' }, { label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }],
     recommended_action: 'archive', links: [], age: 'an arbitrary age label', risk: 'low', group: 'openwork',
     workspace_id: 'ws_example', protected: false };
@@ -31,6 +34,9 @@ function feed() {
 }
 function prItem() {
   return { id: 'pr-7', kind: 'pr', title: 'Synthetic PR', recommended_action: 'merge', group: 'PR / OPEN',
+    purpose: 'Improve a fictional setting.', delivered: 'A proposed change.', status_on_dev: 'Not merged.',
+    why: 'Ready for current-head verification.', if_approved: 'Record merge intent subject to fresh checks and authorization.',
+    if_declined: 'Leave the PR open.', question: '', raw_evidence: [],
     pr_url: 'https://github.com/example/demo/pull/7', head_sha: 'a'.repeat(40), evidence: [{ label: 'State', value: 'OPEN' }] };
 }
 function nightInput() {
@@ -110,10 +116,115 @@ test('queue normalizes without mutating input and keeps synthetic sample/schema 
   normalized.items[0].evidence[0].value = 'changed';
   expect(input.items[0].evidence[0].value).toBe('openwork');
   const sample = validateFeed(JSON.parse(readFileSync(join(sourceDirectory, 'sample.json'), 'utf8')));
-  expect(sample.items).toHaveLength(6);
+  expect(sample.items).toHaveLength(10);
   expect(sample.decisions).toEqual([]);
   expect(JSON.parse(readFileSync(join(sourceDirectory, 'review-queue.schema.json'), 'utf8')).$defs.item.properties.locked.type).toBe('boolean');
   evidence.recordAssertionEvidence('Normalization copies input without creating decisions', `Sample items: ${sample.items.length}; sample decisions: ${sample.decisions.length}. Arbitrary age text preserved; mutating normalized evidence did not change source evidence. Schema declares locked as boolean.`, true);
+});
+
+test('legacy cards receive safe strings without inventing approval or moving raw code into prose', async ({ evidence }) => {
+  const legacy = { id: 'legacy', kind: 'proposal', title: 'Legacy reference', summary: 'session.send {"untrusted":true}', evidence: [{ label: 'Raw record', value: '{"command":"do not execute"}' }] };
+  const before = JSON.stringify(legacy);
+  const normalized = validateFeed({ items: [legacy] });
+  const card = normalized.items[0];
+  expect(card).toMatchObject({ purpose: 'Purpose not supplied.', delivered: 'No delivery summary supplied.', status_on_dev: 'Not verified on dev.', if_approved: '', if_declined: '', question: '', recommended_action: 'keep' });
+  expect(card.why).toContain('no concrete question');
+  expect(canApprove(card)).toBe(false);
+  expect(card.raw_evidence).toEqual(legacy.evidence);
+  expect(card.raw_evidence).not.toBe(card.evidence);
+  card.raw_evidence[0].value = 'changed';
+  expect(JSON.stringify(legacy)).toBe(before);
+  expect(card.purpose + card.delivered + card.status_on_dev + card.why).not.toContain('session.send');
+  expect(validateFeed(normalized)).toEqual(normalized);
+  evidence.recordAssertionEvidence('Legacy normalization is safe and idempotent', 'Missing prose gets explicit unknowns; raw evidence is copied independently, review becomes keep with a reason, and no approval outcome or decision is invented.', true);
+});
+
+test('every card prose field is a bounded plain string and raw evidence remains strictly typed', async ({ evidence }) => {
+  for (const field of ['purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question']) {
+    for (const value of [null, false, 1, {}, [], '\u0000', 'x'.repeat(20001)]) {
+      expect(() => validateFeed({ items: [{ ...item(), [field]: value }] })).toThrow(new RegExp(field));
+    }
+    expect(validateFeed({ items: [{ ...item(), [field]: 'x'.repeat(20000) }] }).items[0]).toHaveProperty(field, 'x'.repeat(20000));
+  }
+  for (const raw_evidence of [null, {}, 'text', [{ label: 'missing value' }], [{ label: 'bad', value: {} }], [{ label: 'bad', url: 'javascript:alert(1)' }], Array.from({ length: 101 }, () => ({ label: 'record', value: 'text' }))]) {
+    expect(() => validateFeed({ items: [{ ...item(), raw_evidence }] })).toThrow();
+  }
+  const raw = [{ label: 'Literal code', value: '</script>session.send {"x":true}', url: 'https://example.com/evidence' }];
+  expect(validateFeed({ items: [{ ...item(), raw_evidence: raw }] }).items[0].raw_evidence).toEqual(raw);
+  const schema = JSON.parse(readFileSync(join(sourceDirectory, 'review-queue.schema.json'), 'utf8'));
+  for (const field of ['purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question']) expect(schema.$defs.item.properties[field].type).toBe('string');
+  expect(schema.$defs.item.properties.raw_evidence.items.$ref).toBe('#/$defs/evidence');
+  evidence.recordAssertionEvidence('Card fields and schema enforce the enrichment contract', 'All seven strings reject nontext, controls and overflow; raw evidence validates shape, bounds and safe URLs while preserving literal source text.', true);
+});
+
+test('review aliases lacking a concrete question downgrade to keep with rationale and no approval', async ({ evidence }) => {
+  for (const recommended_action of ['review', 'review_blockers', 'review_decision']) {
+    for (const question of [undefined, '', '  \n', 'unknown', 'None', 'N/A', 'TBD', 'No concrete question supplied.', '?']) {
+      const raw = { ...item(), recommended_action, question, why: 'Original rationale.' };
+      const normalized = validateFeed({ items: [raw] });
+      expect(normalized.items[0]).toMatchObject({ recommended_action: 'keep', question: '', if_approved: '' });
+      expect(normalized.items[0].why).toContain('Original rationale. Kept for reference: no concrete question');
+      expect(canApprove(normalized.items[0])).toBe(false);
+      expect(raw.recommended_action).toBe(recommended_action);
+      expect(validateFeed(normalized)).toEqual(normalized);
+    }
+    const valid = validateFeed({ items: [{ ...item(), recommended_action, question: 'Choose the smaller scope or the complete redesign' }] });
+    expect(valid.items[0].recommended_action).toBe(recommended_action);
+    expect(hasConcreteQuestion(valid.items[0])).toBe(true);
+    expect(canApprove(valid.items[0])).toBe(true);
+  }
+  for (const recommended_action of ['archive', 'review_archive_eligibility', 'merge', 'review_merge_candidate']) {
+    expect(validateFeed({ items: [{ ...item(), recommended_action, question: '' }] }).items[0].recommended_action).toBe(recommended_action);
+  }
+  evidence.recordAssertionEvidence('Only concrete review questions can remain review recommendations', 'Three review aliases with nine empty/placeholder variants downgrade idempotently and lose approval; concrete choices remain review, and archive/merge recommendations need no fabricated question.', true);
+});
+
+test('none, all worktrees, external missions and NIGHT REVIEW use one non-bypassable lock', async ({ evidence }) => {
+  for (const patch of [{ recommended_action: 'none' }, { recommended_action: ' NONE ' }, { kind: 'worktree', recommended_action: 'keep' }, { kind: 'worktree', recommended_action: 'remove' }, { group: 'external-mission' }, { title: 'SUPAUD-20260915-A99 synthetic' }, { title: 'NIGHT REVIEW — synthetic' }, { title: '[night-review] synthetic' }, { title: 'Identify client making initial inquiry' }]) {
+    const raw = { ...item(), ...patch, locked: false, protected: false };
+    const source = validateFeed({ items: [raw] });
+    expect(isLocked(source.items[0])).toBe(true);
+    expect(canApprove(source.items[0])).toBe(false);
+    for (const action of ['approve', 'decline', 'defer', 'ask_info', 'request_changes', 'comment']) {
+      expect(() => applyDecision(source, [raw.id], action, 'Literal comment', time, 'locked')).toThrow(/Locked/);
+      expect(() => validateFeed({ ...source, decisions: [{ id: raw.id, action, comment: 'Literal comment', batch_id: 'import', decided_at: time }] })).toThrow(/Locked/);
+    }
+    expect(() => validateFeed({ ...source, drafts: { [raw.id]: 'Cannot restore a draft' } })).toThrow(/Locked/);
+    expect(source.decisions).toEqual([]);
+    expect(exportDecisions(source, later).instructions).not.toMatch(/^session\.|^gh |^git |^rm /m);
+  }
+  expect(isLocked({ ...item(), title: 'Ordinary review of night mode' })).toBe(false);
+  evidence.recordAssertionEvidence('Read-only categories cannot be unlocked by source flags', 'All six actions, imported events and drafts fail closed across nine lock variants; no mutation instructions are generated. An unrelated night-mode title remains actionable.', true);
+});
+
+test('missing approval outcomes reject single, mixed batch and imported approval without blocking decline', async ({ evidence }) => {
+  for (const if_approved of [undefined, '', '  \n']) {
+    const source = validateFeed({ items: [item(), { ...item('ses_exampleB'), if_approved }] });
+    const before = JSON.stringify(source);
+    expect(canApprove(source.items[1])).toBe(false);
+    expect(() => applyDecision(source, ['ses_exampleB'], 'approve', '', time, 'one')).toThrow(/if_approved/);
+    expect(() => applyDecision(source, ['ses_exampleA', 'ses_exampleB'], 'approve', '', time, 'batch')).toThrow(/if_approved/);
+    expect(() => validateFeed({ ...source, decisions: [{ id: 'ses_exampleB', action: 'approve', comment: '', batch_id: 'import', decided_at: time }] })).toThrow(/if_approved/);
+    expect(JSON.stringify(source)).toBe(before);
+    for (const action of ['decline', 'defer', 'ask_info', 'request_changes', 'comment']) {
+      const decided = applyDecision(source, ['ses_exampleB'], action, 'Reviewed text', time, 'allowed');
+      expect(undoLast(validateFeed(JSON.parse(exportDecisions(decided, later).json)))).toEqual(source);
+    }
+  }
+  expect(canApprove(validateFeed({ items: [item()] }).items[0])).toBe(true);
+  evidence.recordAssertionEvidence('Approval requires an outcome on every path', 'Missing, empty and whitespace outcomes reject single/bulk/import approval atomically; other decisions retain export/restore/undo behavior.', true);
+});
+
+test('enriched card prose and raw evidence remain snapshot-bound through export and undo', async ({ evidence }) => {
+  const source = feed();
+  const decided = applyDecision(source, ['ses_exampleA'], 'approve', '', time, 'one');
+  const exported = JSON.parse(exportDecisions(decided, later).json);
+  for (const field of ['purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence']) {
+    expect(source.items[0]).toHaveProperty(field, exported.items[0][field]);
+  }
+  expect(validateFeed(exported)).toEqual(decided);
+  expect(undoLast(validateFeed(exported))).toEqual(source);
+  evidence.recordAssertionEvidence('Enrichment survives portable decision history', 'Seven strings and raw evidence retain exact values in exported item snapshots; restore and undo preserve all fields.', true);
 });
 
 test('queue rejects duplicate identities, unsafe enums, invalid references and bounded-field abuse', async ({ evidence }) => {
@@ -250,12 +361,11 @@ test('follow-ups use exact session/owner IDs and JSON escaping; worktrees/propos
   const blocked = exportDecisions(applyDecision(externalOwner, ['pr-7'], 'comment', 'Do not send', time, 'batch'), later).instructions;
   expect(blocked).toContain('target owner is locked');
   expect(blocked).not.toMatch(/^session\.send /m);
-  for (const kind of ['proposal', 'worktree']) {
-    const result = instructions({ id: 'example', title: 'Example', kind, recommended_action: 'remove' });
-    expect(result).toContain('MANUAL AUTHORIZATION REQUIRED');
-    expect(result).not.toMatch(/^git |^rm |^session\./m);
-  }
-  evidence.recordAssertionEvidence('Follow-ups are exact JSON data, never arbitrary commands', 'Session and PR-owner follow-ups parsed back to the exact synthetic target/comment containing quotes, newline, shell substitution and HTML; no PR command was emitted. Missing and locked owners were blocked. Proposal/worktree approval required manual authorization and emitted no git, rm or session mutation.', true);
+  const result = instructions({ id: 'example', title: 'Example', kind: 'proposal', recommended_action: 'remove', if_approved: 'Record a request for separately authorized work.' });
+  expect(result).toContain('MANUAL AUTHORIZATION REQUIRED');
+  expect(result).not.toMatch(/^git |^rm |^session\./m);
+  expect(() => instructions({ id: 'example', title: 'Example', kind: 'worktree', recommended_action: 'remove', if_approved: 'Remove the worktree.' })).toThrow(/Locked/);
+  evidence.recordAssertionEvidence('Follow-ups are exact JSON data, never arbitrary commands', 'Session and PR-owner follow-ups parsed back to the exact synthetic target/comment containing quotes, newline, shell substitution and HTML; no PR command was emitted. Missing and locked owners were blocked. Proposal approval required manual authorization and emitted no git, rm or session mutation; worktree approval was rejected.', true);
 });
 
 test('exports preserve exact normalized items, metadata, full audit and effective decisions for restore', async ({ evidence }) => {

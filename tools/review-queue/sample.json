@@ -7,41 +7,75 @@
   "items": [
     {
       "id": "ses_exampleA", "kind": "session", "title": "Completed documentation explanation",
-      "summary": "Synthetic archive candidate. Current identity, ownership, pin, running state, worktree and authorization must be checked before any action.",
+      "purpose": "Explain how the fictional settings screen works.", "delivered": "A concise explanation and a list of next steps.", "status_on_dev": "No code change was needed.",
+      "why": "The explanation is complete and there is no open question.", "if_approved": "Record an archive recommendation; the audit agent must recheck ownership, pins and current work first.", "if_declined": "Keep the session available for further discussion.", "question": "",
+      "summary": "Synthetic archive candidate; not current authorization.", "raw_evidence": [{"label": "Source excerpt", "value": "session.read {\"sessionId\":\"ses_exampleA\"}"}],
       "evidence": [{"label": "Workspace", "value": "openwork"}, {"label": "Pinned", "value": "no"}, {"label": "Status", "value": "idle"}],
       "recommended_action": "archive", "links": [], "age": "2 days at fictional collection", "risk": "low", "group": "openwork", "workspace_id": "ws_example", "protected": false
     },
     {
       "id": "ses_exampleB", "kind": "session", "title": "Completed reference lookup",
-      "summary": "A second fictional item supports homogeneous bulk-review testing.",
+      "purpose": "Find a reference for the fictional configuration format.", "delivered": "The requested reference and a short usage example.", "status_on_dev": "No implementation change was requested.",
+      "why": "The lookup has been delivered and can be filed after current-state checks.", "if_approved": "Record an archive recommendation, conditional on a fresh safety check.", "if_declined": "Retain the lookup session.", "question": "",
+      "summary": "A second fictional item supports homogeneous bulk-review testing.", "raw_evidence": [{"label": "Source record", "value": "{\"result\":\"delivered\"}"}],
       "evidence": [{"label": "Workspace", "value": "openwork"}, {"label": "Pinned", "value": "no"}, {"label": "Status", "value": "idle"}],
       "recommended_action": "archive", "links": [], "age": "3 days at fictional collection", "risk": "low", "group": "openwork", "workspace_id": "ws_example", "protected": false
     },
     {
       "id": "pr-example-7", "kind": "pr", "title": "Example change awaiting fresh verification",
-      "summary": "Fictional PR only. A recorded head is not current proof. Review base, checks, exact-head reviews and merge authorization.",
-      "evidence": [{"label": "State", "value": "OPEN"}, {"label": "Base", "value": "dev"}, {"label": "Freshness", "value": "Not live; synthetic"}],
-      "recommended_action": "merge", "links": [{"label": "Fictional PR", "url": "https://github.com/example/review-demo/pull/7"}],
+      "purpose": "Make the fictional settings labels easier to understand.", "delivered": "A proposed label update and synthetic checks.", "status_on_dev": "Not yet merged into dev; current checks need verification.",
+      "why": "The change is ready for a human review, not automatic merging.", "if_approved": "Record merge intent; exact-head checks and separate current merge authorization remain required.", "if_declined": "Leave the pull request open without merging or closing it.", "question": "",
+      "summary": "Fictional PR only. A recorded head is not current proof.", "raw_evidence": [{"label": "Head", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+      "evidence": [{"label": "State", "value": "OPEN"}, {"label": "Base", "value": "dev"}],
+      "recommended_action": "review_merge_candidate", "links": [{"label": "Fictional PR", "url": "https://github.com/example/review-demo/pull/7"}],
       "age": "unknown", "risk": "high", "group": "PR / OPEN", "pr_url": "https://github.com/example/review-demo/pull/7", "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "owner_session_id": "ses_exampleA"
     },
     {
       "id": "proposal-example", "kind": "proposal", "title": "Choose an implementation direction",
-      "summary": "A decision records intent only. No implementation or external write is authorized by this fixture.",
-      "evidence": [{"label": "Options", "value": "Continue the existing approach or request a smaller scope."}],
-      "recommended_action": "review", "links": [], "age": "unknown", "risk": "medium", "group": "decisions", "owner_session_id": "ses_exampleB"
+      "purpose": "Agree on the size of the next fictional change.", "delivered": "Two scoped options with their trade-offs.", "status_on_dev": "Neither option has been implemented.",
+      "why": "The owner needs a scope decision before doing more work.", "if_approved": "Record a preference for the smaller label-only change.", "if_declined": "Keep both options open and request a revised proposal.", "question": "Should the next change update labels only, rather than redesigning the screen?",
+      "summary": "No implementation or external write is authorized by this fixture.", "raw_evidence": [{"label": "Options record", "value": "{\"options\":[\"labels\",\"redesign\"]}"}],
+      "evidence": [], "recommended_action": "review_decision", "links": [], "age": "unknown", "risk": "medium", "group": "decisions", "owner_session_id": "ses_exampleB"
     },
     {
       "id": "worktree-example", "kind": "worktree", "title": "Example retained worktree",
-      "summary": "Cleanup needs separate ownership, cleanliness, ignored-file and process checks. No removal command is generated.",
-      "evidence": [{"label": "Path", "value": "/example/private-worktree"}],
-      "recommended_action": "remove", "links": [], "age": "unknown", "risk": "high", "group": "manual cleanup"
+      "purpose": "Retain the working files for an unfinished experiment.", "delivered": "A local worktree reference only.", "status_on_dev": "No merged change is established by this reference.",
+      "why": "Worktree removal is outside this queue's authority.", "if_approved": "", "if_declined": "", "question": "",
+      "summary": "Cleanup needs separate ownership, cleanliness, ignored-file and process checks.", "raw_evidence": [{"label": "Path", "value": "/example/private-worktree"}],
+      "evidence": [], "recommended_action": "remove", "links": [], "age": "unknown", "risk": "high", "group": "manual cleanup", "locked": false
     },
     {
       "id": "ses_externalExample", "kind": "session", "title": "Unrelated mission (read-only)",
-      "summary": "Synthetic external mission owned elsewhere. Reference only; not yours to act on.",
-      "evidence": [{"label": "Ownership", "value": "External mission; untouched"}],
-      "recommended_action": "none", "links": [], "age": "unknown", "risk": "unknown", "group": "external-mission", "locked": true,
+      "purpose": "Track a fictional mission managed by another owner.", "delivered": "An inventory reference, not a handoff.", "status_on_dev": "Not verified here.",
+      "why": "The mission belongs elsewhere and must remain untouched.", "if_approved": "", "if_declined": "", "question": "",
+      "summary": "Synthetic external mission owned elsewhere.", "raw_evidence": [{"label": "Ownership", "value": "External mission; untouched"}],
+      "evidence": [], "recommended_action": "none", "links": [], "age": "unknown", "risk": "unknown", "group": "external-mission", "locked": true,
       "lock_reason": "External mission; no archive, nudge, relaunch, comment, or decision."
+    },
+    {
+      "id": "ses_nightExample", "kind": "session", "title": "NIGHT REVIEW — synthetic coordinator",
+      "purpose": "Summarize fictional overnight work for its owner.", "delivered": "A read-only summary of the collection window.", "status_on_dev": "The summary is not proof of a dev deployment.",
+      "why": "Night review coordinators are preserved as read-only references.", "if_approved": "This source outcome must not bypass the read-only rule.", "if_declined": "", "question": "",
+      "raw_evidence": [], "evidence": [], "recommended_action": "archive", "group": "openwork", "locked": false
+    },
+    {
+      "id": "pr-example-none", "kind": "pr", "title": "Previously completed example",
+      "purpose": "Record a previously completed fictional change.", "delivered": "The source says the change was merged.", "status_on_dev": "Reported as merged; not live verification.",
+      "why": "There is no new decision to make.", "if_approved": "", "if_declined": "", "question": "",
+      "raw_evidence": [{"label": "Source state", "value": "{\"state\":\"MERGED\"}"}], "evidence": [{"label": "State", "value": "MERGED"}], "recommended_action": "none", "locked": false
+    },
+    {
+      "id": "ses_exampleC", "kind": "session", "title": "Completed synthetic checklist",
+      "purpose": "Prepare a checklist for a fictional release review.", "delivered": "A complete checklist for the owner to use.", "status_on_dev": "Documentation only; no runtime change.",
+      "why": "The requested checklist is delivered and has no unresolved question.", "if_approved": "Record archive intent after current ownership and state are checked.", "if_declined": "Retain the checklist session for follow-up.", "question": "",
+      "raw_evidence": [], "evidence": [{"label": "Workspace", "value": "openwork"}, {"label": "Pinned", "value": "no"}, {"label": "Status", "value": "idle"}],
+      "recommended_action": "archive", "group": "openwork", "workspace_id": "ws_example", "protected": false
+    },
+    {
+      "id": "proposal-no-outcome", "kind": "proposal", "title": "Question missing an approval outcome",
+      "purpose": "Clarify a fictional release checklist requirement.", "delivered": "A question, but no actionable approval outcome.", "status_on_dev": "No change has been proposed.",
+      "why": "The owner must explain what approval would mean before it can be recorded.", "if_approved": "", "if_declined": "Record disagreement without changing the checklist.", "question": "Should the checklist include a separate accessibility review?",
+      "raw_evidence": [{"label": "Incomplete source", "value": "{\"if_approved\":null}"}], "evidence": [], "recommended_action": "review", "group": "decisions", "owner_session_id": "ses_exampleB"
     }
   ],
   "decisions": []

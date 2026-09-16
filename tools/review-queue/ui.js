@@ -50,7 +50,8 @@
         if (raw) {
           const saved = JSON.parse(raw);
           if (saved.sourceSnapshot !== snapshot) throw new Error('Stored feed does not match this snapshot. No decisions restored.');
-          feed = validateFeed({ ...feed, decisions: saved.decisions });
+          const restored = validateFeed({ ...feed, decisions: saved.decisions, drafts: saved.drafts ?? {} });
+          feed = restored;
           if (saved.drafts && typeof saved.drafts === 'object' && !Array.isArray(saved.drafts)) {
             for (const item of feed.items) if (typeof saved.drafts[item.id] === 'string') drafts[item.id] = saved.drafts[item.id].slice(0, 10000);
           }
@@ -113,7 +114,7 @@
     const deferred = decisions.filter((d) => d.action === 'defer').length;
     const followups = decisions.filter((d) => ['ask_info', 'request_changes', 'comment'].includes(d.action)).length;
     $('metrics').replaceChildren();
-    for (const [count, label] of [[feed.items.length, 'total'], [pending, 'pending'], [approved, 'approved'], [declined, 'declined'], [followups, 'follow-ups / comments'], [deferred, 'deferred'], [locked, 'not yours to act on']]) {
+    for (const [count, label] of [[feed.items.length, 'total'], [pending, 'pending'], [approved, 'approved'], [declined, 'declined'], [followups, 'follow-ups / comments'], [deferred, 'deferred'], [locked, 'nothing to decide']]) {
       const metric = element('span'); metric.append(element('strong', String(count)), document.createTextNode(` ${label}`)); $('metrics').append(metric);
     }
     $('progress').style.width = `${actionable ? ((approved + declined) / actionable) * 100 : 0}%`;
@@ -132,17 +133,16 @@
       const row = element('div', undefined, `queue-row${item.id === activeId ? ' active' : ''}${selected.has(item.id) ? ' selected' : ''}${isLocked(item) ? ' locked' : ''}`);
       row.dataset.testid = 'queue-row'; row.dataset.id = item.id; row.dataset.verb = recommendationVerb(item);
       const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.id); checkbox.dataset.testid = 'item-select'; checkbox.setAttribute('aria-label', `Select ${item.title}`);
-      checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(item.id) : selected.delete(item.id); renderList(); renderBulk(); });
+      checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(item.id) : selected.delete(item.id); renderList(); renderBulk(); $('list').querySelector(`[data-id="${CSS.escape(item.id)}"] input`)?.focus({ preventScroll: true }); });
       const open = element('button', undefined, 'row-open'); open.setAttribute('aria-label', `Review ${item.title}`); open.setAttribute('aria-current', item.id === activeId ? 'true' : 'false');
-      open.append(element('span', item.title, 'row-title'), element('span', item.summary, 'row-summary'));
-      const meta = element('span', undefined, 'row-meta'); meta.append(element('span', item.kind, 'tag'), element('span', isLocked(item) ? 'Not yours to act on' : statuses[decisions.get(item.id)?.action] ?? 'Pending'), element('span', `→ ${recommendationVerb(item)}`)); open.append(meta);
-      if (recommendationVerb(item) !== item.recommended_action) open.append(element('span', item.recommended_action, 'row-summary recommendation-source'));
-      open.addEventListener('click', () => { activeId = item.id; renderList(); renderDetail(); });
+      open.append(element('span', item.title, 'row-title'), element('span', item.purpose, 'row-summary'));
+      const meta = element('span', undefined, 'row-meta'); meta.append(element('span', item.kind, 'tag'), element('span', isLocked(item) ? 'Nothing to decide' : statuses[decisions.get(item.id)?.action] ?? 'Pending'), element('span', `→ ${recommendationVerb(item).replaceAll('_', ' ')}`)); open.append(meta);
+      open.addEventListener('click', () => { activeId = item.id; renderList(); renderDetail(); $('list').querySelector('.active .row-open')?.focus({ preventScroll: true }); });
       if (!isLocked(item)) row.append(checkbox);
       row.append(open); return row;
     });
     const firstLocked = items.findIndex(isLocked);
-    if (firstLocked !== -1) nodes.splice(firstLocked, 0, element('h3', 'Read-only references / other owners · not yours to act on', 'locked-heading'));
+    if (firstLocked !== -1) nodes.splice(firstLocked, 0, element('h3', 'Nothing to decide · read-only references', 'locked-heading'));
     $('list').replaceChildren(...(nodes.length ? nodes : [element('p', 'No items match these filters.', 'empty')]));
   }
   function renderBulk() {
@@ -151,7 +151,11 @@
     const items = feed.items.filter((item) => selected.has(item.id));
     const homogeneous = new Set(items.map(shape)).size <= 1 && !items.some(isLocked);
     $('bulk-shape').textContent = homogeneous && items.length ? `${items[0].kind} · ${items[0].group} · ${items[0].recommended_action}` : 'Mixed kinds, groups or recommendations. Filter to matching items before batching.';
-    $('bulk-apply').disabled = !homogeneous || !items.length;
+    const missingOutcome = items.some((item) => !canApprove(item));
+    $('bulk-action').querySelector('option[value="approve"]').disabled = missingOutcome;
+    const approvalBlocked = $('bulk-action').value === 'approve' && missingOutcome;
+    if (approvalBlocked) $('bulk-shape').textContent = 'Approval unavailable: every selected item needs an approval outcome.';
+    $('bulk-apply').disabled = !homogeneous || !items.length || approvalBlocked;
   }
   function safeLink(label, url) {
     const allowed = safeUrl(url);
@@ -162,44 +166,75 @@
     const root = $('detail'); root.replaceChildren();
     const item = feed.items.find((candidate) => candidate.id === activeId);
     if (!item) { root.append(element('p', 'Choose an item or load a feed to start reviewing.', 'empty')); return; }
-    const meta = element('div', undefined, 'detail-meta');
-    for (const value of [item.kind, item.group, `Risk: ${item.risk}`, item.age || 'Age unknown']) meta.append(element('span', value, 'tag'));
     const heading = element('h2', item.title); heading.dataset.testid = 'detail-title';
-    root.append(meta, heading, element('div', item.id, 'detail-id'));
-    if (isLocked(item)) root.append(element('p', `${recommendationVerb(item) === 'worktree' ? 'Worktree reference — read-only.' : 'Not yours to act on.'} ${item.lock_reason || 'Separate ownership and authorization checks required; read-only.'}`, 'locked-banner'));
-    else if (item.protected) root.append(element('p', 'Protected item: approving here never overrides pin, running-state or permission restrictions.', 'notice'));
-    const evidence = element('section', undefined, 'section'); evidence.append(element('h3', 'Evidence · inspect before deciding'));
-    if (!item.evidence.length) evidence.append(element('p', 'No evidence supplied. Ask for information rather than infer a pass.', 'muted'));
-    for (const entry of item.evidence) {
-      const row = element('div', undefined, 'evidence'); const value = element('div', undefined, 'evidence-value');
-      if (entry.value !== undefined) value.append(document.createTextNode(String(entry.value)));
-      if (entry.url) { if (entry.value !== undefined) value.append(document.createTextNode(' · ')); value.append(safeLink('Open evidence', entry.url)); }
-      row.append(element('div', entry.label, 'evidence-label'), value); evidence.append(row);
+    root.append(heading);
+    function field(name, label, value) {
+      const section = element('section', undefined, 'section'); section.dataset.field = name;
+      section.append(element('h3', label), element('p', value, 'summary')); root.append(section); return section;
     }
-    if (item.links.length) { const links = element('div', undefined, 'actions'); for (const link of item.links) links.append(safeLink(link.label, link.url)); evidence.append(links); }
+    field('purpose', 'Purpose', item.purpose || 'Purpose not supplied.');
+    field('status_on_dev', 'Status on dev', item.status_on_dev || 'Not verified on dev.');
+    const delivered = field('delivered', 'Delivered', item.delivered || 'No delivery summary supplied.');
+    if (item.links.length) {
+      const links = element('div', undefined, 'actions'); links.dataset.field = 'links';
+      for (const link of item.links) links.append(safeLink(link.label, link.url));
+      delivered.append(links);
+    }
+    const rationale = field('why', 'Why', item.why || 'No rationale supplied.');
+    const recommendation = element('div', undefined, 'recommendation'); recommendation.dataset.field = 'recommendation';
+    recommendation.append(element('span', 'Recommendation · ', 'muted'), element('strong', recommendationVerb(item).replaceAll('_', ' ')));
+    rationale.append(recommendation);
+    if (item.question.trim()) field('question', 'Question for you', item.question);
+    const review = element('section', undefined, 'section'); review.dataset.field = 'decision'; root.append(review);
+    if (isLocked(item)) {
+      review.append(element('p', `Nothing to decide. Not yours to act on; this reference is read-only. ${item.lock_reason || 'Separate ownership and authorization checks required.'}`, 'locked-banner'));
+    } else {
+      if (item.protected) review.append(element('p', 'Protected item: decisions here never override pin, running-state or permission restrictions.', 'small muted'));
+      const actions = element('div', undefined, 'decision-actions');
+      const commentLabel = element('label', 'Comment or follow-up request'); commentLabel.htmlFor = 'comment';
+      const comment = element('textarea'); comment.id = 'comment'; comment.dataset.testid = 'comment'; comment.rows = 3; comment.maxLength = 10000; comment.placeholder = 'What should the owner explain or change?'; comment.value = drafts[item.id] ?? ''; comment.addEventListener('input', saveDraft);
+      for (const [action, label] of Object.entries(labels)) {
+        const row = element('div', undefined, 'decision-action');
+        const button = element('button', label, action); button.dataset.action = action;
+        if (action === 'approve') button.disabled = !canApprove(item);
+        button.addEventListener('click', guarded(() => decide([item.id], action, comment.value))); row.append(button);
+        if (action === 'approve' || action === 'decline') {
+          const name = action === 'approve' ? 'if_approved' : 'if_declined';
+          const outcome = element('span', item[name].trim() || (action === 'approve' ? 'Unavailable: no approval outcome supplied.' : 'Records disagreement only; no external action.'), 'outcome');
+          outcome.dataset.field = name; outcome.id = `${action}-outcome`; button.setAttribute('aria-describedby', outcome.id); row.append(outcome);
+        }
+        actions.append(row);
+      }
+      const templates = element('div', undefined, 'templates');
+      for (const [title, text] of [['Ask for more info', 'Please provide the missing evidence and current status.'], ['Needs clarification', 'Please explain '], ['More work', 'Please change ']]) {
+        const button = element('button', title); button.addEventListener('click', () => { comment.value = text; saveDraft(); comment.focus(); }); templates.append(button);
+      }
+      review.append(actions, commentLabel, comment, templates);
+    }
+    const evidence = element('section', undefined, 'section'); evidence.dataset.field = 'evidence'; evidence.append(element('h3', 'Evidence checks'));
+    const checks = item.evidence.filter((entry) => /^(?:workspace|pinned|status|state|base|checks|proof|freshness|verification)$/i.test(entry.label) && entry.value !== undefined && /^(?:openwork|yes|no|idle|running|busy|open|closed|merged|dev|passed|failed|incomplete|unknown|not run|not verified)$/i.test(entry.value));
+    if (!checks.length) evidence.append(element('p', 'No concise checks supplied. Inspect raw evidence before deciding; unknown is not a pass.', 'muted'));
+    for (const entry of checks) {
+      const row = element('div', undefined, 'evidence'); row.append(element('div', entry.label, 'evidence-label'), element('div', entry.value, 'evidence-value'));
+      if (entry.url) row.append(safeLink('Open evidence', entry.url)); evidence.append(row);
+    }
     root.append(evidence);
-    const summary = element('section', undefined, 'section'); summary.append(element('h3', 'Context'), element('p', item.summary, 'summary'));
-    const recommendation = element('div', undefined, 'recommendation'); recommendation.append(element('div', 'RECOMMENDATION · NOT YOUR DECISION', 'eyebrow'), element('strong', recommendationVerb(item)), element('div', `Source: ${item.recommended_action}`, 'small muted recommendation-source'), element('p', isLocked(item) ? 'Read-only reference. No decisions or follow-ups can be recorded for this item.' : 'Approve means accept this recommendation, subject to audit-agent checks. Decline records disagreement; it never closes a PR.', 'small muted')); summary.append(recommendation); root.append(summary);
-    if (isLocked(item)) return;
-    const review = element('section', undefined, 'section'); const owner = item.owner_session_id ?? (item.kind === 'session' ? item.id : null);
-    review.append(element('h3', 'Your decision'), element('p', owner ? `Follow-up owner: ${owner}` : 'No session owner supplied. Follow-ups require manual routing by the audit agent.', 'small muted'));
-    const templates = element('div', undefined, 'templates');
-    for (const [title, text] of [['Ask for more info', 'Ask for more info: please provide the missing evidence and current status.'], ['Needs clarification', 'Needs clarification: please explain '], ['More work: …', 'More work: please ']]) {
-      const button = element('button', title); button.addEventListener('click', () => { $('comment').value = text; saveDraft(); $('comment').focus(); }); templates.append(button);
+    const raw = element('details', undefined, 'section raw-evidence'); raw.dataset.field = 'raw_evidence';
+    raw.append(element('summary', 'Raw evidence and source details'));
+    const meta = element('p', `${item.kind} · ${item.group} · Risk: ${item.risk} · ${item.age}`, 'small muted');
+    raw.append(meta, element('div', item.id, 'detail-id'), element('p', `Source recommendation: ${item.recommended_action}`, 'recommendation-source'), element('p', item.summary, 'summary'));
+    const entries = [...item.raw_evidence, ...item.evidence.filter((entry) => !item.raw_evidence.some((other) => JSON.stringify(other) === JSON.stringify(entry)))];
+    if (!entries.length) raw.append(element('p', 'No raw evidence supplied.', 'muted'));
+    for (const entry of entries) {
+      const row = element('div', undefined, 'evidence'); row.append(element('div', entry.label, 'evidence-label'));
+      if (entry.value !== undefined) row.append(element('pre', entry.value, 'raw-value'));
+      if (entry.url) row.append(safeLink('Open source', entry.url)); raw.append(row);
     }
-    const commentLabel = element('label', 'Comment or follow-up request', 'sr-only'); commentLabel.htmlFor = 'comment';
-    const comment = element('textarea'); comment.id = 'comment'; comment.dataset.testid = 'comment'; comment.rows = 3; comment.maxLength = 10000; comment.placeholder = 'What should the owner explain or change?'; comment.value = drafts[item.id] ?? ''; comment.addEventListener('input', saveDraft);
-    review.append(templates, commentLabel, comment);
-    const actions = element('div', undefined, 'actions');
-    for (const [action, label] of Object.entries(labels)) {
-      const button = element('button', label, action); button.dataset.action = action; button.addEventListener('click', guarded(() => decide([item.id], action, comment.value))); actions.append(button);
-    }
-    review.append(actions); root.append(review);
-    const history = element('section', undefined, 'section'); history.append(element('h3', 'Decision history'));
-    const entries = feed.decisions.filter((decision) => decision.id === item.id);
-    if (!entries.length) history.append(element('p', 'No decisions recorded yet.', 'muted small'));
-    for (const decision of entries) history.append(element('div', `${statuses[decision.action]} · ${decision.decided_at}\n${decision.comment || '(no comment)'}\nBatch: ${decision.batch_id}`, 'history'));
-    root.append(history);
+    raw.append(element('h3', 'Decision history'));
+    const history = feed.decisions.filter((decision) => decision.id === item.id);
+    if (!history.length) raw.append(element('p', 'No decisions recorded yet.', 'muted small'));
+    for (const decision of history) raw.append(element('div', `${statuses[decision.action]} · ${decision.decided_at}\n${decision.comment || '(no comment)'}\nBatch: ${decision.batch_id}`, 'history'));
+    root.append(raw);
   }
   function saveDraft() {
     if (!activeId || !$('comment')) return;
@@ -212,7 +247,7 @@
     const batch = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     feed = applyDecision(feed, ids, action, comment, now, batch);
     for (const id of ids) delete drafts[id];
-    dirty = true; exportStamp = ''; selected.clear(); persist(); render(); message(`Recorded ${labels[action].toLowerCase()} for ${ids.length} item${ids.length === 1 ? '' : 's'}. Nothing was executed. Undo is available.`);
+    dirty = true; exportStamp = ''; selected.clear(); persist(); render(); $('detail').focus({ preventScroll: true }); message(`Recorded ${labels[action].toLowerCase()} for ${ids.length} item${ids.length === 1 ? '' : 's'}. Nothing was executed. Undo is available.`);
   }
   function prepareBatch() {
     const ids = [...selected]; const action = $('bulk-action').value; const comment = $('bulk-comment').value;
@@ -252,26 +287,26 @@
   for (const name of ['search', 'kind', 'group', 'recommendation', 'status']) $(name).addEventListener(name === 'search' ? 'input' : 'change', () => { selected.clear(); render(); });
   $('select-visible').addEventListener('change', () => { const checked = $('select-visible').checked; selected = checked ? new Set(visibleItems().filter((item) => !isLocked(item)).map((item) => item.id)) : new Set(); renderList(); renderBulk(); });
   $('clear-selection').addEventListener('click', () => { selected.clear(); renderList(); renderBulk(); });
+  $('bulk-action').addEventListener('change', renderBulk);
   $('bulk-apply').addEventListener('click', guarded(prepareBatch));
   $('cancel-bulk').addEventListener('click', () => { pendingBatch = null; $('confirm-dialog').close(); });
   $('confirm-dialog').addEventListener('cancel', () => { pendingBatch = null; });
   $('confirm-bulk').addEventListener('click', guarded(() => {
     if (!pendingBatch) return;
-    const { ids, action, comment } = pendingBatch; decide(ids, action, comment); pendingBatch = null; $('bulk-comment').value = ''; $('confirm-dialog').close();
+    const { ids, action, comment } = pendingBatch; decide(ids, action, comment); pendingBatch = null; $('bulk-comment').value = ''; $('confirm-dialog').close(); $('detail').focus({ preventScroll: true });
   }));
   $('undo').addEventListener('click', guarded(() => { feed = undoLast(feed); dirty = true; exportStamp = ''; selected.clear(); persist(); render(); message('Undid the last recorded batch. Previously exported files are unchanged: export a replacement and do not execute the old one.'); }));
   $('export-json').addEventListener('click', guarded(() => download('json')));
   $('export-markdown').addEventListener('click', guarded(() => download('markdown')));
   window.addEventListener('beforeunload', (event) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
   document.addEventListener('keydown', guarded((event) => {
-    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.repeat || $('confirm-dialog').open) return;
-    if (event.target.closest('input,textarea,select,[contenteditable="true"]')) return;
-    if (event.key === ' ' && event.target.closest('button,a')) return;
+    if (!feed || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.repeat || event.isComposing || $('confirm-dialog').open) return;
+    if (!(event.target instanceof Element) || event.target.closest('input,textarea,select,button,a,summary,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
     const items = visibleItems(); const index = items.findIndex((item) => item.id === activeId);
     if (event.key === 'j' || event.key === 'k') {
       event.preventDefault(); if (!items.length) return;
       activeId = items[Math.max(0, Math.min(items.length - 1, index + (event.key === 'j' ? 1 : -1)))].id;
-      renderList(); renderDetail(); $('list').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+      renderList(); renderDetail(); $('detail').focus({ preventScroll: true }); $('list').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
     } else if (event.key === ' ' && activeId) {
       event.preventDefault(); if (isLocked(items[index])) { message('Not yours to act on. This item is read-only.'); return; }
       selected.has(activeId) ? selected.delete(activeId) : selected.add(activeId); renderList(); renderBulk();

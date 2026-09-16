@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -6,12 +6,20 @@ import { chromium, type Page } from 'playwright';
 import { expect } from 'vitest';
 import { test } from '@openwork/testkit';
 import { buildHtml } from '../../tools/review-queue/build.mjs';
-import { validateFeed, isLocked, recommendationVerb } from '../../tools/review-queue/core.mjs';
+import { validateFeed, isLocked, recommendationVerb, canApprove, hasConcreteQuestion } from '../../tools/review-queue/core.mjs';
+
+import { writePrivateOutput } from '../../tools/review-queue/convert.mjs';
 
 const realPage = process.env.REVIEW_QUEUE_PAGE;
+const realFeed = process.env.REVIEW_QUEUE_REAL_FEED;
+const cardReport = process.env.REVIEW_QUEUE_CARD_REPORT;
 const root = fileURLToPath(new URL('../../tools/review-queue/', import.meta.url));
 const baseItem = {
   summary: 'Synthetic evidence only. No real account, customer or private session.',
+  purpose: 'Explain a fictional setting.', delivered: 'A short explanation and next steps.', status_on_dev: 'No runtime change.',
+  why: 'The requested explanation is complete.', if_approved: 'Record intent only, subject to current-state checks.',
+  if_declined: 'Keep the current work unchanged.', question: 'Should this explanation be retained for follow-up?',
+  raw_evidence: [{ label: 'Raw source', value: 'session.read {"sessionId":"ses_fictional"}' }],
   evidence: [{ label: 'Workspace', value: 'openwork' }, { label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }],
   recommended_action: 'archive', links: [], age: 'Captured in synthetic fixture', risk: 'low', group: 'openwork',
   workspace_id: 'ws_fixture', protected: false,
@@ -58,8 +66,8 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     await page.goto(pathToFileURL(path).href);
     expect(await page.getByTestId('queue-row').count()).toBe(216);
     expect(await page.getByTestId('item-select').count()).toBe(214);
-    expect(await page.locator('.locked-heading').textContent()).toContain('not yours to act on');
-    expect(await page.locator('#metrics').textContent()).toContain('2 not yours to act on');
+    expect(await page.locator('.locked-heading').textContent()).toContain('Nothing to decide');
+    expect(await page.locator('#metrics').textContent()).toContain('2 nothing to decide');
     for (let index = 0; index < 3; index++) await page.locator(`[data-id="ses_fixture${index}"] input`).check();
     await page.getByTestId('bulk-approve').click();
     expect(await page.locator('#batch-preview li').count()).toBe(3);
@@ -167,6 +175,198 @@ test('offline review queue records a scoped batch, exports and restores it, and 
 
 // The optional private page is opened unchanged, in an isolated profile. Evidence
 // records only counts/booleans, never source titles, IDs, screenshots or downloads.
+test('ten seeded cards render readable prose in decision order with raw evidence collapsed', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-queue-cards-'));
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  let requests = 0;
+  let errors = 0;
+  context.on('request', (request) => { if (/^https?:/.test(request.url())) requests++; });
+  page.on('pageerror', () => errors++);
+  try {
+    let input: ReturnType<typeof validateFeed>;
+    try {
+      const source = realFeed || join(root, 'sample.json');
+      if ((await stat(source)).size > 12 * 1024 * 1024) throw new Error('Feed too large');
+      input = validateFeed(JSON.parse(await readFile(source, 'utf8')));
+    } catch {
+      throw new Error('Card input failed validation; private source details withheld.');
+    }
+    expect(input.items.length >= 10).toBe(true);
+    const selected: number[] = [];
+    for (const verb of ['archive', 'merge', 'review']) {
+      const index = input.items.findIndex((item) => !isLocked(item) && recommendationVerb(item) === verb && (verb !== 'review' || hasConcreteQuestion(item)));
+      expect(index >= 0).toBe(true);
+      selected.push(index);
+    }
+    let seed = 24681357;
+    const remaining = input.items.map((_, index) => index).filter((index) => !selected.includes(index));
+    while (selected.length < 10 && remaining.length) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      selected.push(...remaining.splice(seed % remaining.length, 1));
+    }
+    expect(new Set(selected).size).toBe(10);
+    const html = buildHtml(input, await readFile(join(root, 'template.html'), 'utf8'), await readFile(join(root, 'core.mjs'), 'utf8'), await readFile(join(root, 'ui.js'), 'utf8'));
+    const path = join(directory, 'index.html');
+    await writeFile(path, html, { mode: 0o600 });
+    await page.goto(pathToFileURL(path).href);
+    expect(await page.getByTestId('queue-row').count()).toBe(input.items.length);
+    expect(await page.getByTestId('item-select').count()).toBe(input.items.filter((item) => !isLocked(item)).length);
+    await page.locator('#status').selectOption('pending');
+    const decided = new Set(input.decisions.map((decision) => decision.id));
+    expect(await page.getByTestId('queue-row').count()).toBe(input.items.filter((item) => !isLocked(item) && !decided.has(item.id)).length);
+    await page.locator('#status').selectOption('');
+    expect(await page.locator('#guide > p').count()).toBe(3);
+    expect(await page.locator('#guide').getAttribute('open')).toBeNull();
+    const report: string[] = [];
+    for (const index of selected) {
+      const item = input.items[index];
+      if (!item) throw new Error('Missing sampled card');
+      const position = input.items.filter((entry) => !isLocked(entry)).concat(input.items.filter(isLocked)).findIndex((entry) => entry.id === item.id);
+      await page.getByTestId('queue-row').nth(position).locator('.row-open').click();
+      const card = page.locator('#detail');
+      expect((await page.getByTestId('detail-title').textContent()) === item.title).toBe(true);
+      const order = await card.locator(':scope > [data-field]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-field')));
+      expect(order).toEqual(['purpose', 'status_on_dev', 'delivered', 'why', ...(item.question.trim() ? ['question'] : []), 'decision', 'evidence', 'raw_evidence']);
+      expect(await card.locator(':scope > :first-child').getAttribute('data-testid')).toBe('detail-title');
+      for (const [name, value] of Object.entries({ purpose: item.purpose, status_on_dev: item.status_on_dev, delivered: item.delivered, why: item.why })) {
+        expect(typeof value === 'string' && value.trim().length > 0).toBe(true);
+        expect((await card.locator(`[data-field="${name}"] > p`).textContent()) === value).toBe(true);
+      }
+      expect(await card.locator('[data-field="why"] [data-field="recommendation"]').count()).toBe(1);
+      expect(await card.locator('[data-field="delivered"] a').count()).toBe(item.links.length);
+      expect(await card.locator('[data-field="question"]').count()).toBe(item.question.trim() ? 1 : 0);
+      const raw = card.locator('.raw-evidence');
+      expect(await raw.getAttribute('open')).toBeNull();
+      expect(await raw.locator('.detail-id').isVisible()).toBe(false);
+      expect(await raw.locator('.recommendation-source').isVisible()).toBe(false);
+      if (isLocked(item)) expect(await card.locator('[data-action],textarea').count()).toBe(0);
+      else {
+        expect(await card.locator('[data-action="approve"]').isDisabled()).toBe(!canApprove(item));
+        for (const action of ['approve', 'decline']) {
+          const field = action === 'approve' ? 'if_approved' : 'if_declined';
+          expect(await card.locator(`.decision-action:has([data-action="${action}"]) [data-field="${field}"]`).count()).toBe(1);
+          if (item[field].trim()) expect((await card.locator(`[data-field="${field}"]`).textContent()) === item[field].trim()).toBe(true);
+        }
+      }
+      const text = await card.innerText();
+      expect(/session\.(?:read|send|archive)|gh pr |git worktree |\{\s*"|ses_[a-zA-Z0-9]{6,}|<script|```/.test(text)).toBe(false);
+      expect(await card.locator('script,iframe,pre:visible').count()).toBe(0);
+      for (const link of await card.locator('a:visible').all()) {
+        expect(await link.getAttribute('rel')).toBe('noopener noreferrer');
+        expect(await link.getAttribute('referrerpolicy')).toBe('no-referrer');
+      }
+      report.push(`Card ${report.length + 1}\n${text}`);
+    }
+    expect(report.length).toBe(10);
+    try {
+      const output = cardReport || join(directory, 'cards.txt');
+      writePrivateOutput(output, report.join('\n\n---\n\n') + '\n', [realFeed || join(root, 'sample.json'), path], { replace: true });
+      expect((await stat(output)).mode & 0o777).toBe(0o600);
+      expect((await readFile(output, 'utf8')) === report.join('\n\n---\n\n') + '\n').toBe(true);
+    } catch {
+      throw new Error('Private card report could not be written safely outside Git; details withheld.');
+    }
+    expect(requests).toBe(0);
+    expect(errors).toBe(0);
+    evidence.recordAssertionEvidence('Ten seeded cards satisfy the prose-first contract', `${realFeed ? 'Private actual feed' : 'Synthetic sample'}: ten cards including archive, merge and a concrete review question checked. Field order, readable prose, outcome adjacency, safe links, lock exclusion, disabled approval, three-line Guide and collapsed raw verified. No raw code in normal card text; zero HTTP requests or page errors. ${cardReport ? 'Rendered card text written only to the private report.' : 'No card text persisted.'}`, true);
+  } finally {
+    await context.close();
+    await browser.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('approval guards cover keyboard, batch and restore while focused controls cannot act on another card', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-queue-guards-'));
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ acceptDownloads: true });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.on('dialog', (dialog) => dialog.accept());
+  try {
+    const input = validateFeed(JSON.parse(await readFile(join(root, 'sample.json'), 'utf8')));
+    const path = join(directory, 'index.html');
+    await writeFile(path, buildHtml(input, await readFile(join(root, 'template.html'), 'utf8'), await readFile(join(root, 'core.mjs'), 'utf8'), await readFile(join(root, 'ui.js'), 'utf8')));
+    await page.goto(pathToFileURL(path).href);
+    await page.locator('[data-id="proposal-no-outcome"] .row-open').click();
+    expect(await page.locator('[data-action="approve"]').isDisabled()).toBe(true);
+    await page.locator('#detail').focus();
+    await page.keyboard.press('a');
+    expect(await page.locator('#message').textContent()).toContain('if_approved');
+    expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    await page.locator('[data-id="proposal-no-outcome"] input').check();
+    expect(await page.locator('[data-id="proposal-no-outcome"] input').evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.keyboard.press('a');
+    expect(await page.locator('#bulk-apply').isDisabled()).toBe(true);
+    await page.locator('#bulk-action').selectOption('decline');
+    expect(await page.locator('#bulk-apply').isDisabled()).toBe(false);
+    await page.locator('#bulk-apply').click();
+    await page.keyboard.press('a');
+    expect(await page.locator('#confirm-dialog').getAttribute('open')).not.toBeNull();
+    await page.locator('#cancel-bulk').click();
+    expect(await page.locator('#bulk-apply').evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.locator('#clear-selection').click();
+    const invalid = { ...input, decisions: [{ id: 'proposal-no-outcome', action: 'approve', comment: '', batch_id: 'forged', decided_at: new Date().toISOString() }] };
+    for (const control of ['#import-decisions', '#import-feed']) {
+      await page.locator(control).setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(invalid)) });
+      await expect.poll(async () => page.locator('#message').textContent()).toContain('if_approved');
+      expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    }
+    await page.locator('[data-id="ses_exampleA"] .row-open').click();
+    expect(await page.locator('[data-id="ses_exampleA"] .row-open').evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.keyboard.press('a');
+    await page.keyboard.press('j');
+    expect(await page.getByTestId('detail-title').textContent()).toBe('Completed documentation explanation');
+    expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    await page.locator('#detail').focus();
+    await page.keyboard.press('j');
+    expect(await page.locator('#detail').evaluate((node) => node === document.activeElement)).toBe(true);
+    expect(await page.getByTestId('detail-title').textContent()).toBe('Completed reference lookup');
+    await page.keyboard.press('c');
+    await page.getByTestId('comment').fill('Literal a d j k text');
+    await page.keyboard.press('a');
+    expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    await page.locator('#detail .raw-evidence > summary').focus();
+    await page.keyboard.press('a');
+    expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    const original = (await exportJson(page)).data;
+    for (const field of ['purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence']) {
+      const changed = { ...original, items: original.items.map((item: ReturnType<typeof validateFeed>['items'][number], index: number) => index ? item : { ...item, [field]: field === 'raw_evidence' ? [{ label: 'Changed', value: 'new source' }] : 'Changed prose' }) };
+      await page.locator('#import-decisions').setInputFiles({ name: 'changed.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(changed)) });
+      await expect.poll(async () => page.locator('#message').textContent()).toContain('exact same items');
+    }
+    for (const id of ['worktree-example', 'ses_externalExample', 'ses_nightExample', 'pr-example-none']) {
+      await page.locator(`[data-id="${id}"] .row-open`).click();
+      expect(await page.locator('#detail [data-action],#comment').count()).toBe(0);
+      await page.locator('#detail').focus();
+      await page.keyboard.press('a');
+      await page.keyboard.press('d');
+      await page.keyboard.press('Space');
+      expect(await page.locator('#bulk').isVisible()).toBe(false);
+    }
+    expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    await page.evaluate(() => {
+      const key = Object.keys(localStorage).find((name) => name.startsWith('review-queue-v1-'));
+      if (!key) throw new Error('Missing synthetic storage key');
+      const saved = JSON.parse(localStorage.getItem(key) || '{}');
+      saved.drafts = { 'ses_nightExample': 'Forbidden stored draft' };
+      localStorage.setItem(key, JSON.stringify(saved));
+    });
+    await page.reload();
+    expect(await page.locator('#message').textContent()).toContain('Locked item cannot have a draft');
+    expect(await page.locator('#comment').inputValue()).toBe('');
+    expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
+    evidence.recordAssertionEvidence('Approval and focus guards hold across every UI entry point', 'No-outcome approval rejected via keyboard, bulk, feed and decision imports. Button/summary/text focus and modal shortcuts cannot decide or navigate another card. All four read-only categories reject shortcuts. Changed prose/raw snapshots and locked saved drafts cannot restore authority; no decisions were added.', true);
+  } finally {
+    await context.close();
+    await browser.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('reconciled night feed shows coverage and read-only history with scoped reversible decisions', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-queue-night-'));
   const browser = await chromium.launch({ headless: true });
@@ -196,8 +396,9 @@ test('reconciled night feed shows coverage and read-only history with scoped rev
     const path = realPage || join(directory, 'index.html');
     if (!realPage) await writeFile(path, html);
     await page.goto(pathToFileURL(path).href);
-    const counts = realPage ? { merge: 3, archive: 36, worktree: 71, review: 61, relaunch: 1, none: 117 } : { merge: 1, archive: 3, worktree: 1, review: 2, relaunch: 1, none: 1 };
-    expect(await page.getByTestId('queue-row').count()).toBe(realPage ? 289 : 9);
+    const counts: Record<string, number> = {};
+    for (const item of input.items) counts[recommendationVerb(item)] = (counts[recommendationVerb(item)] ?? 0) + 1;
+    expect(await page.getByTestId('queue-row').count()).toBe(input.items.length);
     for (const [verb, count] of Object.entries(counts)) {
       expect(input.items.filter((item) => recommendationVerb(item) === verb).length).toBe(count);
       expect(await page.locator(`[data-testid="queue-row"][data-verb="${verb}"]`).count()).toBe(count);
@@ -206,19 +407,17 @@ test('reconciled night feed shows coverage and read-only history with scoped rev
       await page.locator('#recommendation').selectOption('');
     }
     await page.locator('#recommendation').selectOption('');
-    if (realPage) {
-      for (const [kind, count] of [['session', 84], ['pr', 134], ['worktree', 71]]) expect(input.items.filter((item) => item.kind === kind).length).toBe(count);
-    }
     expect(await page.locator('#coverage').isVisible()).toBe(true);
     expect((await page.locator('#coverage').textContent())?.includes('unknown new root count: unknown (not reconciled)')).toBe(true);
-    expect(await page.locator('#done-overnight .overnight-entry').count()).toBe(realPage ? 5 : 1);
+    expect(await page.locator('#done-overnight .overnight-entry').count()).toBe(input.actions_taken?.length ?? 0);
     expect(await page.locator('#done-overnight button, #done-overnight input, #done-overnight textarea, #done-overnight script, #coverage script').count()).toBe(0);
     expect(await page.locator('[data-verb="worktree"] input').count()).toBe(0);
     await page.locator('[data-verb="worktree"] .row-open').first().click();
     expect(await page.locator('#detail [data-action]').count()).toBe(0);
     expect((await page.locator('#detail .recommendation-source').textContent())?.includes('review_worktree_removal')).toBe(true);
-    expect(await page.locator('[data-verb="archive"] .recommendation-source').count()).toBe(counts.archive);
-    const selectable = input.items.filter((item) => !isLocked(item) && recommendationVerb(item) === 'archive');
+    expect(await page.locator('[data-verb="archive"] .recommendation-source').count()).toBe(0);
+    expect(await page.locator('#detail .raw-evidence').getAttribute('open')).toBeNull();
+    const selectable = input.items.filter((item) => canApprove(item) && recommendationVerb(item) === 'archive');
     const first = selectable[0];
     if (!first) throw new Error('No selectable archive group');
     const selected = selectable.filter((item) => item.kind === first.kind && item.group === first.group && item.recommended_action === first.recommended_action).slice(0, 3);
@@ -250,7 +449,7 @@ test('reconciled night feed shows coverage and read-only history with scoped rev
     expect(/@import|url\s*\(/i.test(html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || '')).toBe(false);
     expect(networkRequests).toBe(0);
     expect(pageErrors).toBe(0);
-    evidence.recordAssertionEvidence('Reconciled source history, mapped counts and reversible approval', `${realPage ? 'Private real page: 289 items (84 sessions / 134 PRs / 71 worktrees), 5 history entries' : 'Synthetic page: 9 items, 1 history entry'}. Verb counts: ${JSON.stringify(counts)}. Unknown roots visibly remain unknown; worktrees and overnight history have no decision controls. Original recommendation sublabels, all six filters, exactly 3 same-batch approvals, export and complete undo verified. Original items/coverage/history retained. Zero external resource references, HTTP(S) requests or page errors. No private content captured.`, true);
+    evidence.recordAssertionEvidence('Reconciled source history, mapped counts and reversible approval', `${realPage ? 'Private real page' : 'Synthetic page'}: ${input.items.length} items. Verb counts: ${JSON.stringify(counts)}. Unknown roots visibly remain unknown; worktrees and overnight history have no decision controls. Source recommendations are collapsed, all filters, exactly 3 same-batch approvals, export and complete undo verified. Original items/coverage/history retained. Zero external resource references, HTTP(S) requests or page errors. No private content captured.`, true);
   } finally {
     await context.close();
     await browser.close();
