@@ -4,7 +4,7 @@ import { describeSkippedProvider, type DenSession } from "@/lib/den";
 import { carryVariant, describeModelPick, describeModelPreview, previewAutomaticChoice, resolveModelPreview, type ModelChoicePreview, type ModelMode } from "@/lib/model-choice";
 import { effortStopLabel } from "@/lib/effort";
 import { DEFAULT_MODEL_DEFAULTS, type ModelPurpose } from "@/lib/model-defaults";
-import { chooseIndexedModel, MODEL_INTELLIGENCE_INDEX, type ModelSelectionPreferences } from "@/lib/model-intelligence";
+import { chooseIndexedModel, matchesModelSearch, MODEL_INTELLIGENCE_INDEX, type ModelSelectionPreferences } from "@/lib/model-intelligence";
 import {
   createCoworkerThreads,
   modelOriginLabel,
@@ -24,8 +24,8 @@ export const AUTOMATIC_BLURB = "Picks a quick, standard, or deep model for each 
 
 function selectedDescription(option: EngineModelOption | undefined, value: string): string {
   if (!value) return "Choose a connected model, or use the recommendation below.";
-  if (!option) return "This saved model is not currently available from a connected provider.";
-  return `${option.providerLabel} · ${option.modelId} · ${modelOriginLabel(option)}`;
+  if (!option) return "Saved model unavailable. Refresh the catalog or choose another model.";
+  return `${option.providerLabel} · ${modelOriginLabel(option)}`;
 }
 
 /**
@@ -43,7 +43,7 @@ export function describeAutomaticChoice(catalog: Pick<EngineModelCatalog, "model
   return parts.join(" · ");
 }
 
-function ModelFacts({ model }: { model: EngineModelOption | undefined }) {
+function ModelFacts({ model, savedId }: { model: EngineModelOption | undefined; savedId?: string }) {
   const facts = model?.intelligence;
   const fact = (value: boolean | null | undefined) => value == null ? "Unknown" : value ? "Yes" : "No";
   const number = (value: number | null | undefined) => value == null ? "Unknown" : String(value);
@@ -51,7 +51,7 @@ function ModelFacts({ model }: { model: EngineModelOption | undefined }) {
   const adapter = MODEL_INTELLIGENCE_INDEX.adapters.find((entry) => entry.npm === facts?.adapterNpm);
   return (
     <div className="space-y-2 break-words text-[11px] leading-relaxed text-mist" data-testid="model-intelligence-facts">
-      <p className="select-text font-mono text-snow">{model?.id ?? "No catalog model to inspect"}</p>
+      <p className="select-text font-mono text-snow">{model?.id || savedId || "No catalog model to inspect"}</p>
       <p>Source: {facts?.provenance ?? "Unknown"}. Status: {facts?.status ?? "Unknown"}.</p>
       <p>Tools: {fact(facts?.tools)}. Reasoning: {fact(facts?.reasoning)}.</p>
       <p>Input modalities: {facts ? Object.entries(facts.input).map(([key, value]) => `${key}: ${fact(value)}`).join("; ") : "Unknown"}.</p>
@@ -182,11 +182,7 @@ export function ModelPicker({
   const selected = catalog.models.find((option) => option.id === value && (!workerModel || (option.toolCall && option.status !== "deprecated")));
   const visible = catalog.models.filter((option) => {
     if (workerModel && (!option.toolCall || option.status === "deprecated")) return false;
-    const needle = query.trim().toLowerCase();
-    if (!needle) return true;
-    return `${option.providerLabel} ${option.providerId} ${option.modelLabel} ${option.modelId} ${option.family}`
-      .toLowerCase()
-      .includes(needle);
+    return matchesModelSearch(option, query);
   });
   const groups = Array.from(
     visible.reduce((byProvider, option) => {
@@ -218,6 +214,7 @@ export function ModelPicker({
     ? resolveModelPreview(catalog, "conversation", DEFAULT_MODEL_DEFAULTS, { ...coworker, model: value, modelVariant, modelMode, useAppModelDefaults: false })
     : undefined);
   const previewPending = loading || previewLoading;
+  const availabilityUnverified = !selected && (previewPending || currentPreview?.state === "context");
   const currentDescription = previewPending ? "Reading current model choice..." : describeModelPreview(currentPreview);
   const inspected = inspectedId ? catalog.models.find((model) => model.id === inspectedId)
     : showPreview && currentPreview?.state === "ready" ? currentPreview.model : selected;
@@ -250,14 +247,14 @@ export function ModelPicker({
         aria-expanded={open}
       >
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-line bg-ink">
-          <StatusDot tone={showPreview ? previewPending || currentPreview?.state === "context" ? "mist" : currentPreview?.state === "ready" ? "mint" : "amber" : selected ? "mint" : "amber"} />
+          <StatusDot tone={showPreview ? previewPending || currentPreview?.state === "context" ? "mist" : currentPreview?.state === "ready" ? "mint" : "amber" : availabilityUnverified ? "mist" : selected ? "mint" : "amber"} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block break-words text-xs font-semibold text-snow" data-testid="model-picker-current">
-            {automatic ? AUTOMATIC_LABEL : allowsDefault && !value ? defaultLabel : selected?.modelLabel || value || "Choose a model"}
+            {automatic ? AUTOMATIC_LABEL : allowsDefault && !value ? defaultLabel : selected?.modelLabel || (value ? "Saved model" : "Choose a model")}
           </span>
           <span className="mt-0.5 block break-words text-[11px] leading-relaxed text-mist" data-testid="model-picker-current-detail">
-            {showPreview ? currentDescription : selectedDescription(selected, value)}
+            {showPreview || availabilityUnverified ? currentDescription : selectedDescription(selected, value)}
           </span>
         </span>
         <span className="text-xs text-mist" aria-hidden="true">{open ? "⌃" : "⌄"}</span>
@@ -291,7 +288,7 @@ export function ModelPicker({
             {inspectedId && !inspected ? <option value={inspectedId}>{inspectedId} (unavailable)</option> : null}
           </select>
           <p>Inspection does not change your model. Only the connected catalog supplies choices; registry entries are non-exhaustive documentation, not authorization.</p>
-          <ModelFacts model={inspected} />
+          <ModelFacts model={inspected} savedId={inspectedId || value} />
           <details>
             <summary className="cursor-pointer">Selection policy {MODEL_INTELLIGENCE_INDEX.version} / reviewed {MODEL_INTELLIGENCE_INDEX.reviewedAt}</summary>
             <div className="mt-2 space-y-2">
@@ -345,9 +342,9 @@ export function ModelPicker({
               </span>
             </button>
 
-            {value && !selected ? (
+            {value && !selected && !availabilityUnverified ? (
               <div className="mt-1 break-words rounded-xl bg-amber/8 px-2.5 py-2 text-[11px] leading-relaxed text-amber" data-testid="model-unavailable">
-                Saved selection {value} is unavailable. {allowsDefault ? "Choose a connected model or return to the default. This explicit choice is not replaced automatically." : "Choose a connected model or use the recommendation."}
+                Your saved model is unavailable. {allowsDefault ? "Choose a connected model or return to the default. This explicit choice is not replaced automatically." : "Choose a connected model or use the recommendation."}
               </div>
             ) : null}
 
@@ -382,6 +379,10 @@ export function ModelPicker({
               </div>
             ))}
 
+            {query.trim() && !loading && catalog.models.length > 0 && visible.length === 0 ? (
+              <p className="p-3 text-xs text-mist" role="status">No connected models match this search. <button type="button" className="font-medium text-spark hover:underline" onClick={() => setQuery("")}>Clear search</button></p>
+            ) : null}
+
             {skipped.length > 0 ? (
               <div className="mt-2 border-t border-line pt-2" data-testid="model-skipped-providers">
                 <p className="px-2 pb-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-mist">Granted, not usable here yet</p>
@@ -399,7 +400,7 @@ export function ModelPicker({
 
             {!loading && runtime.engineManaged && catalog.models.length === 0 ? (
               <p className="p-3 text-xs leading-relaxed text-mist">
-                The connected model catalog is not available here yet. Refresh after a coworker workspace and provider are ready.{allowsDefault ? " You can still choose the default now." : ""}
+                No connected models are listed yet. Refresh the catalog or manage your AI connections.{allowsDefault ? " Your saved choices are kept." : ""}
               </p>
             ) : null}
             {!runtime.engineManaged ? (
@@ -418,7 +419,7 @@ export function ModelPicker({
             onChange={(event) => onChange({ model: value, modelVariant: event.target.value, modelMode })}
           >
             <option value="">{defaultPurpose ? "Automatic effort for this role" : coworker ? `Follow effort setting · ${effortStopLabel(coworker.effortPreference)}` : "Model default effort"}</option>
-            {variantUnavailable ? <option value={modelVariant} disabled>{modelVariant} (not currently offered)</option> : null}
+            {variantUnavailable ? <option value={modelVariant} disabled>{modelVariant} ({availabilityUnverified ? "availability unverified" : "not currently offered"})</option> : null}
             {variants.map((variant) => (
               <option key={variant} value={variant}>{variant.slice(0, 1).toUpperCase() + variant.slice(1)}</option>
             ))}
@@ -426,7 +427,7 @@ export function ModelPicker({
           <p className="mt-1 text-[11px] leading-relaxed text-mist">{defaultPurpose
             ? variants.length ? "Automatic adapts effort to this role using the levels the model offers. A fixed level overrides it." : "No effort levels are listed for this model. Automatic uses its default when no levels are offered."
             : forWorker ? "Sets effort once when the Worker starts. A fixed level overrides the coworker's effort setting." : "Leave this on Follow effort setting to adapt to each task. A fixed level overrides that setting when supported."}</p>
-          {variantUnavailable ? <p className="mt-1 break-words text-[11px] leading-relaxed text-amber" role="status">Saved effort "{modelVariant}" is not offered in the current catalog. It is still saved, not Automatic. Refresh the catalog or choose a supported effort.</p> : null}
+          {variantUnavailable ? <p className="mt-1 break-words text-[11px] leading-relaxed text-amber" role="status">{availabilityUnverified ? `Saved effort "${modelVariant}" is kept; availability is unverified.` : `Saved effort "${modelVariant}" is not offered in the current catalog. It is still saved, not Automatic. Refresh the catalog or choose a supported effort.`}</p> : null}
         </Field>
       ) : null}
 

@@ -83,6 +83,15 @@ test("the facilitator uses a guarded quick policy unless the group or app pins i
   anchor.cost.output = 1;
   assert.equal(facilitatorModels(catalog, members).secondary, null, "a repair cannot go above the quick pick's known prices or cross providers");
   assert.deepEqual(facilitatorModels({ models: [] }, members), { primary: null, secondary: null });
+  const luna = model("ipr_fixture/gwm_luna", { upstreamModelId: "gpt-5.6-luna", source: "cloud", tier: "cloud", modelGroupId: "group", credentialSetId: "set", reasoning: true, variants: ["low", "high"], knownPrice: true, cost: { input: 2, output: 2 } });
+  const previous = { ...luna, id: "ipr_fixture/gwm_previous", modelId: "gwm_previous", upstreamModelId: "other-model", isProviderDefault: true, reasoning: false, variants: ["high"], cost: { input: 1, output: 1 } };
+  const connected = { models: [previous, luna] };
+  assert.deepEqual(facilitatorModels(connected, [{ model: previous.id }]), { primary: luna, secondary: previous }, "Luna is the initial role preference; only the repair keeps the primary's price caps");
+  assert.deepEqual(facilitatorModels(connected, [], previous.id), { primary: previous, secondary: null });
+  assert.deepEqual(facilitatorModels(connected, [], "", { model: previous.id, modelVariant: "high" }), { primary: previous, secondary: null });
+  assert.deepEqual(facilitatorModels(connected, [], "", { model: "", modelVariant: "low" }), { primary: luna, secondary: null }, "an automatic repair must also advertise the exact app effort");
+  assert.deepEqual(facilitatorModels(connected, [], "", { model: "", modelVariant: "missing" }), { primary: null, secondary: null });
+  assert.deepEqual(facilitatorModels({ models: [luna, { ...luna, id: "ipr_fixture/gwm_alternate", modelId: "gwm_alternate", upstreamModelId: "openai/gpt-5.6-luna", credentialSetId: "other" }] }, []), { primary: null, secondary: null }, "no member or explicit choice resolves ambiguous credentials");
 });
 
 test("a routing pass repairs once, then tries the next model once, then gives up quietly", async () => {

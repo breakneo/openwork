@@ -28,7 +28,9 @@ import {
 } from "@/lib/mcp";
 import {
   createCoworkerThreads,
-  createWorkspaceReadiness,
+  workspacePreparationScope,
+  workspaceReadinessCache,
+  projectWorkspaceReadiness,
   prepareCurrentWorkspace,
   WorkspaceChangedError,
   describeInteractions,
@@ -67,7 +69,7 @@ import { WorkerDecisionCards } from "@/ui/worker-decision";
 import { WorkersPanel } from "@/ui/workers";
 import { coworkerToolName } from "@/lib/coworker-tools";
 import { EXECUTION_KINDS, executionMetadata, executionState, safeWorkLabel, summarizeWorkerReceipt } from "@/lib/work-receipt";
-import { executionProgress, type ExecutionActivity } from "@/lib/progress-activity";
+import { executionProgress, pendingAdmissionState, type ExecutionActivity } from "@/lib/progress-activity";
 import { PROGRESS_LIMITS } from "@/lib/progress-config";
 import type { ProgressObservation } from "@/lib/progress-service";
 import { livePhase, phaseWord, safeLiveMarkdown, writingText, type LivePhase } from "@/lib/live-phase";
@@ -189,7 +191,7 @@ type PreparedVoiceDiscussion = { threadId: string; activation: VoiceActivation }
 type ActiveTurn = {
   messageId: string;
   prompt: string;
-  phase: "accepting" | "waiting";
+  phase: "preparing" | "accepting" | "waiting";
 };
 
 /** How a turn is (re)sent: a fresh message, or the same message id run again after a failure, a stop, or a cut-off. */
@@ -419,15 +421,22 @@ export function ThreadsPanel({
         : null,
     [runtime.serverUrl, runtime.ownerToken, coworker.workspaceId, coworker.model, coworker.modelVariant, discussionThreadId, discussionThreadIds, workerThreadIds],
   );
+  const [openThreadId, setOpenThreadId] = useState("");
   const [preparationAttempt, setPreparationAttempt] = useState(0);
-  const readiness = useMemo(() => createWorkspaceReadiness(async (signal) => {
+  const preparationOwner = openThreadId ? { ...coworker, useAppModelDefaults: false } : coworker;
+  const preparationScope = workspacePreparationScope(runtime, preparationOwner, session);
+  const readiness = useMemo(() => workspaceReadinessCache.get(preparationScope, async (signal) => {
     if (!runtime.engineManaged || !coworker.workspaceId || !runtime.readinessKey) throw new Error("AI is unavailable. Restart AI in Settings. Your draft is kept.");
-    const expected = { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey };
-    const prepared = await coworkerBridge.coworkers.ensureWorkspace(coworker.slug, expected);
+    const expected = { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey, workspaceRevision: runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0 };
+    const [prepared, settings] = await Promise.all([coworkerBridge.coworkers.ensureWorkspace(coworker.slug, expected), coworkerBridge.settings.get()]);
     signal.throwIfAborted();
-    if (prepared.readinessKey !== expected.readinessKey || prepared.workspaceId !== expected.workspaceId || prepared.createdAt !== expected.createdAt) throw new Error("The AI workspace changed. Retry preparation; your draft is kept.");
-    await createCoworkerThreads({ serverUrl: runtime.serverUrl, token: runtime.ownerToken, workspaceId: coworker.workspaceId, model: coworker.model, modelVariant: coworker.modelVariant }).prepare(signal);
-  }), [runtime.serverUrl, runtime.ownerToken, runtime.engineManaged, runtime.readinessKey, coworker.slug, coworker.createdAt, coworker.workspaceId, coworker.model, coworker.modelVariant, preparationAttempt]);
+    if (prepared.readinessKey !== expected.readinessKey || (prepared.workspaceRevision ?? 0) !== expected.workspaceRevision || prepared.workspaceId !== expected.workspaceId || prepared.createdAt !== expected.createdAt) throw new Error("The AI workspace changed. Retry preparation; your draft is kept.");
+    await createCoworkerThreads({ serverUrl: runtime.serverUrl, token: runtime.ownerToken, workspaceId: coworker.workspaceId }).prepare(signal, { coworker: preparationOwner, defaults: settings.modelDefaults });
+  }), [preparationScope.runtimeKey, preparationScope.workspaceKey, preparationScope.configurationKey, preparationAttempt]);
+  const retryPreparation = useCallback(() => {
+    workspaceReadinessCache.invalidate(preparationScope, readiness);
+    setPreparationAttempt((attempt) => attempt + 1);
+  }, [preparationScope.runtimeKey, preparationScope.workspaceKey, preparationScope.configurationKey, readiness]);
   const preparation = useSyncExternalStore(readiness.subscribe, readiness.snapshot);
   useEffect(() => { if (active) void readiness.wait().catch(() => undefined); }, [active, readiness]);
   useEffect(() => readiness.retain(), [readiness]);
@@ -435,21 +444,16 @@ export function ThreadsPanel({
   const currentReadiness = useRef(readiness);
   currentReadiness.current = readiness;
   const readinessScope = useRef<WorkspaceReadinessScope>({ readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "" } });
-  readinessScope.current = { readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "" } };
+  readinessScope.current = { readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "", workspaceRevision: runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0 } };
   const readReadiness = useCallback(() => readinessScope.current, []);
   const reportActivity = useCallback((activity: CoworkerActivity | null) => {
     if (currentReadiness.current !== readiness) return;
     latestActivity.current = activity;
     const current = readiness.snapshot();
-    onActivityChange(current.state === "ready" || (activity && ["Needs you", "Stopping...", "Stop not confirmed", "Checking confirmation", "Confirmation unavailable", "Awaiting reply"].includes(activity.label)) ? activity : {
-      state: current.state === "starting" ? "starting" : "offline",
-      label: current.state === "starting" ? "Starting AI" : "AI unavailable",
-      detail: current.error, updatedAt: 0,
-    });
+    onActivityChange(current.state === "ready" && !activity ? null : projectWorkspaceReadiness(activity, current));
   }, [onActivityChange, readiness]);
   useEffect(() => { if (active) reportActivity(latestActivity.current); }, [active, reportActivity, preparation]);
   const [discussions, setDiscussions] = useState<ThreadListItem[]>([]);
-  const [openThreadId, setOpenThreadId] = useState("");
   const [pendingAssignment, setPendingAssignment] = useState<AssignmentDraft>(assignmentDraft ?? null);
   const [queuedTurn, setQueuedTurn] = useState<QueuedTurn | null>(null);
   const [preparedVoice, setPreparedVoice] = useState<PreparedVoiceDiscussion | null>(null);
@@ -535,7 +539,7 @@ export function ThreadsPanel({
     void refresh();
     if (!threads) return;
     const unsubscribe = threads.subscribe(() => void refresh(), undefined, () => {
-      if (readiness.snapshot().state === "ready") setPreparationAttempt((attempt) => attempt + 1);
+      if (readiness.snapshot().state !== "starting") retryPreparation();
     });
     const timer = window.setInterval(() => void refresh(), failing ? 1_500 : 5_000);
     return () => {
@@ -544,7 +548,7 @@ export function ThreadsPanel({
       unsubscribe();
       window.clearInterval(timer);
     };
-  }, [failing, threads, refresh, readiness]);
+  }, [failing, threads, refresh, readiness, retryPreparation]);
 
   // The moment the AI service is back, drop any listing error it caused and re-read.
   useEffect(() => {
@@ -725,7 +729,7 @@ export function ThreadsPanel({
         headerSlots={headerSlots}
         problem={workspaceProblem}
         warmingUp={warmingUp}
-        onRetry={() => { setPreparationAttempt((attempt) => attempt + 1); void refresh(); }}
+        onRetry={() => { retryPreparation(); void refresh(); }}
         assignmentDraft={pendingAssignment}
         onStartDiscussion={async (draft, takeCurrentDraft, isCurrent, signal) => {
           const messageId = newMessageId();
@@ -1212,6 +1216,9 @@ function ThreadView({
   latestNativeState.current = nativeState;
   const [transcriptLoaded, setTranscriptLoaded] = useState(false);
   const [confirmationUnknown, setConfirmationUnknown] = useState<string | null>(null);
+  const [acceptedMessage, setAcceptedMessage] = useState<string | null>(null);
+  const [activeTurn, setActiveTurn] = useState<ActiveTurn | null>(null);
+  const activeTurnRef = useRef<ActiveTurn | null>(null);
   const [refusedMessage, setRefusedMessage] = useState<string | null>(null);
   const currentPreparation = useRef({ coworker, threads, session });
   currentPreparation.current = { coworker, threads, session };
@@ -1283,9 +1290,17 @@ function ThreadView({
   const executions = nativeActivity.scope === activityScope ? nativeActivity.executions : EMPTY_EXECUTIONS;
   const pendingAdmission = executions.find((entry) => entry.messageId === turnState.pending?.messageId);
   const pendingNativeOutcome = turnState.pending ? nativeState?.turnOutcomes[turnState.pending.messageId] : undefined;
-  const refusedAdmission = Boolean(turnState.pending && turnState.pending.stoppedAt === null && !pendingNativeOutcome && !pendingAdmission?.admission?.confirmed && (refusedMessage === turnState.pending.messageId || (pendingAdmission?.admission?.refusal && pendingAdmission.admission.refusal.notSubmitted !== true && pendingAdmission.admission.phase === "attempted")));
-  const unconfirmedAdmission = Boolean(turnState.pending && turnState.pending.stoppedAt === null && !pendingNativeOutcome && !refusedAdmission
-    && (confirmationUnknown === turnState.pending.messageId || (pendingAdmission?.admission?.phase === "attempted" && !pendingAdmission.admission.confirmed && !pendingAdmission.admission.refusal)));
+  const receiptObserved = Boolean(turnState.pending && nativeState?.inputSkills && Object.hasOwn(nativeState.inputSkills, turnState.pending.messageId) && !nativeState.ambiguousTurns.includes(turnState.pending.messageId));
+  const admissionState = turnState.pending && turnState.pending.stoppedAt === null && !pendingNativeOutcome ? pendingAdmissionState({
+    messageId: turnState.pending.messageId, execution: pendingAdmission, active: activeTurn,
+    confirmed: acceptedMessage === turnState.pending.messageId || receiptObserved,
+    unknown: confirmationUnknown === turnState.pending.messageId, refused: refusedMessage === turnState.pending.messageId,
+  }) : "none";
+  const refusedAdmission = admissionState === "refused";
+  const unconfirmedAdmission = admissionState === "unconfirmed";
+  const admissionInFlight = admissionState === "preparing" || admissionState === "sending";
+  const acceptedObservationUnavailable = admissionState === "accepted" && !["failed", "cancelled", "succeeded"].includes(pendingAdmission?.state ?? "")
+    && (engineStatus.type === "unknown" || pendingAdmission?.available === false || Boolean(readErrors.transcript || readErrors.activity));
   const admissionBlocked = useRef(false);
   const confirmationReading = useRef(false);
   admissionBlocked.current = unconfirmedAdmission || refusedAdmission;
@@ -1304,7 +1319,7 @@ function ThreadView({
       } catch {
         // An unavailable activity read cannot erase already observed work.
         if (!disposed) {
-          setNativeActivity((current) => ({ ...current, executions: current.executions.map((entry) => ({ ...entry, available: false })) }));
+          setNativeActivity((current) => ({ ...current, executions: current.executions.map((entry) => ({ ...entry, available: false, nativeStatus: "unknown", ...(entry.admission ? { admission: { ...entry.admission, inFlight: null } } : {}) })) }));
           setReadErrors((current) => ({ ...current, activity: "Activity could not be refreshed." }));
         }
       } finally { reading = false; }
@@ -1315,9 +1330,6 @@ function ThreadView({
   }, [activityScope, coworker.slug, threadId]);
   /** The pending turn was read back from disk: a quit or reload happened while it ran. */
   const [recovered, setRecovered] = useState(false);
-  /** The turn this view is driving right now; null between turns. */
-  const [activeTurn, setActiveTurn] = useState<ActiveTurn | null>(null);
-  const activeTurnRef = useRef<ActiveTurn | null>(null);
   /** A failure the app met itself, before or beside the engine: a model not connected, a refused send, a stalled retry. */
   const [failure, setFailure] = useState("");
   /** An automatic attempt scheduled after a transient failure, and the timer that fires it. */
@@ -1600,6 +1612,7 @@ function ThreadView({
     const attempt = send.mode === "retry" ? send.attempt : 0;
     let continued = false;
     let admissionAttempted = false;
+    let admissionConfirmed = false;
     const skillFields = selectionFields(send.skills ?? []);
     /**
      * When a model the app chose by itself cannot answer, move to the next
@@ -1659,7 +1672,7 @@ function ThreadView({
       }, delay);
       return true;
     };
-    const active: ActiveTurn = { messageId, prompt, phase: "accepting" };
+    const active: ActiveTurn = { messageId, prompt, phase: "preparing" };
     activeTurnRef.current = active;
     setActiveTurn(active);
     if (kind === "discussion" && !firstPromptRef.current && (!titleLoadedRef.current || title.trim() === defaultDiscussionTitle)) {
@@ -1684,7 +1697,7 @@ function ThreadView({
     commitTurnState((state) => beginPending(state, { messageId, prompt, startedAt: Date.now(), ...skillFields }));
     onActivityChange({
       state: "working",
-      label: "Working",
+      label: "Preparing",
       detail: kind === "discussion" ? "Replying in your discussion" : kind === "worker" ? workerNameFromTitle(title) : title,
       updatedAt: Date.now(),
       threadId,
@@ -1724,7 +1737,7 @@ function ThreadView({
         if (current.coworker.slug !== coworker.slug || current.coworker.createdAt !== coworker.createdAt) throw new WorkspaceChangedError("The coworker changed. Your draft is kept.");
         const selectionOwner = kind === "discussion" ? current.coworker : { ...current.coworker, useAppModelDefaults: false };
         const skillsReady = skillFields.skills?.length ? coworkerBridge.turns.validateSkills(coworker.slug, skillFields) : Promise.resolve();
-        const [catalog, settings] = await Promise.all([current.threads.listModelCatalog(), coworkerBridge.settings.get(), skillsReady]);
+        const [catalog, settings] = await Promise.all([current.threads.listModelCatalog(signal), coworkerBridge.settings.get(), skillsReady]);
         signal.throwIfAborted();
         const inherited = usesAppConversationDefault(selectionOwner);
         const modelDefaults = settings.modelDefaults;
@@ -1751,6 +1764,9 @@ function ThreadView({
         if (selection.automatic && turnModelId !== prepared.value.standardId) markAutoPicked(coworker.slug, turnModelId);
         prepared.assertCurrent();
       }
+      const sending: ActiveTurn = { messageId, prompt, phase: "accepting" };
+      activeTurnRef.current = sending;
+      setActiveTurn(sending);
       admissionAttempted = true;
       const acceptance = await coworkerBridge.turns.send({ slug: coworker.slug, threadId, kind, prompt, messageId, ...skillFields, model: turnModel, expectedReadiness: prepared?.expected, retry: send.mode === "retry", retryByPerson: send.mode === "retry" && send.byPerson === true, retryLabel: send.mode === "retry" ? send.switchedTo : undefined });
       if (acceptance.rejected) {
@@ -1774,6 +1790,8 @@ function ThreadView({
         void refresh();
         return;
       }
+      admissionConfirmed = true;
+      setAcceptedMessage(acceptance.messageId || messageId);
       setRefusedMessage(null);
       setConfirmationUnknown(null);
       if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
@@ -1860,6 +1878,11 @@ function ThreadView({
         if (send.submission) composerDraftStore.finishSubmission(send.submission, true);
         setFailure(""); setError("");
         commitTurnState((state) => state.pending?.messageId === messageId ? clearPending(state) : state);
+      } else if (admissionConfirmed) {
+        setConfirmationUnknown(null);
+        setEngineStatus({ type: "unknown" });
+        setReadErrors((current) => ({ ...current, transcript: "Message accepted. Its activity could not be refreshed; shown messages and queued work are kept." }));
+        void refresh();
       } else if (!admissionAttempted) {
         if (cause instanceof WorkspaceChangedError) {
           setError(message);
@@ -1875,7 +1898,7 @@ function ThreadView({
     } finally {
       if (!voiceIntent?.admitted && !voiceFollowup) voiceRef.current?.abandonReply(voiceIntent);
       if (send.submission && !voiceFollowup) {
-        try { composerDraftStore.finishSubmission(send.submission, admissionAttempted ? "uncertain" : false); }
+        try { composerDraftStore.finishSubmission(send.submission, admissionConfirmed ? true : admissionAttempted ? "uncertain" : false); }
         catch (cause) { setError(`Your recorded message is kept; its draft could not be restored: ${cause instanceof Error ? cause.message : String(cause)}`); }
       }
       if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
@@ -2089,7 +2112,7 @@ function ThreadView({
     if (!viewMounted.current || admissionBlocked.current || threadStop(stopScope) || !message || JSON.stringify(message) !== JSON.stringify(requested)) return;
     jumpToLatest();
     voice.stop("");
-    if (activeTurnRef.current || appRetry || engineRunning) {
+    if (activeTurnRef.current || appRetry || engineRunning || acceptedObservationUnavailable) {
       if (!await stop()) return;
       await untilTurnReleased();
     }
@@ -2146,7 +2169,7 @@ function ThreadView({
       if (!cancelled.ok) throw new Error("Cancellation was not confirmed. Try Stop again before continuing.");
       await threads.client.abortThread(threadId, { signal: AbortSignal.timeout(10_000) });
       // The message may still be on its way to the engine's run; keep the stop in force until the turn has ended.
-      if (activeTurnRef.current?.phase !== "accepting") await abortUntilQuiet(messageId);
+      if (activeTurnRef.current?.phase !== "accepting" && activeTurnRef.current?.phase !== "preparing") await abortUntilQuiet(messageId);
       await untilTurnReleased();
       if (activeTurnRef.current) throw new Error("The pending send has not finished stopping. Try Stop again before continuing.");
       const result = await threads.client.waitUntilIdle(threadId, { timeoutMs: 10_000, pollIntervalMs: 300, signal: AbortSignal.timeout(10_000) });
@@ -2220,21 +2243,25 @@ function ThreadView({
   const rawOutcome = deriveTurnOutcome({
     coworkerName: coworker.name,
     now,
-    turn: pendingTurn ? { ...pendingTurn, recovered } : null,
+    turn: pendingTurn ? { ...pendingTurn, recovered: recovered && !admissionInFlight } : null,
     engine: engineStatus,
     reply: pendingReply,
     needsYou,
-    failure: pendingNativeOutcome === "succeeded" ? "" : failure || (refusedAdmission ? pendingAdmission?.failure ?? "The native request was refused. Stop to confirm earlier work is clear before sending another request." : ""),
+    failure: pendingNativeOutcome === "succeeded" ? "" : failure || (pendingAdmission?.state === "failed" && admissionState === "accepted" ? pendingAdmission.failure : "") || (refusedAdmission ? pendingAdmission?.failure ?? "The native request was refused. Stop to confirm earlier work is clear before sending another request." : ""),
     appRetry,
-    attemptActive: activeTurn !== null,
+    attemptActive: activeTurn !== null || admissionInFlight,
     waitBudgetMs: WAIT_BUDGET_MS,
     signedIn: session !== null,
     recommendedModel: recommendedModel?.modelLabel ?? "",
   });
-  const needsContinuation = pendingTurn && (nativeState?.pendingInputIds.includes(pendingTurn.messageId) || messages.some((message) => message.id === pendingTurn.messageId || message.parentId === pendingTurn.messageId));
-  const receiptObserved = Boolean(pendingTurn && nativeState?.inputSkills && Object.hasOwn(nativeState.inputSkills, pendingTurn.messageId) && !nativeState.ambiguousTurns.includes(pendingTurn.messageId));
-  const awaitingReplyConfirmation = unconfirmedAdmission && receiptObserved;
-  const confirmationLabel = awaitingReplyConfirmation ? "Awaiting reply" : activeTurn ? "Checking confirmation" : "Confirmation unavailable";
+  const needsContinuation = pendingTurn && (acceptedMessage === pendingTurn.messageId || pendingAdmission?.admission?.confirmed || nativeState?.pendingInputIds.includes(pendingTurn.messageId) || messages.some((message) => message.id === pendingTurn.messageId || message.parentId === pendingTurn.messageId));
+  const confirmationLabel = activeTurn ? "Checking confirmation" : "Confirmation unavailable";
+  useEffect(() => {
+    if (admissionState !== "accepted" || (!confirmationUnknown && !refusedMessage)) return;
+    setConfirmationUnknown(null);
+    setRefusedMessage(null);
+    setError("");
+  }, [admissionState, confirmationUnknown, refusedMessage]);
   useEffect(() => {
     if (pendingNativeOutcome !== "succeeded") return;
     setConfirmationUnknown(null);
@@ -2242,7 +2269,7 @@ function ThreadView({
     setFailure("");
     setError("");
   }, [pendingNativeOutcome]);
-  const outcome = stopAttempt || unconfirmedAdmission ? null : refusedAdmission && rawOutcome
+  const outcome = stopAttempt || unconfirmedAdmission || (acceptedObservationUnavailable && !needsYou) ? null : refusedAdmission && rawOutcome
     ? { ...rawOutcome, choices: [{ id: "stop", label: "Stop" } satisfies TurnChoice] }
     : rawOutcome && needsContinuation && ["failed", "stopped-by-you", "cut-off"].includes(rawOutcome.kind)
     ? { ...rawOutcome, detail: "Earlier actions and their history are kept. Continue performs only missing work, using a new message in this discussion.", choices: rawOutcome.choices.map((choice): TurnChoice => choice.id === "retry" || choice.id === "continue" ? { ...choice, id: "continue", label: "Continue" } : choice) }
@@ -2254,8 +2281,8 @@ function ThreadView({
 
   const turnRunning = outcome?.kind === "working" || outcome?.kind === "slow" || outcome?.kind === "retrying";
   // The engine can be busy on a turn this view never sent (a Worker's review, a scheduled run): still working.
-  const working = !stopAttempt && (turnRunning || (outcome === null && !needsYou && engineRunning) || (activeTurn !== null && outcome === null));
-  const voiceSettled = !stopAttempt && engineStatus.type === "idle" && !activeTurn && !appRetry && !working && !needsYou && !error && !Object.values(readErrors).some(Boolean);
+  const working = !stopAttempt && !acceptedObservationUnavailable && (turnRunning || admissionInFlight || (outcome === null && !needsYou && engineRunning) || (activeTurn !== null && outcome === null));
+  const voiceSettled = !stopAttempt && !unconfirmedAdmission && !refusedAdmission && !acceptedObservationUnavailable && engineStatus.type === "idle" && !activeTurn && !appRetry && !working && !needsYou && !error && !Object.values(readErrors).some(Boolean);
   const voiceReply = useMemo(() => privateVoiceReply(messages, voiceSettled && !failure && (!outcome || outcome.kind === "replied")), [messages, voiceSettled, failure, outcome?.kind]);
   const voice = useVoice({
     active: active && kind === "discussion" && !assignmentMode && !assignmentBusy,
@@ -2308,12 +2335,12 @@ function ThreadView({
   // What the coworker is doing this moment comes from what is streaming, not from a label:
   // a reasoning part is thinking, a text part is writing, an unsettled tool call is a tool.
   const phase: LivePhase = livePhase({
-    label: activeTurn?.phase === "accepting" ? "Sending" : outcome?.kind === "retrying" ? "Retrying" : "",
+    label: admissionState === "sending" ? "Sending" : outcome?.kind === "retrying" ? "Retrying" : "",
     stream: working ? correlatedStream : null,
     activeStep,
     landedWords: working ? currentWords : "",
   });
-  const workingLabel = outcome?.kind === "slow" ? "Still working" : phaseWord(phase);
+  const workingLabel = admissionState === "preparing" ? "Preparing" : outcome?.kind === "slow" ? "Still working" : phaseWord(phase);
   /** Words of the reply have arrived this turn — streaming now, or landed by an earlier step of the same turn. */
   const wordsArrived = Boolean(currentWords) || phase === "writing"
     || currentReplies.some((message) => message.text.trim() !== "");
@@ -2329,7 +2356,7 @@ function ThreadView({
     failedSteps: currentReplies.flatMap((reply) => reply.toolCalls).filter((call) => executionState(call.status) === "failed").length,
   };
 
-  const readableStatus = stopAttempt ? stopPending ? "Stopping..." : "Stop not confirmed" : unconfirmedAdmission ? confirmationLabel : !transcriptLoaded ? "Loading conversation" : outcome && outcome.kind !== "working" && outcome.kind !== "replied"
+  const readableStatus = stopAttempt ? stopPending ? "Stopping..." : "Stop not confirmed" : unconfirmedAdmission ? confirmationLabel : acceptedObservationUnavailable ? "Awaiting reply" : !transcriptLoaded ? "Loading conversation" : outcome && outcome.kind !== "working" && outcome.kind !== "replied"
     ? outcome.label
     : working
       ? workingLabel
@@ -2345,6 +2372,10 @@ function ThreadView({
     if (!transcriptLoaded) return;
     if (unconfirmedAdmission && !needsYou) {
       onActivityChange({ state: "attention", label: confirmationLabel, detail: "The recorded message is kept. Use Check again to observe its status, or Stop. Do not resend it.", updatedAt: 0, threadId });
+      return;
+    }
+    if (acceptedObservationUnavailable && !needsYou) {
+      onActivityChange({ state: "attention", label: "Awaiting reply", detail: "Message accepted. Its activity is unavailable; check its status again or Stop.", updatedAt: 0, threadId });
       return;
     }
     if (needsYou) {
@@ -2389,12 +2420,13 @@ function ThreadView({
     // already announced itself; clearing here would leave the header on Ready for one frame.
     if (activeTurnRef.current) return;
     onActivityChange(null);
-  }, [activeToolLabel, unconfirmedAdmission, confirmationLabel, kind, needsYou, onActivityChange, outcome?.kind, outcome?.label, outcome?.line, pending, stopAttempt, stopPending, threadId, title, transcriptLoaded, working, workingLabel]);
+  }, [activeToolLabel, unconfirmedAdmission, acceptedObservationUnavailable, confirmationLabel, kind, needsYou, onActivityChange, outcome?.kind, outcome?.label, outcome?.line, pending, stopAttempt, stopPending, threadId, title, transcriptLoaded, working, workingLabel]);
 
   const currentDiscussion: ThreadListItem = discussions.find((item) => item.id === threadId)
     ?? { id: threadId, title, createdAt: 0, updatedAt: 0, status: "idle" };
   const freshDiscussion = transcriptLoaded && turnsLoaded && kind === "discussion" && visibleMessages.length === 0 && !working && !needsYou && !error && !outcome;
-  const composerWorking = Boolean(stopAttempt) || turnRunning || activeTurn !== null || (engineRunning && !needsYou);
+  const composerWorking = Boolean(stopAttempt) || turnRunning || admissionInFlight || acceptedObservationUnavailable || activeTurn !== null || (engineRunning && !needsYou);
+  const statusState = stopAttempt ? stopPending ? "stopping" : "stop-unconfirmed" : needsYou ? "needs-you" : working ? "working" : unconfirmedAdmission || refusedAdmission || acceptedObservationUnavailable ? "unknown" : workspacePreparation.state === "error" ? "unavailable" : workspacePreparation.state === "starting" ? "preparing" : "idle";
   const [controlStatusSlot, setControlStatusSlot] = useState<HTMLDivElement | null>(null);
   const [floatingSlot, setFloatingSlot] = useState<HTMLDivElement | null>(null);
   const [computerOpenRequest, setComputerOpenRequest] = useState(0);
@@ -2424,7 +2456,7 @@ function ThreadView({
           <>
             {kind !== "discussion" ? <Button variant="ghost" onClick={onBack}>Back</Button> : null}
             {kind !== "worker" ? (
-              <Button variant="ghost" disabled={!active || stopPending || (!working && !needsYou && !stopAttempt && !unconfirmedAdmission && !refusedAdmission)} title={working || needsYou || stopAttempt || unconfirmedAdmission || refusedAdmission ? "Stop work in this conversation" : "No active work to stop"} data-testid="coworker-stop" onClick={() => void stop()}>{stopLabel}</Button>
+              <Button variant="ghost" disabled={!active || stopPending || (!working && !needsYou && !stopAttempt && !unconfirmedAdmission && !refusedAdmission && !acceptedObservationUnavailable)} title={working || needsYou || stopAttempt || unconfirmedAdmission || refusedAdmission || acceptedObservationUnavailable ? "Stop work in this conversation" : "No active work to stop"} data-testid="coworker-stop" onClick={() => void stop()}>{stopLabel}</Button>
             ) : null}
           </>
         )}
@@ -2434,8 +2466,8 @@ function ThreadView({
       <div className="@container/discussion min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-col @min-[760px]/discussion:flex-row">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="coworker-conversation-column">
-      <p data-testid="coworker-thread-status" className="sr-only" aria-live="polite" data-state={stopAttempt ? stopPending ? "stopping" : "stop-unconfirmed" : needsYou ? "needs-you" : working ? "working" : "idle"} data-outcome={outcome?.kind ?? ""}>
-        {!stopAttempt && !needsYou && !unconfirmedAdmission && workspacePreparation.state !== "ready" ? workspacePreparation.state === "starting" ? "Starting AI" : "AI unavailable" : transcriptLoaded && kind === "discussion" && !stopAttempt && !working && !needsYou && !unconfirmedAdmission && !failed && !settledWord ? "Ready" : readableStatus}
+      <p data-testid="coworker-thread-status" className="sr-only" aria-live="polite" data-state={statusState} data-outcome={outcome?.kind ?? ""}>
+        {!stopAttempt && !working && !needsYou && !unconfirmedAdmission && !refusedAdmission && !acceptedObservationUnavailable && !failed && !settledWord && workspacePreparation.state !== "ready" ? workspacePreparation.state === "starting" ? "Starting AI" : "AI unavailable" : transcriptLoaded && kind === "discussion" && !stopAttempt && !working && !needsYou && !unconfirmedAdmission && !acceptedObservationUnavailable && !failed && !settledWord ? "Ready" : readableStatus}
       </p>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div
@@ -2554,14 +2586,14 @@ function ThreadView({
           {providerRefreshNote ? (
             <p className="px-1 text-[11px] leading-relaxed text-mist" data-testid="coworker-provider-refresh">{providerRefreshNote}</p>
           ) : null}
-          {unconfirmedAdmission ? <p role="status" className="px-1 text-xs text-mist">{receiptObserved ? "The message is accepted, but its final result is not confirmed." : activeTurn ? "Checking the recorded message confirmation." : "Confirmation is still unavailable after the bounded wait."} Your message is kept; do not resend it. <button type="button" className="underline" onClick={() => {
+          {unconfirmedAdmission ? <p role="status" className="px-1 text-xs text-mist">{activeTurn ? "Checking the recorded message confirmation." : "Confirmation is still unavailable after the bounded wait."} Your message is kept; do not resend it. <button type="button" className="underline" onClick={() => {
             if (confirmationReading.current) return;
             confirmationReading.current = true;
             void Promise.all([refresh(), waitForObservation(coworkerBridge.turns.activity(coworker.slug, threadId)).then((executions) => { if (viewMounted.current) setNativeActivity({ scope: activityScope, executions }); })])
               .catch(() => setError("Status is still unavailable. You can check again or Stop."))
               .finally(() => { confirmationReading.current = false; });
-          }}>Check again</button> or use Stop.</p> : error || workspacePreparation.error ? <ErrorNote>{error || workspacePreparation.error}</ErrorNote> : null}
-          {Object.values(readErrors).some(Boolean) ? <p role="status" className="px-1 text-xs text-mist">{readErrors.transcript || "Some activity could not be refreshed. Shown messages and queued work are kept."} <button type="button" className="underline" onClick={() => void refresh()}>Try again</button></p> : null}
+          }}>Check again</button> or use Stop.</p> : error || (!working && !needsYou && !acceptedObservationUnavailable && workspacePreparation.error) ? <ErrorNote>{error || workspacePreparation.error}</ErrorNote> : null}
+          {Object.values(readErrors).some(Boolean) || acceptedObservationUnavailable ? <p role="status" className="px-1 text-xs text-mist">{admissionState === "accepted" ? "Message accepted. Its activity is not available yet; shown messages and queued work are kept." : readErrors.transcript || "Some activity could not be refreshed. Shown messages and queued work are kept."} <button type="button" className="underline" onClick={() => void refresh()}>Try again</button></p> : null}
         </div>
       </div>
       {kind === "discussion" ? (

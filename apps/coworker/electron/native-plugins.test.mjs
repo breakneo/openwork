@@ -29,6 +29,7 @@ import { NATIVE_TURN_ROLES } from "./native-turns.mjs";
 import { createCoworkerToolsServer } from "./coworker-tools.mjs";
 import { assertWorkerToolContext, WORKER_MANAGEMENT } from "./worker-controls.mjs";
 import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
+import { dispatchNativeTurn } from "./native-recovery.mjs";
 import { createWorkspaceReadiness } from "../src/lib/threads.ts";
 import { createComposerDraftStore } from "../src/lib/skill-selection.ts";
 import { selectCatalogSkill, selectionFields, validateSkillSelections, sameSkillFields, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
@@ -108,6 +109,7 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
     ensurePlatformServer: async () => handle, registerCoworkerTools: async () => undefined,
     toolsRegistered: new Set(), serverHandle: handle, warmedCoworkerWorkspaces, prepareNativeTurnRoles,
     AbortSignal, warmedCoworkerScopes: new Map(), workspaceReadinessScope: () => generation,
+    pendingWorkspaceReadinessChanges: () => [], coworkersDir: "/workspace", getCoworker: async () => coworker,
     nativeWorkspaceRequest: async (_handle, _workspaceId, method, route, body) => {
       calls.push({ method, route, body });
       if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "turn-roles", "events", "abilities"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
@@ -629,6 +631,156 @@ test("native main binds Worker skills to admitted provenance and consultations t
   assert.equal(admissions.length, 3);
   assert.equal(admissions[2].headers.get("x-openwork-native-skills-scope"), null);
   assert.equal(entry.cloudSkillOrigin.scope, null);
+});
+
+async function originHintFixture() {
+  const main = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  const helpers = main.slice(main.indexOf("function assertSkillSession("), main.indexOf("async function resolveWorkerSkills("));
+  const workspace = { id: "ws_origin", workspaceType: "local", path: "/fixture/origin" };
+  const session = { baseUrl: "http://127.0.0.1:1", orgId: "org_origin", token: "fixture-principal-token" };
+  const account = { baseUrl: session.baseUrl, orgId: session.orgId, accountId: "fixture-principal" };
+  const cloud = { id: "openwork-cloud-origin", name: "Origin", content: "PRIVATE_BODY_CANARY", location: "/fixture/private/SKILL.md", source: { type: "openwork-cloud", uri: "skill://origin", scope: "a".repeat(64) } };
+  const frozen = (scope = cloud.source.scope) => Object.freeze({ scopes: Object.freeze([scope]) });
+  const state = { hint: frozen(), catalog: [cloud], allowed: true, beforeHint: async () => {}, beforePrincipal: async () => {}, beforeCatalog: async () => {}, beforePrompt: async () => {} };
+  const calls = { hints: [], principals: 0, catalogs: 0, receipts: 0, prompts: [], forwarded: [] };
+  const entry = { id: "work_origin", messageId: "msg_origin", workspaceId: workspace.id, state: "running", nativeAdmission: "prepared", agent: "build", prompt: "Use the current tools", skills: [], skillSelections: [], owner: { slug: "fixture", threadId: "ses_origin", kind: "private" } };
+  const handle = { url: "http://127.0.0.1:2", config: { workspaces: [workspace] }, managedOpencodeV2: { isAlive: () => true },
+    nativeSkillOriginSnapshot: async (input) => { calls.hints.push(input); input.signal?.throwIfAborted(); await state.beforeHint(); return state.hint; },
+  };
+  const sandbox = {
+    AbortSignal, Headers, URL, createHash, path, selectedCloudSkillScope, validateSkillSelections,
+    ownerToken: "fixture-owner-token", serverHandle: handle, denSession: session, appliedSkillSession: { handle, session },
+    createNativeV2Client: () => ({ listSkills: async (signal) => { calls.catalogs++; await state.beforeCatalog(); signal?.throwIfAborted(); return structuredClone(state.catalog); } }),
+    createHeadlessThreadClient: (options) => ({
+      getThreadSnapshot: async (threadId) => ({ threadId, messages: [], native: { engine: "v2", pendingInputIds: [] } }),
+      sendTurn: async (threadId, input) => {
+        await input.beforeInput();
+        input.signal?.throwIfAborted();
+        const response = await options.fetch(`${options.baseUrl}/workspace/${options.workspaceId}/opencode2/api/session/${threadId}/prompt`, {
+          method: "POST", headers: { "x-openwork-native-skills-scope": "forged-scope" }, body: JSON.stringify({ id: input.messageId, text: input.prompt, skills: input.skills }),
+        });
+        if (!response.ok) throw new Error("Fresh native authorization refused input");
+        return { threadId, messageId: input.messageId, acceptedAt: 1 };
+      },
+    }),
+    fetch: async (url, init) => {
+      if (new URL(url).pathname === "/v1/me") {
+        calls.principals++;
+        assert.equal(init.headers.Authorization, `Bearer ${session.token}`);
+        await state.beforePrincipal();
+        return Response.json({ user: { id: account.accountId } });
+      }
+      assert.match(new URL(url).pathname, /\/prompt$/);
+      calls.prompts.push({ headers: new Headers(init.headers), body: JSON.parse(init.body) });
+      await state.beforePrompt();
+      if (!state.allowed || new Headers(init.headers).get("x-openwork-native-skills-scope") !== state.catalog[0]?.source.scope) return new Response(null, { status: 403 });
+      calls.forwarded.push(state.catalog.map((skill) => skill.content));
+      return Response.json({});
+    },
+    collaboration: { change: async (change) => { const value = change({ executions: { [entry.id]: entry } }); calls.receipts++; return value; } },
+  };
+  const api = runInNewContext(`${helpers}\nskillAwareClient`, sandbox);
+  const client = (options = {}) => api({ baseUrl: handle.url, workspaceId: workspace.id, token: sandbox.ownerToken, captureSkillOrigin: true, ...options });
+  const send = (current = client(), signal = new AbortController().signal) => dispatchNativeTurn({ client: current, threadId: entry.owner.threadId, turn: { ...entry }, signal,
+    markAttempted: async () => { assert.equal(entry.cloudSkillOrigin.messageId, entry.messageId); entry.nativeAdmission = "attempted"; },
+  });
+  return { state, calls, entry, workspace, handle, sandbox, session, account, cloud, frozen, client, send };
+}
+
+test("native main uses private origin hints only for unselected owned workspaces and keeps selected skills fresh", async () => {
+  for (const mode of ["warm", "older", "missing", "empty", "mutable", "invalid", "error", "foreign-workspace", "foreign-token", "selected"]) {
+    const f = await originHintFixture();
+    if (mode === "warm") {
+      f.entry.model = { providerId: "fixture", modelId: "b".repeat(64) };
+      f.entry.cloudSkillOrigin = { scope: "b".repeat(64), workspaceId: "foreign" };
+    }
+    if (mode === "older") delete f.handle.nativeSkillOriginSnapshot;
+    if (mode === "missing") f.state.hint = null;
+    if (mode === "empty") f.state.hint = Object.freeze({ scopes: Object.freeze([]) });
+    if (mode === "mutable") f.state.hint = { scopes: [f.cloud.source.scope] };
+    if (mode === "invalid") f.state.hint = f.frozen("unverified");
+    if (mode === "error") f.state.beforeHint = async () => { throw new Error("Private hint unavailable"); };
+    if (mode === "foreign-workspace") f.handle.config.workspaces = [];
+    if (mode === "selected") Object.assign(f.entry, selectionFields([selectCatalogSkill(f.state.catalog, { id: f.cloud.id }, f.workspace.id, f.account)]));
+    const client = f.client(mode === "foreign-token" ? { token: "not-the-owner" } : {});
+    f.state.beforePrompt = async () => { f.state.catalog = [{ ...f.cloud, content: "FRESH_BODY_CANARY" }]; };
+    await f.send(client);
+    assert.equal(f.calls.catalogs, mode === "warm" ? 0 : mode === "selected" ? 2 : 1, mode);
+    assert.equal(f.calls.principals, mode === "selected" ? 2 : 1, "principal verification is fresh even with a warm hint");
+    assert.equal(f.calls.hints.length, mode === "warm" ? 2 : ["older", "foreign-workspace", "foreign-token", "selected"].includes(mode) ? 0 : 1, mode);
+    for (const hint of f.calls.hints) {
+      assert.equal(hint.workspaceId, f.workspace.id);
+      assert.equal(hint.directory, f.workspace.path);
+      assert.ok(hint.signal instanceof AbortSignal);
+      assert.deepEqual(Object.keys(hint).sort(), ["directory", "signal", "workspaceId"]);
+    }
+    assert.equal(f.entry.cloudSkillOrigin.scope, f.cloud.source.scope);
+    assert.deepEqual(structuredClone(f.entry.cloudSkillOrigin.account), f.account);
+    assert.equal(f.calls.prompts[0].headers.get("x-openwork-native-skills-scope"), f.cloud.source.scope);
+    assert.deepEqual(f.calls.forwarded, [["FRESH_BODY_CANARY"]], "origin preparation does not skip the final prompt path");
+    assert.doesNotMatch(JSON.stringify([f.entry.cloudSkillOrigin, f.calls.prompts[0].body]), /PRIVATE_BODY_CANARY|FRESH_BODY_CANARY|fixture-principal-token|fixture-owner-token|SKILL\.md/);
+  }
+  for (const phase of ["selected-origin", "final-prompt"]) {
+    const f = await originHintFixture();
+    if (phase === "selected-origin") {
+      Object.assign(f.entry, selectionFields([selectCatalogSkill(f.state.catalog, { id: f.cloud.id }, f.workspace.id, f.account)]));
+      f.state.beforeCatalog = async () => { if (f.calls.catalogs === 2) f.state.catalog = [{ ...f.cloud, source: { ...f.cloud.source, scope: "b".repeat(64) } }]; };
+    } else f.state.beforePrompt = async () => { f.state.allowed = false; };
+    await assert.rejects(f.send(), phase === "selected-origin" ? /OpenWork account changed/ : /Fresh native authorization refused/);
+    assert.equal(f.calls.forwarded.length, 0);
+    assert.equal(f.calls.prompts.length, phase === "selected-origin" ? 0 : 1);
+    if (phase === "selected-origin") assert.equal(f.calls.hints.length, 0);
+  }
+});
+
+test("native main rechecks origin hint identity after principal lookup and falls back on rotation", async () => {
+  for (const mode of ["null", "changed-reference", "equal-scopes", "handle"]) {
+    const f = await originHintFixture();
+    const scope = mode === "equal-scopes" ? f.cloud.source.scope : "b".repeat(64);
+    f.state.beforePrincipal = async () => {
+      if (f.calls.principals !== 1) return;
+      f.state.hint = mode === "null" ? null : f.frozen(scope);
+      f.state.catalog = [{ ...f.cloud, source: { ...f.cloud.source, scope } }];
+      if (mode === "handle") {
+        f.sandbox.serverHandle = { ...f.handle };
+        f.sandbox.appliedSkillSession = { session: f.session, handle: f.sandbox.serverHandle };
+      }
+    };
+    await f.send();
+    assert.equal(f.calls.catalogs, 1, "a changed reference must use fresh discovery even when its scope text is identical");
+    assert.equal(f.calls.principals, 2, "the fallback retains the existing discovery/principal ordering");
+    assert.equal(f.calls.hints.length, mode === "handle" ? 1 : 2);
+    assert.equal(f.entry.cloudSkillOrigin.scope, scope);
+    assert.equal(f.calls.prompts[0].headers.get("x-openwork-native-skills-scope"), scope);
+    assert.equal(f.calls.forwarded.length, 1);
+  }
+  const f = await originHintFixture();
+  f.state.beforePrincipal = async () => { f.sandbox.denSession = { ...f.session, orgId: "replacement-account" }; f.sandbox.appliedSkillSession = { handle: f.handle, session: f.sandbox.denSession }; };
+  await assert.rejects(f.send(), /OpenWork account changed/);
+  assert.equal(f.calls.catalogs, 0);
+  assert.equal(f.calls.receipts, 0);
+  assert.equal(f.calls.prompts.length, 0);
+});
+
+test("native main origin preparation propagates cancellation without fallback or receipt writes", async () => {
+  for (const mode of ["before", "hint", "principal", "principal-signal", "recheck", "fallback"]) {
+    const f = await originHintFixture();
+    const controller = new AbortController();
+    const cancelled = new DOMException("Origin preparation cancelled", "AbortError");
+    const stop = async () => { throw cancelled; };
+    if (mode === "before") controller.abort(cancelled);
+    if (mode === "hint") f.state.beforeHint = stop;
+    if (mode === "principal") f.state.beforePrincipal = stop;
+    if (mode === "principal-signal") f.state.beforePrincipal = async () => { controller.abort(cancelled); };
+    if (mode === "recheck") f.state.beforeHint = async () => { if (f.calls.hints.length === 2) throw cancelled; };
+    if (mode === "fallback") { f.state.hint = null; f.state.beforeCatalog = stop; }
+    await assert.rejects(f.send(f.client(), controller.signal), (error) => error === cancelled);
+    assert.equal(f.calls.catalogs, mode === "fallback" ? 1 : 0, "cancellation must not become a fresh native retry");
+    assert.equal(f.calls.receipts, 0);
+    assert.equal(f.calls.prompts.length, 0);
+    assert.equal(f.entry.nativeAdmission, "prepared");
+    assert.equal(f.entry.cloudSkillOrigin, undefined);
+  }
 });
 
 test("Effect interruption aborts live broker transport and waits for exact-call cancellation acknowledgement", async (t) => {

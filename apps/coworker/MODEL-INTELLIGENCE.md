@@ -1,6 +1,6 @@
 # Model intelligence and selection preferences
 
-Policy reviewed September 14, 2026. This index describes documented metadata and
+Policy reviewed September 16, 2026. This index describes documented metadata and
 product preferences, **not a model leaderboard or measured speed/quality**.
 
 ## Three separate owners
@@ -55,12 +55,16 @@ compares the two reported text token rates only.
    inheritance is resolved before the retained coworker override.
    An explicit app effort no longer offered by its model refuses selection;
    the facilitator may use its deterministic scorer, never another effort.
-2. For inherited Automatic role defaults, prefer connected GPT-5.6 Luna for
-   conversation/delivery and GPT-6 Astra with advertised `medium` effort for
-   thinking. Match catalog identity, never display labels or member-specific IDs.
-   This initial role choice is not capped by a previous app recommendation's
-   price. Existing source-tier ordering and avoided models still apply; ambiguous
-   credential choices require an explicit choice. Explicit overrides remain exact.
+2. For inherited Automatic role defaults, prefer connected GPT-5.6 Luna for all
+   four purposes: conversation, thinking, delivery and facilitator. Require exact
+   `gpt-5.6-luna` or `openai/gpt-5.6-luna` identity; opaque `ipr_*` / `gwm_*` routes
+   require `upstreamModelId`, never label or API-ID guessing. Thinking preference
+   requires advertised reasoning. Effort follows the existing role/dial policy
+   using only advertised variants, or the model default when none exist; no
+   automatic Astra or forced-medium policy remains. This initial role choice is
+   not capped by a previous app recommendation's price. Source-tier ordering,
+   avoided models and credential/group ambiguity guards still apply. Explicit
+   overrides remain exact.
 3. Otherwise resolve the standard anchor. A missing stale app recommendation may
    use a current eligible recommendation, but an explicitly missing/excluded/avoided
    choice does not authorize replacement. Ordinary substitutions and failure
@@ -90,9 +94,26 @@ legacy unpinned execution are unchanged. Fable and other assigned models remain
 selectable when connected; no static row fabricates access. Cloud-assigned Gateway
 providers retain their opaque request IDs and safe upstream identity metadata.
 Native key-only refresh must finish applying before sync reports it as applied.
-The facilitator honors group override then app choice, otherwise quick selection;
-automatic secondary attempts stay with the same provider at no higher known prices.
-Memory/progress transport allowlists, budgets and opt-in settings are unchanged.
+The facilitator honors group override then app choice, otherwise the Luna role
+preference or guarded quick selection around the members' anchor. Automatic
+secondary attempts stay with the same provider at no higher known prices and must
+also offer an explicit app effort. Memory/progress transport allowlists, budgets
+and opt-in settings are unchanged.
+
+`resolveOnboardingModelDefaults(catalog, savedDefaults, providerId?)` in
+`model-choice.ts` returns reviewable `{ defaults, previews }` for these four roles.
+It fills only blank model choices, keeps saved variants unchanged, and preserves
+unavailable explicit models/efforts with an unavailable preview. The optional
+just-connected provider ID scopes new recommendations only, never existing choices.
+Without an unambiguous Luna preference or provider/credential boundary it leaves
+blank choices unresolved. It neither mutates nor saves settings; onboarding owns
+explicit per-role review and persistence. Empty recommended effort remains dynamic.
+
+`matchesModelSearch(model, query)` in `model-intelligence.ts` AND-matches query
+tokens across safe display, provider, upstream and API identity fields, ignoring
+case and separators. Thus `gpt luna` finds an opaque Gateway route through its
+upstream identity. It does not qualify a model for selection, index connection
+options/credentials, or widen the connected catalog.
 
 Events use these same roles, not an Event-specific model policy. Contributions
 and lead conclusions use Conversation; delegated Workers use Thinking or Delivery.

@@ -6,6 +6,12 @@
  * what these return.
  */
 import type { TeamDraft, TeamRole } from "./bridge.ts";
+import { normalizeModelDefaults, type ModelDefault, type ModelDefaults, type ModelPurpose } from "./model-defaults.ts";
+import { resolveModelPreview, resolveOnboardingModelDefaults, type OnboardingModelRecommendations } from "./model-choice.ts";
+import type { EngineModelCatalog } from "./threads.ts";
+
+export type OnboardingStep = "welcome" | "local" | "models" | "intents" | "team" | "create";
+const MODEL_PURPOSES: ModelPurpose[] = ["conversation", "thinking", "delivery", "facilitator"];
 
 export const ONBOARDING_DRAFT_KEY = "open-coworker.onboarding-team.v1";
 export const MAX_TEAM_DRAFTS = 6;
@@ -19,6 +25,11 @@ export type OnboardingDraft = {
   drafts: TeamDraft[];
   /** Slugs created so far, so a retry skips them. */
   createdSlugs: string[];
+  step?: OnboardingStep;
+  contextKey?: string;
+  providerId?: string;
+  modelChoices?: Partial<ModelDefaults>;
+  modelsReviewed?: boolean;
 };
 
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -46,10 +57,69 @@ export function loadOnboardingDraft(storage: DraftStorage | null): OnboardingDra
     const parsed: unknown = JSON.parse(storage.getItem(ONBOARDING_DRAFT_KEY) ?? "");
     if (!isRecord(parsed) || typeof parsed.draftId !== "string" || !parsed.draftId) return emptyOnboardingDraft();
     const drafts = Array.isArray(parsed.drafts) ? parsed.drafts.filter(isTeamDraft) : [];
-    return { draftId: parsed.draftId, intents: strings(parsed.intents), ...(typeof parsed.patternId === "string" ? { patternId: parsed.patternId } : {}), drafts, createdSlugs: strings(parsed.createdSlugs) };
+    const modelChoices: Partial<ModelDefaults> = {};
+    if (isRecord(parsed.modelChoices)) {
+      const normalized = normalizeModelDefaults(parsed.modelChoices);
+      for (const purpose of MODEL_PURPOSES) {
+        if (isRecord(parsed.modelChoices[purpose])) modelChoices[purpose] = normalized[purpose];
+      }
+    }
+    return {
+      draftId: parsed.draftId, intents: strings(parsed.intents), ...(typeof parsed.patternId === "string" ? { patternId: parsed.patternId } : {}), drafts, createdSlugs: strings(parsed.createdSlugs),
+      ...(isOnboardingStep(parsed.step) ? { step: parsed.step } : {}),
+      ...(typeof parsed.contextKey === "string" ? { contextKey: parsed.contextKey } : {}),
+      ...(typeof parsed.providerId === "string" && parsed.providerId ? { providerId: parsed.providerId } : {}),
+      ...(Object.keys(modelChoices).length ? { modelChoices } : {}),
+      ...(typeof parsed.modelsReviewed === "boolean" ? { modelsReviewed: parsed.modelsReviewed } : {}),
+    };
   } catch {
     return emptyOnboardingDraft();
   }
+}
+
+function isOnboardingStep(value: unknown): value is OnboardingStep {
+  return value === "welcome" || value === "local" || value === "models" || value === "intents" || value === "team" || value === "create";
+}
+
+export function onboardingDraftForContext(draft: OnboardingDraft, contextKey: string): OnboardingDraft {
+  return { ...(draft.contextKey && draft.contextKey !== "local" && draft.contextKey !== contextKey ? emptyOnboardingDraft() : draft), contextKey };
+}
+
+export function onboardingStepFor(draft: OnboardingDraft): OnboardingStep | "" {
+  if (draft.step === "welcome" || draft.step === "local" || draft.step === "models") return draft.step;
+  if (draft.step || draft.drafts.length || draft.intents.length) {
+    if (!draft.modelsReviewed) return "models";
+    return draft.step ?? (draft.drafts.length ? "team" : "intents");
+  }
+  return "";
+}
+
+export function completeOnboardingDraft(draft: OnboardingDraft): OnboardingDraft {
+  return { ...emptyOnboardingDraft(), ...(draft.contextKey ? { contextKey: draft.contextKey } : {}), modelsReviewed: true };
+}
+
+export function resumeOnboardingDraft(draft: OnboardingDraft, hasTeam: boolean, savedDefaults?: ModelDefaults): OnboardingDraft {
+  if (onboardingStepFor(draft) || draft.modelsReviewed) return draft;
+  return hasTeam || (savedDefaults && MODEL_PURPOSES.every((purpose) => savedDefaults[purpose].model.trim())) ? completeOnboardingDraft(draft) : draft;
+}
+
+export function connectOnboardingProvider(draft: OnboardingDraft, providerId?: string): OnboardingDraft {
+  return providerId && providerId !== draft.providerId ? { ...draft, providerId, modelsReviewed: false } : draft;
+}
+
+export function chooseOnboardingModel(draft: OnboardingDraft, purpose: ModelPurpose, choice: ModelDefault): OnboardingDraft {
+  return { ...draft, modelChoices: { ...draft.modelChoices, [purpose]: { model: choice.model, modelVariant: choice.modelVariant } }, modelsReviewed: false };
+}
+
+export function onboardingModelReview(draft: OnboardingDraft, catalog: Pick<EngineModelCatalog, "models">, savedDefaults: ModelDefaults): OnboardingModelRecommendations {
+  const configured = normalizeModelDefaults(draft.modelChoices, savedDefaults);
+  const recommendations = resolveOnboardingModelDefaults(catalog, configured, draft.providerId);
+  const defaults = normalizeModelDefaults(draft.modelChoices, recommendations.defaults);
+  const previews = { ...recommendations.previews };
+  for (const purpose of MODEL_PURPOSES) {
+    if (draft.modelChoices?.[purpose]?.model === "") previews[purpose] = resolveModelPreview(catalog, purpose, defaults);
+  }
+  return { defaults, previews };
 }
 
 function isTeamDraft(value: unknown): value is TeamDraft {

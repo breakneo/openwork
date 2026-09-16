@@ -39,7 +39,7 @@ import { migrateOpenworkCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
 import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
 import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
-import type { NativeCleanupRequest } from "./engine-v2-preview.js";
+import { engineV2ByConfig, type NativeCleanupRequest, type NativeSkillOriginInput, type NativeSkillOriginSnapshot } from "./engine-v2-preview.js";
 import type { EmbeddedOpencodeV2Options, LocalManagedMcpVaultKeyProvider, ServerConfig } from "./types.js";
 
 export type EmbeddedServerOptions = CliArgs & {
@@ -76,6 +76,7 @@ export type EmbeddedServerHandle = {
   /** The single mandatory v2 process owned by startServer, not a second sidecar. */
   managedOpencodeV2: { pid: number | null; isAlive: () => boolean } | null;
   nativeCleanupRequest: (input: NativeCleanupRequest) => Promise<Response>;
+  nativeSkillOriginSnapshot: (input: NativeSkillOriginInput) => Promise<NativeSkillOriginSnapshot | null>;
   /** Current managed-engine generations for desktop diagnostics and acceptance checks. */
   managedOpencodePool: () => EnginePoolSnapshot | null;
   /** Stop the HTTP server and managed OpenCode (if any). */
@@ -332,6 +333,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
 
   const initialManagedOpencode = managedOpencode;
   const initialServer = server;
+  const initialNativeEngine = engineV2ByConfig.get(config);
   return {
     port: server.port,
     url: `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`,
@@ -341,6 +343,11 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
     nativeCleanupRequest: (input) => initialServer.nativeCleanupRequest({ ...input,
       signal: AbortSignal.any([nativeCleanupLifetime.signal, ...(input.signal ? [input.signal] : [])]),
     }),
+    nativeSkillOriginSnapshot: async (input) => {
+      if (stopPromise || config.engine !== "v2" || !initialNativeEngine || engineV2ByConfig.get(config) !== initialNativeEngine) return null;
+      const snapshot = await initialNativeEngine.nativeSkillOriginSnapshot?.(input) ?? null;
+      return !stopPromise && engineV2ByConfig.get(config) === initialNativeEngine ? snapshot : null;
+    },
     policyToken: managedDesktopPolicy(config).evaluationToken,
     managedOpencode: initialManagedOpencode
       ? {

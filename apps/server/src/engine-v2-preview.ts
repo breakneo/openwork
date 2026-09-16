@@ -1,8 +1,9 @@
 import { executionRules } from "./managed-policy-rules.js";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
-import { isAbsolute, join, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { loopbackFetch } from "./server-fetch.js";
 
 import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
@@ -25,7 +26,10 @@ import {
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
 import { runtimeDbPath, runtimeStorageDir } from "./runtime-db.js";
 import {
+  ENGINE_GLOBAL_RUNTIME_CONFIG_ID,
+  inspectRuntimeOpencodeConfigState,
   isEngineGlobalRuntimeConfigId,
+  mergeRuntimeOpencodeConfigLayers,
   onRuntimeOpencodeConfigWrite,
   readGlobalRuntimeMcpConfig,
   readGlobalRuntimeOpencodeConfig,
@@ -35,7 +39,7 @@ import {
 } from "./runtime-opencode-config-store.js";
 import type { EnvService } from "./env-file.js";
 import { selectPrimaryCredentialEnvName } from "./managed-provider-auth.js";
-import type { ServerConfig } from "./types.js";
+import type { ServerConfig, WorkspaceInfo } from "./types.js";
 
 const PREVIEW_STATE_FILE = "engine-v2-preview.json";
 const UNSET_API_KEY = "openwork-engine-v2-preview-unset";
@@ -68,6 +72,16 @@ export interface RuntimeProviderRecordLike {
   models?: Record<string, unknown>;
 }
 
+export interface NativeSkillOriginInput {
+  workspaceId: string;
+  directory: string;
+  signal?: AbortSignal;
+}
+
+export interface NativeSkillOriginSnapshot {
+  readonly scopes: readonly string[];
+}
+
 export interface NativeCleanupRequest {
   workspaceId: string;
   directory: string;
@@ -91,6 +105,7 @@ export interface EngineV2Preview {
   syncCloudSkills(): Promise<{ root: string; state: CloudNativeSkillState; failure?: CloudNativeSkillSyncCode }>;
   /** One serialized fresh Cloud read + native readiness barrier for discovery/admission. */
   assertNativeSkillsScope(expectedScope: string | null): Promise<void>;
+  nativeSkillOriginSnapshot?(input: NativeSkillOriginInput): Promise<NativeSkillOriginSnapshot | null>;
   withNativeSkills<T>(directory: string, use: (catalog: Awaited<ReturnType<typeof waitForNativeOpenWorkV2Skills>>, assertCurrent: () => Promise<void>) => Promise<T>, expectedScope?: string | null): Promise<T>;
   request(directory: string, path: string, init?: { method?: string; body?: unknown; timeoutMs?: number }): Promise<{ status: number; json: unknown }>;
   createNativeCleanupRequest(isCurrent: () => boolean, hostSignal: AbortSignal): (input: NativeCleanupRequest) => Promise<Response>;
@@ -402,6 +417,39 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
   const mcpInFlight = new Map<string, Promise<void>>();
   const mcpWorkspaces = new Map<string, string>();
   const cloudSkillsRoot = join(rootDir, "cloud-skills");
+  let originRevision = 0;
+  const skillOrigins = new Map<string, {
+    context: string; workspace: WorkspaceInfo; state: CloudNativeSkillState; generation: number; snapshot: NativeSkillOriginSnapshot;
+  }>();
+  function invalidateSkillOrigins(): void {
+    originRevision++;
+    skillOrigins.clear();
+  }
+  async function skillOriginContext(directory: string, signal?: AbortSignal) {
+    try {
+      if (!mandatory || config.engine !== "v2" || typeof directory !== "string" || !isAbsolute(directory)) return null;
+      const workspaces = config.workspaces.filter((entry) => entry.workspaceType === "local" && resolve(entry.path) === resolve(directory));
+      const workspace = workspaces[0];
+      if (workspaces.length !== 1 || config.workspaces.filter((entry) => entry.id === workspace.id).length !== 1) return null;
+      const hostContext = () => JSON.stringify([originRevision, runtimeDbPath(config), config.engine, config.opencodeV2,
+        config.token, config.hostToken, config.authorizedRoots, config.readOnly, workspace]);
+      const started = hostContext();
+      const [requested, configured, roots, global, local] = await Promise.all([
+        realpath(directory), realpath(workspace.path),
+        Promise.all(config.authorizedRoots.map((root) => realpath(root).catch(() => null))),
+        inspectRuntimeOpencodeConfigState(config, ENGINE_GLOBAL_RUNTIME_CONFIG_ID, { signal }),
+        inspectRuntimeOpencodeConfigState(config, workspace.id, { signal }),
+      ]);
+      if (requested !== configured || !roots.some((root) => root !== null
+        && (requested === root || requested.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)))
+        || global.status !== "available" || !["available", "row-missing"].includes(local.status)
+        || config.workspaces.find((entry) => entry.id === workspace.id) !== workspace || started !== hostContext()) return null;
+      const effective = mergeRuntimeOpencodeConfigLayers(global.config, local.config);
+      const scope = cloudNativeSkillScopeKey(runtimeMcpMap(global.config)[OPENWORK_CLOUD_MCP_NAME] ?? null);
+      if (!scope) return null;
+      return { workspace, scope, context: createHash("sha256").update(JSON.stringify([started, requested, roots, effective])).digest("hex") };
+    } catch { return null; }
+  }
   let skillAdmissions: Promise<unknown> = Promise.resolve();
   const cloudSkills = createCloudNativeSkillSync({
     root: cloudSkillsRoot,
@@ -413,8 +461,22 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     },
   });
 
+  async function nativeSkillOriginSnapshot(input: NativeSkillOriginInput): Promise<NativeSkillOriginSnapshot | null> {
+    input.signal?.throwIfAborted();
+    const active = sidecar;
+    const origin = skillOrigins.get(input.workspaceId);
+    if (!mandatory || !allowRunning || !running || !active?.isAlive() || !origin) return null;
+    const context = await skillOriginContext(input.directory, input.signal);
+    input.signal?.throwIfAborted();
+    if (!allowRunning || !running || sidecar !== active || !active.isAlive() || skillOrigins.get(input.workspaceId) !== origin
+      || cloudSkills.current() !== origin.state || cloudSkills.generation() !== origin.generation
+      || context?.workspace !== origin.workspace || context.context !== origin.context) return null;
+    return origin.snapshot;
+  }
+
   async function syncCloudSkills(): Promise<{ root: string; state: CloudNativeSkillState; failure?: CloudNativeSkillSyncCode }> {
     if (!sidecar) throw new CloudNativeSkillSyncError("cloud_skill_engine_unavailable", "OpenCode v2 is not running");
+    skillOrigins.clear();
     try {
       return { root: cloudSkillsRoot, state: await cloudSkills.sync() };
     } catch (error) {
@@ -444,6 +506,8 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         await assertNativeSkillsScope(expectedScope);
         const active = sidecar;
         if (!allowRunning || !active?.isAlive()) throw new CloudNativeSkillSyncError("cloud_skill_engine_unavailable", "OpenCode v2 is not running");
+        skillOrigins.clear();
+        const origin = await skillOriginContext(directory);
         let state;
         try { state = await sync.sync(); } catch (error) {
           if (!(error instanceof CloudNativeSkillSyncError)) throw error;
@@ -466,8 +530,14 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
           if (generation !== sync.generation()) continue;
           throw error;
         }
+        const currentOrigin = origin && state.skills.length ? await skillOriginContext(directory) : null;
         await assertNativeSkillsScope(expectedScope);
         if (generation !== sync.generation()) continue;
+        if (origin && currentOrigin?.workspace === origin.workspace && currentOrigin.context === origin.context
+          && sync.current() === state && state.root && state.skills.every((skill) => skill.scope === origin.scope)) {
+          skillOrigins.set(origin.workspace.id, { context: origin.context, workspace: origin.workspace, state, generation,
+            snapshot: Object.freeze({ scopes: Object.freeze([origin.scope]) }) });
+        }
         // Never retry the admitted operation, including an uncertain POST.
         return use(catalog, async () => {
           // Session ownership, permission and instruction work can await after
@@ -647,6 +717,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
 
   async function closeSidecar(): Promise<void> {
     const active = sidecar;
+    invalidateSkillOrigins();
     workspaceReadiness.clear();
     workspaceMcp.clear();
     mcpWorkspaces.clear();
@@ -702,6 +773,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       running = health.healthy;
       const unsubscribeConfig = onRuntimeOpencodeConfigWrite((writeConfig, workspaceId) => {
         if (runtimeDbPath(writeConfig) !== runtimeDbPath(config)) return;
+        invalidateSkillOrigins();
         const global = isEngineGlobalRuntimeConfigId(workspaceId);
         if (global) scheduleMirror();
         if (global) void cloudSkills.reconcileScope().catch(() => {
@@ -717,7 +789,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
           });
         }
       });
-      const unsubscribeEnv = options.env?.onChange(scheduleMirror);
+      const unsubscribeEnv = options.env?.onChange(() => { invalidateSkillOrigins(); scheduleMirror(); });
       unsubscribe = () => { unsubscribeConfig(); unsubscribeEnv?.(); };
       scheduleMirror();
       if (mirrorInFlight) await mirrorInFlight;
@@ -1055,5 +1127,5 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       const managed = sidecar;
       return { pid: managed?.childPid ?? null, isAlive: () => managed?.isAlive() === true };
     },
-    status, setEnabled, setChatRouting, connection, ensureWorkspaceReady, syncWorkspaceMcp, syncCloudSkills, assertNativeSkillsScope, withNativeSkills, createNativeCleanupRequest, stop };
+    status, setEnabled, setChatRouting, connection, ensureWorkspaceReady, syncWorkspaceMcp, syncCloudSkills, assertNativeSkillsScope, nativeSkillOriginSnapshot, withNativeSkills, createNativeCleanupRequest, stop };
 }

@@ -2,9 +2,59 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { browserScript, clickButton, coworker, evalIn, eventually, fill, needs, resolveHost, screenshot, test, waitFor, waitForText } from "@openwork/testkit";
+import { browserScript, clickButton, coworker, evalIn, eventually, fill, needs, resolveHost, screenshot, spec, test, waitFor, waitForText, type Probe, type User } from "@openwork/testkit";
 import { expect, onTestFinished } from "vitest";
-import { clickCoworkerControl, isolatedFreshStartCoworker } from "../worlds/coworker.ts";
+import { clickCoworkerControl, isolatedFreshStartCoworker, isolatedOnboardingCoworker, pressKey } from "../worlds/coworker.ts";
+
+type OnboardingWorld = Awaited<ReturnType<typeof isolatedOnboardingCoworker>>;
+
+async function readyCoworker(world: OnboardingWorld, probe: Probe) {
+  return probe.eventually(world.ui, { within: 120_000, label: "the selected coworker is prepared without a contradictory banner", until: (ui) => ui.status === "Ready" && !ui.warming });
+}
+
+async function filledTransitionFrames(world: OnboardingWorld, reducedMotion = false) {
+  const trace = await world.frames();
+  expect(trace.overflow).toBe(false);
+  expect(trace.frames.length).toBeGreaterThan(1);
+  expect(trace.frames.filter((frame) => frame.meaningful === 0 || frame.background.every((color) => color === "transparent") || frame.leaked), "every sampled setup frame needs meaningful visible content and a painted background, without credentials").toEqual([]);
+  if (reducedMotion) expect(trace.frames.filter((frame) => !frame.reducedMotion || frame.movingSurfaces > 0), "reduced motion must not animate the full-window setup surface").toEqual([]);
+  return { frames: trace.frames.length, stages: [...new Set(trace.frames.map((frame) => frame.stage))], minimumVisibleContent: Math.min(...trace.frames.map((frame) => frame.meaningful)), samples: trace.frames.filter((frame, index, frames) => index === 0 || frame.stage !== frames[index - 1]?.stage || index === frames.length - 1) };
+}
+
+async function nextNativeCall(world: OnboardingWorld, probe: Probe, before: number, prompt: string) {
+  const requests = await probe.eventually(world.model.requests, { within: 90_000, label: "one actual native dispatch reaches the pinned localhost model", until: (calls) => calls.length > before });
+  expect(requests).toHaveLength(before + 1);
+  const call = requests[before];
+  if (!call) throw new Error("The native request witness is missing.");
+  expect(call.prompt).toContain(prompt);
+  expect(call.authenticated).toBe(true);
+  expect(call.finished).toBe(false);
+  expect(world.model.faults()).toEqual([]);
+  return call;
+}
+
+async function chooseRoleEffort(user: User, level: "high") {
+  await user.click({ role: "combobox", label: /^Thinking effort/ });
+  await user.press(level[0]);
+  await user.press("Enter");
+}
+
+async function reviewedTeam(user: User, probe: Probe, world: OnboardingWorld) {
+  await user.click({ testId: "onboarding-models-continue" });
+  await user.see({ testId: "onboarding-intents" });
+  await user.click({ testId: "onboarding-intent", nth: 0 });
+  await user.click({ testId: "onboarding-intent", nth: 1 });
+  await user.click({ testId: "onboarding-intents-continue" });
+  await user.see({ testId: "onboarding-team" });
+  expect(await world.coworkers()).toEqual([]);
+  await user.screenshot();
+  await user.click({ testId: "onboarding-team-create" });
+  await user.see({ testId: "coworker-rail" }, { timeoutMs: 120_000 });
+  const team = await probe.eventually(world.coworkers, { within: 60_000, label: "two real native coworkers created once", until: (team) => team.length === 2 });
+  const first = team[0], other = team[1];
+  if (!first || !other) throw new Error("Both native coworkers are required.");
+  return { first, other };
+}
 
 async function openAssignments(app: Awaited<ReturnType<typeof coworker>>): Promise<void> {
   await waitFor(app, () => {
@@ -334,11 +384,7 @@ test.skipIf(!enabled)(previewOnly ? "Coworker Fresh start fullscreen preview wit
   evidence.recordAssertionEvidence("Partial and malformed confirmation cannot erase; Cancel leaves ordinary chat usable", "Native confirmation rejects partial, lowercase, padded and extra-field requests. Team and session identities were unchanged and another loopback-model turn completed.", true);
 
   // Fixed account-storage fixture, never a real sign-in or remote origin.
-  await evalIn(app, browserScript((baseUrl) => {
-    localStorage.setItem("coworker.den.session.v1", JSON.stringify({ baseUrl, token: "reset-fixture-session", userName: "Fixture member", userEmail: "fixture@example.test", orgId: "org_reset_fixture", orgName: "Reset fixture" }));
-    location.reload();
-    return true;
-  }, [`http://127.0.0.1:${model.port}`]));
+  await fixture.seedAccountStorage();
   await waitForText(app, "Juniper", { timeoutMs: 120_000 });
   const replayCoworkersBefore = await invoke("coworkers.list");
   await settings();
@@ -627,8 +673,7 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
   await evalIn(app, () => { const button = document.querySelector<HTMLElement>('[data-testid="coworker-composer"] [data-testid="effort-dial-pill"]'); if (!button) throw new Error("Effort dial unavailable"); button.click(); return true; });
   await waitFor(app, () => Boolean(document.querySelector('[data-testid="effort-dial-range"]')), { timeoutMs: 10_000, label: "effort control" });
   await evalIn(app, () => { const range = document.querySelector<HTMLElement>('[data-testid="effort-dial-range"]'); if (!range) throw new Error("Effort range unavailable"); range.focus(); return true; });
-  await app.client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 });
-  await app.client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 });
+  await pressKey(app, "ArrowRight");
   await waitFor(app, async () => { const { result } = await window.__COWORKER__.invoke("coworkers.get", { slug: "scout" }); return typeof result === "object" && result !== null && "effortPreference" in result && result.effortPreference === "thorough"; }, { awaitPromise: true, timeoutMs: 15_000, label: "the dial's stop kept on the record" });
   await evalIn(app, () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return true; });
   await waitFor(app, () => !document.querySelector('[data-testid="effort-dial-panel"]'), { timeoutMs: 5_000, label: "the popover closed" });
@@ -1214,5 +1259,261 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
     "The created assignment stored a 120-minute interval, 09:00-18:00 window, weekdays, and maximum of four runs per day, with a next due time.",
     true,
   );
+});
+
+const onboarding = spec.world(isolatedOnboardingCoworker, {
+  resources: { surfaces: ["desktop"], services: ["mock"], nativeReason: "Verify packaged Coworker handoff, native provider storage, embedded v2 preparation and native conversation admission; a web renderer cannot prove these." },
+  needs: { env: ["OPENWORK_EVAL_ELECTRON_BINARY"], optIn: ["OPENWORK_EVAL_COWORKER_LOOPBACK_ONLY"] },
+  timeout: 300_000,
+});
+
+onboarding("Coworker native onboarding Cloud reviews roles before team creation and keeps prepared coworkers independent", { timeout: 360_000 }, async ({ world, user, probe, step, evidence }) => {
+  expect(world.cold).toEqual({ packaged: true, electron: true, welcome: true });
+  expect(world.egress).toHaveLength(2);
+  const preferred = `${world.cloudProvider}/${world.cloudModels[0]}`;
+  const deliberate = `${world.cloudProvider}/${world.cloudModels[1]}`;
+  await step("a real handoff reaches role review, never team creation, through a held Cloud catalog", async () => {
+    world.den.catalog("held");
+    await user.click({ testId: "onboarding-cloud-choice" });
+    await user.see({ testId: "sign-in-gate" });
+    await user.screenshot();
+    await user.click({ placeholder: "opencoworker://den-auth?grant=…" });
+    await world.typeHandoff();
+    await user.click({ role: "button", label: "Connect" });
+    await probe.eventually(world.den.reads, { within: 30_000, label: "the native account sync is waiting on the fixture catalog", until: (reads) => reads.some((read) => read.path === "/v1/inference-providers") });
+    expect(world.den.exchanges()).toBe(1);
+    await user.notSee({ testId: "onboarding-intents" });
+    expect(await world.coworkers()).toEqual([]);
+    world.den.catalog("available");
+    await user.see({ testId: "onboarding-models" }, { timeoutMs: 120_000 });
+    const ui = await probe.eventually(world.ui, { within: 90_000, label: "four current role recommendations", until: (ui) => ui.roles.length === 4 && ui.continueDisabled === false });
+    expect(ui.roles.map((row) => row.role)).toEqual(["conversation", "thinking", "delivery", "facilitator"]);
+    expect(ui.roles.every((row) => row.current === "Cloud model A")).toBe(true);
+    expect(ui.text).toMatch(/paid access (?:is )?unverified/i);
+    expect(world.den.reads().filter((read) => read.path.includes("inference-providers")).every((read) => read.authenticated && read.scoped)).toBe(true);
+    expect(world.model.requests()).toEqual([]);
+    await user.notSee({ testId: "onboarding-team" });
+    await user.screenshot();
+    const frames = await filledTransitionFrames(world);
+    expect(frames.stages).toEqual(expect.arrayContaining(["sign-in-gate", "onboarding-models"]));
+    evidence.recordAssertionEvidence("Native Cloud connection reviews models before creating coworkers", JSON.stringify({ exchanges: world.den.exchanges(), frames, package: world.packageHashes, engine: world.engine, egress: world.egress, gatewayHandler: "Not exercised: Den grants and inference upstream are localhost fixtures." }), true);
+  });
+
+  await step("tokenized upstream search, deliberate model/effort and failed refresh survive reload without silent replacement", async () => {
+    await user.click({ testId: "model-default-conversation" });
+    await user.click({ testId: "model-picker-current", nth: 0 });
+    await user.type({ role: "textbox", label: "Search AI models" }, "gpt luna");
+    const options = await probe.dom(`[data-testid="model-provider-${world.cloudProvider}"] button`);
+    expect(options.elements.map((item) => item.text)).toEqual([expect.stringContaining(preferred)]);
+    await user.type({ role: "textbox", label: "Search AI models" }, "Cloud model B", { replace: true });
+    await user.click({ role: "button", text: new RegExp(`${deliberate}$`) });
+    await chooseRoleEffort(user, "high");
+    await probe.eventually(world.ui, { within: 10_000, label: "the deliberate role and effort are shown", until: (ui) => ui.roles[0]?.current === "Cloud model B" && ui.roles[0]?.variant === "high" });
+    await filledTransitionFrames(world);
+    await user.reload();
+    await user.see({ testId: "onboarding-models" }, { timeoutMs: 90_000 });
+    await probe.eventually(world.ui, { within: 90_000, label: "reloaded role review retains the deliberate choice", until: (ui) => ui.continueDisabled === false && ui.roles[0]?.current === "Cloud model B" && ui.roles[0]?.variant === "high" });
+    const before = (await world.ui()).roles;
+    expect(before.slice(1).every((row) => row.current === "Cloud model A")).toBe(true);
+    await user.screenshot();
+    world.den.catalog("unavailable");
+    await user.click({ role: "button", label: "Refresh models" });
+    await user.see({ role: "alert", text: /Models could not be refreshed/ }, { timeoutMs: 30_000 });
+    expect((await world.ui()).continueDisabled).toBe(true);
+    expect((await world.ui()).roles.map(({ role, current, variant }) => ({ role, current, variant }))).toEqual(before.map(({ role, current, variant }) => ({ role, current, variant })));
+    expect(await world.coworkers()).toEqual([]);
+    expect(world.model.requests()).toEqual([]);
+    await user.screenshot();
+    world.den.catalog("available");
+    await user.click({ role: "button", label: "Retry" });
+    await probe.eventually(world.ui, { within: 90_000, label: "a real successful catalog retry re-enables review", until: (ui) => ui.continueDisabled === false });
+  });
+
+  const { first, other } = await reviewedTeam(user, probe, world);
+  expect(await world.modelDefaults()).toEqual({ conversation: { model: deliberate, modelVariant: "high" }, thinking: { model: preferred, modelVariant: "" }, delivery: { model: preferred, modelVariant: "" }, facilitator: { model: preferred, modelVariant: "" } });
+  await step("navigation preserves valid preparation and one coworker override leaves the other untouched", async () => {
+    await user.click({ testId: "coworker-rail-row", label: other.name });
+    await readyCoworker(world, probe);
+    await user.click({ testId: "coworker-rail-row", label: first.name });
+    await readyCoworker(world, probe);
+    const before = await world.preparation();
+    expect(before.key).toEqual(expect.any(String));
+    expect(before.revisions).toHaveProperty(other.workspaceId, expect.any(Number));
+    await user.click({ testId: "coworker-profile-button" });
+    await user.see({ testId: "openwork-settings" });
+    const returningAt = Date.now();
+    await user.click({ role: "button", label: /Back to coworkers/ });
+    await user.click({ testId: "coworker-rail-row", label: first.name });
+    await readyCoworker(world, probe);
+    const returnFrames = (await world.frames()).frames.filter((frame) => frame.at >= returningAt && frame.stage === "coworker-discussion-view");
+    expect(returnFrames.length).toBeGreaterThan(0);
+    expect(returnFrames.filter((frame) => frame.warming), "returning to a prepared coworker must not flash a fresh preparation or unavailable banner").toEqual([]);
+    expect(await world.preparation()).toEqual(before);
+    expect(world.model.requests()).toEqual([]);
+    const untouched = (await world.coworkers()).find((coworker) => coworker.slug === other.slug);
+    if ((await world.ui()).contextOpen) await user.click({ testId: "context-panel-close" });
+    await user.click({ testId: "context-rail-settings" });
+    await user.click({ text: "Customize for this coworker" });
+    await user.click({ testId: "model-picker-current", nth: 0 });
+    await user.type({ role: "textbox", label: "Search AI models" }, "gpt luna");
+    await user.click({ role: "button", text: new RegExp(`${preferred}$`) });
+    await probe.eventually(world.coworkers, { within: 30_000, label: "the personal model is saved natively", until: (coworkers) => coworkers.some((coworker) => coworker.slug === first.slug && coworker.model === preferred && coworker.modelChosenBy === "person" && !coworker.useAppModelDefaults) });
+    expect((await world.coworkers()).find((coworker) => coworker.slug === other.slug)).toEqual(untouched);
+    const after = await world.preparation();
+    expect(after.key).toBe(before.key);
+    expect(after.revisions?.[other.workspaceId]).toBe(before.revisions?.[other.workspaceId]);
+    await user.screenshot();
+    await user.click({ testId: "context-panel-close" });
+    await user.click({ testId: "coworker-rail-row", label: other.name });
+    await readyCoworker(world, probe);
+    const prompt = "Help me choose the next review step.";
+    await user.type({ role: "textbox", label: `Message ${other.name}` }, prompt);
+    await user.click({ testId: "coworker-send" });
+    const call = await nextNativeCall(world, probe, 0, prompt);
+    expect(call.model).toBe(world.cloudModels[1]);
+    const admitted = await probe.eventually(() => world.state(other.slug), { within: 30_000, label: "the native session uses the persisted role model and effort", until: (state) => state.running });
+    expect(admitted.session).toMatchObject({ model: { providerID: world.cloudProvider, id: world.cloudModels[1], variant: "high" } });
+    world.model.release(call.id);
+    await user.see({ text: call.reply }, { timeoutMs: 90_000 });
+    await readyCoworker(world, probe);
+    expect(world.model.requests()).toHaveLength(1);
+    expect(world.model.faults()).toEqual([]);
+    const frames = await filledTransitionFrames(world);
+    expect(frames.stages).toEqual(expect.arrayContaining(["onboarding-models", "onboarding-intents", "onboarding-team", "coworker-discussion-view"]));
+    const privacy = await world.privacy();
+    expect(privacy.clean).toBe(true);
+    expect(privacy.inspectedLogs).toBeGreaterThan(0);
+    evidence.recordAssertionEvidence("Role choices persist and preparation is scoped to the coworker", JSON.stringify({ defaults: await world.modelDefaults(), before, after, untouched, dispatch: { model: call.model, authenticated: call.authenticated, route: call.route }, frames, privacy }), true);
+  });
+});
+
+onboarding("Coworker native onboarding BYOK keeps delayed native turns truthful through replies and failures", { timeout: 360_000 }, async ({ world, user, probe, step, evidence }) => {
+  await world.reducedMotion();
+  await world.restartFrames();
+  await step("the real native custom provider flow checks a fake key and supplies provider-scoped role choices", async () => {
+    await user.click({ testId: "onboarding-local-choice" });
+    await user.see({ testId: "local-providers" }, { timeoutMs: 90_000 });
+    await user.click({ testId: "add-another-open" });
+    await user.click({ role: "option", label: /^Custom/ });
+    await user.see({ testId: "custom-form" });
+    await user.screenshot();
+    await user.type({ role: "textbox", label: "Name" }, "Fixture box");
+    await user.type({ role: "textbox", label: "Address" }, world.customAddress);
+    await user.type({ role: "textbox", label: "Key (optional)" }, world.byokKey, { sensitive: true, verify: true });
+    await user.click({ role: "button", label: "Check" });
+    await user.see({ testId: "custom-start-model" }, { timeoutMs: 30_000 });
+    await user.click({ testId: "custom-start-model" });
+    await user.press("End");
+    await user.press("Enter");
+    await user.see({ testId: "custom-start-model" }, { value: "local-large" });
+    await user.click({ role: "button", label: "Save" });
+    await user.see({ testId: "onboarding-models" }, { timeoutMs: 120_000 });
+    const ui = await probe.eventually(world.ui, { within: 90_000, label: "BYOK model review is populated from the connected provider", until: (ui) => ui.roles.length === 4 && ui.continueDisabled === false });
+    expect(ui.roles[0]?.current).toBe("local-large");
+    expect(ui.roles.every((row) => row.detail?.includes("Fixture box") && world.customModels.includes(row.current ?? ""))).toBe(true);
+    expect(world.den.exchanges()).toBe(0);
+    expect(world.model.requests()).toEqual([]);
+    expect(await world.coworkers()).toEqual([]);
+    await user.screenshot();
+    await user.click({ testId: "onboarding-models-continue" });
+    const defaults = await world.modelDefaults();
+    expect(Object.values(defaults).every((choice) => choice.model.startsWith(`${world.customProvider}/`) && world.customModels.includes(choice.model.split("/")[1] ?? ""))).toBe(true);
+    await user.click({ testId: "onboarding-intents-own" });
+    await user.type({ placeholder: "Scout" }, "Juniper");
+    await user.click({ role: "button", label: "Add coworker" });
+    await user.see({ testId: "coworker-rail" }, { timeoutMs: 90_000 });
+    await readyCoworker(world, probe);
+    const frames = await filledTransitionFrames(world, true);
+    expect(frames.stages).toEqual(expect.arrayContaining(["local-mode", "onboarding-models", "onboarding-intents"]));
+    evidence.recordAssertionEvidence("Native BYOK onboarding uses only its checked provider and respects reduced motion", JSON.stringify({ defaults, frames, package: world.packageHashes, egress: world.egress }), true);
+  });
+
+  await step("a genuinely active delayed request is not lost confirmation; a real observation outage stays unknown without replay", async () => {
+    const prompt = "Help me plan a small review.";
+    await world.restartFrames();
+    await user.type({ role: "textbox", label: "Message Juniper" }, prompt);
+    await user.click({ testId: "coworker-send" });
+    const call = await nextNativeCall(world, probe, 0, prompt);
+    expect(call).toMatchObject({ route: "/custom/v1/chat/completions", model: "local-large" });
+    const active = await probe.eventually(() => world.state("juniper"), { within: 30_000, label: "the native engine confirms the request is active", until: (state) => state.running && state.activity.some((entry) => isRecord(entry.admission) && entry.admission.confirmed === true) });
+    const heldThrough = call.startedAt + 20_000;
+    await probe.eventually(async () => {
+      const state = await world.state("juniper");
+      const ui = await world.ui();
+      expect(state.running).toBe(true);
+      expect(world.model.requests()).toHaveLength(1);
+      expect(ui.warming).toBe(false);
+      expect(ui.status).not.toMatch(/Ready|Confirmation|Checking confirmation/i);
+      expect(ui.outcome).not.toBe("failed");
+      return Date.now();
+    }, { within: 25_000, intervalMs: 500, label: "a held real provider response remains active beyond the short observer window", until: (at) => at >= heldThrough });
+    const heldFrames = await world.frames();
+    const activeFrames = heldFrames.frames.filter((frame) => frame.at >= call.startedAt);
+    expect(activeFrames.length).toBeGreaterThan(1);
+    expect(activeFrames.filter((frame) => /Ready|Confirmation|Checking confirmation/i.test(frame.status) || /confirmation.*unavailable|lost confirmation/i.test(frame.visibleStatus))).toEqual([]);
+    await user.screenshot();
+    await world.rendererOffline(true);
+    try {
+      await probe.eventually(world.ui, { within: 30_000, label: "the actual renderer transport failure is shown as unknown, not success", until: (ui) => ui.state === "unknown" && ui.text.includes("Message accepted.") });
+      expect((await world.state("juniper")).running).toBe(true);
+      expect(world.model.requests()).toHaveLength(1);
+      expect((await world.ui()).status).not.toMatch(/Ready|Confirmation unavailable/i);
+      await user.screenshot();
+    } finally {
+      await world.rendererOffline(false);
+    }
+    await user.click({ role: "button", label: "Try again" });
+    world.model.release(call.id);
+    await user.see({ text: call.reply }, { timeoutMs: 90_000 });
+    await readyCoworker(world, probe);
+    const settled = await world.state("juniper");
+    expect(settled.threadId).toBe(active.threadId);
+    expect(settled.running).toBe(false);
+    expect(settled.messages.filter((message) => message.type === "user")).toHaveLength(1);
+    expect(settled.messages.some((message) => message.type === "assistant" && message.completed && message.text.includes(call.reply))).toBe(true);
+    expect(world.model.requests()).toHaveLength(1);
+    await user.screenshot();
+    evidence.recordAssertionEvidence("Delayed native work and lost observation have distinct truthful states", JSON.stringify({ threadId: settled.threadId, heldMs: heldThrough - call.startedAt, activeFrames: activeFrames.length, nativeAdmission: active.activity, dispatches: world.model.requests().length, unknownFrom: "Renderer transport disabled while the native engine remained active; no IPC or UI status was mocked." }), true);
+  });
+
+  await step("reload and follow-up keep one native conversation; a provider rejection stays failed without a new automatic dispatch", async () => {
+    await filledTransitionFrames(world, true);
+    await user.reload();
+    await user.see({ role: "textbox", label: "Message Juniper" }, { timeoutMs: 90_000 });
+    await readyCoworker(world, probe);
+    expect(world.model.requests()).toHaveLength(1);
+    const initial = await world.state("juniper");
+    const followup = "Make that review more concise.";
+    await user.type({ role: "textbox", label: "Message Juniper" }, followup);
+    await user.click({ testId: "coworker-send" });
+    const second = await nextNativeCall(world, probe, 1, followup);
+    world.model.release(second.id);
+    await user.see({ text: second.reply }, { timeoutMs: 90_000 });
+    await readyCoworker(world, probe);
+    const afterFollowup = await world.state("juniper");
+    expect(afterFollowup.threadId).toBe(initial.threadId);
+    expect(afterFollowup.messages.filter((message) => message.type === "user")).toHaveLength(2);
+    expect(afterFollowup.messages.filter((message) => message.type === "assistant" && message.completed && message.error === null)).toHaveLength(2);
+    await user.screenshot();
+    const failurePrompt = "Check one more review step.";
+    await user.type({ role: "textbox", label: "Message Juniper" }, failurePrompt);
+    await user.click({ testId: "coworker-send" });
+    const failed = await nextNativeCall(world, probe, 2, failurePrompt);
+    world.model.release(failed.id, "failure");
+    await user.see({ testId: "coworker-turn-outcome" }, { timeoutMs: 90_000 });
+    await probe.eventually(world.ui, { within: 30_000, label: "native provider failure is not a ready or success banner", until: (ui) => ui.outcome === "failed" && ui.status !== "Ready" });
+    const failure = await probe.eventually(() => world.state("juniper"), { within: 30_000, label: "the failed turn is durably settled in the same native session", until: (state) => !state.running && state.messages.some((message) => message.error !== null) });
+    expect(failure.threadId).toBe(initial.threadId);
+    expect(failure.messages.filter((message) => message.type === "user")).toHaveLength(3);
+    expect(world.model.requests()).toHaveLength(3);
+    expect(world.model.requests().every((call) => call.authenticated && call.route === "/custom/v1/chat/completions" && call.model === "local-large" && !call.expired)).toBe(true);
+    expect(world.model.faults()).toEqual([]);
+    await user.screenshot();
+    const frames = await filledTransitionFrames(world, true);
+    const privacy = await world.privacy();
+    expect(privacy.clean).toBe(true);
+    expect(privacy.inspectedLogs).toBeGreaterThan(0);
+    evidence.recordAssertionEvidence("First reply, follow-up and rejection use the real native v2 conversation without replay", JSON.stringify({ threadId: initial.threadId, users: failure.messages.filter((message) => message.type === "user").map((message) => message.id), dispatches: world.model.requests().map(({ id, route, model, authenticated, expired }) => ({ id, route, model, authenticated, expired })), frames, privacy }), true);
+  });
 });
 }

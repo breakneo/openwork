@@ -20,8 +20,8 @@
  */
 import type { ModelChosenBy } from "./bridge.ts";
 import { recommendModel, type EngineModelCatalog, type EngineModelOption } from "./threads.ts";
-import { DEFAULT_MODEL_DEFAULTS, usesAppConversationDefault, type ModelDefaults, type ModelPurpose } from "./model-defaults.ts";
-import { chooseIndexedFallbackModel, chooseIndexedModel, chooseAutomaticRoleModel, MODEL_INTELLIGENCE_INDEX, type ModelSelectionDecision, type ModelSelectionOptions, type ModelSelectionPreferences } from "./model-intelligence.ts";
+import { DEFAULT_MODEL_DEFAULTS, usesAppConversationDefault, type ModelDefault, type ModelDefaults, type ModelPurpose } from "./model-defaults.ts";
+import { chooseIndexedFallbackModel, chooseIndexedModel, chooseAutomaticRoleModel, preferredRoleModel, sameModelBoundary, MODEL_INTELLIGENCE_INDEX, type ModelSelectionDecision, type ModelSelectionOptions, type ModelSelectionPreferences } from "./model-intelligence.ts";
 import { effortForTurn, effortStopOf, laneWithPreference, replyKindForLane } from "./effort.ts";
 export { costsNoMoreThan } from "./model-intelligence.ts";
 
@@ -305,10 +305,10 @@ export function resolveModelPreview(
   const selected = purpose !== "facilitator" && coworker[field]?.trim()
     ? { model: coworker[field]?.trim() ?? "", modelVariant: coworker[`${field}Variant`] ?? "" }
     : defaults[purpose];
-  if (purpose === "facilitator" && !selected.model) return { state: "context", detail: "Chosen when group participants are known; group overrides take priority." };
+  if (purpose === "facilitator" && !selected.model && !preferredRoleModel(catalog, purpose)) return { state: "context", detail: "Chosen when group participants are known; group overrides take priority." };
   const nativeDefaults = catalog.models.filter((model) => model.isProviderDefault);
   const standard = coworker.model || (nativeDefaults.length === 1 ? nativeDefaults[0]?.id : undefined);
-  const automatic = !selected.model && purpose !== "facilitator" && usesAppConversationDefault(coworker)
+  const automatic = !selected.model && (purpose === "facilitator" || usesAppConversationDefault(coworker))
     ? chooseAutomaticRoleModel(catalog, purpose, { standard, preferences: coworker.modelSelectionPreferences })
     : null;
   const choice = selected.model
@@ -324,4 +324,33 @@ export function resolveModelPreview(
   } catch (error) {
     return { state: "unavailable", detail: error instanceof Error ? error.message : "The selected effort is unavailable." };
   }
+}
+
+export type OnboardingModelRecommendations = { defaults: ModelDefaults; previews: Record<ModelPurpose, ModelChoicePreview> };
+
+export function resolveOnboardingModelDefaults(
+  catalog: Pick<EngineModelCatalog, "models">,
+  current: ModelDefaults = DEFAULT_MODEL_DEFAULTS,
+  providerId?: string,
+): OnboardingModelRecommendations {
+  const scoped = { models: catalog.models.filter((model) => providerId === undefined || model.providerId === providerId) };
+  const role = (purpose: ModelPurpose): { selection: ModelDefault; preview: ModelChoicePreview } => {
+    const saved = { ...current[purpose] };
+    if (saved.model.trim()) return { selection: saved, preview: resolveModelPreview(catalog, purpose, current) };
+    const choice = chooseAutomaticRoleModel(scoped, purpose);
+    const model = choice.model;
+    if (!model) return { selection: saved, preview: { state: "unavailable", detail: choice.reason } };
+    if (!preferredRoleModel(scoped, purpose) && scoped.models.some((candidate) => candidate.id !== model.id && candidate.tier === model.tier
+      && chooseIndexedModel({ models: [candidate] }, "standard").model && !sameModelBoundary(candidate, model))) {
+      return { selection: saved, preview: { state: "unavailable", detail: "Multiple connected provider or credential choices are available. Choose an explicit role model; no connection was selected automatically." } };
+    }
+    const selection = { ...saved, model: model.id };
+    const preview = resolveModelPreview(scoped, purpose, { ...current, [purpose]: selection });
+    return { selection: preview.state === "ready" ? selection : saved, preview };
+  };
+  const conversation = role("conversation"), thinking = role("thinking"), delivery = role("delivery"), facilitator = role("facilitator");
+  return {
+    defaults: { conversation: conversation.selection, thinking: thinking.selection, delivery: delivery.selection, facilitator: facilitator.selection },
+    previews: { conversation: conversation.preview, thinking: thinking.preview, delivery: delivery.preview, facilitator: facilitator.preview },
+  };
 }

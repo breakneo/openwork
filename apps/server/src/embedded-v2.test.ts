@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,7 +52,7 @@ if (!process.env.OPENWORK_EMBEDDED_V2_TEST_ROOT) {
     const workspace = join(root, "workspace");
     await mkdir(workspace);
     await writeFile(bin, `#!${process.execPath}
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 const log = (value) => appendFileSync(process.env.FIXTURE_LOG, JSON.stringify(value) + "\\n");
 const config = () => JSON.parse(readFileSync(join(process.env.OPENCODE_CONFIG_DIR, "opencode.json"), "utf8"));
@@ -92,6 +92,11 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
     else if (request.method === "DELETE") mcps.delete(name);
     return new Response(null, { status: 204 });
   }
+  if (url.pathname === "/api/skill" && process.env.FIXTURE_CLOUD_SKILLS === "1") return Response.json({ data: (config().skills ?? []).flatMap(root =>
+    readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => {
+      const location = join(root, entry.name, "SKILL.md");
+      return { id: entry.name, name: entry.name, location, content: readFileSync(location, "utf8").trim() };
+    })) });
   if (url.pathname === "/api/skill") return Response.json(process.env.FIXTURE_SKILLS ? JSON.parse(readFileSync(process.env.FIXTURE_SKILLS, "utf8")) : { data: [] });
   if (url.pathname === "/api/session" && request.method === "POST") {
     const data = await request.json(); sessions.set(data.id, data); return Response.json({ data });
@@ -120,6 +125,7 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
     }
     if (action === "wait" && request.method === "POST") return new Response(null, { status: active.has(id) ? 409 : 204 });
   }
+  if (url.pathname.endsWith("/permission") && process.env.FIXTURE_CLOUD_SKILLS === "1") return Response.json({ data: request.method === "GET" ? [] : { id: "per_fixture", effect: "allow" } });
   if (url.pathname.includes("/instructions/entries/") && request.method === "PUT") { log({ instruction: await request.json() }); return new Response(null, { status: 204 }); }
   if (url.pathname.endsWith("/prompt") && request.method === "POST") { const data = await request.json(); log({ prompt: data }); return Response.json({ data }); }
   return Response.json({ error: "unexpected route" }, { status: 404 });
@@ -146,6 +152,180 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
+
+  test("host-only skill origin snapshots avoid duplicate sync without authorizing native input", async () => {
+    const { CLOUD_NATIVE_SKILLS_SCOPE_HEADER, cloudNativeSkillId } = await import("./cloud-native-skills.js");
+    const { isRecord } = await import("./connect-mcp-transport.js");
+    const { ENGINE_GLOBAL_RUNTIME_CONFIG_ID } = await import("./runtime-opencode-config-store.js");
+    const { Database } = await import("bun:sqlite");
+    const item = await fixture();
+    const directory = item.options.workspaces[0]!;
+    const foreign = join(item.root, "foreign");
+    await mkdir(foreign);
+    const uris = Array.from({ length: 8 }, (_, index) => `skill://fixture-${index}/SKILL.md`);
+    let revision = "ALPHA";
+    let visible = true;
+    let rejectCloud = false;
+    let credential = "Bearer origin-fixture";
+    let badNativeId = false;
+    let cloudCalls = 0;
+    const reads: string[] = [];
+    const cloud = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      cloudCalls++;
+      if (rejectCloud || request.headers.get("authorization") !== credential) return new Response(null, { status: 401 });
+      const body: unknown = await request.json();
+      if (!isRecord(body)) return new Response(null, { status: 400 });
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      let result: unknown;
+      if (body.method === "initialize") result = { protocolVersion: "2025-06-18", capabilities: { resources: {} }, serverInfo: { name: "fixture", version: "1" } };
+      else if (body.method === "resources/read" && isRecord(body.params) && typeof body.params.uri === "string") {
+        const uri = body.params.uri;
+        reads.push(uri);
+        result = { contents: [{ uri, text: uri === "skill://index.json"
+          ? JSON.stringify({ skills: visible ? uris.map((url, index) => ({ name: `fixture-${index}`, type: "skill-md", url })) : [] })
+          : `Private fixture instructions ${uris.indexOf(uri)} ${revision}.` }] };
+      } else return new Response(null, { status: 400 });
+      return Response.json({ jsonrpc: "2.0", id: body.id, result });
+    } });
+    const send = globalThis.fetch;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") throw new Error("Origin fixture refuses external egress");
+      const response = await send(input, init);
+      if (!badNativeId || url.pathname !== "/api/skill") return response;
+      const payload: unknown = await response.json();
+      if (!isRecord(payload) || !Array.isArray(payload.data)) throw new Error("Missing fixture catalog");
+      return Response.json({ data: payload.data.map((entry) => isRecord(entry) ? { ...entry, id: "foreign-native-id" } : entry) });
+    }, { preconnect: send.preconnect }));
+    let handle: Awaited<ReturnType<typeof startEmbeddedServer>> | undefined;
+    try {
+      handle = await startEmbeddedServer({ ...item.options, workspaces: [directory, foreign], opencodeV2: { ...item.options.opencodeV2,
+        env: { ...item.options.opencodeV2.env, FIXTURE_CLOUD_SKILLS: "1" } } });
+      const host = handle;
+      const engine = engineV2ByConfig.get(host.config)!;
+      const workspaceId = host.config.workspaces[0]!.id;
+      const input = { workspaceId, directory };
+      const snapshot = () => host.nativeSkillOriginSnapshot(input);
+      const mount = `${host.url}/workspace/${workspaceId}/opencode2/api`;
+      const headers = { authorization: `Bearer ${host.config.token}`, "content-type": "application/json" };
+      const cloudConfig = { type: "remote", url: `http://127.0.0.1:${cloud.port}/mcp`, enabled: true, oauth: false, headers: { Authorization: credential } };
+      const configure = (value: Record<string, unknown>) => writeGlobalRuntimeOpencodeConfig(host.config, (current) => ({ ...current, mcp: { "openwork-cloud": value } }));
+      const discover = async () => {
+        const response = await fetch(mount + "/skill", { headers });
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const prompt = (skills?: Array<{ id: string; text?: string }>, scope?: string) => fetch(mount + "/session/ses_origin/prompt", { method: "POST",
+        headers: { ...headers, ...(scope ? { [CLOUD_NATIVE_SKILLS_SCOPE_HEADER]: scope } : {}) },
+        body: JSON.stringify({ id: "msg_origin", text: "Fixture input", ...(skills ? { skills } : {}) }) });
+      const forwarded = async () => (await readFile(item.log, "utf8")).trim().split("\n").filter((line) => line.includes('"prompt":')).length;
+      expect(await snapshot()).toBeNull();
+      await configure(cloudConfig);
+      expect(await snapshot()).toBeNull();
+      await discover();
+      const hint = await snapshot();
+      expect(hint).toEqual({ scopes: [expect.stringMatching(/^[0-9a-f]{64}$/)] });
+      if (!hint?.scopes[0]) throw new Error("Expected a non-authorizing scope hint");
+      const scope = hint.scopes[0];
+      const skillId = cloudNativeSkillId(uris[0]!);
+      const location = join(item.options.opencodeV2.rootDir, "cloud-skills", scope, skillId, "SKILL.md");
+      const baseline = { cloudCalls, log: await readFile(item.log, "utf8"), db: (await stat(join(item.root, "runtime.sqlite"))).mtimeMs,
+        native: await readFile(join(item.options.opencodeV2.rootDir, "config/opencode.json"), "utf8") };
+      expect(Object.isFrozen(hint)).toBe(true);
+      expect(Object.isFrozen(hint.scopes)).toBe(true);
+      expect(await snapshot()).toBe(hint);
+      expect(await host.nativeSkillOriginSnapshot({ ...input, workspaceId: "unknown" })).toBeNull();
+      expect(await host.nativeSkillOriginSnapshot({ ...input, directory: foreign })).toBeNull();
+      expect(await host.nativeSkillOriginSnapshot({ workspaceId: host.config.workspaces[1]!.id, directory: foreign })).toBeNull();
+      const roots = host.config.authorizedRoots;
+      host.config.authorizedRoots = [];
+      expect(await snapshot()).toBeNull();
+      host.config.authorizedRoots = roots;
+      await expect(host.nativeSkillOriginSnapshot({ ...input, signal: AbortSignal.abort(new Error("fixture cancelled")) })).rejects.toThrow("cancelled");
+      expect({ cloudCalls, log: await readFile(item.log, "utf8"), db: (await stat(join(item.root, "runtime.sqlite"))).mtimeMs,
+        native: await readFile(join(item.options.opencodeV2.rootDir, "config/opencode.json"), "utf8") }).toEqual(baseline);
+      expect((await fetch(mount + "/session", { method: "POST", headers, body: JSON.stringify({ id: "ses_origin", agent: "fixture" }) })).status).toBe(200);
+      const beforeWarm = reads.length;
+      revision = "BRAVO";
+      expect(await snapshot()).toEqual(hint);
+      expect(reads).toHaveLength(beforeWarm);
+      expect((await prompt(undefined, scope)).status).toBe(200);
+      expect(reads.slice(beforeWarm).filter((uri) => uri === "skill://index.json")).toHaveLength(1);
+      expect(reads.slice(beforeWarm).filter((uri) => uri !== "skill://index.json").sort()).toEqual([...uris].sort());
+      expect(await readFile(location, "utf8")).toContain("BRAVO");
+      expect(await snapshot()).not.toBe(hint);
+      expect(await snapshot()).toEqual(hint);
+      const beforeDenied = await forwarded();
+      expect((await (await prompt([{ id: skillId }])).json()).code).toBe("cloud_skill_scope_required");
+      expect((await (await prompt([{ id: skillId }], "f".repeat(64))).json()).code).toBe("cloud_skill_scope_mismatch");
+      expect(await forwarded()).toBe(beforeDenied);
+      const selected = await prompt([{ id: skillId, text: "Unverified caller body" }], scope);
+      expect(selected.status).toBe(200);
+      expect((await selected.json()).data.skills).toEqual([{ id: skillId, name: skillId }]);
+      const db = new Database(join(item.root, "runtime.sqlite"));
+      try {
+        db.prepare("UPDATE runtime_opencode_configs SET config_json = ?, updated_at = updated_at + 1 WHERE workspace_id = ?")
+          .run(JSON.stringify({ mcp: { "openwork-cloud": { ...cloudConfig, headers: { ...cloudConfig.headers, "x-fixture-context": "changed" } } } }), ENGINE_GLOBAL_RUNTIME_CONFIG_ID);
+      } finally { db.close(); }
+      const beforeContextRead = cloudCalls;
+      expect(await snapshot()).toBeNull();
+      expect(cloudCalls).toBe(beforeContextRead);
+      await configure(cloudConfig);
+      await discover();
+      expect(await snapshot()).toEqual(hint);
+      await writeRuntimeOpencodeConfig(host.config, workspaceId, (current) => ({ ...current, mcp: { unrelated: { type: "remote", enabled: false, url: "https://example.test/mcp" } } }));
+      expect(await snapshot()).toBeNull();
+      await discover();
+      expect(await snapshot()).toEqual(hint);
+      const nativeConfig = host.config.opencodeV2!.config;
+      host.config.opencodeV2!.config = { ...nativeConfig, warming: false };
+      expect(await snapshot()).toBeNull();
+      host.config.opencodeV2!.config = nativeConfig;
+      credential = "Bearer rotated-origin-fixture";
+      await configure({ ...cloudConfig, headers: { Authorization: credential } });
+      expect(await snapshot()).toBeNull();
+      await configure(cloudConfig);
+      expect(await snapshot()).toBeNull();
+      await configure({ ...cloudConfig, headers: { Authorization: credential } });
+      await discover();
+      const rotated = await snapshot();
+      expect(rotated?.scopes[0]).not.toBe(scope);
+      expect((await (await prompt([{ id: skillId }], scope)).json()).code).toBe("cloud_skill_scope_mismatch");
+      visible = false;
+      const beforeRevocation = reads.length;
+      const beforeRejected = await forwarded();
+      expect((await (await prompt([{ id: skillId }], rotated?.scopes[0])).json()).code).toBe("skill_unavailable");
+      expect(reads.slice(beforeRevocation)).toEqual(["skill://index.json"]);
+      expect(await forwarded()).toBe(beforeRejected);
+      expect(await snapshot()).toBeNull();
+      visible = true;
+      await discover();
+      expect(await snapshot()).not.toBeNull();
+      badNativeId = true;
+      const mismatched = await prompt(undefined, rotated?.scopes[0]);
+      expect(mismatched.status).toBe(502);
+      expect((await mismatched.json()).code).toBe("engine_skill_sync_failed");
+      expect(await forwarded()).toBe(beforeRejected);
+      expect(await snapshot()).toBeNull();
+      badNativeId = false;
+      await discover();
+      rejectCloud = true;
+      expect((await (await prompt([{ id: skillId }], rotated?.scopes[0])).json()).code).toBe("skill_unavailable");
+      expect(await snapshot()).toBeNull();
+      expect((await prompt()).status).toBe(200);
+      rejectCloud = false;
+      await discover();
+      engineV2ByConfig.set(host.config, { ...engine });
+      expect(await snapshot()).toBeNull();
+      engineV2ByConfig.set(host.config, engine);
+      await host.stop();
+      expect(await snapshot()).toBeNull();
+    } finally {
+      await handle?.stop();
+      fetchSpy.mockRestore();
+      cloud.stop(true);
+    }
+  }, 30_000);
 
   test("explicit host pin controls native health and metadata without changing Desktop's default", async () => {
     expect(constants.opencodeV2Version).toBe("0.0.0-beta-19086");
@@ -309,6 +489,8 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
         env: { ...item.options.opencodeV2.env, FIXTURE_SKILLS: catalogFile } } });
       const engine = engineV2ByConfig.get(handle.config)!;
       await waitFor(async () => engine.status().running);
+      expect(await handle.nativeSkillOriginSnapshot({ workspaceId: handle.config.workspaces[0]!.id, directory: item.options.workspaces[0]! })).toBeNull();
+      expect(cloudReads).toBe(0);
       await expect(handle.nativeCleanupRequest({ workspaceId: handle.config.workspaces[0]!.id, directory: item.options.workspaces[0]!,
         method: "GET", path: "/api/session/active" })).rejects.toThrow("existing v2 engine");
       await writeGlobalRuntimeOpencodeConfig(handle.config, (current) => ({ ...current, mcp: { "openwork-cloud": {

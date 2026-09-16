@@ -4,7 +4,7 @@ import { useCalendarData } from "@/ui/calendar-data";
 import { useCalendarPreferences } from "@/ui/calendar-preferences";
 import { eventForTarget, groupEventTarget, type EventArtifact } from "@/lib/events";
 import type { DocumentNavigationGuard } from "@/ui/documents";
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { coworkerBridge, type CoworkerActivityItem, type CoworkerGroupSummary, type CoworkerSummary, type CoworkerTemplateSync, type ProviderSyncRun, type RuntimeInfo } from "@/lib/bridge";
 import { acknowledgeCoworker } from "@/ui/coworker-avatar";
 import { publishGroupRun } from "@/lib/group-runs";
@@ -26,7 +26,7 @@ import {
   removeConnect,
   type ConnectState,
 } from "@/lib/connect";
-import { readCoworkerActivity, type CoworkerActivity } from "@/lib/threads";
+import { projectWorkspaceReadiness, readCoworkerActivity, runtimeWorkspaceReadinessKey, workspacePreparationScope, workspaceReadinessCache, type CoworkerActivity, type WorkspacePreparationScope } from "@/lib/threads";
 import { Button, ErrorNote } from "@/ui/kit";
 import { NewCoworker } from "@/ui/new-coworker";
 import { GroupDetailsSheet } from "@/ui/group-details";
@@ -43,7 +43,9 @@ const RAIL_BOUNDS: PanelBounds = { min: 220, max: 380, collapsedWidth: 88, colla
 import { OnboardingWelcome } from "@/ui/onboarding";
 import { OnboardingIntents } from "@/ui/onboarding-intents";
 import { OnboardingTeam } from "@/ui/onboarding-team";
-import { emptyOnboardingDraft, loadOnboardingDraft, saveOnboardingDraft, toggleIntent, type OnboardingDraft } from "@/lib/onboarding-team";
+import { chooseOnboardingModel, completeOnboardingDraft, connectOnboardingProvider, emptyOnboardingDraft, loadOnboardingDraft, onboardingDraftForContext, onboardingStepFor, resumeOnboardingDraft, saveOnboardingDraft, toggleIntent, type OnboardingDraft, type OnboardingStep } from "@/lib/onboarding-team";
+import { OnboardingModelDefaults } from "@/ui/app-model-defaults";
+import { LocalModeScreen } from "@/ui/local-mode";
 import type { TeamRole } from "@/lib/bridge";
 import { AppLoader, CoworkerMark } from "@/ui/brand";
 import type { SettingsSection } from "@/ui/openwork-settings";
@@ -51,25 +53,114 @@ import { VoiceContext } from "@/ui/use-voice";
 import { useActivityInbox } from "@/ui/use-activity-inbox";
 import type { ActivityDocumentTarget } from "@/ui/activity-inbox";
 
-// Whole-window or rarely opened screens load on first use so the startup chunk
-// carries the team, discussions and groups only. Local setup shares the provider
-// editor with Settings; the root loader covers it, the shell covers the rest.
 const ActivityInbox = lazy(() => import("@/ui/activity-inbox").then((module) => ({ default: module.ActivityInbox })));
-const LocalModeScreen = lazy(() => import("@/ui/local-mode").then((module) => ({ default: module.LocalModeScreen })));
 const OpenWorkSettings = lazy(() => import("@/ui/openwork-settings").then((module) => ({ default: module.OpenWorkSettings })));
 const FactoryResetScreen = lazy(() => import("@/ui/factory-reset").then((module) => ({ default: module.FactoryResetScreen })));
 const OnboardingReplay = lazy(() => import("@/ui/onboarding-replay").then((module) => ({ default: module.OnboardingReplay })));
-
-/** How long a freshly (re)started workspace may stay silent before it is a problem worth naming. */
-const WORKSPACE_WARMUP_MS = 45_000;
 
 /** Identity of a pushed account context; the server itself no-ops on a repeat. */
 function sessionKey(session: DenSession): string {
   return `${session.baseUrl}\u0000${session.orgId}\u0000${session.token}`;
 }
 
+type ScopedCoworkerActivity = { scope: WorkspacePreparationScope; activity: CoworkerActivity };
+type CoworkerActivitySnapshots = Record<string, ScopedCoworkerActivity>;
+
+function samePreparationScope(current: WorkspacePreparationScope | null | undefined, captured: WorkspacePreparationScope): boolean {
+  return current?.runtimeKey === captured.runtimeKey && current.workspaceKey === captured.workspaceKey && current.configurationKey === captured.configurationKey;
+}
+
+function sameRuntimeInfo(current: RuntimeInfo | null, next: RuntimeInfo): boolean {
+  if (!current || runtimeWorkspaceReadinessKey(current, "") !== runtimeWorkspaceReadinessKey(next, "")) return false;
+  const workspaceIds = new Set([...Object.keys(current.workspaceReadinessRevisions ?? {}), ...Object.keys(next.workspaceReadinessRevisions ?? {})]);
+  for (const workspaceId of workspaceIds) {
+    if (runtimeWorkspaceReadinessKey(current, workspaceId) !== runtimeWorkspaceReadinessKey(next, workspaceId)) return false;
+  }
+  return current.engineError === next.engineError && current.appName === next.appName && current.version === next.version
+    && current.coworkersDir === next.coworkersDir && current.denBaseUrl === next.denBaseUrl
+    && current.deepLinkScheme === next.deepLinkScheme && current.deepLinksRegistered === next.deepLinksRegistered;
+}
+
+function activityForScope(entry: ScopedCoworkerActivity | undefined, scope: WorkspacePreparationScope): CoworkerActivity | null {
+  if (!entry?.scope || entry.scope.runtimeKey !== scope.runtimeKey || entry.scope.workspaceKey !== scope.workspaceKey) return null;
+  const activity = entry.activity;
+  if (entry.scope.configurationKey !== scope.configurationKey
+    && (["idle", "ready", "starting"].includes(activity.state) || (activity.state === "offline" && activity.label === "AI unavailable"))) {
+    return { ...activity, state: "idle", label: "Idle", detail: "", updatedAt: 0 };
+  }
+  return activity;
+}
+
+function reconcileActivitySnapshots(current: CoworkerActivitySnapshots, runtime: RuntimeInfo, coworkers: CoworkerSummary[], session: DenSession | null): CoworkerActivitySnapshots {
+  const next: CoworkerActivitySnapshots = {};
+  let changed = false;
+  for (const coworker of coworkers) {
+    const entry = current[coworker.slug];
+    if (!entry?.scope) continue;
+    const scope = workspacePreparationScope(runtime, coworker, session);
+    const activity = activityForScope(entry, scope);
+    if (!activity) { changed = true; continue; }
+    if (samePreparationScope(entry.scope, scope)) next[coworker.slug] = entry;
+    else { next[coworker.slug] = { scope, activity }; changed = true; }
+  }
+  return changed || Object.keys(current).length !== Object.keys(next).length ? next : current;
+}
+
+function mergeActivityReads(current: CoworkerActivitySnapshots, reads: Array<{ slug: string; scope: WorkspacePreparationScope; activity: CoworkerActivity | null }>, currentScope: (slug: string) => WorkspacePreparationScope | null): CoworkerActivitySnapshots {
+  let next = current;
+  for (const { slug, scope, activity } of reads) {
+    if (!samePreparationScope(currentScope(slug), scope)) continue;
+    if (!activity && !next[slug]) continue;
+    if (next === current) next = { ...current };
+    if (activity) next[slug] = { scope, activity };
+    else delete next[slug];
+  }
+  return next;
+}
+
+function visibleCoworkerActivity(scope: WorkspacePreparationScope, polled: CoworkerActivity | null, live: CoworkerActivity | null, cloud: CoworkerActivity | null, attention: CoworkerActivity | null): CoworkerActivity {
+  const candidates = [attention, live, cloud, polled];
+  const activity = candidates.find((entry) => entry?.state === "attention")
+    ?? candidates.find((entry) => entry?.state === "working" || entry?.state === "retrying")
+    ?? candidates.find((entry) => entry?.state === "offline" || (entry?.state === "recent" && entry.label !== "Ready" && entry.label !== "Idle"))
+    ?? live ?? cloud ?? polled ?? null;
+  const projected = projectWorkspaceReadiness(activity, workspaceReadinessCache.peek(scope));
+  return { ...projected, ...(projected.last ?? polled?.last ? { last: projected.last ?? polled?.last } : {}), ...(polled?.recent ? { recent: polled.recent } : {}) };
+}
+
+class DeferredView extends Component<{ children: ReactNode; title: string; onBack: () => void; overlay?: boolean }, { failed: boolean }> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  override render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className={`window-shell window-drag flex h-full min-w-0 flex-1 items-center justify-center p-6 ${this.props.overlay ? "absolute inset-0" : ""}`}>
+        <div className="window-no-drag flex max-w-md flex-col items-center gap-4 text-center">
+          <CoworkerMark size={64} />
+          <p className="text-sm text-snow" role="alert">{this.props.title} could not open.</p>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={this.props.onBack}>Back</Button>
+            <Button variant="primary" onClick={() => window.location.reload()}>Reload app</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+function onboardingContext(session: DenSession | null): string {
+  return session ? JSON.stringify([session.baseUrl, session.orgId, session.userEmail]) : "local";
+}
+
 export default function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  const runtimeRef = useRef(runtime);
+  const runtimeObservation = useRef(0);
+  const [bootReady, setBootReady] = useState(false);
   const [bootError, setBootError] = useState("");
   const [session, setSession] = useState<DenSession | null>(() => readDenSession());
   const [providerSync, setProviderSync] = useState<ProviderSyncRun | null>(null);
@@ -91,6 +182,7 @@ export default function App() {
   const readerNavigation: DocumentNavigationGuard = useRef(null);
   const coworkersRef = useRef(coworkers);
   coworkersRef.current = coworkers;
+  const selected = coworkers.find((coworker) => coworker.slug === selectedSlug) ?? null;
   const allowSourceNavigation = useCallback(() => {
     const message = readerNavigation.current?.() ?? "";
     setNavigationNotice(message);
@@ -130,12 +222,31 @@ export default function App() {
   const [groupDetailsOpen, setGroupDetailsOpen] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [onboardingReady, setOnboardingReady] = useState(false);
-  /** The "Use this Mac" step: what this Mac already has, before the first coworker. */
-  const [localSetup, setLocalSetup] = useState(false);
-  /** After the account or local-mode step: what the team will help with, then the proposed team. */
-  const [onboardingStep, setOnboardingStep] = useState<"" | "intents" | "team">("");
   const [onboardingDraft, setOnboardingDraft] = useState<OnboardingDraft>(() => emptyOnboardingDraft());
+  const onboardingDraftRef = useRef(onboardingDraft);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const accountKey = session ? sessionKey(session) : "local";
+  const onboardingStep = onboardingStepFor(onboardingDraft);
+  const updateOnboardingDraft = useCallback((next: OnboardingDraft | ((current: OnboardingDraft) => OnboardingDraft)) => {
+    const resolved = typeof next === "function" ? next(onboardingDraftRef.current) : next;
+    onboardingDraftRef.current = resolved;
+    saveOnboardingDraft(window.sessionStorage, resolved);
+    setOnboardingDraft(resolved);
+  }, []);
+  const setOnboardingStep = useCallback((step: OnboardingStep) => {
+    updateOnboardingDraft((current) => ({ ...current, step }));
+  }, [updateOnboardingDraft]);
+  const finishOnboarding = useCallback(() => {
+    updateOnboardingDraft(completeOnboardingDraft(onboardingDraftRef.current));
+    setOnboardingReady(true);
+  }, [updateOnboardingDraft]);
   const [teamCatalog, setTeamCatalog] = useState<TeamRole[]>([]);
+  const [teamCatalogError, setTeamCatalogError] = useState("");
+  const [teamCatalogReload, setTeamCatalogReload] = useState(0);
+  const [teamError, setTeamError] = useState("");
+  const [proposingTeam, setProposingTeam] = useState(false);
+  const proposalGeneration = useRef(0);
   const [globalSettings, setGlobalSettings] = useState<SettingsSection | null>(null);
   const [globalSettingsMounted, setGlobalSettingsMounted] = useState(false);
   const [factoryResetOpen, setFactoryResetOpen] = useState(false);
@@ -144,9 +255,9 @@ export default function App() {
   const inbox = useActivityInbox(Boolean(runtime) && !factoryResetOpen);
   // A read-only tour, deliberately separate from first-run flags and persisted team drafts.
   const [replayOnboarding, setReplayOnboarding] = useState<"welcome" | "ai" | null>(null);
-  const [activityBySlug, setActivityBySlug] = useState<Record<string, CoworkerActivity>>({});
-  const [liveActivityBySlug, setLiveActivityBySlug] = useState<Record<string, CoworkerActivity>>({});
-  const [attentionBySlug, setAttentionBySlug] = useState<Record<string, string>>({});
+  const [activityBySlug, setActivityBySlug] = useState<CoworkerActivitySnapshots>({});
+  const [liveActivityBySlug, setLiveActivityBySlug] = useState<CoworkerActivitySnapshots>({});
+  const [attentionBySlug, setAttentionBySlug] = useState<CoworkerActivitySnapshots>({});
   /** OpenWork Connect (the `openwork-cloud` gateway) state per coworker, while signed in. */
   const [connectBySlug, setConnectBySlug] = useState<Record<string, ConnectState>>({});
   const connectTokenRef = useRef<{ sessionKey: string; token: ConnectToken } | null>(null);
@@ -154,51 +265,87 @@ export default function App() {
   /** Automatic retries per coworker while the AI service is still coming up; cleared on success. */
   const connectRetryRef = useRef<Record<string, { attempts: number; timer: number }>>({});
   /** Cloud responsibilities Den is running right now, per coworker: "Running in OpenWork Cloud". */
-  const [cloudRunBySlug, setCloudRunBySlug] = useState<Record<string, CoworkerActivity>>({});
+  const [cloudRunBySlug, setCloudRunBySlug] = useState<CoworkerActivitySnapshots>({});
   const pushedSessionKeyRef = useRef("");
-  /** When each coworker's workspace first stopped answering; cleared by the next good read. */
-  const notAnsweringSinceRef = useRef<Record<string, number>>({});
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
   const resetReturnFocusRef = useRef<HTMLElement | null>(null);
   const groupReadingRef = useRef(false);
-  const activityReadingRef = useRef(false);
+  const activityReadingRef = useRef(new Map<string, WorkspacePreparationScope>());
+  const activityRefreshRef = useRef<() => void>(() => {});
 
+  const currentPreparationScope = useCallback((slug: string) => {
+    const currentRuntime = runtimeRef.current;
+    const coworker = coworkersRef.current.find((entry) => entry.slug === slug);
+    return currentRuntime && coworker ? workspacePreparationScope(currentRuntime, coworker, sessionRef.current) : null;
+  }, []);
+
+  const reconcileActivities = useCallback((info: RuntimeInfo) => {
+    const reconcile = (current: CoworkerActivitySnapshots) => reconcileActivitySnapshots(current, info, coworkersRef.current, sessionRef.current);
+    setActivityBySlug(reconcile);
+    setLiveActivityBySlug(reconcile);
+    setAttentionBySlug(reconcile);
+    setCloudRunBySlug(reconcile);
+  }, []);
+
+  const applyRuntime = useCallback((info: RuntimeInfo, expected?: RuntimeInfo, workspaceId = "", expectedSession?: DenSession | null): boolean => {
+    if (expectedSession !== undefined && sessionRef.current !== expectedSession) return false;
+    const current = runtimeRef.current;
+    if (expected && current && current !== expected) {
+      return runtimeWorkspaceReadinessKey(current, workspaceId) === runtimeWorkspaceReadinessKey(expected, workspaceId)
+        && runtimeWorkspaceReadinessKey(info, workspaceId) === runtimeWorkspaceReadinessKey(current, workspaceId);
+    }
+    if (sameRuntimeInfo(current, info)) return true;
+    runtimeObservation.current += 1;
+    runtimeRef.current = info;
+    reconcileActivities(info);
+    setRuntime(info);
+    return true;
+  }, [reconcileActivities]);
+
+  useEffect(() => {
+    if (runtimeRef.current) reconcileActivities(runtimeRef.current);
+    activityRefreshRef.current();
+  }, [coworkers, session, runtime, reconcileActivities]);
+
+  const bootGeneration = useRef(0);
   const boot = useCallback(async () => {
+    const request = ++bootGeneration.current;
+    const observation = runtimeObservation.current;
+    const bootSession = sessionRef.current;
     try {
       const list = await coworkerBridge.coworkers.list();
       const info = await coworkerBridge.runtimeInfo();
       // A fresh window runs no group turn, so any still recorded as running was cut off: settle it first.
       await coworkerBridge.groups.recoverInterrupted().catch(() => []);
-      const groups = await coworkerBridge.groups.list().catch(() => []);
-      // Publish the saved team and its selection together, keeping the loader up until both are ready.
-      setRuntime(info);
+      const groups = await coworkerBridge.groups.list();
+      if (request !== bootGeneration.current || sessionRef.current !== bootSession) return;
+      const currentSession = sessionRef.current;
+      const restored = onboardingDraftForContext(currentSession && !currentSession.userEmail ? emptyOnboardingDraft() : loadOnboardingDraft(window.sessionStorage), onboardingContext(currentSession));
+      const settings = list.length === 0 && !restored.modelsReviewed && !onboardingStepFor(restored) ? await coworkerBridge.settings.get() : null;
+      if (request !== bootGeneration.current || sessionRef.current !== bootSession) return;
+      const resumed = resumeOnboardingDraft(restored, list.length > 0, settings?.modelDefaults);
+      const saved: OnboardingDraft = currentSession && list.length === 0 && !resumed.modelsReviewed && !onboardingStepFor(resumed) ? { ...resumed, step: "models" } : resumed;
+      const step = onboardingStepFor(saved);
+      if (observation === runtimeObservation.current) applyRuntime(info);
       setBots(list);
       setGroups(groups);
       setSelectedSlug((current) =>
         current && list.some((coworker) => coworker.slug === current) ? current : (list[0]?.slug ?? ""),
       );
-      if (list.length === 0) {
-        // A team drafted before a quit or reload comes back where it was left.
-        const saved = loadOnboardingDraft(window.sessionStorage);
-        setOnboardingDraft(saved);
-        if (saved.drafts.length > 0) setOnboardingStep("team");
-      }
+      updateOnboardingDraft(saved);
+      setOnboardingReady(!step && (list.length > 0 || saved.modelsReviewed === true));
+      setCreating(step === "create");
       setBootError("");
+      setBootReady(true);
     } catch (cause) {
-      setBootError(cause instanceof Error ? cause.message : String(cause));
+      if (request === bootGeneration.current) setBootError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [applyRuntime, updateOnboardingDraft]);
 
-  const runtimeObservation = useRef(0);
   useEffect(() => {
     void boot();
-    return coworkerBridge.onRuntimeChanged((info) => {
-      runtimeObservation.current += 1;
-      setLiveActivityBySlug({});
-      setActivityBySlug({});
-      setRuntime(info);
-    });
-  }, [boot]);
+    return coworkerBridge.onRuntimeChanged(applyRuntime);
+  }, [applyRuntime, boot]);
 
   useEffect(() => {
     if (!runtime) return;
@@ -210,12 +357,12 @@ export default function App() {
       const observation = runtimeObservation.current;
       try {
         const info = await coworkerBridge.runtimeInfo();
-        if (!cancelled && observation === runtimeObservation.current) setRuntime((current) => current && current.readinessKey === info.readinessKey && current.engineManaged === info.engineManaged && current.engineError === info.engineError ? current : info);
+        if (!cancelled && observation === runtimeObservation.current) applyRuntime(info);
       } catch { }
       finally { reading = false; }
     }, 5_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [runtime?.serverUrl]);
+  }, [applyRuntime, runtime?.serverUrl]);
 
   useEffect(() => {
     if (!runtime) return;
@@ -283,24 +430,36 @@ export default function App() {
   }, [factoryResetOpen]);
 
   const refreshRuntime = useCallback(async () => {
+    const observation = runtimeObservation.current;
+    const account = sessionRef.current;
     const info = await coworkerBridge.runtimeInfo();
-    setRuntime(info);
-  }, []);
+    if (observation === runtimeObservation.current && account === sessionRef.current) applyRuntime(info);
+  }, [applyRuntime]);
 
   const restartRuntime = useCallback(async () => {
-    setRuntime(await coworkerBridge.restartRuntime());
-  }, []);
+    const observation = runtimeObservation.current;
+    const account = sessionRef.current;
+    const info = await coworkerBridge.restartRuntime();
+    if (observation === runtimeObservation.current && account === sessionRef.current) applyRuntime(info);
+  }, [applyRuntime]);
 
   const receiveImportedTemplates = useCallback((result: CoworkerTemplateSync) => {
     const first = result.created[0];
     if (!first) return;
     setBots((current) => [...current, ...result.created.filter((item) => !current.some((known) => known.slug === item.slug))]);
     setSelectedSlug((current) => current || first.slug);
-    setOnboardingReady(true);
-    setOnboardingStep("");
-    setCreating(false);
+    const draft = onboardingDraftRef.current;
+    if (onboardingStepFor(draft) || coworkersRef.current.length === 0) {
+      if (!draft.modelsReviewed) {
+        updateOnboardingDraft({ ...onboardingDraftForContext(draft, onboardingContext(sessionRef.current)), step: "models" });
+        setOnboardingReady(false);
+      }
+    } else {
+      setOnboardingReady(true);
+      setCreating(false);
+    }
     void refreshRuntime();
-  }, [refreshRuntime]);
+  }, [refreshRuntime, updateOnboardingDraft]);
 
   const receiveTemplates = useCallback((result: CoworkerTemplateSync) => {
     setTemplateSync(result);
@@ -328,6 +487,7 @@ export default function App() {
     pushedSessionKeyRef.current = sessionKey(next);
     try {
       const run = await coworkerBridge.den.setSession(providerSyncSession(next));
+      if (pushedSessionKeyRef.current !== sessionKey(next)) return run;
       setProviderSync(run);
       setTemplateSync(null);
       setTemplateError("");
@@ -340,36 +500,60 @@ export default function App() {
       return run;
     } catch (cause) {
       const failed: ProviderSyncRun = { status: "failed", message: cause instanceof Error ? cause.message : String(cause) };
-      setProviderSync(failed);
+      if (pushedSessionKeyRef.current === sessionKey(next)) setProviderSync(failed);
       return failed;
     } finally {
-      void refreshRuntime();
+      if (pushedSessionKeyRef.current === sessionKey(next)) void refreshRuntime();
     }
   }, [receiveTemplates, refreshRuntime]);
 
   useEffect(() => {
-    if (!runtime || !session || pushedSessionKeyRef.current === sessionKey(session)) return;
+    if (!bootReady || !runtime || !session || pushedSessionKeyRef.current === sessionKey(session)) return;
     void pushSession(session);
-  }, [pushSession, runtime, session]);
+  }, [bootReady, pushSession, runtime, session]);
+
+  const clearAccountPresentation = useCallback(() => {
+    runtimeObservation.current += 1;
+    setActivityBySlug({});
+    setLiveActivityBySlug({});
+    for (const pending of Object.values(connectRetryRef.current)) window.clearTimeout(pending.timer);
+    connectRetryRef.current = {};
+    connectedWorkspacesRef.current.clear();
+    connectTokenRef.current = null;
+    setConnectBySlug({});
+    setProviderSync(null);
+    setTemplateSync(null);
+    setTemplateError("");
+    setAttentionBySlug({});
+    setCloudRunBySlug({});
+  }, []);
 
   const signInWithGrant = useCallback(async (grant: string, baseUrl?: string) => {
     if (!runtime) return;
+    const firstRun = Boolean(onboardingStepFor(onboardingDraftRef.current)) || (!onboardingReady && coworkersRef.current.length === 0);
     setSignInBusy(true);
     setSignInError("");
     try {
       const next = await exchangeGrant(baseUrl ?? runtime.denBaseUrl, grant);
+      const previous = onboardingDraftRef.current;
+      const scoped = onboardingDraftForContext(next.userEmail ? previous : emptyOnboardingDraft(), onboardingContext(next));
+      if (firstRun) {
+        updateOnboardingDraft({ ...scoped, providerId: undefined, step: "models", modelsReviewed: false });
+        setOnboardingReady(false);
+      } else updateOnboardingDraft(scoped);
+      clearAccountPresentation();
       writeDenSession(next);
+      sessionRef.current = next;
       setSession(next);
       await pushSession(next);
-      setConnecting(false);
-      if (coworkers.length === 0) setOnboardingStep("intents");
+      if (sessionRef.current === next) setConnecting(false);
     } catch (cause) {
       setSignInError(cause instanceof Error ? cause.message : String(cause));
       setConnecting(true);
     } finally {
       setSignInBusy(false);
     }
-  }, [coworkers.length, pushSession, runtime]);
+  }, [clearAccountPresentation, onboardingReady, pushSession, runtime, updateOnboardingDraft]);
 
   // Den's "Open in app" button returns here as an opencoworker://den-auth link.
   useEffect(() => {
@@ -386,39 +570,35 @@ export default function App() {
   }, [runtime, signInWithGrant]);
 
   const signOut = useCallback(async () => {
+    const account = sessionRef.current;
     // The organization's capabilities leave with the account.
     if (runtime) {
       await Promise.all(coworkers
         .filter((coworker) => coworker.workspaceId)
         .map((coworker) => removeConnect(runtime, coworker.workspaceId).catch(() => undefined)));
     }
-    for (const pending of Object.values(connectRetryRef.current)) window.clearTimeout(pending.timer);
-    connectRetryRef.current = {};
-    connectedWorkspacesRef.current.clear();
-    connectTokenRef.current = null;
-    setConnectBySlug({});
+    await coworkerBridge.den.clearSession();
+    clearAccountPresentation();
+    updateOnboardingDraft(onboardingDraftForContext(onboardingDraftRef.current, "local"));
     writeDenSession(null);
+    sessionRef.current = null;
     setSession(null);
-    setProviderSync(null);
     pushedSessionKeyRef.current = "";
-    try {
-      await coworkerBridge.den.clearSession();
-    } finally {
-      void refreshRuntime();
-    }
-  }, [coworkers, refreshRuntime, runtime]);
+    await refreshRuntime();
+  }, [clearAccountPresentation, coworkers, refreshRuntime, runtime, updateOnboardingDraft]);
 
   const syncProviders = useCallback(async (): Promise<ProviderSyncRun> => {
+    const key = pushedSessionKeyRef.current;
     try {
       const run = await coworkerBridge.den.syncProviders();
-      setProviderSync(run);
+      if (pushedSessionKeyRef.current === key) setProviderSync(run);
       return run;
     } catch (cause) {
       const failed: ProviderSyncRun = { status: "failed", message: cause instanceof Error ? cause.message : String(cause) };
-      setProviderSync(failed);
+      if (pushedSessionKeyRef.current === key) setProviderSync(failed);
       return failed;
     } finally {
-      void refreshRuntime();
+      if (pushedSessionKeyRef.current === key) void refreshRuntime();
     }
   }, [refreshRuntime]);
 
@@ -431,6 +611,8 @@ export default function App() {
   const syncConnect = useCallback(async (options: { force?: boolean; remint?: boolean; slug?: string } = {}) => {
     if (!runtime?.engineManaged || !session) return;
     const key = sessionKey(session);
+    const isCurrentAccount = () => sessionRef.current !== null && sessionKey(sessionRef.current) === key;
+    if (!isCurrentAccount()) return;
     const targets = coworkers.filter((coworker) =>
       coworker.workspaceId
       && (!options.slug || coworker.slug === options.slug)
@@ -451,9 +633,11 @@ export default function App() {
     try {
       if (!token || expiresSoon || options.remint) {
         token = await createDenAutomationsClient(session).mintMcpToken();
+        if (!isCurrentAccount()) return;
         connectTokenRef.current = { sessionKey: key, token };
       }
     } catch (cause) {
+      if (!isCurrentAccount()) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       setConnectBySlug((current) => {
         const next = { ...current };
@@ -469,10 +653,12 @@ export default function App() {
       try {
         if (!payload) throw new Error("OpenWork did not name a gateway for this organization.");
         state = connectStateFromHealth(await reconcileConnect(runtime, coworker.workspaceId, payload));
+        if (!isCurrentAccount()) return;
         connectedWorkspacesRef.current.add(`${key}\u0000${coworker.workspaceId}`);
       } catch (cause) {
         state = { status: "unavailable", message: cause instanceof Error ? cause.message : String(cause) };
       }
+      if (!isCurrentAccount()) return;
       setConnectBySlug((current) => ({ ...current, [coworker.slug]: state }));
       // Right after a coworker is created its AI service may still be starting, so the first
       // registration can land before the engine answers. Try again by itself a few times.
@@ -495,139 +681,85 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [runtime?.engineManaged, session, syncConnect]);
 
+  const activityEnabled = Boolean(runtime) && bootReady && !factoryResetOpen;
   useEffect(() => {
-    // These reads feed the hidden sidebar, not native job execution. Keep the
-    // last display snapshot while reset is open; refresh it when returning.
-    if (!runtime || factoryResetOpen) return;
+    if (!activityEnabled) return;
     let cancelled = false;
-    const refreshActivity = async () => {
-      const entries = await Promise.all(
-        coworkers.map(async (coworker) => {
-          if (!coworker.workspaceId) {
-            return [
-              coworker.slug,
-              { state: "offline", label: "Setting up", detail: "Workspace is not ready", updatedAt: 0 },
-            ] as const;
-          }
-          if (!runtime.engineManaged) {
-            // One phrase for one fact: the header, rail, and sidebar all say the AI service is unavailable.
-            return [coworker.slug, { state: "offline", label: "AI unavailable", detail: "", updatedAt: 0 }] as const;
-          }
-          // Worker threads are work in progress, never finished assignments; their ids come from the main process.
-          const workers = await coworkerBridge.workers.list(coworker.slug).catch(() => []);
-          const [readActivity, localResponsibilities] = await Promise.all([
-            readCoworkerActivity({
-              serverUrl: runtime.serverUrl,
-              workspaceId: coworker.workspaceId,
-              token: runtime.ownerToken,
-              conversationThreadId: coworker.conversationThreadId,
-              workerThreadIds: workers.map((worker) => worker.threadId).filter(Boolean),
-            }),
-            coworkerBridge.localResponsibilities.list(coworker.slug).catch(() => []),
-          ]);
-          // A workspace that has just been (re)started may not answer for a moment.
-          // That is a warm-up, shown calmly; it becomes a problem only if it lasts.
-          const now = Date.now();
-          if (readActivity.state !== "offline") delete notAnsweringSinceRef.current[coworker.slug];
-          const notAnsweringSince = readActivity.state === "offline"
-            ? (notAnsweringSinceRef.current[coworker.slug] ??= now)
-            : null;
-          const threadActivity: CoworkerActivity =
-            notAnsweringSince !== null && now - notAnsweringSince < WORKSPACE_WARMUP_MS
-              ? { state: "starting", label: "Starting up", detail: "", updatedAt: 0 }
-              : readActivity;
-          // A Worker waiting on a decision needs the person as much as a pending question does; the card is in the discussion.
-          const deciding = workers.find((worker) => worker.status === "waiting" && worker.waitingFor === "decision");
-          if (deciding && threadActivity.state !== "attention" && threadActivity.state !== "offline" && threadActivity.state !== "starting") {
-            return [
-              coworker.slug,
-              {
-                state: "attention",
-                label: "Needs you",
-                detail: `${deciding.name} needs a decision`,
-                updatedAt: deciding.updatedAt,
-                ...(coworker.conversationThreadId ? { threadId: coworker.conversationThreadId } : {}),
-                ...(threadActivity.last ? { last: threadActivity.last } : {}),
-                ...(threadActivity.recent ? { recent: threadActivity.recent } : {}),
-              },
-            ] as const;
-          }
-          const localRunning = localResponsibilities.find((item) => item.latestRun?.status === "running");
-          const localSuccess = localResponsibilities
-            .filter((item) => item.latestRun?.status === "succeeded")
-            .sort((left, right) => (right.latestRun?.finishedAt ?? 0) - (left.latestRun?.finishedAt ?? 0))[0];
-          const localSuccessAt = localSuccess?.latestRun?.finishedAt ?? 0;
-          const latestActivity = localSuccess && localSuccessAt > (threadActivity.last?.updatedAt ?? 0)
-            ? { title: localSuccess.name, updatedAt: localSuccessAt, threadId: localSuccess.latestRun?.threadId }
-            : threadActivity.last;
-          if (localRunning?.latestRun) {
-            return [
-              coworker.slug,
-              {
-                state: "working",
-                label: "Running locally",
-                detail: localRunning.name,
-                updatedAt: localRunning.latestRun.startedAt,
-                ...(localRunning.latestRun.threadId ? { threadId: localRunning.latestRun.threadId } : {}),
-                ...(latestActivity ? { last: latestActivity } : {}),
-                ...(threadActivity.recent ? { recent: threadActivity.recent } : {}),
-              },
-            ] as const;
-          }
-          const localFailure = localResponsibilities
-            .filter((item) => item.latestRun?.status === "failed")
-            .sort((left, right) => (right.latestRun?.finishedAt ?? 0) - (left.latestRun?.finishedAt ?? 0))[0];
-          if (localFailure?.latestRun) {
-            return [
-              coworker.slug,
-              {
-                state: "attention",
-                label: "Run failed",
-                detail: localFailure.name,
-                updatedAt: localFailure.latestRun.finishedAt ?? localFailure.latestRun.startedAt,
-                ...(localFailure.latestRun.threadId ? { threadId: localFailure.latestRun.threadId } : {}),
-                ...(latestActivity ? { last: latestActivity } : {}),
-                ...(threadActivity.recent ? { recent: threadActivity.recent } : {}),
-              },
-            ] as const;
-          }
-          // The soonest scheduled responsibility, so an idle coworker can say what is next.
-          const upcoming = localResponsibilities
-            .filter((item) => item.state === "active" && typeof item.nextDueAt === "number" && item.nextDueAt > now)
-            .sort((left, right) => (left.nextDueAt ?? 0) - (right.nextDueAt ?? 0))[0];
-          const withNext = upcoming && upcoming.nextDueAt ? { next: { name: upcoming.name, at: upcoming.nextDueAt } } : {};
-          return [coworker.slug, { ...threadActivity, ...(latestActivity ? { last: latestActivity } : {}), ...withNext }] as const;
+    const readActivity = async (coworker: CoworkerSummary, info: RuntimeInfo, preparationScope: WorkspacePreparationScope): Promise<CoworkerActivity | null> => {
+      const isCurrent = () => !cancelled && samePreparationScope(currentPreparationScope(coworker.slug), preparationScope);
+      if (!isCurrent()) return null;
+      if (!coworker.workspaceId) return { state: "offline", label: "Setting up", detail: "Workspace is not ready", updatedAt: 0 };
+      if (!info.engineManaged) return { state: "offline", label: "AI unavailable", detail: info.engineError, updatedAt: 0 };
+      const workers = await coworkerBridge.workers.list(coworker.slug).catch(() => []);
+      if (!isCurrent()) return null;
+      const [threadActivity, localResponsibilities] = await Promise.all([
+        readCoworkerActivity({
+          serverUrl: info.serverUrl, workspaceId: coworker.workspaceId, token: info.ownerToken,
+          conversationThreadId: coworker.conversationThreadId,
+          workerThreadIds: workers.map((worker) => worker.threadId).filter(Boolean), preparationScope,
         }),
-      );
-      if (!cancelled) setActivityBySlug(Object.fromEntries(entries));
+        coworkerBridge.localResponsibilities.list(coworker.slug).catch(() => []),
+      ]);
+      if (!isCurrent()) return null;
+      if (threadActivity.state === "attention") return threadActivity;
+      const deciding = workers.find((worker) => worker.status === "waiting" && worker.waitingFor === "decision");
+      if (deciding) return {
+        state: "attention", label: "Needs you", detail: `${deciding.name} needs a decision`, updatedAt: deciding.updatedAt,
+        ...(coworker.conversationThreadId ? { threadId: coworker.conversationThreadId } : {}),
+        ...(threadActivity.last ? { last: threadActivity.last } : {}), ...(threadActivity.recent ? { recent: threadActivity.recent } : {}),
+      };
+      const localRunning = localResponsibilities.find((item) => item.latestRun?.status === "running");
+      const localSuccess = localResponsibilities
+        .filter((item) => item.latestRun?.status === "succeeded")
+        .sort((left, right) => (right.latestRun?.finishedAt ?? 0) - (left.latestRun?.finishedAt ?? 0))[0];
+      const localSuccessAt = localSuccess?.latestRun?.finishedAt ?? 0;
+      const latestActivity = localSuccess && localSuccessAt > (threadActivity.last?.updatedAt ?? 0)
+        ? { title: localSuccess.name, updatedAt: localSuccessAt, threadId: localSuccess.latestRun?.threadId }
+        : threadActivity.last;
+      if (localRunning?.latestRun) return {
+        state: "working", label: "Running locally", detail: localRunning.name, updatedAt: localRunning.latestRun.startedAt,
+        ...(localRunning.latestRun.threadId ? { threadId: localRunning.latestRun.threadId } : {}),
+        ...(latestActivity ? { last: latestActivity } : {}), ...(threadActivity.recent ? { recent: threadActivity.recent } : {}),
+      };
+      const localFailure = localResponsibilities
+        .filter((item) => item.latestRun?.status === "failed")
+        .sort((left, right) => (right.latestRun?.finishedAt ?? 0) - (left.latestRun?.finishedAt ?? 0))[0];
+      if (localFailure?.latestRun) return {
+        state: "attention", label: "Run failed", detail: localFailure.name, updatedAt: localFailure.latestRun.finishedAt ?? localFailure.latestRun.startedAt,
+        ...(localFailure.latestRun.threadId ? { threadId: localFailure.latestRun.threadId } : {}),
+        ...(latestActivity ? { last: latestActivity } : {}), ...(threadActivity.recent ? { recent: threadActivity.recent } : {}),
+      };
+      const now = Date.now();
+      const upcoming = localResponsibilities
+        .filter((item) => item.state === "active" && typeof item.nextDueAt === "number" && item.nextDueAt > now)
+        .sort((left, right) => (left.nextDueAt ?? 0) - (right.nextDueAt ?? 0))[0];
+      const withNext = upcoming?.nextDueAt ? { next: { name: upcoming.name, at: upcoming.nextDueAt } } : {};
+      return { ...threadActivity, ...(latestActivity ? { last: latestActivity } : {}), ...withNext };
     };
-    if (runtime.engineManaged) {
-      // The service is back: a label recorded while it was down is stale now,
-      // and the first fresh read may take a moment while the service warms up.
-      setActivityBySlug((current) => {
-        let changed = false;
-        const next: Record<string, CoworkerActivity> = { ...current };
-        for (const [slug, activity] of Object.entries(current)) {
-          if (activity.label !== "AI unavailable") continue;
-          next[slug] = { state: "starting", label: "Starting up", detail: "", updatedAt: 0 };
-          changed = true;
-        }
-        return changed ? next : current;
-      });
-    }
     const refresh = () => {
-      // Persist the in-flight guard across effect restarts as well as timer ticks.
-      if (cancelled || activityReadingRef.current) return;
-      activityReadingRef.current = true;
-      void refreshActivity().catch(() => undefined).finally(() => { activityReadingRef.current = false; });
+      const info = runtimeRef.current;
+      if (cancelled || !info) return;
+      for (const coworker of coworkersRef.current) {
+        const scope = workspacePreparationScope(info, coworker, sessionRef.current);
+        if (samePreparationScope(activityReadingRef.current.get(scope.workspaceKey), scope)) continue;
+        activityReadingRef.current.set(scope.workspaceKey, scope);
+        void readActivity(coworker, info, scope).then((activity) => {
+          if (!activity || cancelled || !samePreparationScope(currentPreparationScope(coworker.slug), scope)) return;
+          setActivityBySlug((current) => mergeActivityReads(current, [{ slug: coworker.slug, scope, activity }], currentPreparationScope));
+        }).catch(() => undefined).finally(() => {
+          if (activityReadingRef.current.get(scope.workspaceKey) === scope) activityReadingRef.current.delete(scope.workspaceKey);
+        });
+      }
     };
+    activityRefreshRef.current = refresh;
     refresh();
     const timer = window.setInterval(refresh, 4_000);
     return () => {
       cancelled = true;
+      if (activityRefreshRef.current === refresh) activityRefreshRef.current = () => {};
       window.clearInterval(timer);
     };
-  }, [runtime, coworkers, factoryResetOpen]);
+  }, [activityEnabled, currentPreparationScope]);
 
   useEffect(() => {
     if (!session) {
@@ -638,11 +770,16 @@ export default function App() {
     let cancelled = false;
     const den = createDenAutomationsClient(session);
     const refreshAttention = async () => {
+      const info = runtimeRef.current;
+      if (!info) return;
+      const scopes = new Map<string, WorkspacePreparationScope>(coworkers.map((coworker) => [coworker.slug, workspacePreparationScope(info, coworker, session)]));
       try {
         const list = await den.list();
-        const next: Record<string, string> = {};
-        const running: Record<string, CoworkerActivity> = {};
+        const next: CoworkerActivitySnapshots = {};
+        const running: CoworkerActivitySnapshots = {};
         for (const coworker of coworkers) {
+          const scope = scopes.get(coworker.slug);
+          if (!scope || !samePreparationScope(currentPreparationScope(coworker.slug), scope)) continue;
           const owned = list.items.filter(
             (entry) =>
               coworker.automations.includes(entry.automation.id) ||
@@ -650,24 +787,24 @@ export default function App() {
           );
           const attention = owned.find((entry) => entry.automation.state === "needs_attention");
           if (attention) {
-            next[coworker.slug] =
-              attention.automation.needsAttentionReason?.message || attention.automation.name;
+            next[coworker.slug] = { scope, activity: { state: "attention", label: "Needs you", detail: attention.automation.needsAttentionReason?.message || attention.automation.name, updatedAt: 0 } };
           }
           const active = owned.find((entry) =>
             entry.latestRun !== null && ["queued", "claimed", "running"].includes(entry.latestRun.status),
           );
           if (active?.latestRun) {
-            running[coworker.slug] = {
+            running[coworker.slug] = { scope, activity: {
               state: "working",
               label: active.latestRun.status === "running" ? "Running in OpenWork Cloud" : "Queued in OpenWork Cloud",
               detail: active.automation.name,
               updatedAt: active.latestRun.startedAt ?? active.latestRun.createdAt,
-            };
+            } };
           }
         }
-        if (!cancelled) {
-          setAttentionBySlug(next);
-          setCloudRunBySlug(running);
+        if (!cancelled && sessionRef.current === session) {
+          const reads = (entries: CoworkerActivitySnapshots) => Array.from(scopes, ([slug, scope]) => ({ slug, scope, activity: entries[slug]?.activity ?? null }));
+          setAttentionBySlug((current) => mergeActivityReads(current, reads(next), currentPreparationScope));
+          setCloudRunBySlug((current) => mergeActivityReads(current, reads(running), currentPreparationScope));
         }
       } catch {
         // The responsibilities rail presents connection errors in context.
@@ -679,7 +816,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [session, coworkers]);
+  }, [session, coworkers, currentPreparationScope]);
 
   const rail = useResizablePanel({
     storageKey: "open-coworker.team-rail",
@@ -692,52 +829,53 @@ export default function App() {
   useEffect(() => {
     if (!onboardingStep || teamCatalog.length > 0) return;
     let cancelled = false;
+    setTeamCatalogError("");
     coworkerBridge.team.catalog()
       .then((catalog) => {
         if (!cancelled) setTeamCatalog(catalog);
       })
-      .catch(() => undefined);
+      .catch((cause: unknown) => {
+        if (!cancelled) setTeamCatalogError(`Team roles could not be loaded. ${cause instanceof Error ? cause.message : String(cause)}`);
+      });
     return () => {
       cancelled = true;
     };
-  }, [onboardingStep, teamCatalog.length]);
+  }, [onboardingStep, teamCatalog.length, teamCatalogReload]);
 
-  /** Change the draft from its latest value (two quick taps must both land) and keep it for the session. */
-  const updateOnboardingDraft = useCallback((next: OnboardingDraft | ((current: OnboardingDraft) => OnboardingDraft)) => {
-    setOnboardingDraft((current) => {
-      const resolved = typeof next === "function" ? next(current) : next;
-      saveOnboardingDraft(window.sessionStorage, resolved);
-      return resolved;
-    });
-  }, []);
-
-  /** Skip the proposed team: today's blank Add screen. */
   const addOwnCoworker = useCallback(() => {
-    setOnboardingStep("");
+    setOnboardingStep("create");
     setOnboardingReady(true);
     setCreating(true);
-  }, []);
+  }, [setOnboardingStep]);
 
   const proposeTeam = useCallback(async () => {
-    try {
-      const drafts = patternDrafts(await coworkerBridge.team.recommend(onboardingDraft.intents), onboardingDraft.patternId ?? "");
-      updateOnboardingDraft((current) => ({ ...current, drafts }));
+    if (proposingTeam) return;
+    const draft = onboardingDraftRef.current;
+    if (draft.drafts.length > 0) {
       setOnboardingStep("team");
-    } catch (cause) {
-      setBootError(cause instanceof Error ? cause.message : String(cause));
+      return;
     }
-  }, [onboardingDraft.intents, onboardingDraft.patternId, updateOnboardingDraft]);
+    const request = ++proposalGeneration.current;
+    setProposingTeam(true);
+    setTeamError("");
+    try {
+      const drafts = patternDrafts(await coworkerBridge.team.recommend(draft.intents), draft.patternId ?? "");
+      const current = onboardingDraftRef.current;
+      if (request !== proposalGeneration.current || current.draftId !== draft.draftId || onboardingStepFor(current) !== "intents"
+        || current.patternId !== draft.patternId || current.intents.join("\u0000") !== draft.intents.join("\u0000")) return;
+      updateOnboardingDraft({ ...current, drafts, step: "team" });
+    } catch (cause) {
+      if (request === proposalGeneration.current) setTeamError(`Your team could not be proposed. Retry Continue. ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      if (request === proposalGeneration.current) setProposingTeam(false);
+    }
+  }, [proposingTeam, setOnboardingStep, updateOnboardingDraft]);
 
+  const selectedPreparation = runtime && selected ? workspacePreparationScope(runtime, selected, session) : null;
   const updateSelectedLiveActivity = useCallback((activity: CoworkerActivity | null) => {
-    if (!selectedSlug) return;
-    setLiveActivityBySlug((current) => {
-      if (activity) return { ...current, [selectedSlug]: activity };
-      if (!(selectedSlug in current)) return current;
-      const next = { ...current };
-      delete next[selectedSlug];
-      return next;
-    });
-  }, [selectedSlug]);
+    if (!selectedSlug || !selectedPreparation) return;
+    setLiveActivityBySlug((current) => mergeActivityReads(current, [{ slug: selectedSlug, scope: selectedPreparation, activity }], currentPreparationScope));
+  }, [currentPreparationScope, selectedSlug, selectedPreparation?.runtimeKey, selectedPreparation?.workspaceKey, selectedPreparation?.configurationKey]);
 
   if (bootError) {
     return (
@@ -755,7 +893,7 @@ export default function App() {
     );
   }
 
-  if (!runtime) {
+  if (!runtime || !bootReady) {
     return <AppLoader />;
   }
 
@@ -774,11 +912,41 @@ export default function App() {
     );
   }
 
-  if (coworkers.length === 0 && calendar.loading && !creating) return <AppLoader />;
+  if (coworkers.length === 0 && calendar.loading && !onboardingStep && !creating) return <AppLoader />;
 
-  if (coworkers.length === 0 && calendar.events.length === 0 && !onboardingReady && !creating) {
+  if (!creating && ((onboardingStep && onboardingStep !== "create") || (coworkers.length === 0 && calendar.events.length === 0 && !onboardingReady))) {
+    if (onboardingStep === "models") {
+      return (
+        <OnboardingModelDefaults
+          key={accountKey}
+          runtime={runtime}
+          session={session}
+          draft={onboardingDraft}
+          onChange={updateOnboardingDraft}
+          onBack={() => setOnboardingStep(onboardingDraft.providerId ? "local" : "welcome")}
+          onManageConnections={() => setOnboardingStep("local")}
+          onSyncProviders={syncProviders}
+          onRuntimeChanged={applyRuntime}
+          onContinue={(modelChoices) => {
+            const current = onboardingDraftRef.current;
+            if (current.step === "create") {
+              updateOnboardingDraft({ ...current, modelChoices, modelsReviewed: true, step: "create" });
+              setOnboardingReady(true);
+              setCreating(true);
+            } else if (current.drafts.length > 0 || current.intents.length > 0 || coworkersRef.current.length === 0) {
+              updateOnboardingDraft({ ...current, modelChoices, modelsReviewed: true, step: current.drafts.length ? "team" : "intents" });
+            } else finishOnboarding();
+          }}
+        />
+      );
+    }
+    const teamCatalogNotice = teamCatalogError ? <div role="alert" className="window-no-drag flex shrink-0 items-center gap-3 px-6 py-3">
+      <ErrorNote>{teamCatalogError}</ErrorNote>
+      <Button variant="ghost" className="shrink-0 text-xs" onClick={() => setTeamCatalogReload((current) => current + 1)}>Retry loading roles</Button>
+    </div> : null;
     if (onboardingStep === "team") {
       return (
+        <div className="flex h-full flex-col"><div className="min-h-0 flex-1">
         <OnboardingTeam
           catalog={teamCatalog}
           draft={onboardingDraft}
@@ -787,49 +955,57 @@ export default function App() {
           onCreated={(team, firstSlug) => {
             const first = team.find((coworker) => coworker.slug === firstSlug) ?? team[0];
             if (first) acknowledgeCoworker(first.slug, "wake");
-            setBots(team);
-            setSelectedSlug(team.some((coworker) => coworker.slug === firstSlug) ? firstSlug : (team[0]?.slug ?? ""));
-            setOnboardingDraft(emptyOnboardingDraft());
-            setOnboardingStep("");
-            setOnboardingReady(true);
+            setBots((current) => [...current.filter((coworker) => !team.some((added) => added.slug === coworker.slug)), ...team]);
+            setSelectedSlug((current) => first?.slug ?? current);
+            finishOnboarding();
             void refreshRuntime();
           }}
         />
+        </div>{teamCatalogNotice}</div>
       );
     }
     if (onboardingStep === "intents") {
       return (
-        <OnboardingIntents
-          catalog={teamCatalog}
-          selected={onboardingDraft.intents}
-          patternId={onboardingDraft.patternId ?? ""}
-          onPattern={(patternId) => updateOnboardingDraft((current) => ({ ...current, patternId, intents: workPattern(patternId)?.jobs.map((job) => job.roleId) ?? [] }))}
-          onToggle={(id) => updateOnboardingDraft((current) => ({ ...current, intents: toggleIntent(current.intents, id) }))}
-          onContinue={() => void proposeTeam()}
-          onOwn={addOwnCoworker}
-          onBack={() => setOnboardingStep("")}
-        />
+        <div className="window-shell flex h-full flex-col">
+          <fieldset disabled={proposingTeam} aria-busy={proposingTeam} className="min-h-0 min-w-0 flex-1">
+            <OnboardingIntents
+              catalog={teamCatalog}
+              selected={onboardingDraft.intents}
+              patternId={onboardingDraft.patternId ?? ""}
+              onPattern={(patternId) => updateOnboardingDraft((current) => current.patternId === patternId ? current : { ...current, patternId, intents: workPattern(patternId)?.jobs.map((job) => job.roleId) ?? [], drafts: [] })}
+              onToggle={(id) => updateOnboardingDraft((current) => ({ ...current, intents: toggleIntent(current.intents, id), drafts: [] }))}
+              onContinue={() => void proposeTeam()}
+              onOwn={addOwnCoworker}
+              onBack={() => setOnboardingStep("models")}
+            />
+          </fieldset>
+          {teamCatalogNotice}
+          {teamError ? <div role="alert" className="window-no-drag shrink-0 px-6 py-3"><ErrorNote>{teamError}</ErrorNote></div> : null}
+        </div>
       );
     }
-    if (localSetup) {
+    if (onboardingStep === "local") {
       return (
         <LocalModeScreen
+          key={accountKey}
           runtime={runtime}
           session={session}
           onConnectAccount={() => setConnecting(true)}
           onRuntimeChanged={refreshRuntime}
-          onBack={() => setLocalSetup(false)}
-          onContinue={() => {
-            setLocalSetup(false);
-            setOnboardingStep("intents");
-          }}
+          onProviderConnected={(providerId) => updateOnboardingDraft((current) => connectOnboardingProvider(current, providerId))}
+          onBack={() => setOnboardingStep("welcome")}
+          onContinue={(choice) => updateOnboardingDraft((current) => {
+            const scoped = connectOnboardingProvider(current, choice?.providerId);
+            const next = choice?.modelId ? chooseOnboardingModel(scoped, "conversation", { model: choice.modelId, modelVariant: scoped.modelChoices?.conversation?.modelVariant ?? "" }) : scoped;
+            return { ...next, step: "models" };
+          })}
         />
       );
     }
     return (
       <OnboardingWelcome
         onConnect={() => setConnecting(true)}
-        onContinueLocally={() => setLocalSetup(true)}
+        onContinueLocally={() => setOnboardingStep("local")}
         onImport={async () => {
           const result = await coworkerBridge.templates.import();
           if (result) {
@@ -841,7 +1017,6 @@ export default function App() {
     );
   }
 
-  const selected = coworkers.find((coworker) => coworker.slug === selectedSlug) ?? null;
   const liveGroups = groups.filter((group) => !group.archivedAt);
   const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? null;
   const eventGroupIds = new Set(calendar.events.map((event) => event.groupId));
@@ -850,39 +1025,19 @@ export default function App() {
   const selectedEventLink = selectedEventTarget ? { id: selectedEventTarget.eventId, title: selectedEvent?.title ?? selectedGroup?.name ?? "Event" } : undefined;
   const visibleActivityBySlug: Record<string, CoworkerActivity> = {};
   for (const coworker of coworkers) {
-    const attention = attentionBySlug[coworker.slug];
-    const activity = activityBySlug[coworker.slug];
-    const liveActivity = liveActivityBySlug[coworker.slug];
-    const cloudRun = cloudRunBySlug[coworker.slug];
-    if (attention) {
-      visibleActivityBySlug[coworker.slug] = {
-        state: "attention",
-        label: "Needs you",
-        detail: attention,
-        updatedAt: activity?.updatedAt ?? 0,
-        ...(activity?.last ? { last: activity.last } : {}),
-        ...(activity?.recent ? { recent: activity.recent } : {}),
-      };
-    } else if (liveActivity) {
-      // The thread view knows the live state; the polled read still owns the history.
-      visibleActivityBySlug[coworker.slug] = {
-        ...liveActivity,
-        ...(liveActivity.last ?? activity?.last ? { last: liveActivity.last ?? activity?.last } : {}),
-        ...(activity?.recent ? { recent: activity.recent } : {}),
-      };
-    } else if (cloudRun) {
-      visibleActivityBySlug[coworker.slug] = {
-        ...cloudRun,
-        ...(activity?.last ? { last: activity.last } : {}),
-        ...(activity?.recent ? { recent: activity.recent } : {}),
-      };
-    } else if (activity) {
-      visibleActivityBySlug[coworker.slug] = activity;
-    }
+    const scope = workspacePreparationScope(runtime, coworker, session);
+    const activity = activityForScope(activityBySlug[coworker.slug], scope);
+    const liveActivity = activityForScope(liveActivityBySlug[coworker.slug], scope);
+    const cloudRun = activityForScope(cloudRunBySlug[coworker.slug], scope);
+    const attention = activityForScope(attentionBySlug[coworker.slug], scope);
+    const fallback: CoworkerActivity | null = !runtime.engineManaged
+      ? { state: "offline", label: "AI unavailable", detail: runtime.engineError, updatedAt: 0 }
+      : !coworker.workspaceId ? { state: "offline", label: "Setting up", detail: "Workspace is not ready", updatedAt: 0 } : null;
+    visibleActivityBySlug[coworker.slug] = visibleCoworkerActivity(scope, activity ?? fallback, liveActivity, cloudRun, attention);
   }
 
   function updateCoworkerInList(updated: CoworkerSummary) {
-    setBots((current) => current.map((coworker) => (coworker.slug === updated.slug ? updated : coworker)));
+    setBots((current) => current.map((coworker) => (coworker.slug === updated.slug && coworker.createdAt === updated.createdAt ? updated : coworker)));
   }
 
   /** A coworker joined the team (from onboarding, the Add screen, or a teammate's suggestion the person accepted). */
@@ -1108,7 +1263,7 @@ export default function App() {
 
   return (
     <VoiceContext.Provider value={{ accountKey: session ? `${sessionKey(session)}\u0000${session.userEmail}` : "signed-out", openModels: () => openGlobalSettings("models"), signIn: () => setConnecting(true) }}>
-    <div className="window-shell relative flex h-full overflow-hidden" data-testid="coworker-shell">
+    <div key={accountKey} className="window-shell relative flex h-full overflow-hidden" data-testid="coworker-shell">
       <div
         className={workspaceActive ? "flex min-w-0 flex-1" : "hidden"}
         data-testid="coworker-workspace"
@@ -1116,13 +1271,14 @@ export default function App() {
       >
         {creating || (!selected && calendar.events.length === 0) ? (
           // Creation takes the whole window: the team list returns once the coworker exists.
-          <div key="create" className="view-enter flex min-w-0 flex-1">
+          <div key="create" className="flex min-w-0 flex-1">
             <NewCoworker
               team={coworkers}
               onAskTeam={(slug, prompt) => { setCreating(false); visitCoworker(slug, prompt); }}
               onCancel={selected || coworkers.length > 0 || calendar.events.length > 0 ? () => setCreating(false) : null}
               onCreated={(coworker) => {
                 setCreating(false);
+                if (onboardingStep === "create") finishOnboarding();
                 addCoworkerToList(coworker);
                 setSelectedSlug(coworker.slug);
                 navigate("chat");
@@ -1130,7 +1286,7 @@ export default function App() {
             />
           </div>
         ) : (
-          <div key="team" className="view-enter flex min-w-0 flex-1">
+          <div key="team" className="flex min-w-0 flex-1">
             <CoworkerRail
               calendarData={calendar}
               calendarPreferences={calendarPreferences}
@@ -1164,7 +1320,8 @@ export default function App() {
               onSelectGroup={(id) => { navigationGeneration.current += 1; if (!allowSourceNavigation()) return; setActivityGroupRequest(null); setGroupDocumentRequest(null); setHomeRequest(null); setGroupEventSource(null); calendarConversationOrigin.current = null; setSelectedActivityId(null); setSelectedGroupId(id); navigate("chat"); setGroupDetailsOpen(false); }}
               onNewGroup={() => { navigationGeneration.current += 1; if (allowSourceNavigation()) setCreatingGroup(true); }}
               activityContent={activityMounted ? (
-                <Suspense fallback={null}>
+                <DeferredView title="Activity" onBack={() => navigate("chat", true)}>
+                <Suspense fallback={<div className="h-full flex-1"><AppLoader message="Opening activity" detail="" /></div>}>
                   <ActivityInbox
                     active={workspaceActive && activityVisible && !creatingGroup}
                     selectedId={selectedActivityId}
@@ -1178,6 +1335,7 @@ export default function App() {
                     onNewEvent={() => { void requestCalendar({ intent: "create", fromActivity: true }); }}
                   />
                 </Suspense>
+                </DeferredView>
               ) : undefined}
             />
             {creatingGroup ? (
@@ -1298,7 +1456,8 @@ export default function App() {
           data-testid="openwork-settings-pane"
           data-active={settingsActive ? "true" : "false"}
         >
-          <Suspense fallback={null}>
+          <DeferredView title="Settings" onBack={closeGlobalSettings}>
+          <Suspense fallback={<div className="flex-1"><AppLoader message="Opening settings" detail="" /></div>}>
           <OpenWorkSettings
             active={settingsActive}
             runtime={runtime}
@@ -1330,15 +1489,18 @@ export default function App() {
             }}
           />
           </Suspense>
+          </DeferredView>
         </div>
       ) : null}
-      <Suspense fallback={null}>
+      {factoryResetOpen || replayOnboarding ? <DeferredView title={factoryResetOpen ? "Fresh start" : "Onboarding replay"} overlay onBack={() => { setFactoryResetOpen(false); setReplayOnboarding(null); }}>
+      <Suspense fallback={<div className="absolute inset-0"><AppLoader message={factoryResetOpen ? "Opening fresh start" : "Opening onboarding replay"} detail="" /></div>}>
         {factoryResetOpen ? <FactoryResetScreen coworkers={coworkers} onBack={() => setFactoryResetOpen(false)} /> : null}
         {replayOnboarding ? <OnboardingReplay step={replayOnboarding} onStep={setReplayOnboarding} runtime={runtime} session={session} onExit={() => {
           setReplayOnboarding(null);
           setGlobalSettings(null);
         }} /> : null}
       </Suspense>
+      </DeferredView> : null}
     </div>
     </VoiceContext.Provider>
   );

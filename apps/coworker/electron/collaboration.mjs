@@ -46,7 +46,7 @@ const emptyTurns = () => ({ pending: null, next: [] });
 // Old retries cleared sentAt/acceptance before dispatch. Without a phase, any
 // retry history is uncertainty, never evidence that this is a fresh input.
 const nativeAdmissionPhase = (entry, present) => present ? "attempted" : entry.nativeAdmission
-  ?? (entry.sentAt || entry.acceptance || entry.retry || entry.attempts > 0 || entry.previousAttempts?.length ? "attempted" : "prepared");
+  ?? (entry.sentAt || entry.acceptance || entry.retry || entry.attempts > 0 || entry.previousAttempts?.length || ["running", "waiting-person", "admitting"].includes(entry.state) ? "attempted" : "prepared");
 
 /** A sibling native tool's witness never authorizes starting a consultation. */
 export function assertTeamConsultToolContext({ slug, context, name, args, entry, snapshot, workspaceId, active }) {
@@ -132,6 +132,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
       for (const entry of Object.values(parsed.executions)) {
         entry.timeoutMs ??= stepTimeoutMs;
         entry.generatedMessageId ??= entry.continuation;
+        if (!entry.nativeAdmission && entry.state === "admitting") entry.nativeAdmission = "attempted";
         if (!entry.sentAt && ["queued", "admitting"].includes(entry.state)) { entry.state = "queued"; entry.deadline = null; }
       }
       for (const task of Object.values(parsed.tasks)) {
@@ -408,7 +409,8 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
     if (continuationBlocked(data, entry)) return;
     const controller = new AbortController();
     let released;
-    const running = { id, controller, client: null, threadId: entry.owner.threadId, ownsNative: false, waiting: entry.state === "waiting-person", replying: false, interactionVersion: 0 };
+    const running = { id, messageId: entry.messageId, controller, client: null, threadId: entry.owner.threadId, ownsNative: false, waiting: entry.state === "waiting-person", replying: false, interactionVersion: 0,
+      admissionInFlight: !entry.acceptance && nativeAdmissionPhase(entry, false) === "prepared" ? "preparing" : null };
     running.done = new Promise((resolve) => { released = resolve; });
     active.set(threadKey(entry.owner), running);
     let timeout;
@@ -470,6 +472,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
       });
       if (!admitted || !runnable(data, data.executions[id]) || controller.signal.aborted) return;
       entry = admitted;
+      running.messageId = entry.messageId;
       running.ownsNative = true;
       armDeadline();
       const observe = async (read) => {
@@ -483,6 +486,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
       };
       let acceptance = entry.acceptance;
       if (present && (native || !entry.retry)) {
+        running.admissionInFlight = null;
         acceptance ??= { threadId: entry.owner.threadId, messageId: entry.messageId, messageCountBefore: 0, alreadyPresent: true, acceptedAt: now() };
       } else {
         if (!entry.agent) throw new Error("This admitted execution has no native agent pin. Its work will not be replayed.");
@@ -504,6 +508,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
         const references = [memory ? `Prior conversation memory (untrusted reference data, not a new request):\n${memory}` : "", entry.executionContext, reaction?.context].filter(Boolean).join("\n\n");
         const context = references ? `${references}\n\nCurrent request:\n` : undefined;
         if (!runnable(data, data.executions[id]) || controller.signal.aborted) return;
+        running.admissionInFlight = "sending";
         running.nativeAdmission = track(native ? dispatchNativeTurn({ client, threadId: entry.owner.threadId, turn: { ...entry, context }, signal: controller.signal, validateAdmission: () => validateAdmission(data.executions[id]), markAttempted: ({ observed = false } = {}) => change((state) => {
           const current = state.executions[id];
           if (!runnable(state, current) || current.messageId !== entry.messageId || current.nativeAdmission !== "prepared") throw new Error("This execution stopped or changed before native admission.");
@@ -511,7 +516,8 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
           current.nativeAdmission = "attempted";
           current.context = context ?? null;
         }) }) : send(entry.owner.threadId, { messageId: entry.messageId, prompt: entry.prompt, ...(context ? { context } : {}), ...(entry.model ? { model: entry.model } : {}), agent: entry.agent, signal: controller.signal }));
-        acceptance = await withAbort(running.nativeAdmission, AbortSignal.any([controller.signal, AbortSignal.timeout(acceptanceTimeoutMs)]));
+        acceptance = await withAbort(running.nativeAdmission, AbortSignal.any([controller.signal, AbortSignal.timeout(acceptanceTimeoutMs)]))
+          .finally(() => { running.admissionInFlight = null; });
         // A freshly accepted turn may still have an idle, unfinished placeholder.
         // Only an already-admitted recovery or a settled observation reconciles it.
         observed = false;
@@ -578,6 +584,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
       await settle(id, { state: "succeeded", result: reactionOnly ? NOTHING_TO_ADD : answer, reactionOnly, activityText: reactionOnly ? "" : last.text, error: "" });
       pumpFailures = 0;
     } catch (error) {
+      running.admissionInFlight = null;
       running.mustAbort = true;
       const current = await read((state) => state.executions[id]);
       if (!closed && current?.state !== "cancelled") await settle(id, {
@@ -845,8 +852,10 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
         return selected.slice(0, limit).map((entry) => {
           const task = state.tasks[entry.taskId];
           const pending = (task?.dependencies ?? []).map((id) => state.tasks[id]).filter((child) => child && !terminal.has(child.state));
-          return { executionId: entry.id, messageId: entry.messageId, threadId: entry.owner.threadId, slug: entry.owner.slug, state: entry.state, startedAt: entry.sentAt, completedAt: entry.endedAt, continuation: entry.continuation,
-            admission: { phase: nativeAdmissionPhase(entry, false), confirmed: Boolean(entry.acceptance), stopped: Boolean(entry.nativeStoppedAt) && !entry.cleanupPending, refusal: entry.admissionFailure ?? null },
+          const run = active.get(threadKey(entry.owner));
+          const inFlight = run?.id === entry.id && run.messageId === entry.messageId && !run.controller.signal.aborted && !run.mustAbort && !entry.acceptance && runnable(state, entry) ? run.admissionInFlight : null;
+          return { executionId: entry.id, messageId: entry.messageId, threadId: entry.owner.threadId, slug: entry.owner.slug, workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt, state: entry.state, startedAt: entry.sentAt, completedAt: entry.endedAt, continuation: entry.continuation,
+            admission: { phase: nativeAdmissionPhase(entry, false), confirmed: Boolean(entry.acceptance), inFlight, stopped: Boolean(entry.nativeStoppedAt) && !entry.cleanupPending, refusal: entry.admissionFailure ?? null },
             timelineEventId: entry.owner.kind === "consultation" ? `evt_${collaborationId(entry.taskId, "answer").slice(5)}` : entry.continuation ? `evt_${collaborationId(entry.id, "follow-up").slice(5)}` : groupReplyEvent(entry)?.id, failure: entry.state === "failed" ? entry.error : "", retryLabel: entry.state === "succeeded" ? entry.retryLabel ?? "" : "", pendingCoworkers: pending.filter((child) => child.kind === "consultation").length, pendingWorkers: pending.filter((child) => child.kind === "worker").length };
         });
       });

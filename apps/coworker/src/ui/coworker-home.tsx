@@ -8,6 +8,7 @@ import { describeCoworkerSummary, showSummaryLine, summaryRowTitle, type Coworke
 import { referralPrompt } from "@/lib/conversation";
 import type { DenSession } from "@/lib/den";
 import { markAutoPicked, peekStartingModel, takeStartingModel } from "@/lib/model-choice";
+import { InlineLoader } from "@/ui/brand";
 import { CoworkerModelSettings } from "@/ui/coworker-model-settings";
 import { createCoworkerThreads, recommendModel, type CoworkerActivity, type ThreadListItem } from "@/lib/threads";
 import { acknowledgeCoworker, AvatarControls, CoworkerAvatar } from "@/ui/coworker-avatar";
@@ -430,51 +431,62 @@ export function CoworkerHome({
 
   useEffect(() => () => onActivityChange(null), [onActivityChange]);
 
-  // A coworker created without a model starts on a connected model that can use
-  // tools, chosen as soon as the AI service answers; the choice is kept so it
-  // shows in Coworker settings and can be changed there.
+  const [startingModel, setStartingModel] = useState(() => coworker.model ? "" : peekStartingModel());
+  const [startingModelError, setStartingModelError] = useState("");
+  const [startingModelRetry, setStartingModelRetry] = useState(0);
+  const startingModelWrite = useRef<Promise<CoworkerSummary> | null>(null);
+  const onCoworkerChangedRef = useRef(onCoworkerChanged);
+  onCoworkerChangedRef.current = onCoworkerChanged;
+
   useEffect(() => {
-    if (coworker.model || !coworker.workspaceId || !runtime.engineManaged) return;
+    if (coworker.model) {
+      if (startingModel && peekStartingModel() === startingModel) takeStartingModel();
+      setStartingModel("");
+      return;
+    }
+    if (!coworker.workspaceId) return;
+    const wanted = peekStartingModel();
+    if (!wanted && !runtime.engineManaged) return;
     let cancelled = false;
     let attempts = 0;
     let timer = 0;
-    const threads = createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: coworker.workspaceId, token: runtime.ownerToken });
     const attempt = async () => {
+      if (wanted) {
+        setStartingModel(wanted);
+        setStartingModelError("");
+        try {
+          const write = startingModelWrite.current ??= coworkerBridge.coworkers.update(coworker.slug, { model: wanted, modelVariant: "", modelChosenBy: "person" });
+          const updated = await write;
+          if (updated.model !== wanted) throw new Error("The saved model did not match your selection. Retry or choose a model in settings.");
+          if (peekStartingModel() === wanted) takeStartingModel();
+          onCoworkerChangedRef.current(updated);
+          if (!cancelled) setStartingModel("");
+        } catch (cause) {
+          startingModelWrite.current = null;
+          if (!cancelled) setStartingModelError(`Your starting model is kept, but could not be saved. ${cause instanceof Error ? cause.message : String(cause)}`);
+        }
+        return;
+      }
       attempts += 1;
       try {
-        const catalog = await threads.listModelCatalog();
-        // A model chosen on the local mode screen before this coworker existed goes first, once;
-        // a provider added a moment ago can still be loading, so wait a little for it.
-        const wanted = peekStartingModel();
-        const chosen = wanted ? catalog.models.find((model) => model.id === wanted) : undefined;
-        if (cancelled) return;
-        if (wanted && !chosen) {
-          if (attempts < 8) {
-            timer = window.setTimeout(() => void attempt(), 3_000);
-            return;
-          }
-          takeStartingModel();
-        }
-        const pick = chosen ?? recommendModel(catalog);
+        const catalog = await createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: coworker.workspaceId, token: runtime.ownerToken }).listModelCatalog();
+        if (cancelled || peekStartingModel()) return;
+        const pick = recommendModel(catalog);
         if (pick) {
-          if (chosen) takeStartingModel();
-          else markAutoPicked(coworker.slug, pick.id);
-          // An app recommendation is only an anchor; absent inheritance stays automatic.
-          // A person's starting choice opts out through the native update handler.
-          onCoworkerChanged(await coworkerBridge.coworkers.update(coworker.slug, { model: pick.id, modelVariant: "", modelChosenBy: chosen ? "person" : "app" }));
+          const updated = await coworkerBridge.coworkers.update(coworker.slug, { model: pick.id, modelVariant: "", modelChosenBy: "app" });
+          markAutoPicked(coworker.slug, pick.id);
+          onCoworkerChangedRef.current(updated);
           return;
         }
-      } catch {
-        // The AI service may still be warming up; try again shortly.
-      }
+      } catch { }
       if (!cancelled && attempts < 30) timer = window.setTimeout(() => void attempt(), 3_000);
     };
-    timer = window.setTimeout(() => void attempt(), 0);
+    void attempt();
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [coworker.model, coworker.slug, coworker.workspaceId, onCoworkerChanged, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl]);
+  }, [coworker.model, coworker.slug, coworker.workspaceId, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl, startingModel, startingModelRetry]);
 
   const activityLevel = activityScreen(nav.route.path);
   const settingsLevel = settingsScreen(nav.route.path);
@@ -504,7 +516,14 @@ export function CoworkerHome({
           <AiUnavailableNote coworkerName={coworker.name} technical={runtime.engineError} onRestart={onRestartRuntime} />
         ) : null}
         <main className="min-h-0 flex-1 overflow-hidden">
-          <ThreadsPanel
+          {startingModel && !coworker.model ? <div className="flex h-full flex-col items-center justify-center gap-4 px-6">
+            <p className="max-w-full break-words text-sm text-snow">{startingModel}</p>
+            {startingModelError ? <div role="alert"><ErrorNote>{startingModelError}</ErrorNote></div> : <InlineLoader label="Saving your starting model" />}
+            {startingModelError ? <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={() => openSettingsSection("model", Date.now())}>Choose model</Button>
+              <Button variant="primary" onClick={() => setStartingModelRetry((current) => current + 1)}>Retry</Button>
+            </div> : null}
+          </div> : <ThreadsPanel
             active={active && !overlayPanel && (contextPanel.collapsed || contextView !== "settings")}
             runtime={runtime}
             session={session}
@@ -526,7 +545,7 @@ export function CoworkerHome({
             onOpenSummary={(kind) => openActivityLevel(SUMMARY_LEVELS[kind])}
             team={teamHooks}
             turnRequest={turnRequest}
-          />
+          />}
         </main>
       </div>
 

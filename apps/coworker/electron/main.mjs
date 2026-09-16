@@ -605,7 +605,9 @@ async function restartPlatformServer() {
     nativeProviderGeneration = null;
     signInAttempts.clear();
     warmedCoworkerWorkspaces.clear();
+    warmedCoworkerScopes.clear();
     coworkerWarmups.clear();
+    coworkerWarmupTail = Promise.resolve();
     toolsRegistered.clear();
     variantsByModel.clear();
     progressCoordinator = null;
@@ -628,6 +630,7 @@ function runtimeInfo() {
     engineManaged: Boolean(serverHandle?.managedOpencodeV2?.isAlive()),
     engineError,
     readinessKey: readinessKey(),
+    workspaceReadinessRevisions: Object.fromEntries(workspaceReadinessRevisions),
   };
 }
 
@@ -927,7 +930,7 @@ const WORKER_TURN_TIMEOUT_MS = 60 * 60_000;
 const collaboration = createCollaboration({
   acceptanceTimeoutMs: 120_000,
   setupTimeoutMs: 120_000,
-  validateAdmission: (entry) => assertExpectedReadiness(entry.expectedReadiness, { workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt }),
+  validateAdmission: (entry) => assertExpectedReadiness(entry.expectedReadiness, { slug: entry.owner.slug, workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt }),
   directory: coworkersDir,
   clientFor: (slug, options) => maintenanceAdmission.run(() => collaborationClient(slug, options)),
   cleanupClientFor: collaborationCleanupClient,
@@ -1302,22 +1305,24 @@ async function captureConversationMemory(entry) {
 
 /** Activity observation never starts a server, installs tools, or cancels parent work. */
 async function readCollaborationActivity(scope) {
+  const handle = serverHandle;
   const entries = await collaboration.activityEntries(scope, PROGRESS_LIMITS.maxActivityExecutions);
   const observed = await Promise.all(entries.filter((entry) => !scope.executionId || entry.executionId === scope.executionId).map(async (entry) => {
     const empty = { replies: [], tools: [], completedSteps: 0, failedSteps: 0, available: false, nativeStatus: "unknown" };
-    if (!serverHandle?.managedOpencodeV2?.isAlive()) return { ...entry, ...empty };
+    if (handle !== serverHandle || !handle?.managedOpencodeV2?.isAlive()) return { ...entry, ...empty };
     try {
       const coworker = await getCoworker(coworkersDir, entry.slug);
-      if (!coworker.workspaceId) return { ...entry, ...empty };
-      const snapshot = await readExecutionActivity({ serverUrl: serverHandle.url, workspaceId: coworker.workspaceId, token: ownerToken, threadId: entry.threadId, messageId: entry.messageId, signal: AbortSignal.timeout(PROGRESS_LIMITS.activityReadTimeoutMs) });
-      return { ...entry, ...snapshot, available: true };
+      if (!coworker.workspaceId || entry.workspaceId !== coworker.workspaceId || entry.coworkerCreatedAt !== coworker.createdAt) return { ...entry, ...empty };
+      if (entry.admission?.inFlight && !entry.admission.confirmed) return { ...entry, ...empty, available: true };
+      const snapshot = await readExecutionActivity({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, threadId: entry.threadId, messageId: entry.messageId, signal: AbortSignal.timeout(PROGRESS_LIMITS.activityReadTimeoutMs) });
+      return { ...entry, ...snapshot, available: handle === serverHandle && handle.managedOpencodeV2.isAlive() };
     } catch { return { ...entry, ...empty }; }
   }));
   const current = await collaboration.activityEntries(scope, PROGRESS_LIMITS.maxActivityExecutions);
   return observed.flatMap((entry) => {
-    const latest = current.find((item) => item.executionId === entry.executionId && item.messageId === entry.messageId && item.threadId === entry.threadId && item.slug === entry.slug);
+    const latest = current.find((item) => item.executionId === entry.executionId && item.messageId === entry.messageId && item.threadId === entry.threadId && item.slug === entry.slug && item.workspaceId === entry.workspaceId && item.coworkerCreatedAt === entry.coworkerCreatedAt);
     if (!latest) return [];
-    const activity = { ...entry, ...latest };
+    const activity = { ...entry, ...latest, available: entry.available && handle === serverHandle && Boolean(handle?.managedOpencodeV2?.isAlive()) && (!entry.admission?.inFlight || Boolean(latest.admission?.inFlight)) };
     return [{ ...activity, progressNote: progressSummaries.noteFor(activity) }];
   });
 }
@@ -1384,25 +1389,57 @@ function skillAwareClient({ captureSkillOrigin = false, ...options }) {
     const accountKey = skillAccountKey(session);
     const preparationSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000);
     const assertCurrent = () => {
+      preparationSignal.throwIfAborted();
       if (denSession !== session || skillAccountKey(denSession) !== accountKey) throw new Error("The OpenWork account changed while checking selected skills. Your words are kept.");
     };
     let binding = null;
     if (session) {
       try {
-        const catalog = await client.nativeSkills.listSkills(preparationSignal);
-        assertCurrent();
-        const scopes = [...new Set(catalog.flatMap((skill) => skill.source ? [skill.source.scope] : []))];
-        if (scopes.length > 1 || scopes.some((scope) => !/^[0-9a-f]{64}$/.test(scope))) throw new Error("The selected skill's OpenWork account could not be verified. Your words are kept.");
-        if (scopes.length) {
-          const account = (await currentSkillAccount(session, preparationSignal)).scope;
+        const handle = !validated && !turn.skills?.length && !turn.skillSelections?.length && typeof serverHandle?.nativeSkillOriginSnapshot === "function" ? serverHandle : null;
+        const registered = handle?.config?.workspaces?.filter((workspace) => workspace.id === options.workspaceId) ?? [];
+        const workspace = registered.length === 1 && registered[0].workspaceType === "local" ? registered[0] : null;
+        const directory = workspace?.path;
+        const hintCurrent = () => workspace && typeof directory === "string" && path.isAbsolute(directory)
+          && handle === serverHandle && handle.url === options.baseUrl && options.token === ownerToken
+          && handle.managedOpencodeV2?.isAlive() && handle.config.workspaces.includes(workspace)
+          && workspace.workspaceType === "local" && workspace.id === options.workspaceId && workspace.path === directory;
+        const readHint = async () => {
           assertCurrent();
-          assertSkillSession(session);
-          binding = { account, scope: scopes[0] };
+          if (!hintCurrent()) return null;
+          const hint = await handle.nativeSkillOriginSnapshot({ workspaceId: options.workspaceId, directory, signal: preparationSignal });
+          assertCurrent();
+          return hintCurrent() && Array.isArray(hint?.scopes) && Object.isFrozen(hint) && Object.isFrozen(hint.scopes)
+            && hint.scopes.length === 1 && typeof hint.scopes[0] === "string" && /^[0-9a-f]{64}$/.test(hint.scopes[0]) ? hint : null;
+        };
+        try {
+          const hint = await readHint();
+          if (hint) {
+            const account = (await currentSkillAccount(session, preparationSignal)).scope;
+            assertCurrent();
+            if (await readHint() === hint) {
+              assertSkillSession(session);
+              binding = { account, scope: hint.scopes[0] };
+            }
+          }
+        } catch (error) {
+          assertCurrent();
+          if (error?.name === "AbortError") throw error;
+        }
+        if (!binding) {
+          const catalog = await client.nativeSkills.listSkills(preparationSignal);
+          assertCurrent();
+          const scopes = [...new Set(catalog.flatMap((skill) => skill.source ? [skill.source.scope] : []))];
+          if (scopes.length > 1 || scopes.some((scope) => !/^[0-9a-f]{64}$/.test(scope))) throw new Error("The selected skill's OpenWork account could not be verified. Your words are kept.");
+          if (scopes.length) {
+            const account = (await currentSkillAccount(session, preparationSignal)).scope;
+            assertCurrent();
+            assertSkillSession(session);
+            binding = { account, scope: scopes[0] };
+          }
         }
       } catch (error) {
-        signal?.throwIfAborted();
         assertCurrent();
-        if (pinnedSession !== undefined) throw error;
+        if (error?.name === "AbortError" || pinnedSession !== undefined) throw error;
       }
     }
     if (binding?.scope) {
@@ -1976,27 +2013,41 @@ const warmedCoworkerScopes = new Map();
 const coworkerWarmups = new Map();
 let coworkerWarmupTail = Promise.resolve();
 let workspaceReadinessRevision = 0;
-const workspaceReadinessChanges = new Set();
+const workspaceReadinessRevisions = new Map();
+const workspaceReadinessChanges = new Map();
 const readinessKey = () => `${serverHandle?.managedOpencodeV2?.pid ?? "stopped"}:${workspaceReadinessRevision}`;
-const workspaceReadinessScope = (coworker) => JSON.stringify([coworker.path, coworker.createdAt, coworker.workspaceId, readinessKey()]);
+const workspaceRevision = (workspaceId) => workspaceReadinessRevisions.get(workspaceId) ?? 0;
+const workspaceReadinessScope = (coworker) => JSON.stringify([coworker.path, coworker.createdAt, coworker.workspaceId, readinessKey(), workspaceRevision(coworker.workspaceId)]);
+const pendingWorkspaceReadinessChanges = (owner) => [...workspaceReadinessChanges]
+  .filter(([, scope]) => !scope || scope.slug === owner.slug || (scope.workspaceId && scope.workspaceId === owner.workspaceId))
+  .map(([promise]) => promise);
 
 function assertExpectedReadiness(expected, owner) {
-  if (expected && (expected.readinessKey !== readinessKey() || workspaceReadinessChanges.size > 0 || !serverHandle?.managedOpencodeV2?.isAlive()
+  if (expected && (expected.readinessKey !== readinessKey() || (expected.workspaceRevision ?? 0) !== workspaceRevision(owner.workspaceId)
+    || pendingWorkspaceReadinessChanges(owner).length > 0 || !serverHandle?.managedOpencodeV2?.isAlive()
     || expected.workspaceId !== owner.workspaceId || expected.createdAt !== owner.coworkerCreatedAt)) {
     throw Object.assign(new Error("The AI configuration changed before submission. Your draft is kept; wait for preparation and try again."), { code: "readiness_changed" });
   }
 }
 
-function invalidateWorkspaceReadiness() {
-  workspaceReadinessRevision += 1;
-  warmedCoworkerWorkspaces.clear();
-  warmedCoworkerScopes.clear();
+function invalidateWorkspaceReadiness(owner) {
+  if (owner) {
+    if (!owner.workspaceId) return;
+    workspaceReadinessRevisions.set(owner.workspaceId, workspaceRevision(owner.workspaceId) + 1);
+    warmedCoworkerWorkspaces.delete(owner.workspaceId);
+    warmedCoworkerScopes.delete(owner.workspaceId);
+  } else {
+    workspaceReadinessRevision += 1;
+    workspaceReadinessRevisions.clear();
+    warmedCoworkerWorkspaces.clear();
+    warmedCoworkerScopes.clear();
+  }
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("coworker:runtime-changed", runtimeInfo());
 }
 
-async function runCoworkerWorkspaceWarmup(coworker, signal = AbortSignal.timeout(120_000)) {
+async function runCoworkerWorkspaceWarmup(coworker, signal = AbortSignal.timeout(120_000), scope = workspaceReadinessScope(coworker)) {
   signal.throwIfAborted();
-  const scope = workspaceReadinessScope(coworker);
+  if (scope !== workspaceReadinessScope(coworker) || pendingWorkspaceReadinessChanges(coworker).length) throw new Error("The native AI service changed during workspace preparation.");
   if (coworker.slug) {
     const contextServer = await ensureToolsServer();
     await installNativeCoworkerPlugins(coworker, contextServer);
@@ -2016,10 +2067,17 @@ async function runCoworkerWorkspaceWarmup(coworker, signal = AbortSignal.timeout
     throw new Error(`The native plugins for ${coworker.name} are not ready. Check the plugin bundles before continuing.`);
   }
   if (coworker.slug) await prepareNativeTurnRoles((method, route, body) => nativeWorkspaceRequest(handle, coworker.workspaceId, method, route, body, { timeoutMs: 120_000, signal }));
+  const current = coworker.slug ? await getCoworker(coworkersDir, coworker.slug) : coworker;
   signal.throwIfAborted();
-  if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || scope !== workspaceReadinessScope(coworker)) throw new Error("The native AI service changed during workspace preparation.");
+  if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || scope !== workspaceReadinessScope(current) || pendingWorkspaceReadinessChanges(current).length) throw new Error("The native AI service changed during workspace preparation.");
   warmedCoworkerWorkspaces.add(coworker.workspaceId);
+  warmedCoworkerScopes.delete(coworker.workspaceId);
   warmedCoworkerScopes.set(coworker.workspaceId, scope);
+  while (warmedCoworkerScopes.size > 64) {
+    const oldest = warmedCoworkerScopes.keys().next().value;
+    warmedCoworkerScopes.delete(oldest);
+    warmedCoworkerWorkspaces.delete(oldest);
+  }
 }
 
 function warmCoworkerWorkspace(coworker) {
@@ -2029,7 +2087,7 @@ function warmCoworkerWorkspace(coworker) {
   const current = coworkerWarmups.get(scope);
   if (current) return current;
   const signal = AbortSignal.timeout(120_000);
-  const warmup = withAbort(coworkerWarmupTail.catch(() => undefined).then(() => runCoworkerWorkspaceWarmup(coworker, signal)), signal)
+  const warmup = withAbort(coworkerWarmupTail.catch(() => undefined).then(() => runCoworkerWorkspaceWarmup(coworker, signal, scope)), signal)
     .finally(() => { if (coworkerWarmups.get(scope) === warmup) coworkerWarmups.delete(scope); });
   coworkerWarmups.set(scope, warmup);
   coworkerWarmupTail = warmup;
@@ -2664,16 +2722,17 @@ const commands = {
   "coworkers.ensureWorkspace": async ({ slug, expected }) => {
     const signal = AbortSignal.timeout(120_000);
     return withAbort((async () => {
-      await withAbort(Promise.all([...workspaceReadinessChanges]), signal);
+      await withAbort(Promise.all(pendingWorkspaceReadinessChanges(await getCoworker(coworkersDir, slug))), signal);
       const handle = await ensurePlatformServer();
       let coworker = await getCoworker(coworkersDir, slug);
       const generation = readinessKey();
+      const revision = workspaceRevision(coworker.workspaceId);
       const assertCurrent = (current) => {
         signal.throwIfAborted();
-        if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || generation !== readinessKey()
+        if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || generation !== readinessKey() || revision !== workspaceRevision(current.workspaceId)
           || current.createdAt !== coworker.createdAt || current.path !== coworker.path || current.workspaceId !== coworker.workspaceId
-          || current.model !== coworker.model || current.modelVariant !== coworker.modelVariant || workspaceReadinessChanges.size > 0
-          || (expected && (expected.createdAt !== current.createdAt || expected.workspaceId !== current.workspaceId || expected.readinessKey !== generation))) {
+          || current.model !== coworker.model || current.modelVariant !== coworker.modelVariant || pendingWorkspaceReadinessChanges(current).length > 0
+          || (expected && (expected.createdAt !== current.createdAt || expected.workspaceId !== current.workspaceId || expected.readinessKey !== generation || (expected.workspaceRevision ?? 0) !== revision))) {
           throw new Error("The coworker or AI configuration changed. Refresh before sending; your draft is kept.");
         }
       };
@@ -2686,7 +2745,7 @@ const commands = {
       await withAbort(warmCoworkerWorkspace(coworker), signal);
       assertCurrent(await getCoworker(coworkersDir, slug));
       prepareCoworker(coworker);
-      return { ...coworker, readinessKey: generation };
+      return { ...coworker, readinessKey: generation, workspaceRevision: revision };
     })(), signal).catch((error) => {
       if (signal.aborted) throw new Error("Starting AI took longer than two minutes. Retry preparation or restart AI in Settings. Your draft is kept.");
       throw error;
@@ -3230,13 +3289,14 @@ function registerIpc() {
       return { ok: false, error: `Unknown Open Coworker command: ${command}` };
     }
     const changesReadiness = ["runtime.restart", "den.session.set", "den.session.clear", "den.providers.sync", "localProviders.connect", "localProviders.saveKey", "localProviders.disconnect", "localProviders.custom.add", "localProviders.signIn.start"].includes(command)
-      || (command === "coworkers.update" && ["model", "modelVariant", "modelMode", "useAppModelDefaults", "modelSelectionPreferences", "effortPreference"].some((field) => Object.hasOwn(request?.payload?.patch ?? {}, field)))
+      || (command === "coworkers.update" && ["model", "modelVariant", "modelMode", "modelChosenBy", "useAppModelDefaults", "modelSelectionPreferences", "effortPreference", "thinkingModel", "thinkingModelVariant", "deliveryModel", "deliveryModelVariant"].some((field) => Object.hasOwn(request?.payload?.patch ?? {}, field)))
       || (command === "settings.update" && request?.payload?.modelDefaults !== undefined);
-    const compareSavedReadiness = changesReadiness && (command === "settings.update" || (command === "coworkers.update" && !request?.payload?.patch?.conversationThreadId));
+    const compareSavedReadiness = changesReadiness && (command === "settings.update" || command === "coworkers.update");
+    const readinessOwner = changesReadiness && command === "coworkers.update" ? { slug: request?.payload?.slug, workspaceId: null } : null;
     const readinessChange = changesReadiness ? Promise.withResolvers() : null;
     let readinessUnchanged = false;
     if (readinessChange) {
-      workspaceReadinessChanges.add(readinessChange.promise);
+      workspaceReadinessChanges.set(readinessChange.promise, readinessOwner);
       if (!compareSavedReadiness && command !== "den.providers.sync") invalidateWorkspaceReadiness();
     }
     try {
@@ -3247,6 +3307,7 @@ function registerIpc() {
           const previous = compareSavedReadiness
             ? command === "coworkers.update" ? await getCoworker(coworkersDir, request?.payload?.slug) : await readSettings(settingsPath)
             : null;
+          if (readinessOwner) readinessOwner.workspaceId = previous?.workspaceId ?? null;
           const noSession = command === "den.providers.sync" && !denSession;
           const result = await handler(request?.payload ?? {});
           readinessUnchanged = (noSession && result?.status === "no_session")
@@ -3261,7 +3322,7 @@ function registerIpc() {
           ? { maintenanceRetryable: !resetInProgress && !quitting && !quitReady && !resetExitReady && (!maintenanceAdmission.closed || resetRetryReady) } : {}) };
     } finally {
       if (readinessChange) { workspaceReadinessChanges.delete(readinessChange.promise); readinessChange.resolve(); }
-      if (changesReadiness && !readinessUnchanged && command !== "runtime.restart") invalidateWorkspaceReadiness();
+      if (changesReadiness && !readinessUnchanged && command !== "runtime.restart") invalidateWorkspaceReadiness(readinessOwner);
       else if (command === "runtime.restart" && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("coworker:runtime-changed", runtimeInfo());
     }
   });

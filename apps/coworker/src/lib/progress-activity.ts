@@ -8,6 +8,8 @@ export type ExecutionActivity = {
   messageId: string;
   threadId: string;
   slug: string;
+  workspaceId?: string | null;
+  coworkerCreatedAt?: string | null;
   state: "queued" | "running" | "waiting-person" | "succeeded" | "failed" | "cancelled";
   timelineEventId?: string;
   startedAt: number | null;
@@ -15,7 +17,7 @@ export type ExecutionActivity = {
   continuation: boolean;
   retryLabel?: string;
   failure?: string;
-  admission?: { phase: "prepared" | "attempted"; confirmed: boolean; stopped: boolean; refusal: { code: string; status?: number; notSubmitted?: boolean } | null };
+  admission?: { phase: "prepared" | "attempted"; confirmed: boolean; inFlight?: "preparing" | "sending" | null; stopped: boolean; refusal: { code: string; status?: number; notSubmitted?: boolean } | null };
   pendingCoworkers: number;
   pendingWorkers: number;
   available: boolean;
@@ -82,11 +84,31 @@ export async function readExecutionActivity(input: {
   return { replies, tools: tools.slice(-PROGRESS_LIMITS.maxVisibleSteps), completedSteps, failedSteps, nativeStatus: snapshot.status.type };
 }
 
+export function pendingAdmissionState(input: {
+  messageId: string;
+  execution?: ExecutionActivity;
+  active?: { messageId: string; phase: "preparing" | "accepting" | "waiting" } | null;
+  confirmed?: boolean;
+  unknown?: boolean;
+  refused?: boolean;
+}): "none" | "preparing" | "sending" | "accepted" | "unconfirmed" | "refused" {
+  const execution = input.execution?.messageId === input.messageId ? input.execution : undefined;
+  const admission = execution?.admission;
+  if (input.confirmed || admission?.confirmed) return "accepted";
+  const active = input.active?.messageId === input.messageId ? input.active : null;
+  if (active?.phase === "preparing") return "preparing";
+  if (active?.phase === "accepting") return "sending";
+  if (execution?.available && ["queued", "running"].includes(execution.state) && admission?.inFlight) return admission.inFlight;
+  if (input.refused || (admission?.phase === "attempted" && admission.refusal && admission.refusal.notSubmitted !== true)) return "refused";
+  if (input.unknown || (admission?.phase === "attempted" && !admission.refusal)) return "unconfirmed";
+  return "none";
+}
+
 export function executionProgress(activity: ExecutionActivity, hasText = false): ProgressObservation {
   const tool = activity.tools.findLast((call) => call.status === "running" || call.status === "pending") ?? null;
   return {
     executionId: activity.executionId,
-    status: activity.state === "succeeded" ? "completed" : activity.state === "failed" ? "failed" : activity.state === "cancelled" ? "cancelled" : activity.state === "waiting-person" ? "waiting" : activity.state === "queued" ? "sending" : !activity.available || activity.nativeStatus === "unknown" ? "unknown" : activity.nativeStatus === "retry" ? "retrying" : activity.nativeStatus === "idle" ? "waiting" : tool ? "tool" : hasText ? "streaming" : activity.continuation ? "resuming" : "preparing",
+    status: activity.state === "succeeded" ? "completed" : activity.state === "failed" ? "failed" : activity.state === "cancelled" ? "cancelled" : activity.state === "waiting-person" ? "waiting" : activity.available && !activity.admission?.confirmed && activity.admission?.inFlight ? activity.admission.inFlight : activity.state === "queued" ? "sending" : !activity.available || activity.nativeStatus === "unknown" ? "unknown" : activity.nativeStatus === "retry" ? "retrying" : activity.nativeStatus === "idle" ? "waiting" : tool ? "tool" : hasText ? "streaming" : activity.continuation ? "resuming" : "preparing",
     startedAt: activity.startedAt,
     completedAt: activity.completedAt,
     tool,

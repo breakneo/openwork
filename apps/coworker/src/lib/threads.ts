@@ -16,7 +16,10 @@ import {
 } from "@openwork/headless-threads/v2";
 import { z } from "zod";
 import { RECENT_WORK_LIMIT } from "./activity-summary.ts";
-import { readCloudProviderSyncStatus, type CloudProviderSyncStatus } from "./den.ts";
+import { readCloudProviderSyncStatus, type CloudProviderSyncStatus, type DenSession } from "./den.ts";
+import type { CoworkerSummary, ExpectedWorkspaceReadiness, RuntimeInfo } from "./bridge.ts";
+import { resolveDiscussionModel } from "./model-choice.ts";
+import type { ModelDefaults } from "./model-defaults.ts";
 import { discussionIds, discussionIdsForWorkspace } from "./discussions.ts";
 import type { StreamEvent } from "./live-stream.ts";
 import { workerNameFromTitle } from "./workers.ts";
@@ -56,7 +59,7 @@ export type RecentWork = {
 
 export type CoworkerActivity = {
   /** `starting`: the workspace is not answering yet after the AI service (re)started; `offline`: it still is not. */
-  state: "ready" | "working" | "retrying" | "attention" | "recent" | "starting" | "offline";
+  state: "idle" | "ready" | "working" | "retrying" | "attention" | "recent" | "starting" | "offline";
   label: string;
   detail: string;
   /** For `retrying`: set when the engine has pushed its retry far out, so the model is effectively unavailable. */
@@ -472,13 +475,13 @@ export function hasPendingInteractions(pending: PendingInteractions): boolean {
 
 export type CoworkerThreads = {
   client: HeadlessThreadClient;
-  prepare: (signal: AbortSignal) => Promise<void>;
+  prepare: (signal: AbortSignal, selection?: { coworker: Parameters<typeof resolveDiscussionModel>[1]; defaults: ModelDefaults; requestText?: string }) => Promise<void>;
   /** Assignment threads only; discussions are excluded. */
   listThreads: () => Promise<ThreadListItem[]>;
   /** Every top-level thread in the workspace, discussions included, newest first. */
   listAllThreads: () => Promise<ThreadListItem[]>;
   renameThread: (threadId: string, title: string) => Promise<void>;
-  listModelCatalog: () => Promise<EngineModelCatalog>;
+  listModelCatalog: (signal?: AbortSignal) => Promise<EngineModelCatalog>;
   listModels: () => Promise<EngineModelOption[]>;
   listSkills: (signal?: AbortSignal) => Promise<NativeV2Skill[]>;
   readActivity: () => Promise<CoworkerActivity>;
@@ -587,7 +590,7 @@ async function waitForWorkspaceWork<T>(work: Promise<T>, signal: AbortSignal): P
 
 export type WorkspaceReadinessScope = {
   readiness: ReturnType<typeof createWorkspaceReadiness>;
-  expected: { workspaceId: string; createdAt: string; readinessKey: string };
+  expected: ExpectedWorkspaceReadiness;
 };
 
 export async function prepareCurrentWorkspace<T>(current: () => WorkspaceReadinessScope, prepare: (signal: AbortSignal) => Promise<T>, signal: AbortSignal) {
@@ -624,6 +627,12 @@ export function createWorkspaceReadiness(prepare: (signal: AbortSignal) => Promi
   let owners = 0;
   const listeners = new Set<() => void>();
   const publish = (next: WorkspaceReadiness) => { state = next; for (const listener of listeners) listener(); };
+  const dispose = () => {
+    if (controller.signal.aborted) return;
+    const cause = new WorkspaceChangedError("AI preparation changed or was cancelled. Your draft is kept.");
+    controller.abort(cause);
+    publish({ state: "error", error: cause.message });
+  };
   return {
     signal: controller.signal,
     snapshot: () => state,
@@ -632,26 +641,104 @@ export function createWorkspaceReadiness(prepare: (signal: AbortSignal) => Promi
       controller.signal.throwIfAborted();
       signal?.throwIfAborted();
       if (!pending) {
-        const timer = setTimeout(() => controller.abort(new Error("Starting AI took longer than two minutes. Retry preparation or restart AI in Settings. Your draft is kept.")), WORKSPACE_STARTUP_TIMEOUT_MS);
-        pending = waitForWorkspaceWork(Promise.resolve().then(() => { controller.signal.throwIfAborted(); return prepare(controller.signal); }), controller.signal)
-          .then(() => { controller.signal.throwIfAborted(); publish({ state: "ready", error: "" }); })
+        const attempt = new AbortController();
+        const scoped = AbortSignal.any([controller.signal, attempt.signal]);
+        const timer = setTimeout(() => attempt.abort(new Error("Starting AI took longer than two minutes. Retry preparation or restart AI in Settings. Your draft is kept.")), WORKSPACE_STARTUP_TIMEOUT_MS);
+        publish({ state: "starting", error: "" });
+        const work = waitForWorkspaceWork(Promise.resolve().then(() => { scoped.throwIfAborted(); return prepare(scoped); }), scoped)
+          .then(() => { scoped.throwIfAborted(); publish({ state: "ready", error: "" }); })
           .catch((cause: unknown) => {
             const message = cause instanceof Error ? cause.message : "AI preparation is unavailable.";
             publish({ state: "error", error: message.includes("draft is kept") ? message : `${message} Retry preparation or restart AI in Settings. Your draft is kept.` });
             throw cause;
-          }).finally(() => clearTimeout(timer));
+          }).finally(() => { clearTimeout(timer); if (pending === work && state.state !== "ready") pending = undefined; });
+        pending = work;
       }
       return signal ? waitForWorkspaceWork(pending, signal) : pending;
     },
     retain() {
       owners += 1;
+      let released = false;
       return () => {
+        if (released) return;
+        released = true;
         owners -= 1;
-        queueMicrotask(() => { if (owners === 0) controller.abort(new WorkspaceChangedError("AI preparation changed or was cancelled. Your draft is kept.")); });
+        queueMicrotask(() => { if (owners === 0) dispose(); });
       };
     },
-    dispose: () => controller.abort(new WorkspaceChangedError("AI preparation changed or was cancelled. Your draft is kept.")),
+    dispose,
   };
+}
+
+export type WorkspacePreparationScope = { runtimeKey: string; workspaceKey: string; configurationKey: string };
+
+export function runtimeWorkspaceReadinessKey(runtime: RuntimeInfo, workspaceId: string): string {
+  return JSON.stringify([runtime.serverUrl, runtime.ownerToken, runtime.engineManaged, runtime.readinessKey, runtime.workspaceReadinessRevisions?.[workspaceId] ?? 0]);
+}
+
+export function workspacePreparationScope(runtime: RuntimeInfo, coworker: CoworkerSummary, session: Pick<DenSession, "baseUrl" | "orgId" | "token"> | null): WorkspacePreparationScope {
+  return {
+    runtimeKey: JSON.stringify([runtimeWorkspaceReadinessKey(runtime, ""), session?.baseUrl, session?.orgId, session?.token]),
+    workspaceKey: JSON.stringify([coworker.slug, coworker.createdAt, coworker.path, coworker.workspaceId]),
+    configurationKey: JSON.stringify([runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0, coworker.model, coworker.modelVariant,
+      coworker.modelMode, coworker.modelChosenBy, coworker.useAppModelDefaults, coworker.modelSelectionPreferences, coworker.effortPreference,
+      coworker.thinkingModel, coworker.thinkingModelVariant, coworker.deliveryModel, coworker.deliveryModelVariant]),
+  };
+}
+
+export function createWorkspaceReadinessCache(limit = 32) {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("A readiness cache needs a positive entry limit.");
+  let runtimeKey = "";
+  const entries = new Map<string, { scope: WorkspacePreparationScope; readiness: ReturnType<typeof createWorkspaceReadiness>; release: () => void }>();
+  const remove = (key: string) => {
+    const entry = entries.get(key);
+    if (!entry) return;
+    entries.delete(key);
+    entry.readiness.dispose();
+    entry.release();
+  };
+  const dispose = () => { for (const key of entries.keys()) remove(key); };
+  return {
+    get(scope: WorkspacePreparationScope, prepare: (signal: AbortSignal) => Promise<void>) {
+      if (scope.runtimeKey !== runtimeKey) { dispose(); runtimeKey = scope.runtimeKey; }
+      let entry = entries.get(scope.workspaceKey);
+      if (entry && (entry.scope.configurationKey !== scope.configurationKey || entry.readiness.signal.aborted)) {
+        remove(scope.workspaceKey);
+        entry = undefined;
+      }
+      if (!entry) {
+        const readiness = createWorkspaceReadiness(prepare);
+        entry = { scope, readiness, release: readiness.retain() };
+      }
+      entries.delete(scope.workspaceKey);
+      entries.set(scope.workspaceKey, entry);
+      while (entries.size > limit) {
+        const oldest = entries.keys().next().value;
+        if (oldest === undefined) break;
+        remove(oldest);
+      }
+      return entry.readiness;
+    },
+    peek(scope: WorkspacePreparationScope): WorkspaceReadiness | undefined {
+      const entry = entries.get(scope.workspaceKey);
+      return runtimeKey === scope.runtimeKey && entry?.scope.configurationKey === scope.configurationKey && !entry.readiness.signal.aborted ? entry.readiness.snapshot() : undefined;
+    },
+    invalidate(scope: WorkspacePreparationScope, expected?: ReturnType<typeof createWorkspaceReadiness>) {
+      const entry = entries.get(scope.workspaceKey);
+      if (runtimeKey === scope.runtimeKey && entry?.scope.configurationKey === scope.configurationKey && (!expected || entry.readiness === expected)) remove(scope.workspaceKey);
+    },
+    dispose,
+  };
+}
+
+export const workspaceReadinessCache = createWorkspaceReadinessCache();
+
+export function projectWorkspaceReadiness(activity: CoworkerActivity | null, preparation?: WorkspaceReadiness): CoworkerActivity {
+  if (activity && (["working", "retrying", "attention", "offline"].includes(activity.state) || (activity.state === "recent" && activity.label !== "Ready" && activity.label !== "Idle"))) return activity;
+  if (preparation?.state === "starting" || preparation?.state === "error") return {
+    ...activity, state: preparation.state === "starting" ? "starting" : "offline", label: preparation.state === "starting" ? "Starting AI" : "AI unavailable", detail: preparation.error, updatedAt: 0,
+  };
+  return { detail: "", updatedAt: 0, ...activity, state: activity?.state === "recent" ? "recent" : preparation?.state === "ready" ? "ready" : "idle", label: preparation?.state === "ready" ? "Ready" : "Idle" };
 }
 
 export function createCoworkerThreads(options: {
@@ -686,14 +773,16 @@ export function createCoworkerThreads(options: {
     baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token,
   });
 
-  async function prepare(signal: AbortSignal): Promise<void> {
+  async function prepare(signal: AbortSignal, selection?: Parameters<CoworkerThreads["prepare"]>[1]): Promise<void> {
     const startup = createNativeV2Client({ baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal });
-    const agent = await startup.getAgent("build", signal);
+    const [agent, catalog] = await Promise.all([startup.getAgent("build", signal), listModelCatalog(signal)]);
     if (agent.id !== "build") throw new Error("The native agent identity could not be confirmed.");
-    const model = parsedModel ? { providerID: parsedModel.providerId, id: parsedModel.modelId, variant: options.modelVariant } : agent.model ?? await startup.defaultModel(signal);
-    const catalog = await startup.readCatalog(signal);
+    const decision = selection ? resolveDiscussionModel(catalog, selection.coworker, selection.requestText ?? "", selection.defaults) : null;
+    if (decision && !decision.model) throw new Error(decision.reason);
+    const model = decision?.model ? { providerID: decision.model.providerId, id: decision.model.modelId, variant: decision.variant }
+      : parsedModel ? { providerID: parsedModel.providerId, id: parsedModel.modelId, variant: options.modelVariant } : agent.model ?? await startup.defaultModel(signal);
     signal.throwIfAborted();
-    if (!model || !catalog.connectedProviderIds.includes(model.providerID) || !catalog.models.some((item) => item.providerID === model.providerID && item.id === model.id && item.enabled && (!model.variant || model.variant === "default" || item.variants.some((variant) => variant.id === model.variant)))) {
+    if (!model || !catalog.connectedProviderIds.includes(model.providerID) || !catalog.models.some((item) => item.providerId === model.providerID && item.modelId === model.id && (!model.variant || model.variant === "default" || item.variants.includes(model.variant)))) {
       throw new Error("The selected AI model is unavailable. Choose or reconnect it in Settings. Your draft is kept.");
     }
   }
@@ -853,7 +942,7 @@ export function createCoworkerThreads(options: {
     if (last) {
       return {
         state: "recent",
-        label: "Ready",
+        label: "Idle",
         detail: last.title,
         updatedAt: last.finishedAt,
         threadId: last.id,
@@ -861,12 +950,13 @@ export function createCoworkerThreads(options: {
         recent,
       };
     }
-    return { state: "ready", label: "Ready", detail: "Waiting for first assignment", updatedAt: 0, recent: [] };
+    return { state: "idle", label: "Idle", detail: "Waiting for first assignment", updatedAt: 0, recent: [] };
   }
 
-  async function listModelCatalog(): Promise<EngineModelCatalog> {
+  async function listModelCatalog(signal?: AbortSignal): Promise<EngineModelCatalog> {
+    const source = signal ? createNativeV2Client({ baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal }) : native;
     const [result, preferred, cloud] = await Promise.all([
-      native.readCatalog(), native.defaultModel(),
+      source.readCatalog(signal), source.defaultModel(signal),
       // Status is advisory: without it, account providers are still recognised by their ids.
       readCloudProviderSyncStatus({ serverUrl: options.serverUrl, token: options.token }).catch(
         (): CloudProviderSyncStatus | null => null,
@@ -970,12 +1060,14 @@ export async function readCoworkerActivity(options: {
   token: string;
   conversationThreadId?: string;
   workerThreadIds?: readonly string[];
+  preparationScope?: WorkspacePreparationScope;
 }): Promise<CoworkerActivity> {
   try {
     // Discussions other than the open one are only known to the coworker's registry.
     const discussionThreadIds = await discussionIdsForWorkspace(options.workspaceId, options.conversationThreadId)
       .catch(() => discussionIds([], options.conversationThreadId));
-    return await createCoworkerThreads({ ...options, discussionThreadIds }).readActivity();
+    const activity = await createCoworkerThreads({ ...options, discussionThreadIds }).readActivity();
+    return projectWorkspaceReadiness(activity, options.preparationScope ? workspaceReadinessCache.peek(options.preparationScope) : undefined);
   } catch {
     return { state: "offline", label: "Not responding", detail: "", updatedAt: 0 };
   }

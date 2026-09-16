@@ -26,6 +26,7 @@ import { updateAllHands, prepareAllHands, claimAllHands, readAllHands } from "./
 import { createWorker, getWorker, nextWorkerState, parseWorkerReport, prepareWorkerTurn, queueWorkerSteer, updateWorker } from "./workers.mjs";
 import { connectedModelCatalog, createCoworkerThreads } from "../src/lib/threads.ts";
 import { resolveDiscussionModel } from "../src/lib/model-choice.ts";
+import { executionProgress } from "../src/lib/progress-activity.ts";
 import { groupConversationRows, reconcileGroupActivity } from "../src/lib/group-continuity.ts";
 import { describeGroupPresentation } from "../src/lib/group-presentation.ts";
 import { fixtureCatalog, fixtureProvider } from "../src/lib/provider-catalog.fixture.ts";
@@ -537,7 +538,7 @@ test("turn submission preserves definitive refusal and generation checks without
   let submissions = 0;
   const ownership = Promise.withResolvers();
   const expectedSource = source.slice(source.indexOf("function assertExpectedReadiness("), source.indexOf("function invalidateWorkspaceReadiness("));
-  const assertExpectedReadiness = runInNewContext(`${expectedSource}\nassertExpectedReadiness`, { readinessKey: () => generation, workspaceReadinessChanges: new Set(), serverHandle: { managedOpencodeV2: { isAlive: () => true } } });
+  const assertExpectedReadiness = runInNewContext(`${expectedSource}\nassertExpectedReadiness`, { readinessKey: () => generation, workspaceRevision: () => 0, pendingWorkspaceReadinessChanges: () => [], serverHandle: { managedOpencodeV2: { isAlive: () => true } } });
   const receipt = { threadId: "ses_fixture", messageId: "msg_fixture", acceptedAt: 1, messageCountBefore: 0 };
   const acceptedEntry = { id: "exec_fixture", prompt: "Hello", acceptance: receipt };
   const guardedSend = runInNewContext(`(${source.slice(start, end)}\n})`, {
@@ -556,12 +557,14 @@ test("turn submission preserves definitive refusal and generation checks without
   await withHome(async (home) => {
     const created = await createCoworker(home, { name: "Fixture", role: "Test" });
     const coworker = await updateCoworker(home, created.slug, { workspaceId: "ws_fixture", model: "fixture/model", modelVariant: "low", modelChosenBy: "app", useAppModelDefaults: true });
+    const otherCreated = await createCoworker(home, { name: "Neighbor", role: "Test" });
+    const other = await updateCoworker(home, otherCreated.slug, { workspaceId: "ws_neighbor", model: coworker.model });
     const settingsPath = path.join(home, "settings.json");
     await updateSettings(settingsPath, { modelDefaults: { conversation: { model: coworker.model, modelVariant: "low" } } });
     const handle = { url: "http://127.0.0.1:8790", managedOpencodeV2: { pid: 1234, isAlive: () => true } };
     const frame = {};
     const event = { sender: { mainFrame: frame }, senderFrame: frame };
-    let invoke, gate, syncGate, syncOutcome = { status: "noop" }, failSave = false, notifications = 0, serverCalls = 0;
+    let invoke, readGate, gate, syncGate, warmGate, syncOutcome = { status: "noop" }, failSave = false, notifications = 0, serverCalls = 0;
     const save = async (write) => {
       if (gate) { gate.entered.resolve(); await gate.release.promise; }
       const result = await write();
@@ -569,9 +572,18 @@ test("turn submission preserves definitive refusal and generation checks without
       return result;
     };
     const context = {
-      Error, serverHandle: handle, denSession: null, coworkersDir: home, settingsPath,
+      Error, AbortSignal, withAbort, serverHandle: handle, denSession: null, coworkersDir: home, settingsPath,
+      toolsRegistered: new Set([coworker.slug, other.slug]), ensureToolsServer: async () => ({}), installNativeCoworkerPlugins: async () => {}, prepareNativeTurnRoles: async () => {},
+      nativeWorkspaceRequest: async (_handle, _workspaceId, _method, route) => {
+        if (route === "/api/plugin/await-activation" && warmGate) { warmGate.entered.resolve(); await warmGate.release.promise; }
+        if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "events", "abilities", "turn-roles"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
+      },
       denSessionHandoff: Promise.resolve(), storedSkillSession: null, appliedSkillSession: null,
-      getCoworker, readSettings, updateCoworker: (...args) => save(() => updateCoworker(...args)), updateSettings: (...args) => save(() => updateSettings(...args)),
+      getCoworker: async (...args) => {
+        if (readGate && args[1] === coworker.slug) { readGate.entered.resolve(); await readGate.release.promise; }
+        return getCoworker(...args);
+      },
+      readSettings, updateCoworker: (...args) => save(() => updateCoworker(...args)), updateSettings: (...args) => save(() => updateSettings(...args)),
       privateOwner: async () => ({}), progressSummaries: { configure() {} }, conversationMemory: { configure() {} },
       ensurePlatformServer: async () => { serverCalls++; return handle; }, loadOrCreateTokens: async () => ({ hostToken: "fixture-host" }),
       fetchJson: async () => {
@@ -585,15 +597,19 @@ test("turn submission preserves definitive refusal and generation checks without
     };
     const handlers = [["coworkers.update", "abilities.catalog"], ["settings.update", "shell.openExternal"], ["den.providers.sync", "voice.status"]]
       .map(([first, next]) => source.slice(source.indexOf(`  "${first}":`), source.indexOf(`  "${next}":`))).join("\n");
-    const readiness = runInNewContext(`${source.slice(source.indexOf("const warmedCoworkerWorkspaces ="), source.indexOf("async function runCoworkerWorkspaceWarmup("))}
+    const readiness = runInNewContext(`${source.slice(source.indexOf("const warmedCoworkerWorkspaces ="), source.indexOf("\n// ---------------------------------------------------------------------------", source.indexOf("function warmCoworkerWorkspace(")))}
       ${source.slice(source.indexOf("function queueDenSessionHandoff("), source.indexOf("async function clearDenSession("))}
       const commands = {${handlers}};
       ${source.slice(source.indexOf("function registerIpc()"), source.indexOf("function installApplicationMenu()"))}
       registerIpc();
-      ({ readinessKey, assertExpectedReadiness, workspaceReadinessChanges, warmedCoworkerWorkspaces });`, context);
-    const owner = { workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt };
-    const prepared = { readinessKey: readiness.readinessKey(), workspaceId: coworker.workspaceId, createdAt: coworker.createdAt };
+      ({ readinessKey, workspaceRevision, assertExpectedReadiness, workspaceReadinessChanges, workspaceReadinessRevisions, warmedCoworkerWorkspaces, warmedCoworkerScopes, warmCoworkerWorkspace });`, context);
+    const owner = { slug: coworker.slug, workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt };
+    const otherOwner = { slug: other.slug, workspaceId: other.workspaceId, coworkerCreatedAt: other.createdAt };
+    const prepared = { readinessKey: readiness.readinessKey(), workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, workspaceRevision: 0 };
+    const otherPrepared = { ...prepared, workspaceId: other.workspaceId, createdAt: other.createdAt };
     readiness.warmedCoworkerWorkspaces.add(coworker.workspaceId);
+    readiness.warmedCoworkerWorkspaces.add(other.workspaceId);
+    readiness.warmedCoworkerScopes.set(other.workspaceId, "neighbor-prepared");
     for (const [command, payload] of [
       ["den.providers.sync", {}],
       ["coworkers.update", { slug: coworker.slug, patch: { model: " fixture/model ", modelVariant: " low ", modelSelectionPreferences: coworker.modelSelectionPreferences } }],
@@ -606,6 +622,38 @@ test("turn submission preserves definitive refusal and generation checks without
     assert.equal(serverCalls, 0, "the direct no-session handler does not touch the runtime");
     assert.equal(notifications, 0);
     assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), true);
+    const hookStart = source.indexOf("  validateAdmission:", source.indexOf("const collaboration = createCollaboration({"));
+    const hookEnd = source.indexOf("\n  directory:", hookStart);
+    assert.ok(hookStart > 0 && hookEnd > hookStart);
+    const validateAdmission = runInNewContext(`({${source.slice(hookStart, hookEnd)}}).validateAdmission`, { assertExpectedReadiness: readiness.assertExpectedReadiness });
+    const nativeWrites = [];
+    const admitDuringLookup = (scope, expectedReadiness) => {
+      const threadId = `ses_lookup_${scope.slug}`;
+      const entry = { owner: { ...scope, threadId, conversationId: threadId, kind: "private" }, workspaceId: scope.workspaceId, coworkerCreatedAt: scope.coworkerCreatedAt,
+        expectedReadiness, messageId: `msg_lookup_${scope.slug}`, prompt: "Hello", agent: "build", nativeAdmission: "prepared" };
+      return dispatchNativeTurn({
+        client: {
+          getThreadSnapshot: async () => ({ threadId, messages: [], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }),
+          sendTurn: async (_threadId, input) => { await input.beforeInput(); nativeWrites.push(scope.slug); return { threadId, messageId: input.messageId }; },
+        },
+        threadId, turn: entry, validateAdmission: () => validateAdmission(entry), markAttempted: async () => {},
+      });
+    };
+    readGate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+    const initialChange = invoke("coworkers.update", { slug: coworker.slug, patch: { model: coworker.model } });
+    try {
+      await readGate.entered.promise;
+      const pendingScope = readiness.workspaceReadinessChanges.values().next().value;
+      assert.equal(pendingScope.slug, coworker.slug);
+      assert.equal(pendingScope.workspaceId, null, "the initial coworker read has not resolved the workspace yet");
+      await assert.rejects(admitDuringLookup(owner, prepared), { code: "readiness_changed", inputNotSent: true });
+      assert.deepEqual(nativeWrites, [], "the production admission hook rejects before native input is written");
+      await admitDuringLookup(otherOwner, otherPrepared);
+      assert.deepEqual(nativeWrites, [other.slug], "the pending lookup does not fence an unrelated coworker");
+    } finally { readGate.release.resolve(); await initialChange; readGate = null; }
+    assert.equal((await initialChange).ok, true);
+    assert.equal(readiness.readinessKey(), prepared.readinessKey);
+    assert.doesNotThrow(() => validateAdmission({ owner, workspaceId: owner.workspaceId, coworkerCreatedAt: owner.coworkerCreatedAt, expectedReadiness: prepared }));
     gate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
     let changing, changed, posts = 0, attempts = 0;
     try {
@@ -623,6 +671,7 @@ test("turn submission preserves definitive refusal and generation checks without
           assert.equal((await invoke("den.providers.sync")).ok, true);
           assert.equal(readiness.readinessKey(), prepared.readinessKey);
           assert.equal(readiness.workspaceReadinessChanges.size, 1, "a completed no-op cannot release another operation's fence");
+          assert.doesNotThrow(() => readiness.assertExpectedReadiness(otherPrepared, otherOwner), "another coworker's pending save cannot fence this workspace");
         },
       }), { code: "readiness_changed", inputNotSent: true });
     } finally { gate.release.resolve(); changed = await changing; gate = null; }
@@ -630,26 +679,35 @@ test("turn submission preserves definitive refusal and generation checks without
     assert.equal(attempts, 1);
     assert.equal(posts, 0);
     assert.throws(() => readiness.assertExpectedReadiness(prepared, owner), { code: "readiness_changed" });
-    assert.equal(readiness.warmedCoworkerWorkspaces.size, 0);
+    assert.equal(readiness.readinessKey(), prepared.readinessKey, "a coworker-only change preserves the global runtime stamp");
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), false);
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(other.workspaceId), true);
+    assert.equal(readiness.warmedCoworkerScopes.get(other.workspaceId), "neighbor-prepared");
+    assert.doesNotThrow(() => readiness.assertExpectedReadiness(otherPrepared, otherOwner));
     for (const [command, payload] of [
       ["settings.update", { modelDefaults: { conversation: { modelVariant: "high" } } }],
       ["coworkers.update", { slug: coworker.slug, patch: { model: "fixture/replacement", modelChosenBy: "person" } }],
     ]) {
-      const before = readiness.readinessKey();
+      const before = JSON.stringify([readiness.readinessKey(), readiness.workspaceRevision(coworker.workspaceId)]);
       assert.equal((await invoke(command, payload)).ok, true);
-      assert.notEqual(readiness.readinessKey(), before, "saved effective changes still invalidate readiness");
+      assert.notEqual(JSON.stringify([readiness.readinessKey(), readiness.workspaceRevision(coworker.workspaceId)]), before, "saved effective changes still invalidate readiness");
+      if (command === "settings.update") {
+        assert.notEqual(readiness.readinessKey(), otherPrepared.readinessKey);
+        assert.equal(readiness.warmedCoworkerWorkspaces.size, 0, "app defaults still invalidate all warm scopes");
+      }
     }
     failSave = true;
-    const beforeFailure = readiness.readinessKey();
+    const beforeFailure = readiness.workspaceRevision(coworker.workspaceId);
     assert.equal((await invoke("coworkers.update", { slug: coworker.slug, patch: { modelVariant: "high" } })).ok, false);
-    assert.notEqual(readiness.readinessKey(), beforeFailure);
+    assert.notEqual(readiness.workspaceRevision(coworker.workspaceId), beforeFailure);
     failSave = false;
     context.denSession = { orgId: "fixture" };
     const nativeNoChange = { fingerprintChanged: false, providerStateChanged: false, envUpserts: 0, envDeletes: 0,
       cleanupChanged: false, cleanupRuntimeChanged: false, fileChanged: false, reloadDeferred: false, nativeReloadAttempted: false, nativeReloadPending: false };
     syncOutcome = { status: "noop", detail: nativeNoChange };
     syncGate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
-    const signedInStamp = { ...prepared, readinessKey: readiness.readinessKey() };
+    const signedInStamp = { ...prepared, readinessKey: readiness.readinessKey(), workspaceRevision: readiness.workspaceRevision(coworker.workspaceId) };
+    const otherSignedInStamp = { ...otherPrepared, readinessKey: readiness.readinessKey(), workspaceRevision: readiness.workspaceRevision(other.workspaceId) };
     const beforeNotifications = notifications;
     let refreshing, refreshed;
     try {
@@ -657,6 +715,7 @@ test("turn submission preserves definitive refusal and generation checks without
       await syncGate.entered.promise;
       assert.equal(readiness.readinessKey(), signedInStamp.readinessKey);
       assert.throws(() => readiness.assertExpectedReadiness(signedInStamp, owner), { code: "readiness_changed" });
+      assert.throws(() => readiness.assertExpectedReadiness(otherSignedInStamp, otherOwner), { code: "readiness_changed" }, "a pending global refresh fences every workspace");
     } finally { syncGate.release.resolve(); refreshed = await refreshing; syncGate = null; }
     assert.equal(refreshed.ok, true);
     assert.equal(readiness.readinessKey(), signedInStamp.readinessKey);
@@ -674,6 +733,21 @@ test("turn submission preserves definitive refusal and generation checks without
       assert.notEqual(readiness.readinessKey(), before, "only a complete successful native no-change receipt preserves readiness");
     }
     assert.equal(readiness.workspaceReadinessChanges.size, 0);
+    warmGate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+    const staleWarmup = readiness.warmCoworkerWorkspace(await getCoworker(home, coworker.slug));
+    const staleResult = assert.rejects(staleWarmup, /changed during workspace preparation/);
+    await warmGate.entered.promise;
+    assert.equal((await invoke("coworkers.update", { slug: coworker.slug, patch: { effortPreference: "thorough" } })).ok, true);
+    warmGate.release.resolve();
+    await staleResult;
+    warmGate = null;
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), false, "a stale warm completion cannot restore Ready");
+    await readiness.warmCoworkerWorkspace(await getCoworker(home, coworker.slug));
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), true, "a failed warmup can prepare the current scope again");
+    const currentGeneration = readiness.readinessKey();
+    assert.equal((await invoke("coworkers.update", { slug: "missing", patch: { model: "fixture/model" } })).ok, false);
+    assert.equal(readiness.readinessKey(), currentGeneration, "an unresolved coworker save is not a global model change");
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), true);
   });
   const observed = await dispatchNativeTurn({
     client: { getThreadSnapshot: async () => ({ threadId: "ses_fixture", messages: [{ id: "msg_fixture", role: "user" }], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } }), sendTurn: async () => assert.fail("Observed input must not be replayed") },
@@ -749,7 +823,7 @@ test("foreground submission wakes dispatch without waiting for the periodic tick
     });
     try {
       await service.start();
-      const input = { owner: { slug: "scout", threadId: "ses_foreground", conversationId: "ses_foreground", kind: "private" }, messageId: "msg_foreground", prompt: "Hello", track: true };
+      const input = { owner: { ...fixtureIdentity, slug: "scout", workspaceId: "workspace_scout", threadId: "ses_foreground", conversationId: "ses_foreground", kind: "private" }, messageId: "msg_foreground", prompt: "Hello", track: true };
       const [first, duplicate] = await Promise.all([service.submit(input), service.submit(input)]);
       assert.equal(first.id, duplicate.id);
       t.mock.timers.tick(0);
@@ -757,6 +831,16 @@ test("foreground submission wakes dispatch without waiting for the periodic tick
       t.mock.timers.tick(45_000);
       assert.equal(setupSignal.aborted, false);
       assert.equal(fixture.requests.length, 0);
+      assert.equal((await service.activityEntries(input.owner))[0].admission.inFlight, "preparing");
+      const readActivity = runInNewContext(`${source.slice(source.indexOf("async function readCollaborationActivity("), source.indexOf("function workerKey("))}\nreadCollaborationActivity`, {
+        serverHandle: { url: "http://127.0.0.1:8790", managedOpencodeV2: { isAlive: () => true } }, collaboration: service, coworkersDir: home, ownerToken: "fixture", AbortSignal,
+        getCoworker: (_directory, slug) => fixtureCoworker(slug), PROGRESS_LIMITS: { maxActivityExecutions: 16, activityReadTimeoutMs: 1000 },
+        readExecutionActivity: async () => assert.fail("host preparation does not require a native input to exist"), progressSummaries: { noteFor: () => null },
+      });
+      const preparing = (await readActivity(input.owner))[0];
+      assert.equal(preparing.available, true);
+      assert.equal(preparing.nativeStatus, "unknown");
+      assert.equal(executionProgress(preparing).status, "preparing");
       prepared.resolve();
       clock.mock.restore();
       t.mock.timers.reset();
@@ -859,9 +943,11 @@ test("foreground submission wakes dispatch without waiting for the periodic tick
 });
 
 test("native collaboration preserves accepted turns through unavailable observations and honors Stop and deadlines", async () => {
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
   for (const action of ["recover", "cancel", "deadline", "forbidden"]) await withHome(async (home) => {
-    const fixture = nativeFixture();
-    const owner = { slug: "scout", threadId: "ses_observation", conversationId: "ses_observation", kind: "private" };
+    const sending = Promise.withResolvers(), acknowledge = Promise.withResolvers();
+    const fixture = nativeFixture(async () => { if (action === "recover") { sending.resolve(); await acknowledge.promise; } });
+    const owner = { ...fixtureIdentity, workspaceId: "workspace_scout", slug: "scout", threadId: "ses_observation", conversationId: "ses_observation", kind: "private" };
     const messageId = "msg_observation";
     let unavailable = true;
     let failedSnapshot = false;
@@ -892,8 +978,26 @@ test("native collaboration preserves accepted turns through unavailable observat
     });
     try {
       const entry = await service.submit({ owner, messageId, prompt: "Hello", track: true });
+      if (action === "recover") {
+        await withAbort(sending.promise, AbortSignal.timeout(4000));
+        const activity = (await service.activityEntries(owner))[0];
+        assert.equal(activity.admission.phase, "attempted");
+        assert.equal(activity.admission.confirmed, false);
+        assert.equal(activity.admission.inFlight, "sending", "a live native send is not a lost acknowledgement");
+        acknowledge.resolve();
+      }
       await service.acceptance(entry.id);
       await eventually(() => waits > 0);
+      const readActivity = runInNewContext(`${source.slice(source.indexOf("async function readCollaborationActivity("), source.indexOf("function workerKey("))}\nreadCollaborationActivity`, {
+        serverHandle: { url: "http://127.0.0.1:8790", managedOpencodeV2: { isAlive: () => true } }, collaboration: service, coworkersDir: home, ownerToken: "fixture", AbortSignal,
+        getCoworker: (_directory, slug) => fixtureCoworker(slug), PROGRESS_LIMITS: { maxActivityExecutions: 16, activityReadTimeoutMs: 1000 },
+        readExecutionActivity: async () => { throw new Error("GET observation unavailable"); }, progressSummaries: { noteFor: () => null },
+      });
+      const accepted = (await readActivity(owner))[0];
+      assert.equal(accepted.admission.confirmed, true);
+      assert.equal(accepted.admission.inFlight, null);
+      assert.equal(accepted.available, false);
+      assert.equal(accepted.nativeStatus, "unknown");
       if (action === "recover" || action === "cancel") {
         assert.equal((await service.read((state) => state.executions[entry.id])).state, "running");
         assert.deepEqual(fixture.aborted, []);
@@ -911,7 +1015,7 @@ test("native collaboration preserves accepted turns through unavailable observat
       }
       if (action !== "recover") await eventually(() => fixture.aborted.length === 1);
       assert.equal(fixture.requests.length, 1);
-    } finally { await service.stop(); }
+    } finally { acknowledge.resolve(); await service.stop(); }
   });
 });
 
@@ -951,7 +1055,7 @@ test("native collaboration rejects completed assistants from interrupted live an
 });
 
 test("native collaboration recovers inbox-only acceptance and fences uncertain admission across restart", async () => {
-  for (const phase of ["inbox", "attempted", "prepared", "legacy-retry", "legacy-queued-retry", "legacy-cleared-retry"]) await withHome(async (home) => {
+  for (const phase of ["inbox", "attempted", "prepared", "legacy-running", "legacy-retry", "legacy-queued-retry", "legacy-cleared-retry"]) await withHome(async (home) => {
     const clearedRetry = ["legacy-queued-retry", "legacy-cleared-retry"].includes(phase);
     const retryOnSubmit = ["legacy-retry", "legacy-cleared-retry"].includes(phase);
     const fixture = nativeFixture();
@@ -983,11 +1087,12 @@ test("native collaboration recovers inbox-only acceptance and fences uncertain a
     } };
     let service = createCollaboration({ ...options, pollMs: 60_000 });
     try {
-      const entry = await service.submit({ owner, messageId, prompt: "Keep this exact input" });
+      const model = { providerId: "fixture", modelId: "text", variant: "low" };
+      const entry = await service.submit({ owner, messageId, prompt: "Keep this exact input", model });
       await service.change((state) => {
         Object.assign(state.executions[entry.id], {
           state: retryOnSubmit ? "failed" : clearedRetry ? "queued" : "running",
-          sentAt: clearedRetry ? null : Date.now(),
+          sentAt: clearedRetry || phase === "legacy-running" ? null : Date.now(),
           ...(["prepared", "attempted"].includes(phase) ? { nativeAdmission: phase } : {}),
           ...(clearedRetry ? { acceptance: null, retry: phase === "legacy-queued-retry", attempts: 1, generatedMessageId: true } : {}),
         });
@@ -995,6 +1100,7 @@ test("native collaboration recovers inbox-only acceptance and fences uncertain a
       });
       await service.stop();
       service = createCollaboration(options);
+      assert.equal((await service.activityEntries(owner))[0].admission.inFlight, null, "a persisted running flag is not live admission evidence");
       if (clearedRetry) {
         const saved = await service.read((state) => state.executions[entry.id]);
         assert.equal(saved.nativeAdmission, undefined);
@@ -1021,6 +1127,7 @@ test("native collaboration recovers inbox-only acceptance and fences uncertain a
       await eventually(async () => ["failed", "succeeded"].includes((await service.read((state) => state.executions[entry.id])).state));
       const settled = await service.read((state) => state.executions[entry.id]);
       const failed = !["inbox", "prepared"].includes(phase);
+      assert.deepEqual(settled.model, model, "recovery keeps the accepted model and effort pin");
       assert.equal(settled.state, failed ? "failed" : "succeeded");
       assert.equal(fixture.requests.length, phase === "prepared" ? 1 : 0);
       if (failed) assert.match(settled.error, /will not be replayed/);

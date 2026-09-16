@@ -867,7 +867,7 @@ test("steering and an admitted turn survive rereads, while pause and stop win se
   } }];
   const autoOwner = { model: "ipr_fixture/gwm_luna", modelChosenBy: "app" };
   assert.equal(resolveWorkerModel(autoOwner, "delivery", gateway).modelId, "gwm_luna");
-  assert.deepEqual(resolveWorkerModel(autoOwner, "thinking", gateway), { providerId: "ipr_fixture", modelId: "gwm_astra", variant: "medium" });
+  assert.deepEqual(resolveWorkerModel(autoOwner, "thinking", gateway), { providerId: "ipr_fixture", modelId: "gwm_luna", variant: "high" });
   const previewCatalog = connectedModelCatalog({ all: gateway, connected: gateway.map((provider) => provider.id), default: {} });
   for (const purpose of ["thinking", "delivery"]) {
     const preview = resolveModelPreview(previewCatalog, purpose, DEFAULT_MODEL_DEFAULTS, autoOwner);
@@ -881,15 +881,16 @@ test("steering and an admitted turn survive rereads, while pause and stop win se
   assert.deepEqual(resolveWorkerModel({ ...autoOwner, thinkingModel: "ipr_fixture/gwm_luna" }, "thinking", gateway, pinned), pinned);
   const oldRecommendation = { model: "legacy/deepseek", modelChosenBy: "app" };
   assert.equal(resolveWorkerModel(oldRecommendation, "delivery", gateway).modelId, "gwm_luna");
-  assert.equal(resolveWorkerModel(oldRecommendation, "thinking", gateway).modelId, "gwm_astra");
+  assert.equal(resolveWorkerModel(oldRecommendation, "thinking", gateway).modelId, "gwm_luna");
   assert.throws(() => resolveWorkerModel({ ...oldRecommendation, useAppModelDefaults: false }, "thinking", gateway), /unavailable/);
-  gateway[0].models.gwm_astra.cost.output = 11;
-  assert.equal(resolveWorkerModel(autoOwner, "thinking", gateway).modelId, "gwm_astra", "requested initial thinking default is not capped by the cheaper conversation model");
-  assert.notEqual(resolveWorkerModel({ ...autoOwner, useAppModelDefaults: false }, "thinking", gateway).modelId, "gwm_astra");
-  const ambiguousGateway = [{ ...gateway[0], models: { ...gateway[0].models, gwm_alternate: { ...gateway[0].models.gwm_astra, credentialSetId: "other" } } }];
+  gateway[0].models.gwm_luna.cost.output = 11;
+  const previousThinking = { ...autoOwner, model: "ipr_fixture/gwm_astra" };
+  assert.equal(resolveWorkerModel(previousThinking, "thinking", gateway).modelId, "gwm_luna", "requested initial thinking default is not capped by the previous automatic model");
+  assert.equal(resolveWorkerModel({ ...previousThinking, useAppModelDefaults: false }, "thinking", gateway).modelId, "gwm_astra");
+  const ambiguousGateway = [{ ...gateway[0], models: { ...gateway[0].models, gwm_alternate: { ...gateway[0].models.gwm_luna, credentialSetId: "other" } } }];
   assert.equal(resolveWorkerModel(autoOwner, "thinking", ambiguousGateway).modelId, "gwm_luna", "ambiguous credentials retain the constrained fallback");
-  const withoutAstra = [{ ...gateway[0], models: { gwm_luna: gateway[0].models.gwm_luna } }];
-  assert.equal(resolveWorkerModel(oldRecommendation, "thinking", withoutAstra).modelId, "gwm_luna", "missing role preference and stale app anchor still have a current fallback");
+  const withoutLuna = [{ ...gateway[0], models: { gwm_astra: gateway[0].models.gwm_astra } }];
+  assert.deepEqual(resolveWorkerModel(oldRecommendation, "thinking", withoutLuna), { providerId: "ipr_fixture", modelId: "gwm_astra", variant: "high" }, "a current fallback follows advertised effort, not the removed Astra/medium policy");
   const blocked = nextWorkerState(worker, { kind: "settled", report: { kind: "decision", text: "Missing acceptance criteria." } });
   assert.equal(blocked.patch.status, "failed", "a new Worker's blocker returns to the supervisor through durable completion");
   assert.equal(blocked.schedule, "stop");

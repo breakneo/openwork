@@ -4,7 +4,7 @@ import { ANSWER_STREAMING_MIN_CHARS, answerStreaming, applyStreamEvent, type Liv
 import { livePhase, writingText } from "./live-phase.ts";
 import { changeGroupSends, groupConversationRows, groupMessageKey, groupReplyParts, groupSends, mergeGroupReplyParts, reconcileGroupActivity, runGroupAction, submitGroupSend, type GroupActionAttempt, type GroupSend } from "./group-continuity.ts";
 import type { GroupTimelineEvent } from "./bridge.ts";
-import { executionProgress, type ExecutionActivity } from "./progress-activity.ts";
+import { executionProgress, pendingAdmissionState, type ExecutionActivity } from "./progress-activity.ts";
 import { describeGroupPresentation } from "./group-presentation.ts";
 import { PROGRESS_LIMITS } from "./progress-config.ts";
 
@@ -140,6 +140,21 @@ test("group snapshots retain unavailable words, isolate native requests, and han
   assert.equal(executionProgress({ ...first, state: "waiting-person" }, true).status, "waiting");
   assert.equal(executionProgress({ ...first, nativeStatus: "idle" }, true).status, "waiting");
   assert.equal(executionProgress({ ...second, state: "succeeded" }, true).status, "completed");
+  const sending: ExecutionActivity = { ...first, nativeStatus: "unknown", admission: { phase: "attempted", confirmed: false, inFlight: "sending", stopped: false, refusal: null } };
+  assert.equal(executionProgress(sending).status, "sending");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: sending }), "sending");
+  const preparing: ExecutionActivity = { ...sending, admission: { ...sending.admission!, phase: "prepared", inFlight: "preparing" } };
+  assert.equal(executionProgress(preparing).status, "preparing");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: preparing }), "preparing");
+  const lost: ExecutionActivity = { ...sending, available: false, admission: { ...sending.admission!, inFlight: null } };
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: lost }), "unconfirmed");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: lost, active: { messageId: first.messageId, phase: "accepting" } }), "sending");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: lost, active: { messageId: "unrelated", phase: "accepting" } }), "unconfirmed");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: lost, active: { messageId: first.messageId, phase: "waiting" } }), "unconfirmed");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: { ...sending, available: false } }), "unconfirmed", "a failed read cannot prolong cached in-flight evidence");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: { ...lost, admission: { ...lost.admission!, confirmed: true } }, unknown: true }), "accepted");
+  assert.equal(pendingAdmissionState({ messageId: first.messageId, execution: lost, confirmed: true }), "accepted");
+  assert.equal(executionProgress({ ...lost, admission: { ...lost.admission!, confirmed: true } }).status, "unknown", "acceptance is not proof of native activity or idle");
   assert.deepEqual(describeGroupPresentation({ ...cached, events: [], interactions: [], active: true, turn: null, nameFor: (slug) => slug, unavailable: true }).activeSlugs, []);
   const other = reconcileGroupActivity(cached, { timeline: [], executions: [{ ...first, messageId: "other-request", replies: [] }] });
   assert.deepEqual(groupReplyParts(other.executions[0]!), []);

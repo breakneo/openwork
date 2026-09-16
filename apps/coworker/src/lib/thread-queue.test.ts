@@ -197,7 +197,38 @@ test("the renderer keeps drafts through preflight and does not gate observation 
   const end = source.indexOf("  }, [abortUntilQuiet", start);
   assert.ok(start > 0 && end > start);
   const script = await transform(`(${source.slice(start, end)}\n})`, { loader: "ts", target: "es2022" });
-  for (const outcome of ["send", "cancel", "reject", "not-submitted", "uncertain"]) {
+  const voiceState = source.slice(source.indexOf("  const voiceSettled ="), source.indexOf("  const voiceReply ="));
+  const activityState = source.slice(source.indexOf("  const statusState ="), source.indexOf("  const [controlStatusSlot,"));
+  assert.ok(voiceState && activityState);
+  assert.match(source, /data-state=\{statusState\}/);
+  for (const unavailable of ["unconfirmedAdmission", "refusedAdmission", "acceptedObservationUnavailable"]) {
+    const status = runInNewContext(`${voiceState}\n${activityState}\n({ voiceSettled, statusState })`, {
+      stopAttempt: null, stopPending: false, engineStatus: { type: "idle" }, activeTurn: null, appRetry: null, working: false, needsYou: false, error: "", readErrors: {},
+      workspacePreparation: { state: "ready" }, unconfirmedAdmission: false, refusedAdmission: false, acceptedObservationUnavailable: false, [unavailable]: true,
+    });
+    assert.equal(status.voiceSettled, false, "unavailable admission/activity cannot deliver an earlier voice reply");
+    assert.equal(status.statusState, "unknown", "unavailable admission/activity must not be labelled idle");
+  }
+  const queuedStart = source.indexOf("  async function sendQueuedNow(");
+  const queuedEnd = source.indexOf("\n  /**", queuedStart);
+  assert.ok(queuedStart > 0 && queuedEnd > queuedStart);
+  const queuedScript = await transform(`${source.slice(queuedStart, queuedEnd)}\nsendQueuedNow`, { loader: "ts", target: "es2022" });
+  for (const stopped of [false, true]) {
+    const recorded = enqueue(beginPending(EMPTY_THREAD_TURNS, { messageId: "accepted", prompt: "First", startedAt: 1 }), { id: "next", text: "Second", queuedAt: 2 });
+    const turnStateRef = { current: recorded };
+    const events: string[] = [];
+    const sendQueuedNow = runInNewContext(queuedScript.code, {
+      admissionBlocked: { current: false }, threadStop: () => null, stopScope: "fixture", turnStateRef, coworker: { slug: "fixture" }, viewMounted: { current: true },
+      setError: () => {}, jumpToLatest: () => {}, voice: { stop: () => {} }, activeTurnRef: { current: null }, appRetry: null, engineRunning: false, acceptedObservationUnavailable: true,
+      coworkerBridge: { turns: { validateSkills: async () => {} } }, stop: async () => { events.push("stop"); return stopped; }, untilTurnReleased: async () => {},
+      clearPending, removeQueued, commitTurnState: (update: (value: ThreadTurnState) => ThreadTurnState) => { turnStateRef.current = update(turnStateRef.current); },
+      submitTurn: () => { events.push("send"); }, newMessageId: () => "next-message",
+    });
+    await sendQueuedNow("next");
+    assert.deepEqual(events, stopped ? ["stop", "send"] : ["stop"], "Send Next now requires confirmed Stop while accepted activity is unavailable");
+    if (!stopped) assert.deepEqual(turnStateRef.current, recorded);
+  }
+  for (const outcome of ["send", "cancel", "reject", "not-submitted", "uncertain", "accepted-unavailable"]) {
     const cancel = outcome === "cancel";
     const events: string[] = [];
     const files = new Map<string, ComposerDraft>();
@@ -213,10 +244,16 @@ test("the renderer keeps drafts through preflight and does not gate observation 
     const refreshed = deferred();
     const observed = deferred();
     const turnStateRef = { current: EMPTY_THREAD_TURNS };
-    const activeTurnRef = { current: null };
+    const activeTurnRef: { current: { messageId: string; prompt: string; phase: "preparing" | "accepting" | "waiting" } | null } = { current: null };
+    const sending = deferred();
+    const acknowledgement = deferred();
+    const confirmation: { accepted: string | null; unknown: string | null; errors: Record<string, string> } = { accepted: null, unknown: null, errors: {} };
     const ignore = () => {};
-    const setters = Object.fromEntries(["setActiveTurn", "clearStall", "setFailure", "setAppRetry", "setRecovered", "setLiveStream", "setError", "setProviderRefreshNote", "setResolution", "setTitle", "setConfirmationUnknown", "setRefusedMessage"].map((name) => [name, ignore]));
+    const setters = Object.fromEntries(["setActiveTurn", "clearStall", "setFailure", "setAppRetry", "setRecovered", "setLiveStream", "setError", "setProviderRefreshNote", "setResolution", "setTitle", "setRefusedMessage", "setEngineStatus"].map((name) => [name, ignore]));
     const sandbox = { ...setters, Date, Promise, Error, String, Boolean,
+      setAcceptedMessage: (id: string | null) => { confirmation.accepted = id; },
+      setConfirmationUnknown: (id: string | null) => { confirmation.unknown = id; },
+      setReadErrors: (update: (value: Record<string, string>) => Record<string, string>) => { confirmation.errors = update(confirmation.errors); },
       activeTurnRef, threadStop: () => cancel && turnStateRef.current.pending?.stoppedAt != null,
       stopScope: "discussion", turnStateRef, voiceRef: { current: null }, stallRef: { current: null },
       coworker: owner, kind: "discussion", admissionBlocked, latestNativeState: { current: null },
@@ -234,10 +271,10 @@ test("the renderer keeps drafts through preflight and does not gate observation 
       coworkerBridge: { settings: { get: async () => ({ modelDefaults: {} }) }, turns: {
         validateSkills: () => { events.push("validate"); validating.resolve(); return validation.promise; },
         activity: async () => [],
-        send: async () => { events.push("send"); if (outcome === "uncertain") throw new Error("IPC response unavailable"); return outcome === "reject" || outcome === "not-submitted" ? { rejected: true, notSubmitted: outcome === "not-submitted", messageId: "msg_first", error: "Selected skill denied" } : { messageId: "msg_first", prompt: draft.text, acceptedAt: 1 }; },
+        send: async () => { events.push("send"); sending.resolve(); await acknowledgement.promise; if (outcome === "uncertain") throw new Error("IPC response unavailable"); return outcome === "reject" || outcome === "not-submitted" ? { rejected: true, notSubmitted: outcome === "not-submitted", messageId: "msg_first", error: "Selected skill denied" } : { messageId: "msg_first", prompt: draft.text, acceptedAt: 1 }; },
       } },
       refresh: () => { events.push("refresh"); return refreshed.promise; },
-      threads: { client: { getThreadSnapshot: async () => { throw new Error("Observation unavailable"); }, waitForThread: async () => { events.push("observe"); observed.resolve(); return { outcome: "settled", snapshot: { messages: [], status: { type: "idle" } } }; } } },
+      threads: { client: { getThreadSnapshot: async () => { throw new Error("Observation unavailable"); }, waitForThread: async () => { events.push("observe"); observed.resolve(); if (outcome === "accepted-unavailable") throw new Error("GET observation unavailable"); return { outcome: "settled", snapshot: { messages: [], status: { type: "idle" } } }; } } },
       threadId: "ses_fixture", waitControllerRef: { current: null }, TURN_OBSERVER_SLICE_MS: 2000,
       window: { setInterval: () => 1, clearInterval: ignore, setTimeout, clearTimeout, requestAnimationFrame: (callback: () => void) => callback() },
       AbortController, isRunning: () => false, nativeV2InputSkillsMatch: () => true,
@@ -250,6 +287,12 @@ test("the renderer keeps drafts through preflight and does not gate observation 
     assert.deepEqual(store.read("discussion").value, draft);
     if (cancel) turnStateRef.current = markStopped(turnStateRef.current, 1);
     validation.resolve();
+    if (!cancel) {
+      await sending.promise;
+      assert.equal(activeTurnRef.current?.phase, "accepting");
+      assert.equal(confirmation.unknown, null, "a genuinely pending send has no lost-ack warning");
+      acknowledgement.resolve();
+    }
     if (cancel || outcome === "reject" || outcome === "not-submitted") {
       await running;
       assert.equal(events.filter((event) => event === "send").length, cancel ? 0 : 1);
@@ -262,6 +305,17 @@ test("the renderer keeps drafts through preflight and does not gate observation 
       assert.deepEqual(store.read("discussion").value, draft);
       assert.equal(admissionBlocked.current, true);
       assert.equal(turnStateRef.current.pending?.messageId, "msg_first");
+      await submit(draft.text, "msg_first", { mode: "send", skills: draft.skills });
+      assert.equal(events.filter((event) => event === "send").length, 1, "a true lost acknowledgement cannot replay the input");
+    } else if (outcome === "accepted-unavailable") {
+      await running;
+      assert.equal(confirmation.accepted, "msg_first");
+      assert.equal(confirmation.unknown, null);
+      assert.equal(admissionBlocked.current, false);
+      assert.match(confirmation.errors.transcript ?? "", /Message accepted/);
+      assert.equal(turnStateRef.current.pending?.messageId, "msg_first");
+      assert.deepEqual(store.read("discussion").value, { text: "", skills: [] });
+      assert.equal(events.filter((event) => event === "send").length, 1);
     } else {
       await observed.promise;
       assert.deepEqual(store.read("discussion").value, { text: "", skills: [] });

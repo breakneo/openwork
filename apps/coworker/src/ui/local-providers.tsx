@@ -19,6 +19,7 @@ import {
   type ConnectedRow,
 } from "@/lib/local-providers";
 import { MODEL_GROWTH_OFFER_IDS, modelGrowthOffer, type ModelGrowthOfferId } from "@/lib/model-growth";
+import { resolveOnboardingModelDefaults } from "@/lib/model-choice";
 import { createCoworkerThreads, type EngineModelCatalog } from "@/lib/threads";
 import { Button, ErrorNote, StatusDot, inputClass } from "@/ui/kit";
 import { OptionRow } from "@/ui/interactions";
@@ -156,7 +157,7 @@ function KeyForm({ provider, onSaved, onCancel }: { provider: AddableProvider; o
     try {
       const result = await coworkerBridge.localProviders.saveKey(provider.id, key);
       setKey("");
-      onSaved(COPY.connectedLine(result.modelCount), provider.id);
+      onSaved(`Key saved. ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} listed.`, result.providerId);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -192,7 +193,7 @@ function KeyForm({ provider, onSaved, onCancel }: { provider: AddableProvider; o
   );
 }
 
-function CustomForm({ onSaved, onCancel, onStartModel }: { onSaved: (line: string, providerId: string) => void; onCancel: () => void; onStartModel?: (modelId: string) => void }) {
+function CustomForm({ onSaved, onCancel, onStartModel }: { onSaved: (line: string, providerId: string) => void; onCancel: () => void; onStartModel?: (modelId: string, providerId?: string) => void }) {
   const [name, setName] = useState("");
   const [address, setAddress] = useState("");
   const [key, setKey] = useState("");
@@ -221,8 +222,8 @@ function CustomForm({ onSaved, onCancel, onStartModel }: { onSaved: (line: strin
       const ordered = [startWith, ...models.filter((model) => model !== startWith)].filter(Boolean);
       const result = await coworkerBridge.localProviders.custom.add({ name, address, key, models: ordered });
       setKey("");
-      if (startWith && onStartModel) onStartModel(`${result.providerId}/${startWith}`);
-      onSaved(COPY.connectedLine(result.modelCount), result.providerId);
+      onSaved(`Connection saved. ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} listed.`, result.providerId);
+      if (startWith && onStartModel) onStartModel(`${result.providerId}/${startWith}`, result.providerId);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -270,6 +271,7 @@ export function LocalProviders({
   onExploreThinking,
   onExploreTeams,
   onModelsChanged,
+  onProviderConnected,
   onRuntimeChanged,
   onStartModel,
   chooseLabel,
@@ -282,11 +284,12 @@ export function LocalProviders({
   /** Navigation to existing account/templates; no team entitlement is implied. */
   onExploreTeams?: () => void;
   /** Something connected or disconnected: the model catalog changed. */
-  onModelsChanged?: () => void;
+  onModelsChanged?: (providerId?: string) => void;
+  onProviderConnected?: (providerId: string) => void;
   /** The platform restarted while getting ready; re-read runtime info. */
   onRuntimeChanged?: () => Promise<void>;
   /** The person picked a model to start with ("providerId/modelId"). */
-  onStartModel?: (modelId: string) => void;
+  onStartModel?: (modelId: string, providerId?: string) => void;
   /** What the free-model row's action says when `onStartModel` is given. */
   chooseLabel?: string;
 }) {
@@ -309,7 +312,9 @@ export function LocalProviders({
   const statesRef = useRef(states);
   statesRef.current = states;
   const signInRequests = useRef(new Map<string, { action: "status" | "cancel" }>());
-  useEffect(() => () => { signInRequests.current.clear(); }, []);
+  const signInProviders = useRef(new Map<string, string>());
+  const refreshGeneration = useRef(0);
+  useEffect(() => () => { signInRequests.current.clear(); signInProviders.current.clear(); refreshGeneration.current += 1; }, []);
 
   const setRowState = useCallback((id: string, next: ConnectState) => {
     statesRef.current = { ...statesRef.current, [id]: next };
@@ -317,51 +322,46 @@ export function LocalProviders({
   }, []);
 
   const refresh = useCallback(async (options: { clearRows?: boolean } = {}) => {
+    const generation = ++refreshGeneration.current;
     setRefreshing(true);
     setReplacementConfirmed(false);
     setError("");
     try {
-      // Detection only looks at this Mac, so its rows appear while the AI service
-      // is still starting; the catalog fills in once the service answers.
-      const detecting = coworkerBridge.localProviders.detect().then((detected) => {
-        setFindings(detected.found);
-        setFound(true);
-      }, (cause: unknown) => {
-        setFindings([]);
-        setFound(false);
-        setError(messageOf(cause));
-      });
-      const ready = await coworkerBridge.localProviders.prepare();
-      setReadiness(ready);
-      // Getting the first workspace ready can move the platform to another port.
-      if (ready.serverUrl && ready.serverUrl !== runtime.serverUrl) void onRuntimeChanged?.();
-      const [detected, models] = await Promise.allSettled([
-        detecting,
-        ready.engineManaged && ready.workspaceId
-          ? createCoworkerThreads({ serverUrl: ready.serverUrl, workspaceId: ready.workspaceId, token: ready.ownerToken }).listModelCatalog()
-          : Promise.resolve(EMPTY_CATALOG),
+      const [, ready] = await Promise.all([
+        coworkerBridge.localProviders.detect().then((detected) => {
+          if (generation === refreshGeneration.current) {
+            setFindings(detected.found);
+            setFound(true);
+          }
+        }),
+        coworkerBridge.localProviders.prepare(),
       ]);
-      setCatalog(models.status === "fulfilled" ? models.value : EMPTY_CATALOG);
-      const failed = [detected, models].find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
-      if (failed) setError(messageOf(failed.reason));
-      // The Refresh control starts finished rows clean; a sign-in in progress is never wiped.
+      if (generation !== refreshGeneration.current) return;
+      const models = ready.engineManaged && ready.workspaceId
+        ? await createCoworkerThreads({ serverUrl: ready.serverUrl, workspaceId: ready.workspaceId, token: ready.ownerToken }).listModelCatalog()
+        : EMPTY_CATALOG;
+      if (generation !== refreshGeneration.current) return;
+      setReadiness(ready);
+      setCatalog(models);
+      if (ready.serverUrl && ready.serverUrl !== runtime.serverUrl) void onRuntimeChanged?.();
       if (options.clearRows) {
         const busy = new Set(busyProviderIds(statesRef.current));
         statesRef.current = Object.fromEntries(Object.entries(statesRef.current).filter(([id]) => busy.has(id)));
         setStates(statesRef.current);
       }
     } catch (cause) {
-      setReadiness(EMPTY_READINESS);
-      setCatalog(EMPTY_CATALOG);
-      setError(messageOf(cause));
+      if (generation === refreshGeneration.current) setError(`Connections could not be refreshed. Use Refresh to try again. ${messageOf(cause)}`);
     } finally {
-      setRefreshing(false);
-      setLoaded(true);
+      if (generation === refreshGeneration.current) {
+        setRefreshing(false);
+        setLoaded(true);
+      }
     }
   }, [onRuntimeChanged, runtime.serverUrl]);
 
   useEffect(() => {
     void refresh();
+    return () => { refreshGeneration.current += 1; };
   }, [refresh]);
 
   const plan = useMemo(() => {
@@ -411,10 +411,17 @@ export function LocalProviders({
     row?.querySelector("button")?.focus();
   }
 
-  const changed = useCallback(async () => {
+  const changed = useCallback(async (providerId?: string) => {
+    if (providerId) onProviderConnected?.(providerId);
     await refresh();
-    onModelsChanged?.();
-  }, [onModelsChanged, refresh]);
+    onModelsChanged?.(providerId);
+  }, [onModelsChanged, onProviderConnected, refresh]);
+
+  function savedProvider(line: string, providerId: string) {
+    setAdding("");
+    setRowState("add-another", { phase: "connected", line });
+    void changed(providerId);
+  }
 
   async function connect(finding: LocalProviderFinding) {
     if (!setupReady || (finding.providerId === "openai" && openaiBusy)) return;
@@ -426,7 +433,7 @@ export function LocalProviders({
     try {
       const result = await coworkerBridge.localProviders.connect(finding.id);
       setRowState(finding.id, connectReducer(IDLE, { type: "result", result }));
-      if (result.status === "connected") await changed();
+      if (result.status === "connected") await changed(result.providerId);
     } catch (cause) {
       setRowState(finding.id, connectReducer(IDLE, { type: "error", error: messageOf(cause), canSignIn: (readiness.signIns[finding.providerId]?.length ?? 0) > 0 }));
     }
@@ -441,6 +448,7 @@ export function LocalProviders({
     setRowState(rowId, { phase: "connecting" });
     try {
       const start = await coworkerBridge.localProviders.signIn.start(providerId);
+      signInProviders.current.set(start.attemptId, start.providerId);
       setRowState(rowId, connectReducer(IDLE, { type: "sign-in-started", start }));
       if (start.url) void coworkerBridge.openExternal(start.url);
     } catch (cause) {
@@ -465,14 +473,18 @@ export function LocalProviders({
       if (action === "cancel") {
         const result = await coworkerBridge.localProviders.signIn.cancel(state.attemptId);
         if (result.ok !== true) throw new Error("Cancellation could not be confirmed. Check the sign-in status.");
-        if (ownsRequest()) setRowState(rowId, IDLE);
+        if (ownsRequest()) {
+          setRowState(rowId, IDLE);
+          signInProviders.current.delete(state.attemptId);
+        }
       } else {
         const status = await coworkerBridge.localProviders.signIn.status(state.attemptId);
         if (!ownsRequest()) return;
         const next = connectReducer(statesRef.current[rowId] ?? state, { type: "sign-in-status", status });
         if (next !== statesRef.current[rowId]) {
           setRowState(rowId, next);
-          if (next.phase === "connected") void changed();
+          if (next.phase === "connected") void changed(signInProviders.current.get(state.attemptId));
+          if (next.phase !== "waiting") signInProviders.current.delete(state.attemptId);
         }
       }
     } catch (cause) {
@@ -639,8 +651,8 @@ export function LocalProviders({
                 <span className="text-[11px] tabular-nums text-mist" data-testid={`connected-${row.providerId}-count`}>{row.modelCount} model{row.modelCount === 1 ? "" : "s"}</span>
                 {onStartModel && chooseLabel ? (
                   <Button variant="ghost" onClick={() => {
-                    const first = catalog.models.find((model) => model.providerId === row.providerId);
-                    if (first) onStartModel(first.id);
+                    const choice = resolveOnboardingModelDefaults(catalog, undefined, row.providerId).defaults.conversation;
+                    onStartModel(choice.model, row.providerId);
                   }}>{chooseLabel}</Button>
                 ) : null}
                 {row.canDisconnect ? (
@@ -670,7 +682,7 @@ export function LocalProviders({
             <span className="text-[11px] text-mist" data-testid="free-model-coming-soon">{COPY.freeComingSoon}</span>
           ) : null}
           {onStartModel && chooseLabel && freeModel ? (
-            <Button variant="default" onClick={() => onStartModel(freeModel.id)} data-testid="free-model-choose">{chooseLabel}</Button>
+            <Button variant="default" onClick={() => onStartModel(freeModel.id, freeModel.providerId)} data-testid="free-model-choose">{chooseLabel}</Button>
           ) : null}
         </FlatRow>
         <FlatRow
@@ -697,11 +709,7 @@ export function LocalProviders({
               ) : null}
               {adding === "custom" ? (
                 <CustomForm
-                  onSaved={(line) => {
-                    setAdding("");
-                    setRowState("add-another", { phase: "connected", line });
-                    void changed();
-                  }}
+                  onSaved={savedProvider}
                   onCancel={() => setAdding("")}
                   onStartModel={onStartModel}
                 />
@@ -753,11 +761,7 @@ export function LocalProviders({
                   {addableChosen.acceptsKey && (addableChosen.id !== "openai" || (!setupBlocked && setupReady && !openaiBusy)) ? (
                     <KeyForm
                       provider={addableChosen}
-                      onSaved={(line) => {
-                        setAdding("");
-                        setRowState("add-another", { phase: "connected", line });
-                        void changed();
-                      }}
+                      onSaved={savedProvider}
                       onCancel={() => setAdding("")}
                     />
                   ) : null}

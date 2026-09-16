@@ -10,9 +10,9 @@
 import { z } from "zod";
 import type { CoworkerGroupTurn, CoworkerSummary, GroupTimelineEvent } from "./bridge.ts";
 import { MAX_SPEAKERS_PER_TURN, RECENT_CONTEXT_EVENTS, type GroupParticipant, type Mentions, type RoutingPlan } from "./groups.ts";
-import { recommendModel, type EngineModelCatalog, type EngineModelOption } from "./threads.ts";
+import type { EngineModelCatalog, EngineModelOption } from "./threads.ts";
 import { DEFAULT_MODEL_DEFAULTS, type ModelDefault } from "./model-defaults.ts";
-import { chooseIndexedFallbackModel, chooseIndexedModel } from "./model-intelligence.ts";
+import { chooseIndexedFallbackModel, chooseAutomaticRoleModel } from "./model-intelligence.ts";
 
 /** The whole routing pass, repair and second model included, fits in this; then the scorer decides. */
 export const ROUTING_TIMEOUT_MS = 45_000;
@@ -194,11 +194,11 @@ export function facilitatorModels(
   const distinct = [...new Map(used.map((model) => [model.id, model])).values()].sort(
     (left, right) => Number(right.source === "cloud") - Number(left.source === "cloud") || (counts.get(right.id) ?? 0) - (counts.get(left.id) ?? 0),
   );
-  const anchor = distinct[0] ?? recommendModel(catalog);
-  if (!anchor) return { primary: null, secondary: null };
-  const primary = chooseIndexedModel(catalog, "quick", { standard: anchor.id }).model;
+  const primary = chooseAutomaticRoleModel(catalog, "facilitator", { standard: distinct[0]?.id }).model;
+  const variant = appDefault.modelVariant.trim();
+  if (variant && !primary?.variants.includes(variant)) return { primary: null, secondary: null };
   const secondary = primary ? chooseIndexedFallbackModel(catalog, "quick", { standard: primary.id, exclude: [primary.id] }).model : null;
-  return { primary, secondary };
+  return { primary, secondary: variant && !secondary?.variants.includes(variant) ? null : secondary };
 }
 
 export type FacilitatorAsk = (prompt: string, model: EngineModelOption, signal: AbortSignal) => Promise<string>;

@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+import { transform } from "esbuild";
+import type { CoworkerSummary, RuntimeInfo } from "./bridge.ts";
+import { DEFAULT_MODEL_DEFAULTS } from "./model-defaults.ts";
+import { resolveDiscussionModel } from "./model-choice.ts";
 import {
   coalesceCalls,
   connectedModelCatalog,
   createWorkspaceReadiness,
+  createWorkspaceReadinessCache,
+  workspacePreparationScope,
+  runtimeWorkspaceReadinessKey,
+  projectWorkspaceReadiness,
   prepareCurrentWorkspace,
   WORKSPACE_STARTUP_TIMEOUT_MS,
   hasPendingInteractions,
+  type CoworkerActivity,
   parseModelPreference,
   recommendModel,
   stalledRetry,
@@ -23,7 +34,7 @@ test("startup readiness is bounded, cancellation-safe and cannot publish a stale
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
     const deferred = { promise, resolve, reject };
     let calls = 0;
-    const ready = createWorkspaceReadiness(async () => { calls += 1; await deferred.promise; });
+    const ready = createWorkspaceReadiness(async () => { if (++calls === 1) await deferred.promise; });
     const release = ready.retain();
     release();
     const retained = ready.retain();
@@ -40,7 +51,12 @@ test("startup readiness is bounded, cancellation-safe and cannot publish a stale
     deferred.resolve();
     await Promise.resolve();
     assert.equal(ready.snapshot().state, "error");
-    await assert.rejects(ready.wait());
+    if (mode === "cancel") await assert.rejects(ready.wait());
+    else {
+      await ready.wait();
+      assert.equal(ready.snapshot().state, "ready");
+      assert.equal(calls, 2, "a settled failure is not cached as a permanently rejected promise");
+    }
     retained();
   }
   let releaseOld = () => {};
@@ -71,6 +87,74 @@ test("startup readiness is bounded, cancellation-safe and cannot publish a stale
   assert.deepEqual(writes, [draft]);
   scope.readiness.dispose();
   assert.throws(prepared.assertCurrent);
+});
+
+test("prepared workspaces survive navigation, isolate coworker changes and dispose bounded stale scopes", async () => {
+  const runtime: RuntimeInfo = { appName: "Fixture", version: "test", serverUrl: "http://127.0.0.1:8790", ownerToken: "fixture", coworkersDir: "/fixture", denBaseUrl: "https://example.invalid", deepLinkScheme: "fixture", deepLinksRegistered: false, engineManaged: true, engineError: "", readinessKey: "pid:1", workspaceReadinessRevisions: {} };
+  const coworker: CoworkerSummary = { slug: "first", path: "/fixture/first", name: "First", role: "", mission: "", avatarColor: "blue", avatarGlasses: "round", personality: "neutral", roleId: "", suggestedBy: null, workspaceId: "ws_first", conversationThreadId: "", model: "fixture/model", modelVariant: "", modelChosenBy: "app", modelMode: "auto", useAppModelDefaults: true, effortPreference: "balanced", automations: [], createdAt: "original" };
+  const other = { ...coworker, slug: "second", path: "/fixture/second", workspaceId: "ws_second" };
+  const firstScope = workspacePreparationScope(runtime, coworker, null);
+  const secondScope = workspacePreparationScope(runtime, other, null);
+  const cache = createWorkspaceReadinessCache(2);
+  let calls = 0;
+  const prepare = async () => { calls++; };
+  try {
+    const first = cache.get(firstScope, prepare);
+    const release = first.retain();
+    await first.wait();
+    release();
+    await Promise.resolve();
+    const second = cache.get(secondScope, prepare);
+    await second.wait();
+    const returned = cache.get(firstScope, prepare);
+    assert.equal(returned, first);
+    await returned.wait();
+    assert.equal(calls, 2, "view navigation does not re-prepare a successful exact scope");
+    const changed = { ...runtime, workspaceReadinessRevisions: { ws_first: 1 } };
+    assert.equal(runtimeWorkspaceReadinessKey(runtime, other.workspaceId), runtimeWorkspaceReadinessKey(changed, other.workspaceId));
+    assert.notEqual(runtimeWorkspaceReadinessKey(runtime, coworker.workspaceId), runtimeWorkspaceReadinessKey(changed, coworker.workspaceId));
+    const replacement = cache.get(workspacePreparationScope(changed, coworker, null), prepare);
+    assert.equal(first.signal.aborted, true);
+    assert.equal(second.signal.aborted, false);
+    assert.equal(cache.peek(secondScope)?.state, "ready");
+    await replacement.wait();
+    for (const owner of [{ ...coworker, effortPreference: "light" }, { ...coworker, useAppModelDefaults: false }, { ...coworker, modelVariant: "high" }, { ...coworker, modelSelectionPreferences: { priority: "balanced", preferred: { quick: [], deep: [] }, avoided: ["fixture/model"] } }] satisfies CoworkerSummary[]) {
+      assert.notEqual(workspacePreparationScope(changed, owner, null).configurationKey, workspacePreparationScope(changed, coworker, null).configurationKey);
+    }
+    const replacedIdentity = { ...coworker, createdAt: "replacement" };
+    cache.get(workspacePreparationScope(changed, replacedIdentity, null), prepare);
+    assert.equal(second.signal.aborted, true, "the least recently used scope is disposed at the entry bound");
+    assert.equal(cache.peek(secondScope), undefined);
+    const signedIn = { baseUrl: "https://example.invalid", orgId: "org_fixture", token: "account_fixture" };
+    cache.get(workspacePreparationScope(changed, coworker, signedIn), prepare);
+    assert.equal(replacement.signal.aborted, true, "an account change invalidates the earlier runtime cache");
+    assert.equal(cache.peek(firstScope), undefined);
+    const idle = { state: "idle", label: "Idle", detail: "", updatedAt: 0 } satisfies Parameters<typeof projectWorkspaceReadiness>[0];
+    assert.equal(projectWorkspaceReadiness(idle).label, "Idle");
+    assert.equal(projectWorkspaceReadiness(idle, { state: "ready", error: "" }).label, "Ready");
+    assert.equal(projectWorkspaceReadiness({ ...idle, state: "starting", label: "Starting AI" }).state, "idle");
+    for (const state of ["working", "attention", "retrying"] satisfies CoworkerActivity["state"][]) {
+      const activity = { ...idle, state };
+      assert.equal(projectWorkspaceReadiness(activity, { state: "starting", error: "" }), activity);
+    }
+  } finally { cache.dispose(); }
+});
+
+test("workspace preparation validates the effective conversation default and effort with the send resolver", async () => {
+  const source = await readFile(new URL("./threads.ts", import.meta.url), "utf8");
+  const start = source.indexOf("  async function prepare(signal:");
+  const end = source.indexOf("  async function listAllThreads()", start);
+  assert.ok(start > 0 && end > start);
+  const script = await transform(`${source.slice(start, end)}\nprepare`, { loader: "ts", target: "es2022" });
+  const catalog = connectedModelCatalog(fixtureCatalog({ connected: ["fixture"], all: [fixtureProvider({ id: "fixture", name: "Fixture", models: { model: { name: "Model", variants: { low: {}, high: {} } } } })] }));
+  const defaults = { ...DEFAULT_MODEL_DEFAULTS, conversation: { model: "fixture/model", modelVariant: "low" } };
+  const owner = { model: "stale/missing", modelVariant: "unavailable", useAppModelDefaults: true, effortPreference: "balanced" };
+  const native = { getAgent: async () => ({ id: "build" }), defaultModel: async () => assert.fail("The saved engine default must not override the effective role default") };
+  const prepare = runInNewContext(script.code, { createNativeV2Client: () => native, options: {}, parsedModel: parseModelPreference(owner.model), WORKSPACE_STARTUP_TIMEOUT_MS, listModelCatalog: async () => catalog, resolveDiscussionModel, Error, Promise });
+  await prepare(new AbortController().signal, { coworker: owner, defaults });
+  assert.equal(resolveDiscussionModel(catalog, owner, "", defaults).variant, "low");
+  await assert.rejects(prepare(new AbortController().signal, { coworker: { ...owner, useAppModelDefaults: false }, defaults }), /not available/);
+  await assert.rejects(prepare(new AbortController().signal, { coworker: owner, defaults: { ...defaults, conversation: { model: "fixture/model", modelVariant: "missing" } } }), /no longer offers/);
 });
 
 test("permissions and questions keep the thread waiting for the person", () => {

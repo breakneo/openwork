@@ -1,4 +1,5 @@
 import type { EngineModelOption, ModelTier } from "./threads.ts";
+import type { ModelPurpose } from "./model-defaults.ts";
 import { MODEL_INTELLIGENCE_INDEX, normalizeModelSelectionPreferences, type ModelLane, type ModelSelectionPreferences, type RankingCriterion } from "./model-intelligence-index.ts";
 
 /**
@@ -70,16 +71,33 @@ export function modelCatalogIdentity(raw: unknown): ModelCatalogIdentity {
   };
 }
 
+export function matchesModelSearch(model: EngineModelOption, query: string): boolean {
+  const tokens = query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const fields = [model.id, model.providerId, model.providerLabel, model.modelId, model.modelLabel,
+    model.label, model.description, model.family, model.upstreamModelId, model.intelligence?.apiModelId]
+    .map((value) => (value ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""));
+  return tokens.every((token) => fields.some((field) => field.includes(token)));
+}
+
+function isGatewayModel(model: EngineModelOption): boolean {
+  return /^ipr_/i.test(model.providerId) || /^gwm_/i.test(model.modelId);
+}
+
+function modelIdentity(model: EngineModelOption): string | undefined {
+  const identity = model.upstreamModelId ?? (isGatewayModel(model) ? undefined : model.intelligence?.apiModelId ?? model.modelId);
+  return identity === "openai/gpt-5.6-luna" ? "gpt-5.6-luna" : identity;
+}
+
 export function sameModelBoundary(candidate: EngineModelOption, anchor: EngineModelOption): boolean {
   if (candidate.providerId !== anchor.providerId || candidate.tier !== anchor.tier) return false;
-  if (!/^ipr_/i.test(anchor.providerId)) return true;
+  if (!isGatewayModel(anchor) && !isGatewayModel(candidate)) return true;
   return Boolean(anchor.modelGroupId && anchor.credentialSetId
     && candidate.modelGroupId === anchor.modelGroupId && candidate.credentialSetId === anchor.credentialSetId);
 }
 
 export function preferredRoleModel(
   catalog: { models: EngineModelOption[] },
-  purpose: "conversation" | "delivery" | "thinking",
+  purpose: ModelPurpose,
   options: ModelSelectionOptions = {},
 ): EngineModelOption | null {
   const preferences = normalizeModelSelectionPreferences(options.preferences);
@@ -87,14 +105,11 @@ export function preferredRoleModel(
   const anchor = options.standard === undefined ? undefined : catalog.models.find((model) => model.id === options.standard);
   if (options.standard !== undefined && (!anchor || !usable(anchor, true) || excluded.has(anchor.id))) return null;
   const tier = anchor?.tier ?? IMPLICIT_ANCHOR_TIERS.find((tier) => catalog.models.some((model) => model.tier === tier && usable(model) && !excluded.has(model.id)));
-  const wanted = purpose === "thinking" ? "gpt-6-astra" : "gpt-5.6-luna";
   const pool = catalog.models.filter((model) => {
     if (model.tier !== tier || model.tier === "opencode" || model.providerId === "opencode" || !usable(model) || excluded.has(model.id)) return false;
-    const gateway = /^ipr_/i.test(model.providerId);
-    const identity = model.upstreamModelId ?? (gateway ? undefined : model.intelligence?.apiModelId ?? model.modelId);
-    if (identity !== wanted && identity !== `openai/${wanted}`) return false;
-    if (gateway && (!model.modelGroupId || !model.credentialSetId)) return false;
-    if (purpose === "thinking" && (!model.variants.includes("medium") || !(model.intelligence?.reasoning ?? model.reasoning))) return false;
+    if (modelIdentity(model) !== "gpt-5.6-luna") return false;
+    if (isGatewayModel(model) && (!model.modelGroupId || !model.credentialSetId)) return false;
+    if (purpose === "thinking" && (model.intelligence ? model.intelligence.reasoning !== true : !model.reasoning)) return false;
     return !anchor || model.id === anchor.id || (sameModelBoundary(model, anchor) && costsNoMoreThan(model, anchor) && preserves(model, anchor));
   });
   const first = pool[0];
@@ -105,7 +120,7 @@ export function preferredRoleModel(
 
 export function chooseAutomaticRoleModel(
   catalog: { models: EngineModelOption[] },
-  purpose: "conversation" | "delivery" | "thinking",
+  purpose: ModelPurpose,
   options: ModelSelectionOptions = {},
 ): ModelSelectionDecision & { variant?: string } {
   const models = catalog.models.filter((model) => model.providerId !== "opencode" && model.tier !== "opencode");
@@ -114,14 +129,14 @@ export function chooseAutomaticRoleModel(
   const preferred = preferredRoleModel({ models }, purpose, { preferences, exclude: [...excluded] });
   if (preferred) return {
     model: preferred, reason: `Selected the requested connected ${purpose} default from the current catalog.`,
-    indexVersion: MODEL_INTELLIGENCE_INDEX.version, ...(purpose === "thinking" ? { variant: "medium" } : {}),
+    indexVersion: MODEL_INTELLIGENCE_INDEX.version,
   };
   const anchor = models.find((model) => model.id === options.standard && usable(model, true) && !excluded.has(model.id));
   const decision = chooseIndexedModel({ models }, purpose === "thinking" ? "deep" : purpose === "delivery" ? "standard" : "quick", {
     ...options, standard: anchor?.id,
   });
   const selected = decision.model;
-  if (!anchor && selected?.upstreamModelId && models.some((model) => model.upstreamModelId === selected.upstreamModelId
+  if (!anchor && selected && modelIdentity(selected) && models.some((model) => model.id !== selected.id && modelIdentity(model) === modelIdentity(selected)
     && usable(model) && !excluded.has(model.id) && !sameModelBoundary(model, selected))) {
     return { ...decision, model: null, reason: "Multiple connected credential choices offer this model. Choose an explicit role default; no credential set was selected automatically." };
   }
