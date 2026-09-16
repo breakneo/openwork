@@ -57,7 +57,8 @@ function nightInput() {
 }
 function instructions(candidate: object, action = 'approve', comment = '') {
   const source = validateFeed({ items: [candidate] });
-  return exportDecisions(applyDecision(source, [source.items[0].id], action, comment, time, 'batch-1'), later).instructions;
+  const historical = validateFeed({ ...source, decisions: [{ id: source.items[0].id, action, comment, decided_at: time, batch_id: 'batch-1' }] });
+  return exportDecisions(historical, later).instructions;
 }
 const report = `# Synthetic report
 
@@ -179,9 +180,9 @@ test('review aliases lacking a concrete question downgrade to keep with rational
   evidence.recordAssertionEvidence('Only concrete review questions can remain review recommendations', 'Three review aliases with nine empty/placeholder variants downgrade idempotently and lose approval; concrete choices remain review, and archive/merge recommendations need no fabricated question.', true);
 });
 
-test('none, all worktrees, external missions and NIGHT REVIEW use one non-bypassable lock', async ({ evidence }) => {
-  for (const patch of [{ recommended_action: 'none' }, { recommended_action: ' NONE ' }, { kind: 'worktree', recommended_action: 'keep' }, { kind: 'worktree', recommended_action: 'remove' }, { group: 'external-mission' }, { title: 'SUPAUD-20260915-A99 synthetic' }, { title: 'NIGHT REVIEW — synthetic' }, { title: '[night-review] synthetic' }, { title: 'Identify client making initial inquiry' }]) {
-    const raw = { ...item(), ...patch, locked: false, protected: false };
+test('explicit reference locks, unauthorized worktrees and external missions remain non-bypassable', async ({ evidence }) => {
+  for (const patch of [{ recommended_action: 'none', locked: true }, { recommended_action: ' NONE ', locked: true }, { kind: 'worktree', recommended_action: 'keep' }, { kind: 'worktree', recommended_action: 'remove' }, { group: 'external-mission' }, { title: 'SUPAUD-20260915-A99 synthetic' }, { title: 'NIGHT REVIEW — synthetic' }, { title: '[night-review] synthetic' }, { title: 'Identify client making initial inquiry' }]) {
+    const raw = { ...item(), locked: false, protected: false, ...patch };
     const source = validateFeed({ items: [raw] });
     expect(isLocked(source.items[0])).toBe(true);
     expect(canApprove(source.items[0])).toBe(false);
@@ -194,7 +195,7 @@ test('none, all worktrees, external missions and NIGHT REVIEW use one non-bypass
     expect(exportDecisions(source, later).instructions).not.toMatch(/^session\.|^gh |^git |^rm /m);
   }
   expect(isLocked({ ...item(), title: 'Ordinary review of night mode' })).toBe(false);
-  evidence.recordAssertionEvidence('Read-only categories cannot be unlocked by source flags', 'All six actions, imported events and drafts fail closed across nine lock variants; no mutation instructions are generated. An unrelated night-mode title remains actionable.', true);
+  evidence.recordAssertionEvidence('Read-only categories cannot be unlocked by source flags', 'Legacy action variants, imported events and drafts fail closed across nine explicit/reference lock variants; no mutation instructions are generated. An unrelated night-mode title remains actionable.', true);
 });
 
 test('missing approval outcomes reject single, mixed batch and imported approval without blocking decline', async ({ evidence }) => {

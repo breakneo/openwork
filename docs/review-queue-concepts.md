@@ -40,6 +40,16 @@ A historical blocked receipt is not a new incident on every poll; a reply is not
 
 The executor policy must not downgrade explicit LIVE per-item human approval into an agent-initiated recommendation. Human-approved cross-workspace archive is not blocked on standing scope alone. Applicable identity, pin, exact active-user-root, external-prefix, busy/working/descendant, read and unresolved-safety gates still apply. Parentless does not mean active; no owned reporting/watchdog worktree is N/A, not the coordinator's worktree. The pure gate evaluator tests these distinctions and produces deterministic first-gate/observation/who/unblock receipts; it does not fake service observations or dispatch. Waiting names owner, outstanding information and the next check, never done.
 
+## Contextual actions and explicit authorization
+
+The primary action now names the proposed outcome (**Approve: …**). **Keep** is the legacy decline disposition, rendered Kept, with no service mutation; Later remains a browser-local skip. Eligible sessions have a universal `archive` instruction independently of recommendation, and an archive recommendation absorbs it into one primary control. Positive unpinned/idle evidence and the full chat-delivery read gate apply to direct archive as well as approve-of-archive; all fresh applicable executor safeguards remain. The latest keyboard contract assigns **k to Keep**, j to next, ArrowUp to previous and x to archive.
+
+PR Close and worktree Reclaim are not inferred from an approved proposal or narrative. A typed native-feed exact-target human authorization with reviewed text/provenance/date is required; unknown or unsupported authority is omitted/rejected. Close records `close_pr`; Reclaim records approve and displays the full safely quoted `git worktree remove -- '<path>'` command. No hard lock or external owner is overridden, and neither operation gains a magic rollback. Historical imported worktrees remain locked. Dialect4 prevents prior executors from consuming the new action semantics; deployment is still a coordinated owner operation.
+
+The README's **Owner objections — point-by-point response** table distinguishes design changes from clarifications for each executor/server objection and identifies synthetic proof. It deliberately includes no private live incident identifiers or counts. Queued receipts establish acceptance, never that actions were processed.
+
+**Product gap:** registration of `openwork://` does not provide an existing-session navigation handler. The inspected `openwork://chat` route creates a new seeded chat. This queue therefore offers a copyable workspace/session route and IDs; it does not claim that “Open in OpenWork” can launch the existing conversation. Collector work and private outputs are owned separately and are not modified by this implementation.
+
 ## Research findings: documented behavior, not implementation claims
 
 Research was time-boxed to the initial design phase. Sources are primary documentation where available. Availability, plan restrictions and exact release capabilities must be checked before adopting a service; historical tools are included as UX precedents, not recommended installations.
@@ -73,9 +83,9 @@ Research was time-boxed to the initial design phase. Sources are primary documen
 ## Twelve design principles
 
 1. **Triage before deep review.** Filter kind/group/recommendation, identify unknowns and protected items, then review a small homogeneous set.
-2. **One focused item, three actions.** Approve, decline, and browser-local Later. One editor sends independent messages; question/change/note chips only prefill. Messages never supersede approval/decline, including readable legacy message actions. Recommendation remains distinct from the human's decision.
+2. **One focused item, three actions.** Approve with its proposed action, Keep (legacy decline), and browser-local Later; eligible sessions add universal Archive. One editor sends independent messages; question/change/note chips only prefill. Messages never supersede approval/decline, including readable legacy message actions. Recommendation remains distinct from the human's decision.
 3. **Evidence above narrative.** Show tests/checks, head/base and source links before summary. Missing evidence says unknown, never green.
-4. **Keyboard-first without accidental actions.** j/k navigate; a/d decide only one focused item; c/? prepare text; Space selects. Native fields/buttons retain their own keys.
+4. **Keyboard-first without accidental actions.** j/ArrowUp navigate; a approves, x archives and k keeps only one focused item; c/? prepare text; Space selects. Native fields/buttons retain their own keys.
 5. **Batch only same-shape items.** Kind, group and recommendation must match. Show count and every selected identity before confirmation. Changing filters clears selection.
 6. **Comments are owned work.** Questions/changes require text and an explicit target session or a manual-routing warning. A comment is not completion.
 7. **Safe abstention and capped WIP.** Defer rather than guess. Finish a bounded lane before opening another. The prototype supports lanes, not an enforced numeric WIP cap.

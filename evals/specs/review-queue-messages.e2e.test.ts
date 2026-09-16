@@ -11,7 +11,7 @@ import { readLog } from '../../tools/review-queue/protocol.mjs';
 test('page incident counts link current outcomes without replay or history overcount', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-incidents-browser-'));
   const feed = join(directory, 'feed.json');
-  await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_incident', title: 'Synthetic incident', kind: 'session', recommended_action: 'archive', if_approved: 'Archive after live checks.' }], decisions: [] }));
+  await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_incident', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], title: 'Synthetic incident', kind: 'session', recommended_action: 'archive', if_approved: 'Archive after live checks.' }], decisions: [] }));
   const live = await startServer({ feed, dir: join(directory, 'queue') });
   const browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
   page.on('dialog', (dialog) => dialog.accept());

@@ -1,8 +1,8 @@
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const labels = { approve: 'Approve', decline: 'Decline', defer: 'Deferred (legacy)', ask_info: 'Message (legacy question)', request_changes: 'Message (legacy changes)', comment: 'Message (legacy note)', message: 'Message' };
-  const statuses = { approve: 'Approved', decline: 'Declined', defer: 'Deferred', ask_info: 'Asked for info', request_changes: 'Changes requested', comment: 'Message recorded', message: 'Message recorded' };
+  const labels = { approve: 'Approve', archive: 'Archive', close_pr: 'Close PR', decline: 'Keep', defer: 'Deferred (legacy)', ask_info: 'Message (legacy question)', request_changes: 'Message (legacy changes)', comment: 'Message (legacy note)', message: 'Message' };
+  const statuses = { approve: 'Approved', archive: 'Archive requested', close_pr: 'PR closure requested', decline: 'Kept', defer: 'Deferred', ask_info: 'Asked for info', request_changes: 'Changes requested', comment: 'Message recorded', message: 'Message recorded' };
   let feed;
   let activeId = null;
   let selected = new Set();
@@ -22,7 +22,7 @@
   let liveStorageReady = false;
   let restoreProblem = '';
   const uncertainState = 'LOCAL ONLY / UNCERTAIN — check the thread. No automatic retry.';
-  const terminalStatuses = ['done', 'archived', 'merged', 'declined', 'deferred', 'stopped'];
+  const terminalStatuses = ['done', 'archived', 'merged', 'closed', 'declined', 'deferred', 'stopped'];
   const events = new Map();
   const ledgerInputs = new Map();
   let currentInputIds = new Set();
@@ -49,7 +49,14 @@
       ? [...events.values()].some((event) => event.kind === 'read' && currentInputIds.has(event.id) && event.deliverable === deliveryIdentity(item))
       : readDeliveries.has(deliveryIdentity(item)));
   }
-  function readAllowed(item) { return !chatOnly(item) || recommendationVerb(item) !== 'archive' || deliveryWasRead(item); }
+  function readAllowed(item, action = 'approve') { return !chatOnly(item) || !isArchiveAction(item, action) || deliveryWasRead(item); }
+  function primaryAction(item) { return recommendationVerb(item) === 'archive' && !canApprove(item) && canArchive(item) ? 'archive' : 'approve'; }
+  function actionReady(item, action) {
+    if (isArchiveAction(item, action)) return canArchive(item) && readAllowed(item, action);
+    if (action === 'approve') return canApprove(item);
+    if (action === 'close_pr') return canClosePr(item);
+    return !isLocked(item);
+  }
   const localRequests = new Map();
   const threadDrafts = new Map();
   const advances = new Map();
@@ -66,7 +73,7 @@
     $('undo').disabled = liveSession || !feed?.decisions.length;
     for (const button of document.querySelectorAll('#detail [data-action]')) {
       const item = feed.items.find((entry) => entry.id === activeId);
-      button.disabled = unavailable() || (button.dataset.action === 'approve' && (!canApprove(item) || !readAllowed(item)));
+      button.disabled = unavailable() || !actionReady(item, button.dataset.action);
     }
     const send = document.querySelector('[data-testid="thread-send"]');
     if (send) send.disabled = unavailable();
@@ -107,7 +114,7 @@
       if (!event || typeof event.id !== 'string' || typeof event.decision_id !== 'string' ||
           !Array.isArray(event.item_ids) || !event.item_ids.every((id) => typeof id === 'string') ||
           !['decision', 'thread', 'status', 'control', 'compensation', 'read'].includes(event.kind) ||
-          !['queued', 'rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'waiting', 'declined', 'deferred', 'stopped', 'withdrawn', 'no_effect', 'sent', 'unarchived', 'cancelled', 'read'].includes(event.status) ||
+          !['queued', 'rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'waiting', 'declined', 'deferred', 'stopped', 'withdrawn', 'no_effect', 'sent', 'unarchived', 'cancelled', 'read', 'closed'].includes(event.status) ||
           typeof event.text !== 'string' || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))) throw new Error('Invalid result event');
       if (nextEvents.has(event.id) && JSON.stringify(nextEvents.get(event.id)) !== JSON.stringify(event)) throw new Error('Conflicting result event');
       nextEvents.set(event.id, event);
@@ -175,7 +182,7 @@
       const metadata = await request('/server.json');
       if (metadata.origin !== location.origin) throw new Error('Server origin mismatch');
       const protocol = await request('/protocol');
-      if (protocol.protocol !== 3 || typeof protocol.epoch !== 'string') throw new Error('Unsupported queue protocol; coordinated owner upgrade required');
+      if (protocol.protocol !== 4 || typeof protocol.epoch !== 'string') throw new Error('Unsupported queue protocol; coordinated owner upgrade required');
       $('mode-badge').title = `Queue protocol ${protocol.protocol} · epoch ${protocol.epoch}`;
       const original = validateFeed(await request('/feed'));
       originalServerFeed = original;
@@ -369,7 +376,7 @@
     return (chatOnly(item) && recommendationVerb(item) === 'archive' && !readAllowed(item)) || ['merge', 'review', 'relaunch', 'blockers'].includes(recommendationVerb(item));
   }
   function archiveEligible(item, decisions = decisionsById(), results = resultById()) {
-    return !laterIds.has(item.id) && item.kind === 'session' && recommendationVerb(item) === 'archive' && canApprove(item) && readAllowed(item) && !item.protected && !item.archived && !isLocked(item)
+    return !laterIds.has(item.id) && item.kind === 'session' && recommendationVerb(item) === 'archive' && canArchive(item) && readAllowed(item) && !item.protected && !item.archived && !isLocked(item)
       && !decisions.has(item.id) && ![...localRequests.values()].some((local) => local.item_ids.includes(item.id))
       && !['blocked', 'waiting', ...terminalStatuses].includes(results.get(item.id)?.status)
       && ![...events.values()].some((event) => event.kind === 'compensation' && event.item_ids.includes(item.id) && !['unarchived', 'cancelled'].includes([...events.values()].filter((entry) => entry.decision_id === event.id).at(-1)?.status))
@@ -416,7 +423,7 @@
     const homogeneous = new Set(items.map(shape)).size === 1;
     const approve = element('button', 'Review archive batch'); approve.dataset.batchApprove = '';
     approve.disabled = !homogeneous || unavailable();
-    approve.addEventListener('click', guarded(() => confirmBatch(items.map((item) => item.id), 'approve', '')));
+    approve.addEventListener('click', guarded(() => confirmBatch(items.map((item) => item.id), items.every(canApprove) ? 'approve' : 'archive', '')));
     card.append(list, element('p', homogeneous ? 'Recheck required. Confirmation lists every session; no action before confirmation.' : 'Mixed archive groups or original recommendations. Require a separate filter for each shape; no partial batch will be approved.', 'small muted'), approve);
     return card;
   }
@@ -432,10 +439,10 @@
     const deferred = decisions.filter((d) => d.action === 'defer').length;
     const followups = reviewHistory().filter((decision) => isMessage(decision.action)).length;
     $('metrics').replaceChildren();
-    for (const [count, label] of [[feed.items.length, 'total'], [pending, 'pending'], [approved, 'approved'], [declined, 'declined'], [followups, 'follow-ups / comments'], [deferred, 'deferred'], [locked, 'nothing to decide']]) {
+    for (const [count, label] of [[feed.items.length, 'total'], [pending, 'pending'], [approved, 'approved'], [decisions.filter((entry) => entry.action === 'archive').length, 'archive requests'], [decisions.filter((entry) => entry.action === 'close_pr').length, 'close requests'], [declined, 'kept'], [followups, 'follow-ups / comments'], [deferred, 'deferred'], [locked, 'nothing to decide']]) {
       const metric = element('span'); metric.append(element('strong', String(count)), document.createTextNode(` ${label}`)); $('metrics').append(metric);
     }
-    $('progress').style.width = `${actionable ? ((approved + declined) / actionable) * 100 : 0}%`;
+    $('progress').style.width = `${actionable ? ((approved + declined + decisions.filter((entry) => ['archive', 'close_pr'].includes(entry.action)).length) / actionable) * 100 : 0}%`;
     $('undo').disabled = liveSession || feed.decisions.length === 0;
   }
   function renderList(preserveActive = false) {
@@ -484,7 +491,7 @@
     const homogeneous = new Set(items.map(shape)).size <= 1 && !items.some(isLocked);
     $('bulk-shape').textContent = homogeneous && items.length ? `${items[0].kind} · ${items[0].group} · ${items[0].recommended_action}` : 'Mixed kinds, groups or recommendations. Filter to matching items before batching.';
     const bulkMerge = items.length > 1 && items.some((item) => recommendationVerb(item).toLowerCase().trim() === 'merge');
-    const missingOutcome = bulkMerge || items.some((item) => !canApprove(item) || !readAllowed(item));
+    const missingOutcome = bulkMerge || items.some((item) => !actionReady(item, 'approve')) || items.some((item) => item.kind === 'worktree') && items.length > 1;
     $('bulk-action').querySelector('option[value="approve"]').disabled = missingOutcome;
     const approvalBlocked = $('bulk-action').value === 'approve' && missingOutcome;
     if (approvalBlocked) $('bulk-shape').textContent = 'Approval unavailable: every selected item needs an approval outcome.';
@@ -598,11 +605,19 @@
       const actions = element('div', undefined, 'decision-actions');
       const commentLabel = element('label', 'Comment or follow-up request'); commentLabel.htmlFor = 'comment';
       const comment = element('textarea'); comment.id = 'comment'; comment.dataset.testid = 'comment'; comment.rows = 3; comment.maxLength = 10000; comment.placeholder = 'What should the owner explain or change?'; comment.value = drafts[item.id] ?? ''; comment.addEventListener('input', saveDraft);
-      for (const [action, label] of [['approve', 'Approve'], ['decline', 'Decline']]) {
+      const proposed = recommendationVerb(item) === 'archive' ? 'archive this session' : canApprove(item) ? shortOutcome(item, 'approve') : recommendationVerb(item).replaceAll('_', ' ');
+      const choices = [[primaryAction(item), canReclaim(item) ? 'Reclaim' : `Approve: ${proposed.slice(0, 80)}`], ['decline', 'Keep']];
+      if (canArchive(item) && recommendationVerb(item) !== 'archive') choices.push(['archive', 'Archive']);
+      if (canClosePr(item)) choices.push(['close_pr', 'Close PR']);
+      for (const [action, label] of choices) {
         const row = element('div', undefined, 'decision-action');
         const button = element('button', label, action); button.dataset.action = action;
-        button.disabled = unavailable() || (action === 'approve' && (!canApprove(item) || !readAllowed(item)));
-        button.addEventListener('click', guarded(() => decide([item.id], action, comment.value))); row.append(button);
+        button.disabled = unavailable() || !actionReady(item, action);
+        button.addEventListener('click', guarded(() => {
+          if (action === 'close_pr' && !window.confirm(`Close this exact PR? ${item.pr_url}\nHead: ${item.head_sha}\nAuthorization: ${actionAuthorization(item, 'close_pr').text}`)) return;
+          if (canReclaim(item) && action === 'approve' && !window.confirm(`Record this exact reclaim instruction for owner recheck?\n${reclaimCommand(item)}\nAuthorization: ${actionAuthorization(item, 'reclaim').text}`)) return;
+          decide([item.id], action, comment.value);
+        })); row.append(button);
         if (action === 'approve' || action === 'decline') {
           const name = action === 'approve' ? 'if_approved' : 'if_declined';
           const outcome = element('span', shortOutcome(item, action), 'outcome');
@@ -617,6 +632,8 @@
         const button = element('button', title); button.addEventListener('click', () => { comment.value = text; saveDraft(); comment.focus(); }); templates.append(button);
       }
       review.append(actions, commentLabel, comment, templates, send);
+      if (canReclaim(item)) { const command = element('pre', reclaimCommand(item), 'raw-value'); command.dataset.testid = 'reclaim-command'; review.append(command); }
+      for (const action of ['close_pr', 'reclaim']) { const grant = actionAuthorization(item, action); if (grant) review.append(element('p', `Explicit authorization · ${grant.at} · ${grant.provenance}\n${grant.text}`, 'raw-value')); }
       if (threadDrafts.has(item.id)) review.append(element('p', `Legacy owner draft retained, not sent: ${threadDrafts.get(item.id)}`, 'raw-value'));
       if (liveSession) { const controls = element('div'); controls.id = 'card-controls'; review.append(controls); renderCardControls(); }
     }
@@ -716,6 +733,7 @@
     const reason = !currentInputIds.has(input.id) ? 'Older snapshot — reconcile first'
       : withdrawnIds().has(input.id) ? 'Withdrawn / changed — follow the linked requests'
         : history.some((event) => event.status === 'merged' || event.outcomes?.some((outcome) => outcome.status === 'merged')) ? 'Merge is not reversible'
+          : history.some((event) => event.status === 'closed' || event.outcomes?.some((outcome) => outcome.status === 'closed')) ? 'PR closure needs separate reopen authorization; no automatic rollback'
           : last === 'rechecking' ? 'Running — cannot interrupt'
             : last && input.item_ids.length > 1 && !outcomes && !['no_effect', 'declined', 'deferred'].includes(last) && !['decline', 'defer'].includes(input.action) ? 'Bulk outcome needs complete per-target receipts first'
               : last && !knownTargets && !['archived', 'no_effect', 'declined', 'deferred'].includes(last) && !completedMessage && !(last === 'done' && ['decline', 'defer'].includes(input.action)) ? 'Blocked, mixed or unknown — reconcile external effects first' : '';
@@ -728,7 +746,10 @@
         $('control-title').textContent = mode === 'undo' ? 'Undo this entire decision?' : 'Change this entire decision?';
         $('control-items').replaceChildren(...input.item_ids.map((id) => element('li', `${feed.items.find((item) => item.id === id)?.title || id} · ${id}`)));
         $('replacement-fields').hidden = mode !== 'change';
-        $('replacement-action').value = ['approve', 'decline'].includes(input.action) ? input.action : 'decline';
+        const replacement = $('replacement-action'); replacement.replaceChildren(new Option('Approve proposed action', 'approve'), new Option('Keep', 'decline'));
+        if (input.items.every((item) => canArchive(item) && readAllowed(item, 'archive'))) replacement.add(new Option('Archive', 'archive'));
+        if (input.items.length === 1 && canClosePr(input.items[0])) replacement.add(new Option('Close PR', 'close_pr'));
+        replacement.value = [...replacement.options].some((option) => option.value === input.action) ? input.action : 'decline';
         $('replacement-comment').value = '';
         $('control-text').value = '';
         $('control-effect').textContent = `${input.item_ids.length} target(s), whole batch only. ${completedMessage ? 'The original message cannot be unsent. Enter the exact cancellation/follow-up message.' : archiveEffect ? 'Queue unarchive only for targets explicitly reported archived, after live rechecks. Explicit no-effect targets need no compensation.' : 'Withdraw only if still unclaimed; running work cannot be interrupted.'} ${mode === 'change' ? 'The replacement waits for successful compensation. Failure or uncertainty blocks it.' : ''} History is append-only.`;
@@ -808,7 +829,7 @@
     for (const event of [...events.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
       if (!event.item_ids.includes(activeId)) continue;
       const time = new Date(event.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-      const status = { queued: 'Queued for owner recheck', rechecking: 'Rechecking…', done: `Done · ${time}`, archived: `Done · archived ${time}`, merged: `Merged · ${time}`, blocked: `Blocked: ${event.text}`, reply: `Reply from owner: ${event.text}`, waiting: `Waiting: ${event.text}`, declined: `Declined · ${time}`, deferred: `Deferred · ${time}`, stopped: `Stopped · ${time}` }[event.status];
+      const status = { queued: 'Queued for owner recheck', rechecking: 'Rechecking…', done: `Done · ${time}`, archived: `Done · archived ${time}`, merged: `Merged · ${time}`, blocked: `Blocked: ${event.text}`, reply: `Reply from owner: ${event.text}`, waiting: `Waiting: ${event.text}`, declined: `Kept · ${time}`, deferred: `Deferred · ${time}`, stopped: `Stopped · ${time}` }[event.status];
       const row = element('div', undefined, 'history'); row.dataset.eventId = event.id;
       row.append(element('strong', status || `${event.status} · ${event.action} · ${time}`));
       if (event.kind === 'decision') row.append(element('div', labels[event.action] || event.action));
@@ -832,6 +853,7 @@
   }
   function render(preserveActive = false) { renderMetrics(); renderList(preserveActive); renderBulk(); renderDetail(); renderPlan(); syncControls(); }
   function validateAction(ids, action) {
+    if (ids.some((id) => !actionReady(feed.items.find((item) => item.id === id), action))) throw new Error('Action unavailable: resolve positive safety/read evidence or explicit authorization. Nothing was sent.');
     if (action === 'approve' && ids.some((id) => {
       const item = feed.items.find((entry) => entry.id === id);
       return item?.kind === 'session' && recommendationVerb(item) === 'archive' && !archiveEligible(item);
@@ -952,7 +974,7 @@
     if (!feed || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.repeat || event.isComposing || $('confirm-dialog').open || $('control-dialog').open || unavailable()) return;
     if (!(event.target instanceof Element) || event.target.closest('input,textarea,select,button,a,summary,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
     const items = visibleItems(); const index = items.findIndex((item) => item.id === activeId);
-    if (event.key === 'j' || event.key === 'k') {
+    if (event.key === 'j' || event.key === 'ArrowUp') {
       event.preventDefault(); if (!items.length) return;
       activeId = items[Math.max(0, Math.min(items.length - 1, index + (event.key === 'j' ? 1 : -1)))].id;
       renderList(); renderDetail(); $('detail').focus({ preventScroll: true }); $('list').querySelector('.active')?.scrollIntoView({ block: 'nearest' });
@@ -963,9 +985,9 @@
       selected.has(activeId) ? selected.delete(activeId) : selected.add(activeId); renderList(); renderBulk();
     } else if ((event.key === 'c' || event.key === '?') && $('comment')) {
       event.preventDefault(); if (event.key === '?') { $('comment').value = drafts[activeId] || 'Needs clarification: please explain '; saveDraft(); } $('comment').focus();
-    } else if ((event.key === 'a' || event.key === 'd') && activeId) {
+    } else if (['a', 'x', 'k', 'd'].includes(event.key) && activeId) {
       event.preventDefault(); if (selected.size) { message('Selection is active. Use Review bulk action to confirm its scope, or clear selection for single-item shortcuts.'); return; }
-      decide([activeId], event.key === 'a' ? 'approve' : 'decline', drafts[activeId] ?? '');
+      decide([activeId], event.key === 'a' ? primaryAction(feed.items.find((item) => item.id === activeId)) : event.key === 'x' ? 'archive' : 'decline', drafts[activeId] ?? '');
     }
   }));
   window.addEventListener('hashchange', () => { if (!liveSession) void connect(); });

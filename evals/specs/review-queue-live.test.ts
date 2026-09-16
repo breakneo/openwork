@@ -21,7 +21,7 @@ type Live = Awaited<ReturnType<typeof startServer>>;
 function item(id: string) {
   return { id, kind: 'session', title: 'Synthetic completed explanation', recommended_action: 'archive',
     group: 'openwork', if_approved: 'Review archive eligibility using current evidence.',
-    if_declined: 'Keep this session.', question: '', protected: false, workspace_id: 'ws_example' };
+    if_declined: 'Keep this session.', question: '', protected: false, workspace_id: 'ws_example', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }] };
 }
 
 function source() {
@@ -31,7 +31,7 @@ function source() {
     { ...item('ses_alias'), recommended_action: 'review_archive_eligibility' },
     { ...item('ses_locked'), locked: true },
     { ...item('ses_external'), group: 'external-mission', locked: false },
-    { ...item('ses_none'), recommended_action: 'none' },
+    { ...item('ses_none'), recommended_action: 'none', locked: true },
     { ...item('ses_night'), title: 'NIGHT REVIEW — synthetic' },
     { ...item('ses_nooutcome'), if_approved: '' },
     { ...item('/example/worktree'), kind: 'worktree' },

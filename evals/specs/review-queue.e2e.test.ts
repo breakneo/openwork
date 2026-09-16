@@ -149,7 +149,7 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     await page.getByTestId('detail-title').click();
     await page.keyboard.press('j');
     expect(await page.getByTestId('detail-title').textContent()).toBe('Session 5');
-    await page.keyboard.press('k');
+    await page.keyboard.press('ArrowUp');
     expect(await page.getByTestId('detail-title').textContent()).toBe('Session 4');
     await page.keyboard.press('c');
     await page.getByTestId('comment').fill('a d j k ? <script>literal</script>');
@@ -164,7 +164,7 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     await page.getByTestId('thread-send').click();
     expect(await page.locator('#message').textContent()).toContain('nonempty');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(4);
-    evidence.recordAssertionEvidence('Follow-up text and keyboard behavior are safe', 'j/k change the focused item; c focuses its text field. Typing action letters and Space records nothing. Ask-info stores literal script-shaped text without creating DOM script nodes, and blank comments are rejected.', true);
+    evidence.recordAssertionEvidence('Follow-up text and keyboard behavior are safe', 'j/ArrowUp change the focused item; c focuses its text field. Typing action letters and Space records nothing. Message stores literal script-shaped text without creating DOM script nodes, and blank comments are rejected.', true);
 
     const stale = { ...exported, items: exported.items.map((item, index) => index === 0 ? { ...item, summary: 'Evidence changed' } : item) };
     await page.locator('#import-decisions').setInputFiles({ name: 'stale.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(stale)) });
@@ -346,7 +346,7 @@ test('display prose is readable without changing source identity, evidence excer
   };
   const excerpt = 'Literal session.send to ses_displayOther: `<script>quoted only</script>` ' + 'context '.repeat(120);
   const input = validateFeed({ items: [
-    { ...baseItem, ...sourceProse, id: 'ses_displaySelf', kind: 'session', title: 'Synthetic normalization task', evidence: [{ label: 'Last assistant', value: excerpt }] },
+    { ...baseItem, ...sourceProse, id: 'ses_displaySelf', kind: 'session', title: 'Synthetic normalization task', evidence: [...baseItem.evidence, { label: 'Last assistant', value: excerpt }] },
     { ...baseItem, id: 'ses_displayOther', kind: 'session', title: 'Related synthetic task', recommended_action: 'keep' },
   ], decisions: [] });
   const requests: string[] = [];
@@ -453,7 +453,7 @@ test('approval guards cover keyboard, batch and restore while focused controls c
     expect(await page.locator('[data-action="approve"]').isDisabled()).toBe(true);
     await page.locator('#detail').focus();
     await page.keyboard.press('a');
-    expect(await page.locator('#message').textContent()).toContain('if_approved');
+    expect(await page.locator('#message').textContent()).toContain('Action unavailable');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(0);
     await page.locator('[data-id="proposal-no-outcome"] input').check();
     expect(await page.locator('[data-id="proposal-no-outcome"] input').evaluate((node) => node === document.activeElement)).toBe(true);

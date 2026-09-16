@@ -13,7 +13,7 @@ import { applyDecision, validateFeed } from '../../tools/review-queue/core.mjs';
 
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'review-controls-'));
-  const feed = validateFeed({ items: ['A', 'B', 'C'].map((name) => ({ id: `ses_fixture${name}`, title: `Synthetic ${name}`, kind: 'session', group: 'example', recommended_action: 'archive', if_approved: 'Recheck before archiving.', workspace_id: 'ws_fixture' })), decisions: [] });
+  const feed = validateFeed({ items: ['A', 'B', 'C'].map((name) => ({ id: `ses_fixture${name}`, title: `Synthetic ${name}`, kind: 'session', group: 'example', recommended_action: 'archive', if_approved: 'Recheck before archiving.', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }] })), decisions: [] });
   const path = join(root, 'feed.json');
   writeFileSync(path, JSON.stringify(feed));
   const live = await startServer({ feed: path, dir: join(root, 'queue') });
@@ -324,7 +324,7 @@ test('protocol epoch rejects old readers, survives restart and preserves stop; f
   const f = await fixture();
   try {
     const protocol = queueProtocol(f.directory);
-    expect(protocol.protocol).toBe(3);
+    expect(protocol.protocol).toBe(4);
     const raw = readFileSync(join(f.directory, 'decisions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(() => raw.map((record) => record.event).map((event) => event.id)).toThrow();
     expect((await fetch(f.origin + '/protocol')).status).toBe(401);

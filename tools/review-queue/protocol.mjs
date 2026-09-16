@@ -2,14 +2,14 @@ import { constants, openSync, closeSync, fstatSync, readSync, writeSync, fsyncSy
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { chatOnly, deliveryOf, deliveryIdentity, recommendationVerb, isMessage } from './core.mjs';
+import { chatOnly, deliveryOf, deliveryIdentity, isMessage, isArchiveAction } from './core.mjs';
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const MAX_BODY = 8 * 1024 * 1024;
 export const MAX_FEED = 4 * 1024 * 1024;
 export const MAX_RECORD = 16 * 1024 * 1024;
 export const MAX_LOG = 64 * 1024 * 1024;
-export const STATES = ['rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'deferred', 'declined', 'waiting', 'stopped', 'no_effect', 'sent', 'unarchived', 'cancelled'];
+export const STATES = ['rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'deferred', 'declined', 'waiting', 'stopped', 'no_effect', 'sent', 'unarchived', 'cancelled', 'closed'];
 
 export function fail(message, status = 400) {
   const error = new Error(message);
@@ -245,9 +245,9 @@ export function readQueue(directory) {
   return { records, entries, inputs: entries.map((entry) => entry.event), events };
 }
 
-export function requireDeliveryRead(items, entries, snapshot) {
+export function requireDeliveryRead(items, entries, snapshot, action = 'approve') {
   for (const item of items) {
-    if (!chatOnly(item) || recommendationVerb(item) !== 'archive') continue;
+    if (!chatOnly(item) || !isArchiveAction(item, action)) continue;
     if (deliveryOf(item).completeness !== 'complete') fail('Read gate: chat-only delivery is incomplete or unknown; request complete answers', 409);
     if (!entries.some((entry) => entry.snapshot === snapshot && entry.event.kind === 'read' && entry.event.item_ids.length === 1 && entry.event.item_ids[0] === item.id && entry.event.deliverable === deliveryIdentity(item))) fail('Read gate: expand the complete answers and Mark read before archive', 409);
   }
@@ -279,6 +279,7 @@ export function reversalPlan(input, inputs, events, mode = 'undo') {
   const overlap = outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.item_ids.some((id) => input.item_ids.includes(id)));
   if (mode === 'change' && overlap) fail('Other same-item work exists; reconcile all affected requests first', 409);
   if (history.some((event) => event.status === 'merged' || event.outcomes?.some((outcome) => outcome.status === 'merged'))) fail('Merge is not reversible', 409);
+  if (history.some((event) => event.status === 'closed' || event.outcomes?.some((outcome) => outcome.status === 'closed'))) fail('PR closure needs separate reopen authorization; no automatic rollback', 409);
   const withdrawal = { action: 'withdraw', items: [] };
   if (!history.some((event) => event.status === 'rechecking')) return withdrawal;
   const last = executionResult(input, events);
@@ -295,7 +296,7 @@ export function reversalPlan(input, inputs, events, mode = 'undo') {
   for (const item of input.items) {
     const status = last.outcomes ? last.outcomes.find((outcome) => outcome.item_id === item.id)?.status : last.status;
     if (status === 'no_effect') continue;
-    if (status === 'archived' && input.action === 'approve' && item.kind === 'session' && ['archive', 'review_archive_eligibility'].includes(item.recommended_action)) action = 'unarchive';
+    if (status === 'archived' && isArchiveAction(item, input.action)) action = 'unarchive';
     else if (isMessage(input.action) && ['sent', 'waiting', 'reply'].includes(status)) action = 'cancel_followup';
     else fail('Outcome is blocked, mixed or unknown; external effects may exist. Reconcile every target before undo/change', 409);
     affected.push(item);

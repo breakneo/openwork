@@ -76,6 +76,14 @@
       "type": "object", "additionalProperties": false, "required": ["label", "url"],
       "properties": {"label": {"$ref": "#/$defs/label"}, "url": {"$ref": "#/$defs/url"}}
     },
+    "actionAuthorization": {
+      "type": "object", "additionalProperties": false, "required": ["action", "target_id", "authorized", "source", "text", "provenance", "at"],
+      "properties": {
+        "action": {"enum": ["close_pr", "reclaim"]}, "target_id": {"$ref": "#/$defs/itemIdentity"},
+        "authorized": {"type": ["boolean", "null"]}, "source": {"const": "explicit-human"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 4000}, "provenance": {"type": "string", "minLength": 1, "maxLength": 2000}, "at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
     "delivery": {
       "type": "object", "additionalProperties": false, "required": ["source", "provenance", "observed_at", "exchanges"],
       "properties": {
@@ -112,6 +120,7 @@
         "purpose": {"type": "string", "maxLength": 20000, "default": "Purpose not supplied."},
         "delivered": {"type": "string", "maxLength": 20000, "default": "No delivery summary supplied."},
         "delivery": {"$ref": "#/$defs/delivery"},
+        "action_authorizations": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/actionAuthorization"}, "description": "Explicit exact-target human permission, never inferred from narrative. Does not override hard locks. Runtime checks item kind and target identity."},
         "status_on_dev": {"type": "string", "maxLength": 20000, "default": "Not verified on dev."},
         "why": {"type": "string", "maxLength": 20000, "default": "No rationale supplied."},
         "if_approved": {"type": "string", "maxLength": 20000, "default": "", "description": "Plain-language outcome. Missing or whitespace-only text blocks approval, including imported decisions and batches."},
@@ -119,7 +128,7 @@
         "question": {"type": "string", "maxLength": 20000, "default": "", "description": "Concrete human question. Review/review_blockers/review_decision without a concrete question normalize to keep with a rationale and no approval outcome."},
         "raw_evidence": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/evidence"}, "description": "Collapsed raw source material. Legacy input defaults to a copy of evidence; summary remains available in the raw drawer."},
         "evidence": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/evidence"}, "default": []},
-        "recommended_action": {"type": "string", "minLength": 1, "maxLength": 200, "default": "review", "description": "recommendationVerb maps review_merge_candidate to merge, review_archive_eligibility to archive, review_worktree_removal to worktree, review_blockers/review_decision to review, and review_repeatability_followup to relaunch. Review without a concrete question normalizes to keep. None, all worktree kinds, worktree verbs, external missions and NIGHT REVIEW are read-only regardless of lock flags. Archive/merge aliases retain all execution gates."},
+        "recommended_action": {"type": "string", "minLength": 1, "maxLength": 200, "default": "review", "description": "recommendationVerb maps review_merge_candidate to merge, review_archive_eligibility to archive, review_worktree_removal to worktree, review_blockers/review_decision to review, and review_repeatability_followup to relaunch. Review without a concrete question normalizes to keep. Explicit locks, external missions and NIGHT REVIEW remain hard read-only. Worktrees require typed exact Reclaim permission; none does not veto a positively safe universal session archive or an explicitly authorized secondary action. Archive/merge aliases retain all execution gates."},
         "links": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/link"}, "default": []},
         "age": {"type": "string", "maxLength": 500, "default": "unknown", "description": "Display text, not a parsed date."},
         "age_days": {"type": ["number", "null"], "minimum": 0, "description": "Finite nonnegative numeric age, or null when unknown."},
@@ -141,7 +150,7 @@
       "type": "object", "additionalProperties": false, "required": ["id", "action", "batch_id", "decided_at"],
       "properties": {
         "id": {"$ref": "#/$defs/itemIdentity"},
-        "action": {"enum": ["approve", "decline", "defer", "ask_info", "request_changes", "comment", "message"]},
+        "action": {"enum": ["approve", "archive", "close_pr", "decline", "defer", "ask_info", "request_changes", "comment", "message"]},
         "comment": {"type": "string", "maxLength": 10000, "default": ""},
         "batch_id": {"$ref": "#/$defs/id"},
         "decided_at": {"$ref": "#/$defs/timestamp"}

@@ -156,7 +156,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
             exactObject(body.replacement, ['action', 'comment', 'decided_at']);
             boundedText(body.replacement.comment, false);
             const previous = [...feed.decisions, ...entries.filter((entry) => entry.event.kind === 'decision' && entry.snapshot === snapshot).flatMap((entry) => entry.event.decisions)];
-            if (body.replacement.action === 'approve') requireDeliveryRead(target.event.items, entries, snapshot);
+            requireDeliveryRead(target.event.items, entries, snapshot, body.replacement.action);
             const id = randomUUID();
             const next = applyDecision({ ...feed, decisions: previous }, target.event.item_ids, body.replacement.action, body.replacement.comment, body.replacement.decided_at, id);
             if (body.replacement.action === 'approve' && target.event.items.length > 1 && target.event.items.some((item) => recommendationVerb(item) === 'merge')) fail('Bulk merge approval is forbidden');
@@ -181,7 +181,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
           const next = applyDecision({ ...feed, decisions: previous }, body.ids, body.action, body.comment, body.decided_at, body.id);
           if (!isMessage(body.action) && outstandingInputs(inputs, events).some((input) => input.item_ids.some((id) => body.ids.includes(id)))) fail('An existing decision or compensation affects this card. Use Undo/change on its exact request', 409);
           const items = body.ids.map((id) => feed.items.find((item) => item.id === id));
-          if (body.action === 'approve') requireDeliveryRead(items, entries, snapshot);
+          requireDeliveryRead(items, entries, snapshot, body.action);
           if (body.action === 'approve' && items.length > 1 && items.some((item) => recommendationVerb(item).toLowerCase().trim() === 'merge')) fail('Bulk merge approval is forbidden');
           return enqueue(directory, savedRequest, { id: body.id, decision_id: body.id, item_ids: body.ids,
             kind: 'decision', action: body.action, status: 'queued', text: body.comment, at: next.decisions.at(-1).decided_at,

@@ -1,7 +1,7 @@
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { isMessage } from './core.mjs';
+import { isMessage, isArchiveAction, canArchive } from './core.mjs';
 import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, compensationCurrent, compensationSucceeded, executionResult, appendEvent, statusEvent, blockedEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
 
 function publishedInputs(directory) {
@@ -31,11 +31,15 @@ export function next(directory = 'reports/review-queue') {
       const entry = entries.find((entry) => entry.event.id === input.id);
       const stale = entry.snapshot !== undefined ? entry.snapshot !== state.snapshot : input.items.some((item) => !state.items.some((current) => isDeepStrictEqual(current, item)));
       const overlap = input.kind === 'decision' && !isMessage(input.action) && outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.kind === 'decision' && other.item_ids.some((id) => input.item_ids.includes(id)));
-      if (input.action === 'approve') requireDeliveryRead(input.items, entries, entry.snapshot);
+      requireDeliveryRead(input.items, entries, entry.snapshot, input.action);
+      const archiveSafe = input.items.every((item) => !isArchiveAction(item, input.action) || canArchive(item));
       const running = inputs.some((other) => other.id !== input.id && claimed.has(other.id) && executionResult(other, events)?.status === 'rechecking' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (running && input.action !== 'stop') continue;
       const effectCurrent = compensationCurrent(input, events);
       appendEvent(dir, 'results.jsonl', statusEvent(input, 'rechecking', 'Claimed before returning work; never automatically replay uncertain work.'));
+      if (!archiveSafe) {
+        appendEvent(dir, 'results.jsonl', blockedEvent(input, 'archive-snapshot-safety', 'executor', 'Establish positive unpinned/idle evidence and resolve hard locks before archive. No external action was returned.')); continue;
+      }
       if (!effectCurrent) {
         appendEvent(dir, 'results.jsonl', blockedEvent(input, 'original-effect-identity', 'operator', 'Original effect is unverified or a later independent archive exists. Reconcile identity and archive generation; do not undo later work.')); continue;
       }
@@ -70,7 +74,7 @@ export function result(id, status, text, directory = 'reports/review-queue', ...
     if (input.kind === 'compensation' && compensationSucceeded(input, events)) fail('Successful compensation is final; do not invalidate a replacement dependency', 409);
     if ([status, ...(outcomes ?? []).map((entry) => entry.status)].some((value) => ['unarchived', 'cancelled'].includes(value) && (input.kind !== 'compensation' || value !== (input.action === 'unarchive' ? 'unarchived' : 'cancelled')))) fail('Result does not match the compensation action', 409);
     const noEffectIds = status === 'no_effect' ? input.item_ids : (outcomes ?? []).filter((entry) => entry.status === 'no_effect').map((entry) => entry.item_id);
-    if (history.some((event) => noEffectIds.some((id) => ['archived', 'merged', 'sent', 'waiting', 'reply'].includes(event.outcomes ? event.outcomes.find((entry) => entry.item_id === id)?.status : event.status)))) fail('Known external effect cannot be relabeled no_effect', 409);
+    if (history.some((event) => noEffectIds.some((id) => ['archived', 'merged', 'closed', 'sent', 'waiting', 'reply'].includes(event.outcomes ? event.outcomes.find((entry) => entry.item_id === id)?.status : event.status)))) fail('Known external effect cannot be relabeled no_effect', 409);
     const event = { ...statusEvent(input, status, text), ...(outcomes ? { outcomes } : {}) };
     appendEvent(dir, 'results.jsonl', event);
     return event;

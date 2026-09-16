@@ -15,7 +15,7 @@ import { buildHtml } from '../../tools/review-queue/build.mjs';
 test('live review posts explicit decisions, polls correlated threads and keeps private data behind the token', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-live-browser-'));
   const feedPath = join(directory, 'feed.json');
-  const base = { kind: 'session', group: 'openwork', purpose: 'Finish a synthetic explanation.', delivered: 'Synthetic report.', status_on_dev: 'Documentation only.', why: 'The explanation is complete.', if_approved: 'Recheck this synthetic session before archiving.', if_declined: 'Keep it unchanged.', protected: false, workspace_id: 'ws_fixture', evidence: [{ label: 'PR checks', value: 'build: SUCCESS\ntests: SUCCESS' }, { label: 'Diff stat', value: '2 files, +12 -4' }, { label: 'Spec results', value: '7 passed; 0 skipped' }, { label: 'Warden', value: 'Passed' }, { label: 'Conflicts', value: 'None observed' }, { label: 'Last assistant', value: 'Synthetic conclusion. <script>literal</script>' }] };
+  const base = { kind: 'session', group: 'openwork', purpose: 'Finish a synthetic explanation.', delivered: 'Synthetic report.', status_on_dev: 'Documentation only.', why: 'The explanation is complete.', if_approved: 'Recheck this synthetic session before archiving.', if_declined: 'Keep it unchanged.', protected: false, workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }, { label: 'PR checks', value: 'build: SUCCESS\ntests: SUCCESS' }, { label: 'Diff stat', value: '2 files, +12 -4' }, { label: 'Spec results', value: '7 passed; 0 skipped' }, { label: 'Warden', value: 'Passed' }, { label: 'Conflicts', value: 'None observed' }, { label: 'Last assistant', value: 'Synthetic conclusion. <script>literal</script>' }] };
   await writeFile(feedPath, JSON.stringify({ items: [
     ...Array.from({ length: 3 }, (_, i) => ({ ...base, id: `ses_archive${i}`, title: `Archive fixture ${i}`, recommended_action: 'archive' })),
     { ...base, id: 'ses_review', title: 'Synthetic human question', recommended_action: 'review', question: 'Should we change the example?', if_approved: 'Ask the owner to revise the synthetic example.' },
@@ -339,7 +339,7 @@ test('file mode ignores connection fragments, keeps the human default and render
   const directory = await mkdtemp(join(tmpdir(), 'review-offline-default-'));
   const root = fileURLToPath(new URL('../../tools/review-queue/', import.meta.url));
   const source = { items: [
-    { id: 'ses_archive', kind: 'session', title: 'Offline archive', group: 'openwork', recommended_action: 'archive', if_approved: 'Recheck archive.' },
+    { id: 'ses_archive', kind: 'session', title: 'Offline archive', group: 'openwork', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], recommended_action: 'archive', if_approved: 'Recheck archive.' },
     { id: 'ses_keep', kind: 'session', title: 'Offline keep', recommended_action: 'keep' },
     { id: 'ses_question', kind: 'session', title: 'Offline human question', recommended_action: 'review', question: 'Revise the example?', if_approved: 'Recheck with owner.', evidence: [
       { label: 'PR checks', value: JSON.stringify([{ name: 'build', conclusion: 'SUCCESS' }, { name: '<script>literal</script>', status: 'FAILURE' }]) },
@@ -391,7 +391,7 @@ test('file mode ignores connection fragments, keeps the human default and render
 test('human filtering follows terminal dispositions and surfaces blocked archive and keep results', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-live-dispositions-'));
   const feedPath = join(directory, 'feed.json');
-  const base = { kind: 'session', group: 'openwork', recommended_action: 'archive', if_approved: 'Ask owner to recheck.' };
+  const base = { kind: 'session', group: 'openwork', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], recommended_action: 'archive', if_approved: 'Ask owner to recheck.' };
   await writeFile(feedPath, JSON.stringify({ items: [
     ...['fresh', 'declined', 'deferred', 'approved'].map((name) => ({ ...base, id: `ses_${name}`, title: name })),
     { ...base, id: 'ses_keep', title: 'Keep reference', recommended_action: 'keep' },
@@ -450,7 +450,7 @@ test('human filtering follows terminal dispositions and surfaces blocked archive
     await page.waitForTimeout(3500);
     expect(await list?.evaluate((node) => node.isConnected)).toBe(true);
     expect(await child?.evaluate((node) => node.isConnected)).toBe(true);
-    evidence.recordAssertionEvidence('Effective dispositions govern archive and human views', 'Prior declined, deferred and approved sessions never enter archive batching. An approved archive becomes a human row when blocked, then disappears when archived without replacing its focused draft editor. A keep recommendation appears for blocked/waiting results and disappears on done; local decline and defer hide their rows immediately. Unchanged polling preserves list nodes.', true);
+    evidence.recordAssertionEvidence('Effective dispositions govern archive and human views', 'Prior declined, deferred and approved sessions never enter archive batching. An approved archive becomes a human row when blocked, then disappears when archived without replacing its focused draft editor. A keep recommendation appears for blocked/waiting results and disappears on done; Keep and local Later hide their rows after the appropriate acceptance/local step. Unchanged polling preserves list nodes.', true);
   } finally {
     await browser.close();
     await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); });
@@ -461,7 +461,7 @@ test('human filtering follows terminal dispositions and surfaces blocked archive
 test('mixed archive shapes fail closed, bulk merge is forbidden and origin mismatch cannot fetch a feed', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-live-guards-'));
   const feedPath = join(directory, 'feed.json');
-  const base = { kind: 'session', group: 'openwork', recommended_action: 'archive', if_approved: 'Recheck before archive.', protected: false };
+  const base = { kind: 'session', group: 'openwork', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], recommended_action: 'archive', if_approved: 'Recheck before archive.', protected: false };
   await writeFile(feedPath, JSON.stringify({ items: [
     { ...base, id: 'ses_one', title: 'First archive shape' },
     { ...base, id: 'ses_two', title: 'Second archive shape', recommended_action: 'review_archive_eligibility' },
@@ -488,7 +488,7 @@ test('mixed archive shapes fail closed, bulk merge is forbidden and origin misma
     await page.reload();
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     expect(await page.getByTestId('queue-row').count()).toBe(2);
-    expect(await page.getByTestId('archive-batch').textContent()).toContain('Archive 2 concluded sessions');
+    expect(await page.getByTestId('archive-batch').textContent()).toContain('Archive 3 concluded sessions');
     expect(await page.getByTestId('archive-batch').textContent()).toContain('Mixed archive groups or original recommendations');
     expect(await page.getByTestId('archive-batch').locator('[data-batch-approve]').isDisabled()).toBe(true);
     await page.locator('#recommendation').selectOption('archive');
@@ -504,7 +504,7 @@ test('mixed archive shapes fail closed, bulk merge is forbidden and origin misma
     expect(await page.locator('#bulk-apply').isDisabled()).toBe(true);
     expect(await page.locator('#bulk-shape').textContent()).toContain('Bulk merge approval is forbidden');
     expect(readLog(live.directory, 'decisions.jsonl')).toEqual([]);
-    evidence.recordAssertionEvidence('Archive scope, merge and origin guards fail closed', 'Mismatched metadata origin never fetches feed. Default human view hides keep, locked and archive rows; the archive card excludes protected, archived, locked and no-outcome sessions, and refuses two different original archive shapes. Explicit search narrows the full confirmation scope. Two merge candidates cannot receive bulk approval. No requests were enqueued.', true);
+    evidence.recordAssertionEvidence('Archive scope, merge and origin guards fail closed', 'Mismatched metadata origin never fetches feed. Default human view hides keep, locked and archive rows; the archive card excludes protected, archived and locked sessions, includes a positively safe archive even without narrative approval prose, and refuses different original archive shapes. Explicit search narrows the full confirmation scope. Two merge candidates cannot receive bulk approval. No requests were enqueued.', true);
   } finally {
     await browser.close();
     await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); });

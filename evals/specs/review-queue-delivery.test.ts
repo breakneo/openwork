@@ -20,7 +20,7 @@ export function syntheticDelivery() {
 }
 
 test('structured session delivery preserves all supplied questions and answers without inferring completeness', async ({ evidence }) => {
-  const base = { items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', kind: 'session', title: 'Synthetic delivery', recommended_action: 'archive', if_approved: 'Archive after reading.' }] };
+  const base = { items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], kind: 'session', title: 'Synthetic delivery', recommended_action: 'archive', if_approved: 'Archive after reading.' }] };
   const options = { report: '', summaries: { items: [{ id: 'ses_delivery', delivery: syntheticDelivery() }] } };
   const feed = enrichFeed(base, options);
   expect(deliveryOf(feed.items[0])).toEqual(syntheticDelivery());
@@ -38,7 +38,7 @@ test('structured session delivery preserves all supplied questions and answers w
 test('offline builder exports the full private deliverable beside its HTML', async ({ evidence }) => {
   const root = mkdtempSync(join(tmpdir(), 'queue-delivery-build-'));
   const input = join(root, 'source.json'); const output = join(root, 'index.html');
-  writeFileSync(input, JSON.stringify({ items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', kind: 'session', title: 'Synthetic full export', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: syntheticDelivery() }] }));
+  writeFileSync(input, JSON.stringify({ items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], kind: 'session', title: 'Synthetic full export', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: syntheticDelivery() }] }));
   try {
     const script = fileURLToPath(new URL('../../tools/review-queue/build.mjs', import.meta.url));
     const run = spawnSync(process.execPath, [script, input, output], { encoding: 'utf8', timeout: 10000 });
@@ -56,7 +56,7 @@ test('offline builder exports the full private deliverable beside its HTML', asy
 test('read acknowledgement binds the exact delivery and snapshot, gates archive server-side, and is never work', async ({ evidence }) => {
   const root = mkdtempSync(join(tmpdir(), 'queue-delivery-'));
   const path = join(root, 'feed.json');
-  const feed = validateFeed({ items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', kind: 'session', title: 'Synthetic delivery', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: syntheticDelivery() }] });
+  const feed = validateFeed({ items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], kind: 'session', title: 'Synthetic delivery', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: syntheticDelivery() }] });
   writeFileSync(path, JSON.stringify(feed));
   const live = await startServer({ feed: path, dir: join(root, 'queue') });
   const snapshot = JSON.stringify({ ...feed, decisions: [] });

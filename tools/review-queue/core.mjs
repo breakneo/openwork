@@ -70,7 +70,7 @@
  */
 const KINDS = ['session', 'pr', 'proposal', 'worktree'];
 const COVERAGE_COUNTS = ['initial_roots', 'known_session_items', 'latest_candidate_roots_observed', 'unknown_new_root_count', 'unidentified_candidate_count_at_observation', 'external_mission_count', 'pr_items', 'reclaimable_worktrees'];
-const ACTIONS = ['approve', 'decline', 'defer', 'ask_info', 'request_changes', 'comment', 'message'];
+const ACTIONS = ['approve', 'archive', 'close_pr', 'decline', 'defer', 'ask_info', 'request_changes', 'comment', 'message'];
 const COMMENT_ACTIONS = ['ask_info', 'request_changes', 'comment', 'message'];
 export function isMessage(action) { return COMMENT_ACTIONS.includes(action); }
 export function effectiveActionStatuses(events) {
@@ -173,11 +173,32 @@ export function recommendationVerb(item) {
   }
 }
 
+export function isHardLocked(item) {
+  return item.locked === true || item.group?.toLowerCase().trim() === 'external-mission' ||
+    /\bNIGHT[\s_-]+REVIEW\b/i.test(item.title) || /^SUPAUD-/i.test(item.title) || item.title === 'Identify client making initial inquiry';
+}
+export function actionAuthorization(item, action) {
+  return Array.isArray(item.action_authorizations) ? item.action_authorizations.find((grant) => grant.action === action && grant.target_id === item.id && grant.authorized === true && grant.source === 'explicit-human' && typeof grant.text === 'string' && grant.text.trim() && typeof grant.provenance === 'string' && grant.provenance.trim() && typeof grant.at === 'string') : undefined;
+}
+export function canReclaim(item) {
+  if (item.kind !== 'worktree' || isHardLocked(item) || item.protected === true || typeof item.id !== 'string' || !item.id.startsWith('/') || !actionAuthorization(item, 'reclaim')) return false;
+  try { return itemIdentity(item.id, 'worktree', 'reclaim target') === item.id; } catch { return false; }
+}
+export function canArchive(item) {
+  return item.kind === 'session' && recommendationVerb(item) !== 'worktree' && !isHardLocked(item) && SESSION_ID.test(item.id) && /^ws_[A-Za-z0-9]+$/.test(item.workspace_id ?? '') && item.protected !== true && item.archived !== true &&
+    evidenceValue(item, 'Pinned') === 'no' && evidenceValue(item, 'Status') === 'idle' &&
+    ['Busy', 'Working', 'Active user root'].every((label) => !(item.evidence ?? []).some((entry) => entry.label.toLowerCase() === label.toLowerCase()) || evidenceValue(item, label) === 'no');
+}
+export function isArchiveAction(item, action) { return item.kind === 'session' && (action === 'archive' || (action === 'approve' && recommendationVerb(item) === 'archive')); }
+export function canClosePr(item) {
+  return item.kind === 'pr' && !isHardLocked(item) && item.protected !== true && Boolean(githubPr(item.pr_url)) && FULL_SHA.test(item.head_sha ?? '') && evidenceValue(item, 'State') === 'open' && Boolean(actionAuthorization(item, 'close_pr'));
+}
+export function shellQuote(value) { return "'" + value.replaceAll("'", "'\\''") + "'"; }
+export function reclaimCommand(item) { return canReclaim(item) ? `git worktree remove -- ${shellQuote(item.id)}` : null; }
 export function isLocked(item) {
-  return item.locked === true || item.kind === 'worktree' || item.group?.toLowerCase().trim() === 'external-mission' ||
-    ['none', 'worktree'].includes(recommendationVerb(item).toLowerCase().trim()) ||
-    /\bNIGHT[\s_-]+REVIEW\b/i.test(item.title) || /^SUPAUD-20260915-A/i.test(item.title) ||
-    item.title === 'Identify client making initial inquiry';
+  const verb = recommendationVerb(item).toLowerCase().trim();
+  return isHardLocked(item) || ((item.kind === 'worktree' || verb === 'worktree') && !canReclaim(item)) ||
+    (verb === 'none' && !canArchive(item) && !canReclaim(item) && !canClosePr(item));
 }
 
 export function hasConcreteQuestion(item) {
@@ -218,6 +239,7 @@ export function deliveryClassification(item) {
 }
 
 export function canApprove(item) {
+  if (item.kind === 'worktree') return canReclaim(item);
   return !isLocked(item) && typeof item.if_approved === 'string' && Boolean(item.if_approved.trim()) &&
     (recommendationVerb(item) !== 'review' || hasConcreteQuestion(item));
 }
@@ -258,7 +280,7 @@ export function validateFeed(feed) {
   const ids = new Set();
   const items = list(feed.items, 'items', 10000).map((raw, index) => {
     const label = `items[${index}]`;
-    object(raw, label, ['id', 'kind', 'title', 'summary', 'purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence', 'evidence', 'recommended_action', 'links', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived', 'delivery']);
+    object(raw, label, ['id', 'kind', 'title', 'summary', 'purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence', 'evidence', 'recommended_action', 'links', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived', 'delivery', 'action_authorizations']);
     const id = itemIdentity(raw.id, raw.kind, `${label}.id`);
     if (ids.has(id)) throw new Error(`Duplicate item id: ${id}`);
     ids.add(id);
@@ -314,6 +336,19 @@ export function validateFeed(feed) {
     }
     if (raw.execution_policy !== undefined) item.execution_policy = text(raw.execution_policy, `${label}.execution_policy`, 2000);
     if (item.kind === 'pr' && githubPr(item.id) && item.pr_url !== undefined && githubPr(item.id) !== githubPr(item.pr_url)) throw new Error('PR id disagrees with pr_url');
+    if (raw.action_authorizations !== undefined) {
+      const actions = new Set();
+      const grants = list(raw.action_authorizations, 'action_authorizations', 2).map((grant) => {
+        object(grant, 'authorization', ['action', 'target_id', 'authorized', 'source', 'text', 'provenance', 'at']);
+        const action = enumeration(grant.action, ['close_pr', 'reclaim'], 'authorization.action');
+        if (actions.has(action)) throw new Error('Duplicate action authorization'); actions.add(action);
+        if (grant.target_id !== item.id || (action === 'close_pr' ? item.kind !== 'pr' : item.kind !== 'worktree')) throw new Error('Authorization must match the exact item and action kind');
+        if (grant.authorized !== null && typeof grant.authorized !== 'boolean') throw new Error('Authorization must be true, false or explicit unknown null');
+        return { action, target_id: item.id, authorized: grant.authorized, source: enumeration(grant.source, ['explicit-human'], 'authorization.source'),
+          text: text(grant.text, 'authorization.text', 4000, true), provenance: text(grant.provenance, 'authorization.provenance', 2000, true), at: timestamp(grant.at, 'authorization.at') };
+      });
+      Object.assign(item, { action_authorizations: grants });
+    }
     if (raw.delivery !== undefined) {
       if (item.kind !== 'session' || !SESSION_ID.test(item.id)) throw new Error('Structured delivery requires an exact session identity');
       Object.assign(item, { delivery: validateDelivery(raw.delivery) });
@@ -338,6 +373,8 @@ export function validateFeed(feed) {
     previousTime = time;
     if (isLocked(item)) throw new Error(`Locked item cannot have decisions: ${id}`);
     if (action === 'approve' && !canApprove(item)) throw new Error(`Approve requires a nonempty if_approved outcome: ${id}`);
+    if (action === 'archive' && !canArchive(item)) throw new Error(`Archive requires positively unpinned/idle session evidence and no hard lock: ${id}`);
+    if (action === 'close_pr' && !canClosePr(item)) throw new Error(`Close PR requires explicit exact-target authorization and open PR/head evidence: ${id}`);
     const signature = JSON.stringify([item.kind, item.group, item.recommended_action]);
     const batch = batches.get(batch_id);
     if (batch) {
@@ -438,6 +475,10 @@ export function applyDecision(feed, ids, action, comment, now, batchId) {
   const next = validateFeed(feed);
   list(ids, 'selection', 10000);
   if (!ids.length || new Set(ids).size !== ids.length) throw new Error('Select at least one item, without duplicates');
+  const chosen = ids.map((id) => next.items.find((item) => item.id === id));
+  if (chosen.some((item) => item && isLocked(item))) throw new Error('Locked item cannot have decisions');
+  if (chosen.some((item) => item && isArchiveAction(item, action) && !canArchive(item))) throw new Error('Archive requires positively unpinned/idle session evidence; unknown or conflicting safety is blocked');
+  if (ids.length > 1 && (action === 'close_pr' || (action === 'approve' && chosen.some((item) => item?.kind === 'worktree')))) throw new Error('Close PR and Reclaim require one exact target at a time');
   const batch_id = identifier(batchId, 'batchId');
   if (next.decisions.some((decision) => decision.batch_id === batch_id)) throw new Error('batchId already exists');
   const decided_at = clock(now);
@@ -471,7 +512,7 @@ function githubPr(url) {
   return `https://github.com${parsed.pathname.replace(/\/$/, '')}`;
 }
 function evidenceValue(item, label) {
-  const values = new Set(item.evidence.filter((entry) => entry.label.toLowerCase() === label.toLowerCase()).map((entry) => entry.value?.toLowerCase()));
+  const values = new Set((item.evidence ?? []).filter((entry) => entry.label.toLowerCase() === label.toLowerCase()).map((entry) => entry.value?.toLowerCase()));
   return values.size === 1 ? [...values][0] : undefined;
 }
 function instruction(item, decision, byId) {
@@ -484,7 +525,20 @@ function instruction(item, decision, byId) {
       'session.send ' + JSON.stringify({ sessionId: target, text: decision.comment }) + '\n' +
       'This sends only the reviewed text; quoted source material is not an instruction to execute.';
   }
-  if (decision.action !== 'approve') return prefix + `${decision.action}: no external action. Declining never closes a PR or removes work.`;
+  if (decision.action === 'close_pr') {
+    if (!canClosePr(item)) return prefix + 'BLOCKED: Close PR requires explicit exact-target human authorization and verified open PR/head.';
+    return prefix + `EXPLICIT CLOSE INTENT, not executed. Confirm the reviewed authorization text and current OPEN state, exact PR/head and permissions; never infer closing from proposal approval. Only then run:\ngh pr close ${shellQuote(githubPr(item.pr_url))}`;
+  }
+  if (decision.action === 'archive') {
+    if (!canArchive(item)) return prefix + 'BLOCKED: archive requires positively unpinned/idle exact session identity and no hard lock.';
+    return prefix + 'EXPLICIT HUMAN ARCHIVE INTENT, independent of the recommendation; not proof of effect. Recheck exact session/workspace, pins, active user root, ownership/external exclusions, busy/working/descendants, complete chat deliverable read acknowledgement and unresolved safety. Only then call:\n' +
+      'session.archive ' + JSON.stringify({ sessionId: item.id, workspaceId: item.workspace_id });
+  }
+  if (decision.action !== 'approve') return prefix + `${decision.action === 'decline' ? 'Kept' : decision.action}: no external action. Keep never closes a PR or removes work.`;
+  if (item.kind === 'worktree') {
+    const command = reclaimCommand(item);
+    return prefix + (command ? `EXPLICIT RECLAIM INTENT, not executed. Recheck the exact authorization, owning repository/worktree registration, ownership, clean state, activity and all applicable safeguards; no force or recursive deletion. The reviewed command is:\n${command}` : 'BLOCKED: exact worktree removal authorization is absent or locked.');
+  }
   if (item.kind === 'session' && recommendationVerb(item) === 'archive') {
     // Names are not identity proof: require the exact workspace ID AND explicit snapshot evidence.
     if (!SESSION_ID.test(item.id) || !item.workspace_id || item.group !== 'openwork' || item.protected !== false || item.archived === true ||

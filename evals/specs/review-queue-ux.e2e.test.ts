@@ -13,7 +13,7 @@ const fullAnswer = 'Full synthetic answer ' + 'x'.repeat(1600);
 test('chat-only answers expand in full and a persisted read acknowledgement unlocks archive', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-read-browser-'));
   const feed = join(directory, 'feed.json');
-  await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_read', workspace_id: 'ws_fixture', title: 'Read synthetic answers', kind: 'session', group: 'example', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: {
+  await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_read', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], title: 'Read synthetic answers', kind: 'session', group: 'example', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: {
     kind: 'chat-only', completeness: 'complete', source: 'session.read', provenance: 'Synthetic full transcript', observed_at: '2026-01-01T00:00:00.000Z', exchanges: [
       { question: 'First question?', at: null, answers: [{ text: fullAnswer, at: null }] },
       { question: 'Second question?', at: null, answers: [{ text: 'Second full answer.', at: null }] },
@@ -65,7 +65,7 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     await page.locator('#detail').focus();
     await page.keyboard.press('j');
     expect(await page.getByTestId('detail-title').textContent()).toBe('Synthetic review 1');
-    await page.keyboard.press('k');
+    await page.keyboard.press('ArrowUp');
     expect(await page.getByTestId('detail-title').textContent()).toBe('Synthetic review 0');
     await page.locator('[data-action="approve"]').click();
     await expect.poll(() => page.getByTestId('detail-title').textContent()).toBe('Synthetic review 1');
@@ -107,7 +107,7 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     expect(await page.getByTestId('thread-events').textContent()).toContain('UNCERTAIN');
     expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(4);
     expect(errors).toEqual([]);
-    evidence.recordAssertionEvidence('Confirmed auto-advance, whole-batch scope and uncertainty', 'Isolated synthetic Chromium checks j/k, approve then ask progression, two-card bulk decline, all-decided empty state, Decided/reload persistence, and no advancement or retry after transport failure.', true);
+    evidence.recordAssertionEvidence('Confirmed auto-advance, whole-batch scope and uncertainty', 'Isolated synthetic Chromium checks j/ArrowUp, approval progression, an orthogonal message followed by Keep, two-card bulk Keep, all-decided empty state, Decided/reload persistence, and no advancement or retry after transport failure.', true);
   } finally {
     await browser.close();
     await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); });
@@ -118,7 +118,7 @@ test('review advances in displayed order after acceptance, preserves uncertain c
 test('undo and change are accessible from log and card, show non-interruptible work and gate compensation', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-ux-controls-'));
   const feed = join(directory, 'feed.json');
-  await writeFile(feed, JSON.stringify({ items: ['A', 'B'].map((name) => ({ id: `ses_archive${name}`, title: `Synthetic archive ${name}`, kind: 'session', group: 'example', recommended_action: 'archive', if_approved: 'Recheck before archive.' })), decisions: [] }));
+  await writeFile(feed, JSON.stringify({ items: ['A', 'B'].map((name) => ({ id: `ses_archive${name}`, title: `Synthetic archive ${name}`, kind: 'session', group: 'example', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], recommended_action: 'archive', if_approved: 'Recheck before archive.' })), decisions: [] }));
   const live = await startServer({ feed, dir: join(directory, 'queue') });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
