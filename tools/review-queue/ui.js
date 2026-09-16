@@ -24,6 +24,7 @@
   const uncertainState = 'LOCAL ONLY / UNCERTAIN — check the thread. No automatic retry.';
   const terminalStatuses = ['done', 'archived', 'merged', 'declined', 'deferred', 'stopped'];
   const events = new Map();
+  const ledgerInputs = new Map();
   const localRequests = new Map();
   const threadDrafts = new Map();
   const advances = new Map();
@@ -48,7 +49,7 @@
     if (input) input.disabled = !connected;
     const batch = document.querySelector('[data-testid="archive-batch"] button[data-batch-approve]');
     if (batch) batch.disabled = unavailable() || new Set(archiveItems().map(shape)).size !== 1;
-    renderBulk();
+    renderBulk(); renderActionLog();
   }
   function connectionLost() {
     connected = false;
@@ -66,8 +67,9 @@
     if (!response.ok) throw new Error(`Server rejected request (${response.status})`);
     return response.json();
   }
-  function acceptEvents(incoming) {
-    if (!Array.isArray(incoming)) throw new Error('Invalid result events');
+  function acceptEvents(incoming, inputs = []) {
+    if (!Array.isArray(incoming) || !Array.isArray(inputs)) throw new Error('Invalid result events');
+    for (const input of inputs) ledgerInputs.set(input.id, input);
     const nextEvents = new Map(events);
     const before = listState();
     const decisions = new Map(originalServerFeed.decisions.map((entry) => [JSON.stringify([entry.batch_id, entry.id]), entry]));
@@ -109,7 +111,7 @@
     try {
       const result = await request(`/results?since=${cursor}`);
       if (!Number.isSafeInteger(result.cursor) || result.cursor < cursor) throw new Error('Invalid result cursor');
-      acceptEvents(result.events); cursor = result.cursor;
+      acceptEvents(result.events, result.inputs); cursor = result.cursor;
     } catch { connectionLost(); }
     if (connected) setTimeout(pollResults, 3000);
   }
@@ -143,7 +145,7 @@
       initialize(original, false);
       const result = await request('/results?since=0');
       if (!Number.isSafeInteger(result.cursor) || result.cursor < 0) throw new Error('Invalid result cursor');
-      acceptEvents(result.events); cursor = result.cursor;
+      acceptEvents(result.events, result.inputs); cursor = result.cursor;
       connected = true; render();
       $('source').textContent = 'Live decisions and owner results · source evidence is a frozen snapshot, not live verification. Every approval requires a fresh recheck.';
       message(restoreProblem || (localRequests.size ? 'Connected. Restored LOCAL ONLY / UNCERTAIN audit entries; inspect them in All items. No request was replayed.' : 'Connected. New decisions are sent immediately once; old decisions are never replayed.'));
@@ -605,6 +607,38 @@
       return match ? [match[1].trim().slice(0, 800), match[2].trim().slice(0, 800)] : null;
     });
     return checks.every(Boolean) ? checks : [];
+  }
+  function openLoggedCard(id) {
+    if (!feed.items.some((item) => item.id === id)) { message('This card is from an older snapshot. Its history is retained; reload the matching source to inspect it.'); return; }
+    for (const name of ['search', 'kind', 'group', 'recommendation', 'status']) $(name).value = '';
+    selected.clear(); activeId = id; render(true); $('detail').focus({ preventScroll: true });
+  }
+  function renderActionLog() {
+    const root = $('action-log');
+    const requests = new Map(ledgerInputs);
+    for (const event of events.values()) if (event.id === event.decision_id) requests.set(event.id, event);
+    for (const decision of feed?.decisions ?? []) {
+      if (requests.has(decision.batch_id)) continue;
+      const batch = feed.decisions.filter((entry) => entry.batch_id === decision.batch_id);
+      requests.set(decision.batch_id, { id: decision.batch_id, item_ids: batch.map((entry) => entry.id), action: decision.action, at: decision.decided_at, text: decision.comment, status: liveSession ? 'Source history — not replayed' : 'Recorded offline — not executed' });
+    }
+    for (const [id, local] of localRequests) requests.set(id, { ...local, status: local.state });
+    const nodes = [];
+    for (const input of [...requests.values()].reverse()) {
+      const history = [...events.values()].filter((event) => event.decision_id === input.id && event.id !== input.id);
+      const latest = history.at(-1);
+      const state = latest?.status || (liveSession && ledgerInputs.has(input.id) && !events.has(input.id) ? 'Unpublished — reconciliation needed' : input.status);
+      const row = element('section', undefined, 'history'); row.dataset.logId = input.id;
+      row.append(element('strong', `${labels[input.action] || input.action} · ${state === 'rechecking' ? 'running / rechecking' : state} · ${input.at}`));
+      for (const id of input.item_ids) {
+        const item = feed.items.find((entry) => entry.id === id) || input.items?.find((entry) => entry.id === id);
+        const open = element('button', `${item?.title || id} · ${id}`); open.addEventListener('click', () => openLoggedCard(id)); row.append(open);
+      }
+      row.append(element('div', input.text || '(no comment)'));
+      for (const event of history) row.append(element('div', `${event.at} · ${event.status === 'rechecking' ? 'running / rechecking' : event.status} · ${event.text}`));
+      nodes.push(row);
+    }
+    root.replaceChildren(...(nodes.length ? nodes : [element('p', 'No decisions recorded yet.', 'muted')]));
   }
   function renderHistory() {
     const root = $('decision-history'); if (!root) return;

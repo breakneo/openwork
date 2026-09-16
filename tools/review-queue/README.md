@@ -203,6 +203,8 @@ Open the server's printed fragment-token URL in a normal browser. The data-free 
 
 New clicks are recorded locally and POSTed once; restored or imported history is never sent. The card thread polls every three seconds and distinguishes queued/rechecking from completed, blocked and owner replies. Follow-up text posts to the same card. Polling preserves editor drafts and focus. Lost delivery stays visibly uncertain, never automatically retried; reload reconciles server receipts while retaining local drafts and unresolved audit entries. LIVE disables imports and Undo, even after connection loss. LIVE JSON/Markdown downloads are **audit-only**, including result receipts and local uncertainties, without executable offline plans; never replay them.
 
+The always-visible **Action log** reads input receipts from `decisions.jsonl` and outcomes from `results.jsonl` on each poll. It shows decision, timestamp, all batch cards, queued/running/done/blocked states and every result text; selecting a card clears filters to reveal it. Reload reconstructs the log from the server, not browser memory. Local uncertainty and source-only decisions are labeled separately; unpublished input is visible as reconciliation-needed, never proof of execution. Offline history remains browser-local until exported.
+
 ### Live HTTP contract
 
 Only these routes exist; unsupported methods, extra query fields, static-file paths and traversal return 404. Errors return `{error}`. Authentication failures return 401, Host/Origin failures 403, invalid bodies/core decisions 400, stale snapshots and id conflicts 409, oversized bodies 413, unsupported encoding/content type 415, held ledger locks 503, and full logs 507.

@@ -99,7 +99,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
         const result = withLedger(directory, () => {
           const events = readLog(directory, 'results.jsonl');
           if (since > events.length) fail('Cursor is beyond the log', 409);
-          return { cursor: events.length, events: events.slice(since) };
+          return { cursor: events.length, events: events.slice(since), inputs: readLog(directory, 'decisions.jsonl').map((input) => input.event) };
         });
         send(200, result);
         return;

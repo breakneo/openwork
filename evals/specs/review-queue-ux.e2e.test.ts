@@ -5,6 +5,7 @@ import { chromium } from 'playwright';
 import { expect } from 'vitest';
 import { test } from '@openwork/testkit';
 import { startServer } from '../../tools/review-queue/serve.mjs';
+import { next, result } from '../../tools/review-queue/executor.mjs';
 import { readLog } from '../../tools/review-queue/protocol.mjs';
 
 test('review advances in displayed order after acceptance, preserves uncertain cards and reaches Decided', async ({ evidence }) => {
@@ -44,9 +45,18 @@ test('review advances in displayed order after acceptance, preserves uncertain c
     await page.locator('#status').selectOption('decided');
     expect(await page.getByTestId('queue-row').count()).toBe(4);
     expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(3);
+    expect(await page.locator('[data-log-id]').count()).toBe(3);
+    const work = next(live.directory);
+    result(work.id, 'done', 'Synthetic completion receipt', live.directory);
+    await expect.poll(() => page.getByTestId('action-log').textContent(), { timeout: 8000 }).toContain('Synthetic completion receipt');
+    expect(await page.getByTestId('action-log').textContent()).toContain('running / rechecking');
+    await page.getByTestId('action-log').getByRole('button', { name: 'Synthetic review 0 · ses_fixture0', exact: true }).click();
+    expect(await page.getByTestId('detail-title').textContent()).toBe('Synthetic review 0');
     await page.reload();
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     expect(await page.getByTestId('queue-row').count()).toBe(0);
+    expect(await page.locator('[data-log-id]').count()).toBe(3);
+    expect(await page.getByTestId('action-log').textContent()).toContain('Synthetic completion receipt');
     await page.locator('#status').selectOption('decided');
     await page.locator('[data-id="ses_fixture2"] .row-open').click();
     await page.route('**/decisions', (route) => route.abort('connectionfailed'));
