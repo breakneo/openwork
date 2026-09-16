@@ -22,6 +22,7 @@ import {
 import { useMessageList } from "./message-list-provider"
 import { createMcpAppActions, type McpAppOrigin } from "./mcp-app-origin"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 import {
   formatMcpAppDiagnostic,
   safeMcpAppDiagnosticMessage,
@@ -78,6 +79,10 @@ const ACTIONABLE_MCP_APP_RESOLUTION_CODES = new Set([
   "invalid_resource_uri",
   "invalid_launch_reference",
   "mcp_unreachable",
+  "mcp_auth_required",
+  "mcp_permission_denied",
+  "mcp_resource_unavailable",
+  "mcp_initialization_failed",
   "resource_read_failed",
   "resource_too_large",
   "server_unavailable",
@@ -275,20 +280,26 @@ export function McpAppDiagnosticNotice({ error, notice, onRetry }: { error: McpA
   const details = formatMcpAppDiagnostic(error)
   return (
     <div className="mt-2 text-xs text-muted-foreground" role="status">
-      <p>{notice} {error.message}</p>
+      <p>{error.causeCode === "mcp_auth_required"
+        ? "Connection needs sign-in. Check the connection under Settings > Library."
+        : error.causeCode === "mcp_permission_denied" || error.causeCode === "tool_denied"
+          ? "Connection access is blocked. Contact your administrator."
+          : error.causeCode === "mcp_resource_unavailable"
+            ? "Interactive view is no longer available. Check the connection under Settings > Library."
+            : notice}</p>
       {error.causeCode === "server_unavailable" || error.causeCode === "mcp_unreachable" ? (
-        <p className="mt-1">The connection was not ready. Retry, or check the connection under Settings &gt; Library.</p>
+        <p className="mt-1">Could not reach the connection. Retry when it is available.</p>
       ) : null}
       {onRetry ? (
-        <button type="button" className="mt-1 underline underline-offset-2" onClick={onRetry}>Retry</button>
+        <Button variant="link" size="xs" className="mt-1 px-0" onClick={onRetry}>Retry</Button>
       ) : null}
       <details className="mt-1">
-        <summary className="cursor-pointer select-none">Technical details ({error.code})</summary>
-        <p className="mt-1">Copy these details when reporting the rendering problem.</p>
+        <summary className="cursor-pointer select-none">Technical details</summary>
         <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[11px] text-foreground">{details}</pre>
-        <button
-          type="button"
-          className="mt-1 underline underline-offset-2"
+        <Button
+          variant="link"
+          size="xs"
+          className="mt-1 px-0"
           onClick={() => {
             if (!navigator.clipboard) return
             void navigator.clipboard.writeText(details)
@@ -297,7 +308,7 @@ export function McpAppDiagnosticNotice({ error, notice, onRetry }: { error: McpA
           }}
         >
           {detailsCopied ? "Copied" : "Copy details"}
-        </button>
+        </Button>
       </details>
     </div>
   )
