@@ -21,7 +21,7 @@ import {
 } from "./model-choice.ts";
 import { fixtureCatalog, fixtureProvider } from "./provider-catalog.fixture.ts";
 import { connectedModelCatalog, recommendModel, type EngineModelOption } from "./threads.ts";
-import { chooseAutomaticRoleModel, chooseIndexedModel, matchesModelSearch, preferredRoleModel, MODEL_INTELLIGENCE_INDEX, modelSelectionDefaults, normalizeModelSelectionPreferences } from "./model-intelligence.ts";
+import { chooseAutomaticRoleModel, chooseIndexedModel, matchesModelSearch, modelPickerDetail, preferredRoleModel, MODEL_INTELLIGENCE_INDEX, modelSelectionDefaults, normalizeModelSelectionPreferences } from "./model-intelligence.ts";
 import { describeTurnFailure } from "./turn-failure.ts";
 import { DEFAULT_MODEL_DEFAULTS, normalizeModelDefaults, type ModelPurpose } from "./model-defaults.ts";
 
@@ -544,4 +544,19 @@ test("the model chosen on the local mode screen goes to the first coworker once"
   assert.equal(takeStartingModel(), "ollama/llama3");
   assert.equal(takeStartingModel(), "", "taken once");
   assert.equal(peekStartingModel(), "");
+});
+
+test("picker detail shows the upstream model for opaque Gateway routes and the readable id otherwise", () => {
+  const base = { modelGroupId: "group", credentialSetId: "set", status: "active", cost: { input: 1, output: 1 }, capabilities: { toolcall: true, reasoning: true }, variants: {} };
+  const model = (name: string, upstreamModelId: string) => ({ ...base, name, upstreamModelId });
+  const opaque = (name: string) => ({ ...base, name });
+  const raw: Parameters<typeof connectedModelCatalog>[0] = { connected: ["ipr_fixture", "openai"], default: {}, all: [
+    { id: "ipr_fixture", name: "OW OpenAI", models: { gwm_luna: model("GPT-5.6 Luna", "openai/gpt-5.6-luna"), gwm_opaque: opaque("Assigned model") } },
+    { id: "openai", name: "OpenAI", models: { "gpt-5.6-luna": opaque("GPT-5.6 Luna") } },
+  ] };
+  const catalog = connectedModelCatalog(raw);
+  const detail = (id: string) => modelPickerDetail(catalog.models.find((option) => option.id === id)!);
+  assert.equal(detail("ipr_fixture/gwm_luna"), "gpt-5.6-luna");
+  assert.equal(detail("ipr_fixture/gwm_opaque"), "", "an unknown upstream must not surface the ipr_/gwm_ route");
+  assert.equal(detail("openai/gpt-5.6-luna"), "openai/gpt-5.6-luna");
 });

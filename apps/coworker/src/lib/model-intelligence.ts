@@ -88,6 +88,17 @@ function modelIdentity(model: EngineModelOption): string | undefined {
   return identity === "openai/gpt-5.6-luna" ? "gpt-5.6-luna" : identity;
 }
 
+/**
+ * Secondary line under a model's label in pickers. Gateway routes (`ipr_…/gwm_…`) are opaque
+ * assignments, so show the upstream model they resolve to, or nothing when unknown; other
+ * providers keep their readable `provider/model` id. The exact route stays in model facts.
+ */
+export function modelPickerDetail(model: Pick<EngineModelOption, "id" | "providerId" | "modelId" | "upstreamModelId" | "modelLabel">): string {
+  if (!isGatewayModel(model as EngineModelOption)) return model.id;
+  const upstream = modelIdentity(model as EngineModelOption);
+  return upstream && upstream !== model.modelLabel ? upstream : "";
+}
+
 export function sameModelBoundary(candidate: EngineModelOption, anchor: EngineModelOption): boolean {
   if (candidate.providerId !== anchor.providerId || candidate.tier !== anchor.tier) return false;
   if (!isGatewayModel(anchor) && !isGatewayModel(candidate)) return true;

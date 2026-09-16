@@ -4,7 +4,7 @@ import { describeSkippedProvider, type DenSession } from "@/lib/den";
 import { carryVariant, describeModelPick, describeModelPreview, previewAutomaticChoice, resolveModelPreview, type ModelChoicePreview, type ModelMode } from "@/lib/model-choice";
 import { effortStopLabel } from "@/lib/effort";
 import { DEFAULT_MODEL_DEFAULTS, type ModelPurpose } from "@/lib/model-defaults";
-import { chooseIndexedModel, matchesModelSearch, MODEL_INTELLIGENCE_INDEX, type ModelSelectionPreferences } from "@/lib/model-intelligence";
+import { chooseIndexedModel, matchesModelSearch, MODEL_INTELLIGENCE_INDEX, modelPickerDetail, type ModelSelectionPreferences } from "@/lib/model-intelligence";
 import {
   createCoworkerThreads,
   modelOriginLabel,
@@ -284,7 +284,7 @@ export function ModelPicker({
         <div className="mt-2 space-y-3">
           <select aria-label="Inspect connected model" className={`${inputClass} bg-panel text-xs`} value={inspectedId} onChange={(event) => setInspectedId(event.target.value)}>
             <option value="">{value ? "Selected model" : "Choose a model to inspect"}</option>
-            {catalog.models.map((model) => <option key={model.id} value={model.id}>{model.id}</option>)}
+            {catalog.models.map((model) => <option key={model.id} value={model.id}>{model.providerLabel} · {model.modelLabel}</option>)}
             {inspectedId && !inspected ? <option value={inspectedId}>{inspectedId} (unavailable)</option> : null}
           </select>
           <p>Inspection does not change your model. Only the connected catalog supplies choices; registry entries are non-exhaustive documentation, not authorization.</p>
@@ -372,7 +372,7 @@ export function ModelPicker({
                           <span className="shrink-0 rounded-full bg-spark/14 px-1.5 py-0.5 text-[8px] uppercase tracking-wide text-[#b8caff]" data-testid="model-standard-tag">Standard</span>
                         ) : null}
                       </span>
-                      <span className="mt-0.5 block break-all text-[10px] text-mist">{option.id}</span>
+                      {modelPickerDetail(option) ? <span className="mt-0.5 block break-all text-[10px] text-mist">{modelPickerDetail(option)}</span> : null}
                     </span>
                   </button>
                 ))}
