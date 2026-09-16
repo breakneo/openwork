@@ -28,6 +28,10 @@ export function assertReadOnlyQueries(queries: string[]): void {
   assert.ok(queries.every(sql => /^(SELECT|SHOW)\b/i.test(sql) && !/GET_LOCK|RELEASE_LOCK|FOR UPDATE|INTO\s+(?:OUTFILE|DUMPFILE)/i.test(sql)), "Read-only CLI must not write, SET, acquire locks or export data");
 }
 
+export function statementText(sql: string): string {
+  return sql.split("\n").filter(line => !/^\s*(?:--(?:\s|$)|#)/.test(line)).join("\n").trim();
+}
+
 export function mysqlClientArgs(url: string): { args: string[]; env: { MYSQL_PWD: string } } {
   const parsed = new URL(url);
   assert.equal(parsed.protocol, "mysql:");
@@ -180,7 +184,8 @@ export async function runMysqlRecovery(input: RecoveryInput) {
     const [rows] = await input.admin.query<RowDataPacket[]>("SELECT argument FROM mysql.general_log WHERE command_type='Query' AND thread_id<>? ORDER BY event_time", [adminId]);
     const queries = rows.map(row => String(row.argument));
     commands.push({ label, command, result, queries, ...(options.pty ? { pty: true } : {}), ...(options.stdin ? { stdin: options.stdin } : {}) });
-    assert.ok(!queries.some(sql => /PRIMARY KEY|sql_require_primary_key\s*=|SET\s+GLOBAL/i.test(sql)), "Recovery must not mutate PKs or global settings");
+    const statements = queries.map(statementText).filter(Boolean);
+    assert.ok(!statements.some(sql => /PRIMARY KEY|sql_require_primary_key\s*=|SET\s+GLOBAL/i.test(sql)), "Recovery must not mutate PKs or global settings");
     await save();
     return { ...result, queries };
   }
@@ -461,9 +466,12 @@ export async function runMysqlRecovery(input: RecoveryInput) {
         assert.deepEqual(recoveredSql.ledger.slice(0, 96), initialSql.ledger);
         assert.deepEqual(recoveredSql.primaryKeys, recovered.primaryKeys);
         assert.deepEqual(recoveredSql.primaryKeys, initialSql.primaryKeys);
-        assert.equal(recoveredSql.applicationDataSha256, recovered.applicationDataSha256);
+        assert.equal(recovered.applicationDataSha256, initial.applicationDataSha256);
         assert.equal(recoveredSql.applicationDataSha256, initialSql.applicationDataSha256);
         assert.deepEqual(recoveredSql.marker, initialSql.marker);
+        const timeless = (rows: RowDataPacket[]) => rows.map(({ created_at, updated_at, ...row }) => JSON.stringify(row));
+        assert.deepEqual(timeless(recoveredSql.marker), timeless(recovered.marker));
+        assert.equal(recoveredSql.marker.length, 1);
         assert.deepEqual(recoveredSql.settings, initialSql.settings);
         assert.equal(recoveredSql.settings[0]?.globalPk, 1);
         assert.equal(recoveredSql.settings[0]?.sessionPk, 1);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { releaseTag, safeEnvironment } from "../src/mysql-upgrade.ts";
-import { assertReadOnlyQueries, mysqlClientArgs, recoveryApplyArgs } from "../src/mysql-recovery.ts";
+import { assertReadOnlyQueries, mysqlClientArgs, recoveryApplyArgs, statementText } from "../src/mysql-recovery.ts";
 
 test("upgrade accepts only exact release tag syntax", () => {
   assert.equal(releaseTag("v0.18.35"), "v0.18.35");
@@ -32,6 +32,16 @@ test("mysql client invocation keeps the password out of argv and targets the exa
   assert.ok(client.args.every(arg => !arg.includes("secret")));
   assert.equal(mysqlClientArgs("mysql://root:pw@127.0.0.1/db").args[2], "-P3306");
   for (const url of ["postgres://root:pw@127.0.0.1/db", "mysql://root:pw@127.0.0.1/db;drop", "mysql://root:pw@127.0.0.1/"]) assert.throws(() => mysqlClientArgs(url));
+});
+
+test("trace guard evaluates statements, not the SQL file's forwarded comment lines", () => {
+  assert.equal(statementText("-- This file never drops a PRIMARY KEY and leaves sql_require_primary_key=ON"), "");
+  assert.equal(statementText("# SET GLOBAL commentary"), "");
+  assert.equal(statementText("-- original 0097 SQL line 94\nALTER TABLE `gateway_request_logs` MODIFY COLUMN `inference_key_id` varchar(64)"), "ALTER TABLE `gateway_request_logs` MODIFY COLUMN `inference_key_id` varchar(64)");
+  assert.equal(statementText("ALTER TABLE `t` ADD CONSTRAINT `c` CHECK (\n      (`a` IS NULL OR `b` IS NULL)\n    )"), "ALTER TABLE `t` ADD CONSTRAINT `c` CHECK (\n      (`a` IS NULL OR `b` IS NULL)\n    )");
+  for (const sql of ["ALTER TABLE t DROP PRIMARY KEY", "SET GLOBAL sql_require_primary_key=OFF", "SET SESSION sql_require_primary_key = OFF", "--no-space-comment SET GLOBAL x=1"]) {
+    assert.match(statementText(sql), /PRIMARY KEY|sql_require_primary_key\s*=|SET\s+GLOBAL/i);
+  }
 });
 
 test("SQL trace guard rejects writes, session changes and named locks", () => {

@@ -58,8 +58,10 @@ kubectl -n <namespace> cp openwork-mysql-0097-recovery ow-0097-recovery:/tmp/rec
 kubectl -n <namespace> exec -it ow-0097-recovery -- node /tmp/recovery/bin/recover-0097.mjs
 ```
 
-`<db-secret>` is the Secret your den-api Deployment reads `DATABASE_URL` from
-(`<release>-secret` unless you configured `secret.existingSecret`). The last command is
+`<db-secret>` is the Secret your migration Job reads `DATABASE_URL` from
+(`<release>-secret` unless you configured `secret.existingSecret`). `envFrom` only works
+when that Secret's key is literally `DATABASE_URL`; if `secret.keys.databaseUrl` maps a
+different key, set `DATABASE_URL` in the pod shell as described below. The last command is
 the dry run: it connects, checks the server, schema, ledger and empty tables, prints the
 recognized state (for example `Supported incomplete state: 0/43 safe-tail statements
 complete`) and writes nothing.
