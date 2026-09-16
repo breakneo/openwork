@@ -6,8 +6,9 @@ import { chromium, type Page } from 'playwright';
 import { expect } from 'vitest';
 import { test } from '@openwork/testkit';
 import { buildHtml } from '../../tools/review-queue/build.mjs';
-import { validateFeed } from '../../tools/review-queue/core.mjs';
+import { validateFeed, isLocked, recommendationVerb } from '../../tools/review-queue/core.mjs';
 
+const realPage = process.env.REVIEW_QUEUE_PAGE;
 const root = fileURLToPath(new URL('../../tools/review-queue/', import.meta.url));
 const baseItem = {
   summary: 'Synthetic evidence only. No real account, customer or private session.',
@@ -133,7 +134,7 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(4);
     evidence.recordAssertionEvidence('Follow-up text and keyboard behavior are safe', 'j/k change the focused item; c focuses its text field. Typing action letters and Space records nothing. Ask-info stores literal script-shaped text without creating DOM script nodes, and blank comments are rejected.', true);
 
-    const stale = { ...first.data, items: first.data.items.map((item, index) => index === 0 ? { ...item, summary: 'Evidence changed' } : item) };
+    const stale = { ...exported, items: exported.items.map((item, index) => index === 0 ? { ...item, summary: 'Evidence changed' } : item) };
     await page.locator('#import-decisions').setInputFiles({ name: 'stale.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(stale)) });
     await expect.poll(async () => page.locator('#message').textContent()).toContain('exact same items');
     expect(validateFeed((await exportJson(page)).data).decisions).toHaveLength(4);
@@ -157,6 +158,99 @@ test('offline review queue records a scoped batch, exports and restores it, and 
     expect(requests).toEqual([]);
     expect(errors).toEqual([]);
     evidence.recordAssertionEvidence('Stale backups are rejected and review has zero HTTP traffic', 'A backup with changed evidence cannot replace current decisions. Across load, bulk actions, exports, reload, locks and comments, Chromium observed zero HTTP(S) requests and zero page errors.', true);
+  } finally {
+    await context.close();
+    await browser.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// The optional private page is opened unchanged, in an isolated profile. Evidence
+// records only counts/booleans, never source titles, IDs, screenshots or downloads.
+test('reconciled night feed shows coverage and read-only history with scoped reversible decisions', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-queue-night-'));
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ acceptDownloads: true });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  let networkRequests = 0;
+  let pageErrors = 0;
+  context.on('request', (request) => { if (/^https?:/.test(request.url())) networkRequests++; });
+  page.on('pageerror', () => pageErrors++);
+  page.on('dialog', (dialog) => dialog.accept());
+  try {
+    const synthetic = validateFeed({
+      schema_version: 1, status: 'final-with-caveats', as_of: '2026-01-01T00:00:00Z',
+      coverage: { known_session_items: 3, unknown_new_root_count: null, caveat: 'Synthetic coverage <script>untrusted</script>' },
+      actions_taken: [{ id: 'history-example', kind: 'session', target_id: 'ses_old', action: 'relaunch', status: 'incomplete', summary: '<script>history is data</script>' }],
+      items: [
+        ...Array.from({ length: 3 }, (_, i) => ({ ...baseItem, id: `ses_night${i}`, kind: 'session', title: `Synthetic ${i}`, recommended_action: 'review_archive_eligibility' })),
+        { ...baseItem, id: '/example/tree', kind: 'worktree', title: 'Read only tree', recommended_action: 'review_worktree_removal' },
+        ...['review_merge_candidate', 'review_blockers', 'review_decision', 'review_repeatability_followup', 'none'].map((action, i) => ({ ...baseItem, id: `pr-${i + 1}`, kind: 'pr', title: `Synthetic PR ${i}`, recommended_action: action })),
+      ], decisions: [],
+    });
+    const html = realPage ? await readFile(realPage, 'utf8') : buildHtml(synthetic, await readFile(join(root, 'template.html'), 'utf8'), await readFile(join(root, 'core.mjs'), 'utf8'), await readFile(join(root, 'ui.js'), 'utf8'));
+    const embedded = html.match(/id="queue-feed">([\s\S]*?)<\/script>/)?.[1];
+    if (!embedded) throw new Error('Missing embedded queue feed');
+    const input = validateFeed(JSON.parse(embedded));
+    const path = realPage || join(directory, 'index.html');
+    if (!realPage) await writeFile(path, html);
+    await page.goto(pathToFileURL(path).href);
+    const counts = realPage ? { merge: 3, archive: 36, worktree: 71, review: 61, relaunch: 1, none: 117 } : { merge: 1, archive: 3, worktree: 1, review: 2, relaunch: 1, none: 1 };
+    expect(await page.getByTestId('queue-row').count()).toBe(realPage ? 289 : 9);
+    for (const [verb, count] of Object.entries(counts)) {
+      expect(input.items.filter((item) => recommendationVerb(item) === verb).length).toBe(count);
+      expect(await page.locator(`[data-testid="queue-row"][data-verb="${verb}"]`).count()).toBe(count);
+      await page.locator('#recommendation').selectOption(verb);
+      expect(await page.getByTestId('queue-row').count()).toBe(count);
+      await page.locator('#recommendation').selectOption('');
+    }
+    await page.locator('#recommendation').selectOption('');
+    if (realPage) {
+      for (const [kind, count] of [['session', 84], ['pr', 134], ['worktree', 71]]) expect(input.items.filter((item) => item.kind === kind).length).toBe(count);
+    }
+    expect(await page.locator('#coverage').isVisible()).toBe(true);
+    expect((await page.locator('#coverage').textContent())?.includes('unknown new root count: unknown (not reconciled)')).toBe(true);
+    expect(await page.locator('#done-overnight .overnight-entry').count()).toBe(realPage ? 5 : 1);
+    expect(await page.locator('#done-overnight button, #done-overnight input, #done-overnight textarea, #done-overnight script, #coverage script').count()).toBe(0);
+    expect(await page.locator('[data-verb="worktree"] input').count()).toBe(0);
+    await page.locator('[data-verb="worktree"] .row-open').first().click();
+    expect(await page.locator('#detail [data-action]').count()).toBe(0);
+    expect((await page.locator('#detail .recommendation-source').textContent())?.includes('review_worktree_removal')).toBe(true);
+    expect(await page.locator('[data-verb="archive"] .recommendation-source').count()).toBe(counts.archive);
+    const selectable = input.items.filter((item) => !isLocked(item) && recommendationVerb(item) === 'archive');
+    const first = selectable[0];
+    if (!first) throw new Error('No selectable archive group');
+    const selected = selectable.filter((item) => item.kind === first.kind && item.group === first.group && item.recommended_action === first.recommended_action).slice(0, 3);
+    expect(selected.length).toBe(3);
+    for (const item of selected) await page.locator(`[data-id="${item.id}"] input`).check();
+    await page.getByTestId('bulk-approve').click();
+    expect(await page.locator('#batch-preview li').count()).toBe(3);
+    await page.getByTestId('confirm-bulk').click();
+    const exported = validateFeed((await exportJson(page)).data);
+    expect(exported.decisions.length).toBe(3);
+    expect(exported.decisions.every((entry) => entry.action === 'approve' && selected.some((item) => item.id === entry.id))).toBe(true);
+    expect(new Set(exported.decisions.map((entry) => entry.batch_id)).size).toBe(1);
+    expect(JSON.stringify(exported.items) === JSON.stringify(input.items)).toBe(true);
+    expect(JSON.stringify(exported.actions_taken) === JSON.stringify(input.actions_taken)).toBe(true);
+    expect(JSON.stringify(exported.coverage) === JSON.stringify(input.coverage)).toBe(true);
+    for (const changed of [
+      { ...exported, coverage: { ...exported.coverage, unknown_new_root_count: 0 } },
+      { ...exported, actions_taken: [] },
+    ]) {
+      await page.locator('#import-decisions').setInputFiles({ name: 'changed-provenance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(changed)) });
+      await expect.poll(async () => (await page.locator('#message').textContent())?.includes('including provenance and overnight history')).toBe(true);
+      expect(validateFeed((await exportJson(page)).data).decisions.length).toBe(3);
+    }
+    await page.getByTestId('undo').click();
+    const undone = validateFeed((await exportJson(page)).data);
+    expect(undone.decisions.length).toBe(0);
+    expect(JSON.stringify(undone) === JSON.stringify(input)).toBe(true);
+    expect(await page.locator('script[src], link[href], img[src], iframe[src], source[src], video[src], audio[src]').count()).toBe(0);
+    expect(/@import|url\s*\(/i.test(html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || '')).toBe(false);
+    expect(networkRequests).toBe(0);
+    expect(pageErrors).toBe(0);
+    evidence.recordAssertionEvidence('Reconciled source history, mapped counts and reversible approval', `${realPage ? 'Private real page: 289 items (84 sessions / 134 PRs / 71 worktrees), 5 history entries' : 'Synthetic page: 9 items, 1 history entry'}. Verb counts: ${JSON.stringify(counts)}. Unknown roots visibly remain unknown; worktrees and overnight history have no decision controls. Original recommendation sublabels, all six filters, exactly 3 same-batch approvals, export and complete undo verified. Original items/coverage/history retained. Zero external resource references, HTTP(S) requests or page errors. No private content captured.`, true);
   } finally {
     await context.close();
     await browser.close();

@@ -224,7 +224,7 @@ function nativeItem(raw) {
   nativeText(raw.id, 'Supplement id', 4096);
   if (!['session', 'pr', 'proposal', 'worktree'].includes(raw.kind)) throw new Error('Invalid supplement kind');
   const item = {};
-  for (const key of ['id', 'kind', 'title', 'summary', 'recommended_action', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason']) {
+  for (const key of ['id', 'kind', 'title', 'summary', 'recommended_action', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived']) {
     if (raw[key] !== undefined) item[key] = raw[key];
   }
   // Pick only documented label/value/url data. Never copy arbitrary command/action objects.
@@ -240,17 +240,12 @@ function nativeItem(raw) {
       return [selected];
     });
   }
-  if (item.recommended_action !== undefined) {
-    nativeText(item.recommended_action, 'Supplement recommendation', 200);
-    if (!/^[a-z][a-z_]*$/.test(item.recommended_action)) item.recommended_action = 'review';
-  }
   if (raw.kind === 'session' && !/^ses_[A-Za-z0-9]+$/.test(raw.id)) throw new Error('Supplement session requires exact ses_ identity');
   if (raw.kind === 'pr') {
     const primary = [raw.pr_url, raw.url, /^https?:\/\//i.test(raw.id) ? raw.id : undefined].filter((url) => url !== undefined);
     const urls = (primary.length ? primary : item.links.map((link) => link.url)).map(nativePrUrl);
     if (!urls.length || urls.some((entry) => entry.url.toLowerCase() !== urls[0].url.toLowerCase())) throw new Error('Missing or conflicting supplement PR identity');
     if (/^pr-\d+$/.test(raw.id) && raw.id !== urls[0].id) throw new Error('Supplement PR id disagrees with URL');
-    item.id = urls[0].id;
     item.pr_url = urls[0].url;
   }
   if (raw.kind === 'worktree') {
@@ -261,10 +256,9 @@ function nativeItem(raw) {
     }
     if (new Set(paths).size > 1) throw new Error('Conflicting supplement worktree paths');
     if (paths.length) {
-      item.id = `worktree-${hash(paths[0])}`;
+      validateFeed({ items: [{ id: paths[0], kind: 'worktree', title: 'Path validation' }] });
       if (!item.evidence.some((entry) => entry.label.toLowerCase() === 'path')) item.evidence.push(evidence('Path', paths[0]));
     } else if (!/^worktree-[A-Za-z0-9_.:-]+$/.test(raw.id)) throw new Error('Supplement worktree requires a path or canonical worktree ID');
-    item.recommended_action = 'review';
     item.locked = true;
     item.protected = true;
     item.lock_reason = 'Worktree reference only. Separate ownership, ignored-file, running-process and human authorization checks required; no removal instruction.';
@@ -274,7 +268,6 @@ function nativeItem(raw) {
   if (raw.locked === true || raw.group === 'external-mission' || (raw.kind === 'session' && typeof raw.title === 'string' && externalSession(raw.title))) {
     item.locked = true;
     item.protected = true;
-    item.recommended_action = 'none';
     if (raw.group === 'external-mission' || (raw.kind === 'session' && externalSession(raw.title ?? ''))) item.group = 'external-mission';
     item.lock_reason = raw.lock_reason ?? 'External or locked native inventory item. Reference only; not yours to act on.';
   }
@@ -289,15 +282,22 @@ export function supplementReport(feed, raw) {
   const items = new Map(normalized.items.map((item) => [item.id, item]));
   for (const source of raw.items) {
     const incoming = nativeItem(source);
+    if (incoming.kind === 'pr' && incoming.pr_url !== undefined) {
+      const url = nativePrUrl(incoming.pr_url).url.toLowerCase();
+      const matches = [...items.values()].filter((entry) => entry.kind === 'pr' && (entry.id === source.id || (entry.pr_url !== undefined && nativePrUrl(entry.pr_url).url.toLowerCase() === url)));
+      if (matches.length > 1) throw new Error('Ambiguous existing PR identity');
+      if (matches.length === 1) incoming.id = matches[0].id;
+    }
     if (incoming.kind === 'worktree') {
       const path = incoming.evidence.find((entry) => entry.label.toLowerCase() === 'path')?.value;
       const matches = [...items.values()].filter((entry) => entry.kind === 'worktree' && (entry.id === source.id || (path && entry.evidence.some((fact) => fact.label.toLowerCase() === 'path' && fact.value === path))));
       if (matches.length > 1) throw new Error('Ambiguous existing worktree identity');
       if (matches.length === 1) incoming.id = matches[0].id;
     }
+    if (incoming.id !== source.id) incoming.evidence.push(evidence('Original ID', source.id));
     const previous = items.get(incoming.id);
     if (previous && previous.kind !== incoming.kind) throw new Error('Supplement identity conflicts with existing kind');
-    if (previous?.kind === 'pr' && previous.pr_url && nativePrUrl(previous.pr_url).url.toLowerCase() !== incoming.pr_url.toLowerCase()) throw new Error('Supplement PR number collides across repositories');
+    if (previous?.kind === 'pr' && previous.pr_url && (incoming.pr_url === undefined || nativePrUrl(previous.pr_url).url.toLowerCase() !== incoming.pr_url.toLowerCase())) throw new Error('Supplement PR number collides across repositories');
     if (!previous) { items.set(incoming.id, incoming); continue; }
     // Canonical Markdown/JSONL identity, title, head, recommendation and evidence win.
     const merged = { ...previous, evidence: [...previous.evidence], links: [...previous.links] };
@@ -305,18 +305,19 @@ export function supplementReport(feed, raw) {
       if (!merged.evidence.some((existing) => JSON.stringify(existing) === JSON.stringify(entry))) merged.evidence.push(entry);
     };
     for (const entry of incoming.evidence) addEvidence({ ...entry, label: `Native: ${entry.label}` });
-    for (const key of ['title', 'summary', 'head_sha', 'recommended_action', 'group']) {
+    for (const key of ['title', 'summary', 'head_sha', 'recommended_action', 'group', 'archived']) {
       if (source[key] !== undefined && incoming[key] !== previous[key]) addEvidence(evidence(`Native ${key}`, incoming[key]));
     }
     for (const link of incoming.links) if (!merged.links.some((existing) => existing.url === link.url && existing.label === link.label)) merged.links.push(link);
-    for (const key of ['workspace_id', 'owner_session_id', 'pr_url', 'head_sha']) {
+    for (const key of ['workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'age_days', 'stale_bound', 'execution_policy', 'archived']) {
       if (previous[key] === undefined && incoming[key] !== undefined) merged[key] = incoming[key];
     }
     if (incoming.protected === true) merged.protected = true;
+    // An observed archive is a safety gate, not a canonical display preference.
+    if (incoming.archived === true) merged.archived = true;
     if (isLocked(previous) || isLocked(incoming)) {
       merged.locked = true;
       merged.protected = true;
-      merged.recommended_action = previous.kind === 'worktree' ? 'review' : 'none';
       if (previous.group === 'external-mission' || incoming.group === 'external-mission') merged.group = 'external-mission';
       merged.lock_reason = previous.lock_reason ?? incoming.lock_reason ?? 'Locked source item; not yours to act on.';
     }
@@ -325,7 +326,7 @@ export function supplementReport(feed, raw) {
   // Known external ownership also locks dependent rows, independent of native row order.
   for (const item of items.values()) {
     if (item.owner_session_id && items.get(item.owner_session_id)?.group === 'external-mission') {
-      item.locked = true; item.protected = true; item.group = 'external-mission'; item.recommended_action = 'none';
+      item.locked = true; item.protected = true; item.group = 'external-mission';
       item.lock_reason = 'Owner is an external mission; all decisions and follow-ups forbidden.';
     }
   }
@@ -334,9 +335,9 @@ export function supplementReport(feed, raw) {
   if (raw.coverage !== undefined) {
     nativeObject(raw.coverage, 'Supplement coverage');
     const coverage = {};
-    for (const key of ['initial_roots', 'known_session_items', 'latest_candidate_roots_observed', 'unknown_new_root_count', 'external_mission_count', 'pr_items', 'reclaimable_worktrees']) {
+    for (const key of ['initial_roots', 'known_session_items', 'latest_candidate_roots_observed', 'unknown_new_root_count', 'unidentified_candidate_count_at_observation', 'external_mission_count', 'pr_items', 'reclaimable_worktrees']) {
       if (raw.coverage[key] !== undefined) {
-        if (!Number.isSafeInteger(raw.coverage[key]) || raw.coverage[key] < 0) throw new Error(`Invalid supplement coverage ${key}`);
+        if (!(key === 'unknown_new_root_count' && raw.coverage[key] === null) && (!Number.isSafeInteger(raw.coverage[key]) || raw.coverage[key] < 0)) throw new Error(`Invalid supplement coverage ${key}`);
         coverage[key] = raw.coverage[key];
       }
     }
@@ -347,7 +348,7 @@ export function supplementReport(feed, raw) {
   const note = `original_collection (native snapshot, NOT refreshed): ${JSON.stringify(original)}\nNative decisions/actions_taken/generated_at are not imported as authority. Worktrees are read-only references.`;
   metadata.collection_caveat = [metadata.collection_caveat, note].filter(Boolean).join('\n\n');
   // Existing decisions remain exact. A newly locked decided item fails closed rather than silently losing audit.
-  return validateFeed({ items: [...items.values()], decisions: normalized.decisions, metadata });
+  return validateFeed({ ...normalized, items: [...items.values()], metadata });
 }
 
 /** Refuse repository destinations and overwrites, including symlinked parents. */

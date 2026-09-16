@@ -25,9 +25,13 @@
     for (let index = 0; index < text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
     return (hash >>> 0).toString(16);
   }
+  function sourceSnapshot(source) {
+    const { decisions, ...envelope } = source;
+    return JSON.stringify(envelope);
+  }
   function persist() {
     try {
-      localStorage.setItem(savedKey, JSON.stringify({ items: feed.items, decisions: feed.decisions, drafts }));
+      localStorage.setItem(savedKey, JSON.stringify({ sourceSnapshot: snapshot, decisions: feed.decisions, drafts }));
       $('storage-status').textContent = 'Saved in this browser for this exact feed. Download JSON for a portable backup; private browsing and previews may clear storage.';
     } catch {
       $('storage-status').textContent = 'Browser storage unavailable. Decisions remain in this tab only: export JSON before closing.';
@@ -36,7 +40,7 @@
   function initialize(input, restore = true) {
     const validated = validateFeed(input);
     feed = validated;
-    snapshot = JSON.stringify(feed.items);
+    snapshot = sourceSnapshot(feed);
     savedKey = `review-queue-v1-${fingerprint(snapshot)}`;
     drafts = Object.create(null);
     dirty = false;
@@ -45,7 +49,7 @@
         const raw = localStorage.getItem(savedKey);
         if (raw) {
           const saved = JSON.parse(raw);
-          if (JSON.stringify(saved.items) !== snapshot) throw new Error('Stored feed does not match this snapshot. No decisions restored.');
+          if (saved.sourceSnapshot !== snapshot) throw new Error('Stored feed does not match this snapshot. No decisions restored.');
           feed = validateFeed({ ...feed, decisions: saved.decisions });
           if (saved.drafts && typeof saved.drafts === 'object' && !Array.isArray(saved.drafts)) {
             for (const item of feed.items) if (typeof saved.drafts[item.id] === 'string') drafts[item.id] = saved.drafts[item.id].slice(0, 10000);
@@ -59,13 +63,32 @@
     for (const [control, property, title] of [['kind', 'kind', 'All kinds'], ['group', 'group', 'All groups'], ['recommendation', 'recommended_action', 'All recommendations']]) {
       const select = $(control);
       select.replaceChildren(new Option(title, ''));
-      [...new Set(feed.items.map((item) => item[property]))].sort().forEach((value) => select.add(new Option(value || '(unspecified)', value)));
+      [...new Set(feed.items.map((item) => property === 'recommended_action' ? recommendationVerb(item) : item[property]))].sort().forEach((value) => select.add(new Option(value || '(unspecified)', value)));
     }
     $('search').value = ''; $('status').value = '';
     const sourceMeta = feed.metadata ?? feed.meta ?? {};
-    const sourceText = sourceMeta.collection_time || sourceMeta.collected_at || 'Collection time unknown; consult source evidence.';
+    const sourceText = sourceMeta.collection_time || sourceMeta.collected_at || feed.as_of || 'Collection time unknown; consult source evidence.';
     $('source').textContent = `Snapshot, not live state. ${sourceText.slice(0, 650)}${sourceText.length > 650 ? '…' : ''}`;
-    $('source-caveat').textContent = JSON.stringify(sourceMeta, null, 2);
+    const { items, decisions, ...provenance } = feed;
+    $('source-caveat').textContent = JSON.stringify(provenance, null, 2);
+    const coverage = $('coverage'); coverage.replaceChildren(); coverage.hidden = !feed.coverage;
+    if (feed.coverage) {
+      coverage.append(element('strong', 'Snapshot coverage — not live or atomic'));
+      for (const [key, value] of Object.entries(feed.coverage)) {
+        coverage.append(element('div', `${key.replaceAll('_', ' ')}: ${value === null ? 'unknown (not reconciled)' : value}`));
+      }
+      if (feed.coverage.unknown_new_root_count === undefined) coverage.append(element('div', 'unknown new root count: not supplied'));
+    }
+    const overnight = $('done-overnight'); overnight.replaceChildren(); overnight.hidden = !feed.actions_taken?.length;
+    if (feed.actions_taken?.length) {
+      overnight.append(element('h2', `Done overnight (${feed.actions_taken.length})`), element('p', 'Read-only source history, not decisions in this queue. Reported outcomes may be incomplete; nothing here authorizes or repeats an action.', 'muted small'));
+      for (const action of feed.actions_taken) {
+        const row = element('details', undefined, 'overnight-entry');
+        row.append(element('summary', `${action.title || action.id} · ${action.action} · ${action.status}`));
+        row.append(element('p', action.summary), element('pre', JSON.stringify(action, null, 2), 'overnight-data'));
+        overnight.append(row);
+      }
+    }
     $('export-json').disabled = false; $('export-markdown').disabled = false;
     persist(); render();
   }
@@ -75,7 +98,7 @@
     const decisions = decisionsById();
     return feed.items.filter((item) => (!$('kind').value || item.kind === $('kind').value)
       && (!$('group').value || item.group === $('group').value)
-      && (!$('recommendation').value || item.recommended_action === $('recommendation').value)
+      && (!$('recommendation').value || recommendationVerb(item) === $('recommendation').value)
       && (!$('status').value || (isLocked(item) ? 'locked' : decisions.get(item.id)?.action ?? 'pending') === $('status').value)
       && (!query || JSON.stringify(item).toLowerCase().includes(query))).sort((a, b) => Number(isLocked(a)) - Number(isLocked(b)));
   }
@@ -107,18 +130,19 @@
     $('select-visible').indeterminate = selectable.some((item) => selected.has(item.id)) && !$('select-visible').checked;
     const nodes = items.map((item) => {
       const row = element('div', undefined, `queue-row${item.id === activeId ? ' active' : ''}${selected.has(item.id) ? ' selected' : ''}${isLocked(item) ? ' locked' : ''}`);
-      row.dataset.testid = 'queue-row'; row.dataset.id = item.id;
+      row.dataset.testid = 'queue-row'; row.dataset.id = item.id; row.dataset.verb = recommendationVerb(item);
       const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.id); checkbox.dataset.testid = 'item-select'; checkbox.setAttribute('aria-label', `Select ${item.title}`);
       checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(item.id) : selected.delete(item.id); renderList(); renderBulk(); });
       const open = element('button', undefined, 'row-open'); open.setAttribute('aria-label', `Review ${item.title}`); open.setAttribute('aria-current', item.id === activeId ? 'true' : 'false');
       open.append(element('span', item.title, 'row-title'), element('span', item.summary, 'row-summary'));
-      const meta = element('span', undefined, 'row-meta'); meta.append(element('span', item.kind, 'tag'), element('span', isLocked(item) ? 'Not yours to act on' : statuses[decisions.get(item.id)?.action] ?? 'Pending'), element('span', `→ ${item.recommended_action}`)); open.append(meta);
+      const meta = element('span', undefined, 'row-meta'); meta.append(element('span', item.kind, 'tag'), element('span', isLocked(item) ? 'Not yours to act on' : statuses[decisions.get(item.id)?.action] ?? 'Pending'), element('span', `→ ${recommendationVerb(item)}`)); open.append(meta);
+      if (recommendationVerb(item) !== item.recommended_action) open.append(element('span', item.recommended_action, 'row-summary recommendation-source'));
       open.addEventListener('click', () => { activeId = item.id; renderList(); renderDetail(); });
       if (!isLocked(item)) row.append(checkbox);
       row.append(open); return row;
     });
     const firstLocked = items.findIndex(isLocked);
-    if (firstLocked !== -1) nodes.splice(firstLocked, 0, element('h3', 'Other owners · not yours to act on', 'locked-heading'));
+    if (firstLocked !== -1) nodes.splice(firstLocked, 0, element('h3', 'Read-only references / other owners · not yours to act on', 'locked-heading'));
     $('list').replaceChildren(...(nodes.length ? nodes : [element('p', 'No items match these filters.', 'empty')]));
   }
   function renderBulk() {
@@ -142,7 +166,7 @@
     for (const value of [item.kind, item.group, `Risk: ${item.risk}`, item.age || 'Age unknown']) meta.append(element('span', value, 'tag'));
     const heading = element('h2', item.title); heading.dataset.testid = 'detail-title';
     root.append(meta, heading, element('div', item.id, 'detail-id'));
-    if (isLocked(item)) root.append(element('p', `Not yours to act on. ${item.lock_reason || 'Controlled by another owner; read-only.'}`, 'locked-banner'));
+    if (isLocked(item)) root.append(element('p', `${recommendationVerb(item) === 'worktree' ? 'Worktree reference — read-only.' : 'Not yours to act on.'} ${item.lock_reason || 'Separate ownership and authorization checks required; read-only.'}`, 'locked-banner'));
     else if (item.protected) root.append(element('p', 'Protected item: approving here never overrides pin, running-state or permission restrictions.', 'notice'));
     const evidence = element('section', undefined, 'section'); evidence.append(element('h3', 'Evidence · inspect before deciding'));
     if (!item.evidence.length) evidence.append(element('p', 'No evidence supplied. Ask for information rather than infer a pass.', 'muted'));
@@ -155,7 +179,7 @@
     if (item.links.length) { const links = element('div', undefined, 'actions'); for (const link of item.links) links.append(safeLink(link.label, link.url)); evidence.append(links); }
     root.append(evidence);
     const summary = element('section', undefined, 'section'); summary.append(element('h3', 'Context'), element('p', item.summary, 'summary'));
-    const recommendation = element('div', undefined, 'recommendation'); recommendation.append(element('div', 'RECOMMENDATION · NOT YOUR DECISION', 'eyebrow'), element('strong', item.recommended_action), element('p', isLocked(item) ? 'Read-only reference. No decisions or follow-ups can be recorded for this item.' : 'Approve means accept this recommendation, subject to audit-agent checks. Decline records disagreement; it never closes a PR.', 'small muted')); summary.append(recommendation); root.append(summary);
+    const recommendation = element('div', undefined, 'recommendation'); recommendation.append(element('div', 'RECOMMENDATION · NOT YOUR DECISION', 'eyebrow'), element('strong', recommendationVerb(item)), element('div', `Source: ${item.recommended_action}`, 'small muted recommendation-source'), element('p', isLocked(item) ? 'Read-only reference. No decisions or follow-ups can be recorded for this item.' : 'Approve means accept this recommendation, subject to audit-agent checks. Decline records disagreement; it never closes a PR.', 'small muted')); summary.append(recommendation); root.append(summary);
     if (isLocked(item)) return;
     const review = element('section', undefined, 'section'); const owner = item.owner_session_id ?? (item.kind === 'session' ? item.id : null);
     review.append(element('h3', 'Your decision'), element('p', owner ? `Follow-up owner: ${owner}` : 'No session owner supplied. Follow-ups require manual routing by the audit agent.', 'small muted'));
@@ -220,7 +244,7 @@
   }));
   $('import-decisions').addEventListener('change', () => readFileInput($('import-decisions'), (data) => {
     const backup = validateFeed(data);
-    if (JSON.stringify(backup.items) !== snapshot) throw new Error('Backup must contain the exact same items and source snapshot. Load its feed first; never replay decisions onto changed evidence.');
+    if (sourceSnapshot(backup) !== snapshot) throw new Error('Backup must contain the exact same items and source snapshot, including provenance and overnight history. Load its feed first; never replay decisions onto changed evidence.');
     const validated = validateFeed({ ...feed, decisions: backup.decisions });
     if ((dirty || feed.decisions.length) && !window.confirm('Replace current decision history with this backup? Export current decisions first if needed.')) return;
     feed = validated; dirty = true; exportStamp = ''; selected.clear(); persist(); render(); message('Restored decision history for the exact matching snapshot. No actions executed.');

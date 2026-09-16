@@ -6,13 +6,20 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Script } from 'node:vm';
-import { validateFeed, applyDecision, undoLast, latestDecisions, exportDecisions, safeUrl, isLocked } from '../../tools/review-queue/core.mjs';
+import { validateFeed, applyDecision, undoLast, latestDecisions, exportDecisions, safeUrl, isLocked, recommendationVerb } from '../../tools/review-queue/core.mjs';
 import { convertReport, supplementReport, privateOutputPath, writePrivateOutput, parseQueueArgs, tableCells } from '../../tools/review-queue/convert.mjs';
 import { buildHtml } from '../../tools/review-queue/build.mjs';
 
 const time = '2026-01-01T12:00:00.000Z';
 const later = '2026-01-01T12:01:00.000Z';
 const sourceDirectory = fileURLToPath(new URL('../../tools/review-queue/', import.meta.url));
+function required<T>(value: T | undefined, label: string): T {
+  if (value === undefined) throw new Error(`Missing synthetic ${label}`);
+  return value;
+}
+function findItem(source: ReturnType<typeof validateFeed>, id: string) {
+  return required(source.items.find((entry) => entry.id === id), `item ${id}`);
+}
 function item(id = 'ses_exampleA') {
   return { id, kind: 'session', title: 'Synthetic task', summary: 'Fictional evidence only',
     evidence: [{ label: 'Workspace', value: 'openwork' }, { label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }],
@@ -25,6 +32,22 @@ function feed() {
 function prItem() {
   return { id: 'pr-7', kind: 'pr', title: 'Synthetic PR', recommended_action: 'merge', group: 'PR / OPEN',
     pr_url: 'https://github.com/example/demo/pull/7', head_sha: 'a'.repeat(40), evidence: [{ label: 'State', value: 'OPEN' }] };
+}
+function nightInput() {
+  return {
+    schema_version: 1, status: 'Synthetic historical inventory only', as_of: time,
+    session_inventory_as_of: time, generated_at: later,
+    coverage: { initial_roots: 3, known_session_items: 2, latest_candidate_roots_observed: 4,
+      unknown_new_root_count: null, unidentified_candidate_count_at_observation: 1,
+      external_mission_count: 0, pr_items: 1, reclaimable_worktrees: 1, caveat: 'Unknown is not zero; fictional coverage.' },
+    items: [{ ...item(), recommended_action: 'review_archive_eligibility', age_days: 1.5,
+      stale_bound: true, execution_policy: 'Review only; current authorization required', archived: false },
+    { id: '/example/night-tree', kind: 'worktree', title: 'Synthetic worktree', recommended_action: 'review_worktree_removal', age_days: null }],
+    actions_taken: [{ id: 'history-1', kind: 'session', action: 'archive', target_id: 'ses_historical', status: 'recorded, not re-executed',
+      created_session_id: 'ses_followup', title: 'Synthetic historical follow-up', createdAt: Date.parse(time),
+      head: 'a'.repeat(40), summary: 'Historical source only', evidence: [{ label: 'Observation', value: 'Synthetic record' }] }],
+    metadata: { source: 'synthetic-night.json', collected_at: time, collection_time: 'Fictional original window', collection_caveat: 'Not live; never infer current permission.' },
+  };
 }
 function instructions(candidate: object, action = 'approve', comment = '') {
   const source = validateFeed({ items: [candidate] });
@@ -219,7 +242,7 @@ test('follow-ups use exact session/owner IDs and JSON escaping; worktrees/propos
     const result = instructions(candidate, 'request_changes', comment);
     const call = result.split('\n').find((line) => line.startsWith('session.send '));
     expect(call).toBeDefined();
-    expect(JSON.parse(call!.slice('session.send '.length))).toEqual({ sessionId: 'ses_exampleA', text: comment });
+    expect(JSON.parse(required(call, 'session.send line').slice('session.send '.length))).toEqual({ sessionId: 'ses_exampleA', text: comment });
     expect(result).not.toMatch(/^gh pr /m);
   }
   expect(instructions(prItem(), 'ask_info', 'Please clarify')).toContain('BLOCKED');
@@ -276,14 +299,14 @@ test('converter handles all table rows, PR states, merged report details and sta
   expect(converted.items.filter((entry) => entry.kind === 'pr')).toHaveLength(3);
   expect(converted.items.filter((entry) => entry.kind === 'proposal')).toHaveLength(3);
   expect(converted.decisions).toEqual([]);
-  expect(converted.metadata.collection_caveat).toContain('Inventory is multi-call, not atomic');
-  expect(converted.metadata.collected_at).toBeUndefined();
-  expect(converted.items.find((entry) => entry.id === 'ses_exampleA')).toMatchObject({ recommended_action: 'archive', protected: false, workspace_id: 'ws_example' });
-  for (const id of ['ses_exampleB', 'ses_exampleC', 'ses_chatExample']) expect(converted.items.find((entry) => entry.id === id).protected).toBe(true);
-  expect(converted.items.find((entry) => entry.id === 'pr-7')).toMatchObject({ recommended_action: 'merge', owner_session_id: 'ses_exampleB', head_sha: 'a'.repeat(40) });
-  expect(converted.items.find((entry) => entry.id === 'pr-7').summary).toContain('Passed synthetic only');
-  expect(converted.items.find((entry) => entry.id === 'pr-8')).toMatchObject({ recommended_action: 'keep', protected: true });
-  expect(converted.items.find((entry) => entry.id === 'pr-9').summary).toContain('verification unknown');
+  expect(required(converted.metadata, 'converted metadata').collection_caveat).toContain('Inventory is multi-call, not atomic');
+  expect(required(converted.metadata, 'converted metadata').collected_at).toBeUndefined();
+  expect(findItem(converted, 'ses_exampleA')).toMatchObject({ recommended_action: 'archive', protected: false, workspace_id: 'ws_example' });
+  for (const id of ['ses_exampleB', 'ses_exampleC', 'ses_chatExample']) expect(findItem(converted, id).protected).toBe(true);
+  expect(findItem(converted, 'pr-7')).toMatchObject({ recommended_action: 'merge', owner_session_id: 'ses_exampleB', head_sha: 'a'.repeat(40) });
+  expect(findItem(converted, 'pr-7').summary).toContain('Passed synthetic only');
+  expect(findItem(converted, 'pr-8')).toMatchObject({ recommended_action: 'keep', protected: true });
+  expect(findItem(converted, 'pr-9').summary).toContain('verification unknown');
   expect(convertReport(report, jsonl, 'synthetic.md')).toEqual(converted);
   evidence.recordAssertionEvidence('Report conversion preserves counts and historical caveats', `Converted ${converted.items.length} synthetic items: six sessions, three PRs and three stable proposals, with zero decisions and no collected_at invented. Preserved non-atomic caveat, exact workspace/owner/head, protected pinned/running/Chat rows, closed PR keep recommendation, and unknown proof on the unverified historical PR.`, true);
 });
@@ -291,12 +314,12 @@ test('converter handles all table rows, PR states, merged report details and sta
 test('converter locks explicit external mission and exact controller without broad title inference', async ({ evidence }) => {
   const converted = convertReport(report, jsonl);
   for (const id of ['ses_externalA', 'ses_controller']) {
-    const entry = converted.items.find((entry) => entry.id === id);
+    const entry = findItem(converted, id);
     expect(entry).toMatchObject({ locked: true, group: 'external-mission', recommended_action: 'none' });
     expect(entry.summary).toContain('External mission (untouched)');
   }
-  expect(isLocked(converted.items.find((entry) => entry.id === 'ses_chatExample'))).toBe(false);
-  const externalProposal = converted.items.find((entry) => entry.kind === 'proposal' && entry.owner_session_id === 'ses_controller');
+  expect(isLocked(findItem(converted, 'ses_chatExample'))).toBe(false);
+  const externalProposal = required(converted.items.find((entry) => entry.kind === 'proposal' && entry.owner_session_id === 'ses_controller'), 'external proposal');
   expect(isLocked(externalProposal)).toBe(true);
   expect(() => applyDecision(converted, ['ses_controller'], 'comment', 'hello', time, 'batch')).toThrow(/Locked/);
   evidence.recordAssertionEvidence('Converter locks exact external identities without broad title guesses', 'Synthetic SUPAUD-prefixed session and exact controller were locked with external-mission/none and untouched summaries; a dependent proposal was locked. An innocent meeting-coordinator title was not locked. A comment to the controller was rejected.', true);
@@ -307,7 +330,7 @@ test('converter deduplicates sessions and JSONL entries, retains escaped pipes a
   const converted = convertReport(duplicated, jsonl + '\n' + JSON.stringify({ number: 9, title: 'last row', state: 'MERGED' }));
   expect(converted.items.filter((entry) => entry.kind === 'session')).toHaveLength(6);
   expect(converted.items.filter((entry) => entry.kind === 'pr')).toHaveLength(3);
-  expect(converted.items.find((entry) => entry.id === 'pr-9').title).toContain('last row');
+  expect(findItem(converted, 'pr-9').title).toContain('last row');
   expect(tableCells('| left \\| pipe | right |')).toEqual(['left | pipe', 'right']);
   expect(() => convertReport(report, '{broken')).toThrow(/JSONL/);
   expect(() => convertReport(report, '{"number":"7"}')).toThrow(/Invalid PR/);
@@ -334,25 +357,26 @@ test('native supplementation preserves canonical rows, merges evidence, adds mis
   expect(JSON.stringify(raw)).toBe(before);
   expect(supplemented.items).toHaveLength(original.items.length + 2);
   expect(original.items.find((entry) => entry.id === 'ses_added')).toBeUndefined();
-  const session = supplemented.items.find((entry) => entry.id === 'ses_exampleA');
-  expect(session.title).toBe(original.items.find((entry) => entry.id === 'ses_exampleA').title);
-  expect(session.evidence).toEqual(expect.arrayContaining(original.items.find((entry) => entry.id === 'ses_exampleA').evidence));
+  const session = findItem(supplemented, 'ses_exampleA');
+  expect(session.title).toBe(findItem(original, 'ses_exampleA').title);
+  expect(session.evidence).toEqual(expect.arrayContaining(findItem(original, 'ses_exampleA').evidence));
   expect(session.evidence).toContainEqual({ label: 'Native summary', value: 'Supplement observation' });
-  const pr = supplemented.items.find((entry) => entry.id === 'pr-7');
+  const pr = findItem(supplemented, 'pr-7');
   expect(pr.head_sha).toBe('a'.repeat(40));
   expect(pr.evidence).toContainEqual({ label: 'Native head_sha', value: 'f'.repeat(40) });
   expect(supplemented.decisions).toEqual([]);
   expect(JSON.stringify(supplemented)).not.toContain('DO_NOT_IMPORT');
-  expect(supplemented.metadata.collection_time).toBe(original.metadata.collection_time);
-  expect(supplemented.metadata.collected_at).toBeUndefined();
-  expect(supplemented.metadata.collection_caveat).toContain(`original_collection (native snapshot, NOT refreshed): {"as_of":"${time}"`);
-  expect(supplemented.metadata.collection_caveat).toContain('Title-only coverage; one root unknown');
-  const worktree = supplemented.items.find((entry) => entry.kind === 'worktree');
-  expect(worktree.id).toMatch(/^worktree-[a-f0-9]{16}$/);
-  expect(worktree).toMatchObject({ locked: true, protected: true, recommended_action: 'review' });
+  expect(required(supplemented.metadata, 'supplemented metadata').collection_time).toBe(required(original.metadata, 'original metadata').collection_time);
+  expect(required(supplemented.metadata, 'supplemented metadata').collected_at).toBeUndefined();
+  expect(required(supplemented.metadata, 'supplemented metadata').collection_caveat).toContain(`original_collection (native snapshot, NOT refreshed): {"as_of":"${time}"`);
+  expect(required(supplemented.metadata, 'supplemented metadata').collection_caveat).toContain('Title-only coverage; one root unknown');
+  const worktree = findItem(supplemented, '/example/private/tree');
+  expect(worktree).toMatchObject({ kind: 'worktree', locked: true, protected: true, recommended_action: 'remove' });
+  expect(isLocked(worktree)).toBe(true);
+  expect(() => applyDecision(supplemented, [worktree.id], 'approve', '', time, 'remove')).toThrow(/Locked/);
   expect(supplementReport(original, { ...raw, items: [...raw.items, raw.items[3]] }).items).toHaveLength(supplemented.items.length);
   expect(exportDecisions(supplemented, later).instructions).not.toMatch(/worktree remove|DO_NOT_IMPORT/);
-  evidence.recordAssertionEvidence('Native supplement adds evidence without importing authority', `Item count grew from ${original.items.length} to ${supplemented.items.length}; native/source inputs remained unchanged, canonical title/head/evidence won, differing native observations remained evidence, and duplicate worktree rows deduplicated. No decisions or DO_NOT_IMPORT command extras survived. Collection time stayed unchanged; original as_of/coverage were retained. Worktree ID was hashed, locked/review-only and emitted no removal instruction.`, true);
+  evidence.recordAssertionEvidence('Native supplement adds evidence without importing authority', `Item count grew from ${original.items.length} to ${supplemented.items.length}; native/source inputs remained unchanged, canonical title/head/evidence won, differing native observations remained evidence, and duplicate worktree rows deduplicated. No decisions or DO_NOT_IMPORT command extras survived. Collection time stayed unchanged; original as_of/coverage were retained. Worktree path ID and remove recommendation were preserved, but the row was locked read-only, rejected approval and emitted no removal instruction.`, true);
 });
 
 test('native locks are monotonic across duplicate rows and cover exact external owners and their dependents', async ({ evidence }) => {
@@ -365,10 +389,10 @@ test('native locks are monotonic across duplicate rows and cover exact external 
   ] };
   const supplemented = supplementReport(original, native);
   for (const id of ['ses_exampleA', 'ses_locked', 'pr-7', ...Array.from({ length: 5 }, (_, index) => `ses_external${index}`)]) {
-    expect(isLocked(supplemented.items.find((entry) => entry.id === id))).toBe(true);
+    expect(isLocked(findItem(supplemented, id))).toBe(true);
     expect(() => applyDecision(supplemented, [id], 'comment', 'No action', time, 'batch')).toThrow(/Locked/);
   }
-  expect(supplemented.items.find((entry) => entry.id === 'ses_exampleA').group).toBe('external-mission');
+  expect(findItem(supplemented, 'ses_exampleA').group).toBe('external-mission');
   const decided = applyDecision(original, ['ses_exampleA'], 'approve', '', time, 'old');
   expect(() => supplementReport(decided, native)).toThrow(/Locked/);
   expect(decided.decisions).toHaveLength(1);
@@ -388,6 +412,239 @@ test('native supplementation rejects malformed selected data, ambiguous identiti
   expect(merged.items).toHaveLength(1);
   expect(merged.items[0]).toMatchObject({ id: 'worktree-existing', title: 'Keep identity', locked: true });
   evidence.recordAssertionEvidence('Malformed supplement fields and identity collisions fail closed', 'Rejected null/array/missing/malformed items, invalid kinds/flags/evidence/links/date/coverage, four unsafe or mismatched PR identities, and conflicting worktree paths. A matching worktree path merged to one existing canonical ID/title while adding its lock.', true);
+});
+
+test('night feed preserves typed snapshot fields without inventing absent metadata or freshness', async ({ evidence }) => {
+  const raw = nightInput();
+  const before = JSON.stringify(raw);
+  const normalized = validateFeed(raw);
+  expect(normalized).toMatchObject(raw);
+  expect(normalized.decisions).toEqual([]);
+  expect(JSON.stringify(raw)).toBe(before);
+  const coverage = required(normalized.coverage, 'night coverage');
+  expect(coverage.unknown_new_root_count).toBeNull();
+  coverage.initial_roots = 99;
+  required(normalized.metadata, 'night metadata').source = 'changed';
+  required(normalized.actions_taken, 'night history')[0].summary = 'changed';
+  expect(JSON.stringify(raw)).toBe(before);
+  const minimal = validateFeed({ items: [item()] });
+  for (const field of ['schema_version', 'status', 'as_of', 'session_inventory_as_of', 'generated_at', 'coverage', 'actions_taken', 'metadata']) expect(minimal).not.toHaveProperty(field);
+  for (const field of ['age_days', 'stale_bound', 'execution_policy', 'archived']) expect(findItem(minimal, 'ses_exampleA')).not.toHaveProperty(field);
+  evidence.recordAssertionEvidence('Night fields are typed snapshot data, not live authority', 'All synthetic feed/item/history/metadata fields survived normalization; nested coverage, metadata and history copies did not mutate input. Missing optional fields stayed absent and no decisions were created.', true);
+});
+
+test('night snapshot version, status and all three timestamps reject invalid types and bounds', async ({ evidence }) => {
+  for (const schema_version of [null, true, '1', 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, {}, []]) {
+    expect(() => validateFeed({ items: [], schema_version })).toThrow(/schema_version/);
+  }
+  for (const schema_version of [0, 1, Number.MAX_SAFE_INTEGER]) expect(validateFeed({ items: [], schema_version }).schema_version).toBe(schema_version);
+  for (const status of [null, false, 1, {}, [], 'x'.repeat(2001), '\u0000']) expect(() => validateFeed({ items: [], status })).toThrow(/status/);
+  expect(validateFeed({ items: [], status: 'x'.repeat(2000) }).status).toHaveLength(2000);
+  for (const field of ['as_of', 'session_inventory_as_of', 'generated_at']) {
+    expect(validateFeed({ items: [], [field]: '2026-01-01T07:00:00-05:00' })).toHaveProperty(field, time);
+    for (const value of [null, 0, true, {}, [], 'yesterday', '2026-01-01', '2026-02-30T12:00:00Z', '2026-01-01T12:00:00', '2026-01-01T24:00:00Z']) {
+      expect(() => validateFeed({ items: [], [field]: value })).toThrow(new RegExp(field));
+    }
+  }
+  evidence.recordAssertionEvidence('Night snapshot envelope validates types and timestamps', 'Safe integer versions and bounded status accepted; wrong types, fractional/unsafe versions, control text and oversized status rejected. Every timestamp normalized an explicit offset and rejected missing timezone, impossible date, invalid hour and nontext input.', true);
+});
+
+test('coverage distinguishes nullable unknown counts from zero and rejects invalid values for every count', async ({ evidence }) => {
+  const fields = ['initial_roots', 'known_session_items', 'latest_candidate_roots_observed', 'unknown_new_root_count', 'unidentified_candidate_count_at_observation', 'external_mission_count', 'pr_items', 'reclaimable_worktrees'];
+  for (const field of fields) {
+    for (const value of [0, 1, Number.MAX_SAFE_INTEGER]) expect(validateFeed({ items: [], coverage: { [field]: value } }).coverage).toEqual({ [field]: value });
+    for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '0', false, {}, []]) {
+      expect(() => validateFeed({ items: [], coverage: { [field]: value } })).toThrow(new RegExp(`coverage.${field}`));
+    }
+    if (field !== 'unknown_new_root_count') expect(() => validateFeed({ items: [], coverage: { [field]: null } })).toThrow(new RegExp(field));
+  }
+  const unknown = validateFeed({ items: [], coverage: { unknown_new_root_count: null } });
+  expect(unknown.coverage).toEqual({ unknown_new_root_count: null });
+  expect(validateFeed(JSON.parse(exportDecisions(unknown, later).json))).toEqual(unknown);
+  expect(validateFeed({ items: [], coverage: {} }).coverage).not.toHaveProperty('unknown_new_root_count');
+  for (const coverage of [null, [], 'unknown', 0, { unexpected: 1 }, { caveat: null }, { caveat: 1 }, { caveat: '\u0000' }, { caveat: 'x'.repeat(20001) }]) expect(() => validateFeed({ items: [], coverage })).toThrow(/coverage/);
+  expect(validateFeed({ items: [], coverage: { caveat: 'x'.repeat(20000) } }).coverage).toEqual({ caveat: 'x'.repeat(20000) });
+  evidence.recordAssertionEvidence('Coverage unknown is distinct from zero and absent', 'All eight count fields accepted nonnegative safe integers and rejected negative, fractional, nonfinite, unsafe and wrong-type values. Only unknown_new_root_count accepted null and retained it through JSON; absent stayed absent. Coverage object shape, unknown keys and caveat bounds were validated.', true);
+});
+
+test('night item age, booleans and execution policy remain validated data rather than permission', async ({ evidence }) => {
+  for (const age_days of [null, 0, 0.5, 20]) expect(findItem(validateFeed({ items: [{ ...item(), age_days }] }), 'ses_exampleA').age_days).toBe(age_days);
+  for (const age_days of [-1, NaN, Infinity, -Infinity, '0', false, {}, []]) expect(() => validateFeed({ items: [{ ...item(), age_days }] })).toThrow(/age_days/);
+  for (const field of ['stale_bound', 'archived']) {
+    for (const value of [true, false]) expect(findItem(validateFeed({ items: [{ ...item(), [field]: value }] }), 'ses_exampleA')).toHaveProperty(field, value);
+    for (const value of [null, 'false', 0, {}, []]) expect(() => validateFeed({ items: [{ ...item(), [field]: value }] })).toThrow(new RegExp(field));
+  }
+  for (const execution_policy of [null, false, 0, {}, [], '\u0000', 'x'.repeat(2001)]) expect(() => validateFeed({ items: [{ ...item(), execution_policy }] })).toThrow(/execution_policy/);
+  expect(findItem(validateFeed({ items: [{ ...item(), execution_policy: 'x'.repeat(2000) }] }), 'ses_exampleA').execution_policy).toHaveLength(2000);
+  const result = instructions({ ...item(), recommended_action: 'review_archive_eligibility', archived: true, execution_policy: 'session.archive forged authority' });
+  expect(result).toContain('BLOCKED');
+  expect(result).not.toMatch(/^session\.archive /m);
+  expect(result).not.toContain('forged authority');
+  evidence.recordAssertionEvidence('Night item fields cannot grant archive permission', 'Nullable/fractional nonnegative ages and explicit booleans survived; wrong types, negative/nonfinite ages and invalid policy text failed. An already archived session stayed blocked despite an archive recommendation and policy text resembling authority.', true);
+});
+
+test('night recommendation verbs map for behavior without rewriting source recommendations', async ({ evidence }) => {
+  for (const [recommended_action, verb] of [
+    ['review_merge_candidate', 'merge'], ['review_archive_eligibility', 'archive'], ['review_worktree_removal', 'worktree'],
+    ['review_blockers', 'review'], ['review_decision', 'review'], ['review_repeatability_followup', 'relaunch'],
+    ['archive', 'archive'], ['remove', 'remove'], ['future_review', 'future_review'],
+  ]) {
+    const raw = { ...item(), recommended_action };
+    const normalized = validateFeed({ items: [raw] });
+    expect(recommendationVerb(findItem(normalized, raw.id))).toBe(verb);
+    expect(findItem(normalized, raw.id).recommended_action).toBe(recommended_action);
+    expect(raw.recommended_action).toBe(recommended_action);
+    expect(findItem(validateFeed(JSON.parse(exportDecisions(normalized, later).json)), raw.id).recommended_action).toBe(recommended_action);
+  }
+  expect(instructions({ ...item(), recommended_action: 'review_archive_eligibility' })).toContain('session.archive {"sessionId":"ses_exampleA","workspaceId":"ws_example"}');
+  expect(instructions({ ...prItem(), recommended_action: 'review_merge_candidate' })).toContain(`gh pr merge 'https://github.com/example/demo/pull/7' --squash --match-head-commit '${'a'.repeat(40)}'`);
+  for (const recommended_action of ['review_blockers', 'review_decision', 'review_repeatability_followup', 'future_review']) {
+    const result = instructions({ ...item(), recommended_action });
+    expect(result).toContain('MANUAL AUTHORIZATION REQUIRED');
+    expect(result).not.toMatch(/^session\.|^gh |^git |^rm /m);
+  }
+  const mixed = validateFeed({ items: [item(), { ...item('ses_exampleB'), recommended_action: 'review_archive_eligibility' }] });
+  expect(() => applyDecision(mixed, mixed.items.map((entry) => entry.id), 'approve', '', time, 'mixed-verbs')).toThrow(/homogeneous/);
+  evidence.recordAssertionEvidence('Recommendation mapping never overwrites original intent', 'All six night verbs and unchanged legacy/unknown verbs retained exact source recommendations through JSON. Archive/merge mappings used existing conditional gates; review/relaunch/unknown approvals stayed manual. Equal mapped verbs did not bypass original-recommendation bulk homogeneity.', true);
+});
+
+test('URL and path item IDs preserve exact identities and reject unsafe or wrong-kind forms', async ({ evidence }) => {
+  for (const id of ['https://github.com/example/demo/pull/7', 'https://github.com/example/demo/pull/7/']) {
+    const source = validateFeed({ items: [{ ...prItem(), id }] });
+    expect(source.items[0].id).toBe(id);
+    const decided = applyDecision(source, [id], 'defer', '', time, 'url-id');
+    expect(latestDecisions(decided)[0].id).toBe(id);
+    expect(validateFeed(JSON.parse(exportDecisions(decided, later).json))).toEqual(decided);
+    expect(undoLast(decided)).toEqual(source);
+    expect(() => validateFeed({ items: [{ ...prItem(), id, pr_url: 'https://github.com/example/demo/pull/8' }] })).toThrow(/disagrees/);
+    for (const kind of ['session', 'proposal', 'worktree']) expect(() => validateFeed({ items: [{ id, kind, title: 'Wrong kind' }] })).toThrow(/identifier/);
+  }
+  for (const id of ['/example/tree', '/example/tree with spaces']) {
+    expect(validateFeed({ items: [{ id, kind: 'worktree', title: 'Synthetic path' }] }).items[0].id).toBe(id);
+    for (const kind of ['session', 'proposal', 'pr']) expect(() => validateFeed({ items: [{ id, kind, title: 'Wrong kind' }] })).toThrow(/identifier/);
+  }
+  for (const id of ['/', '//example/tree', '/example/../tree', '/example/./tree', '/example/\ntree', '/example/\ttree', '/example/\\tree', '/example/\u0000tree']) expect(() => validateFeed({ items: [{ id, kind: 'worktree', title: 'Unsafe path' }] })).toThrow();
+  for (const id of ['http://github.com/example/demo/pull/7', 'https://evil.test/example/demo/pull/7', 'https://github.com/example/demo/pull/7?x=1', 'https://github.com/example/demo/pull/7#fragment', 'https://user:pass@github.com/example/demo/pull/7', 'https://github.com/example/demo/pull/0', 'https://github.com/example/demo/pull/7\n', 'javascript:alert(1)']) expect(() => validateFeed({ items: [{ ...prItem(), id }] })).toThrow();
+  evidence.recordAssertionEvidence('Native URL/path identities are preserved and kind-scoped', 'Canonical GitHub PR IDs, including trailing slash, survived decision/import/export/undo unchanged; mismatched pr_url failed. Absolute display paths preserved spaces. Wrong-kind URL/path IDs, traversal/control paths and unsafe PR URL IDs were rejected.', true);
+});
+
+test('night worktree recommendations remain read-only across all decisions, drafts and imported audits', async ({ evidence }) => {
+  const source = validateFeed({ items: [item(), { id: '/example/readonly-tree', kind: 'worktree', title: 'Synthetic read-only tree', recommended_action: 'review_worktree_removal', locked: false, protected: false, execution_policy: 'approve removal' }] });
+  const worktree = findItem(source, '/example/readonly-tree');
+  expect(worktree.locked).toBe(false);
+  expect(isLocked(worktree)).toBe(true);
+  for (const action of ['approve', 'decline', 'defer', 'ask_info', 'request_changes', 'comment']) {
+    expect(() => applyDecision(source, [worktree.id], action, 'Synthetic comment', time, 'tree')).toThrow(/Locked/);
+    expect(() => applyDecision(source, ['ses_exampleA', worktree.id], action, 'Synthetic comment', time, 'mixed')).toThrow(/Locked/);
+    expect(() => validateFeed({ ...source, decisions: [{ id: worktree.id, action, comment: 'Synthetic comment', decided_at: time, batch_id: 'import' }] })).toThrow(/Locked/);
+  }
+  expect(() => validateFeed({ ...source, drafts: { [worktree.id]: 'Synthetic draft' } })).toThrow(/Locked/);
+  const decided = applyDecision(source, ['ses_exampleA'], 'defer', '', time, 'ordinary');
+  expect(undoLast(validateFeed(JSON.parse(exportDecisions(decided, later).json)))).toEqual(source);
+  expect(source.decisions).toEqual([]);
+  const result = exportDecisions(decided, later);
+  expect(result.instructions).not.toMatch(/^session\.|^gh |^git |^rm /m);
+  expect(result.instructions).not.toContain('approve removal');
+  evidence.recordAssertionEvidence('Worktree review cannot become an executable decision', 'review_worktree_removal stayed locked even with explicit false lock/protection flags. All six single/bulk/import actions and drafts were rejected. An unrelated defer round-tripped and undid without changing the worktree or generating mutation instructions.', true);
+});
+
+test('actions taken validate every required and optional field without becoming decision authority', async ({ evidence }) => {
+  const action = nightInput().actions_taken[0];
+  const invalid: object[] = [
+    ...['id', 'kind', 'action', 'target_id', 'status'].map((field) => ({ ...action, [field]: undefined })),
+    ...['id', 'kind', 'action', 'target_id', 'status', 'created_session_id', 'title', 'createdAt', 'head', 'summary', 'evidence'].flatMap((field) => [null, false, {}].map((value) => ({ ...action, [field]: value }))),
+    { ...action, id: 'unsafe id' }, { ...action, kind: 'shell' }, { ...action, target_id: 'not-session' },
+    { ...action, created_session_id: 'not-session' }, { ...action, command: 'DO_NOT_IMPORT' },
+    { ...action, action: ' ' }, { ...action, status: '' }, { ...action, title: ' ' },
+    ...[['id', 200], ['action', 200], ['status', 2000], ['title', 500], ['head', 100], ['summary', 20000]].map(([field, bound]) => {
+      if (typeof field !== 'string' || typeof bound !== 'number') throw new Error('Invalid synthetic text boundary');
+      return { ...action, [field]: 'x'.repeat(bound + 1) };
+    }),
+    ...[-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, 8640000000000001, '0'].map((createdAt) => ({ ...action, createdAt })),
+    ...['text', [{ label: 'Missing value' }], [{ label: 'Unsafe URL', url: 'javascript:alert(1)' }], [{ label: 'Extra', value: 'x', execute: true }], [{ label: 'Bad value', value: 0 }], [{ label: ' '.repeat(201), value: 'x' }], Array.from({ length: 101 }, () => ({ label: 'Too many', value: 'x' }))].map((evidence) => ({ ...action, evidence })),
+  ];
+  for (const candidate of invalid) expect(() => validateFeed({ items: [], actions_taken: [candidate] })).toThrow();
+  for (const actions_taken of [null, {}, 'history', [null], Array.from({ length: 100001 }, () => action)]) expect(() => validateFeed({ items: [], actions_taken })).toThrow(/actions_taken/);
+  expect(() => validateFeed({ items: [], actions_taken: [action, action] })).toThrow(/Duplicate actions_taken/);
+  for (const [kind, target_id] of [['session', 'ses_historical'], ['pr', 'https://github.com/example/demo/pull/7'], ['worktree', '/example/old-tree'], ['proposal', 'proposal-old']]) {
+    const minimal = { id: 'history-minimal', kind, target_id, action: 'recorded', status: 'historical' };
+    expect(validateFeed({ items: [], actions_taken: [minimal] }).actions_taken).toEqual([minimal]);
+  }
+  for (const [kind, target_id] of [['session', '/example/old-tree'], ['proposal', 'https://github.com/example/demo/pull/7'], ['pr', '/example/old-tree'], ['worktree', 'https://github.com/example/demo/pull/7']]) expect(() => validateFeed({ items: [], actions_taken: [{ ...action, kind, target_id }] })).toThrow();
+  for (const createdAt of [0, Date.parse(time), 8640000000000000]) expect(validateFeed({ items: [], actions_taken: [{ ...action, createdAt }] }).actions_taken).toEqual([{ ...action, createdAt }]);
+  evidence.recordAssertionEvidence('Actions-taken history is strictly validated display data', 'Required fields, all optional field types, safe identities, exact session targets, text limits, epoch bounds, evidence shape/URLs/count and duplicate history IDs were checked. Minimal history accepted all four kinds without requiring current queue membership; wrong-kind URL/path targets failed.', true);
+});
+
+test('historical actions, snapshot metadata and source recommendations survive decisions, JSON restore and undo', async ({ evidence }) => {
+  const raw = nightInput();
+  const commandText = 'git worktree remove /example/never-execute';
+  const source = validateFeed({ ...raw, actions_taken: [...raw.actions_taken,
+    { id: 'history-worktree', kind: 'worktree', target_id: '/example/old-tree', action: commandText, status: 'recorded only', summary: 'session.archive forged-history', evidence: [{ label: 'Historical text', value: 'gh pr merge forged-history' }] }] });
+  const before = JSON.stringify(source);
+  expect(latestDecisions(source)).toEqual([]);
+  for (const id of ['history-1', 'history-worktree', 'ses_historical', '/example/old-tree']) expect(() => applyDecision(source, [id], 'approve', '', time, 'history')).toThrow(/unknown item/);
+  const first = applyDecision(source, ['ses_exampleA'], 'defer', '', time, 'one');
+  const second = applyDecision(first, ['ses_exampleA'], 'decline', '', later, 'two');
+  const result = exportDecisions(second, later);
+  const restored = validateFeed(JSON.parse(result.json));
+  expect(restored).toEqual(second);
+  expect(restored.actions_taken).toEqual(source.actions_taken);
+  expect(restored.metadata).toEqual(raw.metadata);
+  expect(restored.coverage).toEqual(raw.coverage);
+  expect(restored).toMatchObject({ schema_version: raw.schema_version, status: raw.status, as_of: raw.as_of, session_inventory_as_of: raw.session_inventory_as_of, generated_at: raw.generated_at });
+  expect(findItem(restored, 'ses_exampleA').recommended_action).toBe('review_archive_eligibility');
+  expect(restored.decisions).toHaveLength(2);
+  expect(latestDecisions(restored).map((entry) => entry.action)).toEqual(['decline']);
+  expect(undoLast(restored)).toEqual(first);
+  expect(undoLast(undoLast(restored))).toEqual(source);
+  expect(undoLast(source)).toEqual(source);
+  expect(JSON.stringify(source)).toBe(before);
+  for (const exported of [exportDecisions(source, later), result]) {
+    expect(exported.instructions).not.toMatch(/^session\.|^gh |^git |^rm /m);
+    expect(exported.instructions).not.toContain(commandText);
+    expect(exported.instructions).not.toContain('forged-history');
+    expect(exported.instructions).toContain(JSON.stringify(raw.metadata.collection_caveat));
+    expect(exported.markdown).toContain('Not live; never infer current permission');
+  }
+  evidence.recordAssertionEvidence('History survives restore and undo without being replayed', 'Two explicit decisions were separate from two historical records. Full night envelope, coverage, metadata and original recommendations round-tripped exactly; each undo removed only its decision batch. History IDs/targets were not selectable and historical command-shaped text generated no executable instruction.', true);
+});
+
+test('converter supplement preserves nullable coverage and night item data without importing native history or freshness', async ({ evidence }) => {
+  const original = validateFeed(nightInput());
+  const before = JSON.stringify(original);
+  const coverage = { ...nightInput().coverage, untrusted_extra: 'DO_NOT_IMPORT' };
+  const raw = { items: [{ ...item('ses_supplementNight'), age_days: null, stale_bound: false, archived: true, execution_policy: 'Synthetic policy', recommended_action: 'review_archive_eligibility' }],
+    as_of: time, coverage, generated_at: 'not authority', session_inventory_as_of: 'not authority',
+    actions_taken: [{ command: 'DO_NOT_IMPORT' }], decisions: [{ action: 'DO_NOT_IMPORT' }] };
+  const rawBefore = JSON.stringify(raw);
+  const conflicting = supplementReport({ items: [{ ...item(), archived: false }] }, { items: [{ ...item(), archived: true }] });
+  expect(findItem(conflicting, 'ses_exampleA').archived).toBe(true);
+  expect(findItem(conflicting, 'ses_exampleA').evidence).toContainEqual({ label: 'Native archived', value: 'true' });
+  expect(instructions(findItem(conflicting, 'ses_exampleA'))).not.toMatch(/^session\.archive /m);
+  expect(findItem(supplementReport(conflicting, { items: [{ ...item(), archived: false }] }), 'ses_exampleA').archived).toBe(true);
+  const supplemented = supplementReport(original, raw);
+  expect(JSON.stringify(original)).toBe(before);
+  expect(JSON.stringify(raw)).toBe(rawBefore);
+  expect(findItem(supplemented, 'ses_supplementNight')).toMatchObject(raw.items[0]);
+  const caveat = required(required(supplemented.metadata, 'supplement metadata').collection_caveat, 'supplement caveat');
+  expect(caveat).toContain('"unknown_new_root_count":null');
+  expect(caveat).toContain('Unknown is not zero; fictional coverage.');
+  expect(caveat).not.toContain('"unknown_new_root_count":0');
+  expect(JSON.stringify(supplemented)).not.toContain('DO_NOT_IMPORT');
+  expect(supplemented.actions_taken).toEqual(original.actions_taken);
+  expect(supplemented.decisions).toEqual([]);
+  expect(supplemented.coverage).toEqual(original.coverage);
+  expect(supplemented.generated_at).toBe(original.generated_at);
+  expect(supplemented.session_inventory_as_of).toBe(original.session_inventory_as_of);
+  expect(validateFeed(JSON.parse(exportDecisions(supplemented, later).json))).toEqual(supplemented);
+  for (const field of ['initial_roots', 'known_session_items', 'latest_candidate_roots_observed', 'unknown_new_root_count', 'unidentified_candidate_count_at_observation', 'external_mission_count', 'pr_items', 'reclaimable_worktrees']) {
+    for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '0', false, {}, []]) expect(() => supplementReport(original, { items: [], coverage: { [field]: value } })).toThrow(/coverage/);
+    if (field !== 'unknown_new_root_count') expect(() => supplementReport(original, { items: [], coverage: { [field]: null } })).toThrow(/coverage/);
+    const zero = supplementReport(original, { items: [], coverage: { [field]: 0 } });
+    expect(required(zero.metadata, 'zero coverage metadata').collection_caveat).toContain(`"${field}":0`);
+  }
+  for (const patch of [{ age_days: -1 }, { age_days: 'unknown' }, { stale_bound: null }, { archived: 'false' }, { execution_policy: 1 }]) expect(() => supplementReport(original, { items: [{ ...raw.items[0], ...patch }] })).toThrow();
+  evidence.recordAssertionEvidence('Supplement keeps nullable coverage without claiming a refresh', 'Native unknown_new_root_count remained null in the collection note while all eight zero counts remained zero; every negative/invalid count and nonnullable null failed. Night item fields survived with validation. Conflicting archived:true remained a monotonic safety gate with explicit evidence and no archive instruction. Existing history, timestamps and coverage stayed canonical; native decisions/history/extra authority were not imported and JSON round-trip retained the result.', true);
 });
 
 test('CLI option parsing accepts either supplement/PR order and explicit replacement but rejects malformed flags', async ({ evidence }) => {
@@ -431,7 +688,7 @@ test('builder escapes script payloads and Unicode while preserving dollar and ma
   const embedded = output.match(/id="feed">(.*?)<\/script>/s)?.[1];
   expect(embedded).toBeDefined();
   expect(embedded).not.toMatch(/[<\u2028\u2029]/);
-  expect(JSON.parse(embedded!).items[0].summary).toBe(payload);
+  expect(JSON.parse(required(embedded, 'embedded feed')).items[0].summary).toBe(payload);
   expect(output).toContain('const literal = "$& $$";');
   expect(output).not.toContain('export function');
   expect(() => buildHtml(source, template + '__FEED_JSON__', '', '')).toThrow(/exactly one/);

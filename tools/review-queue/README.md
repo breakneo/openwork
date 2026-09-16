@@ -51,9 +51,9 @@ Draft comments survive switching items through best-effort browser storage, but 
 
 ### Locked / another owner's items
 
-`group: "external-mission"` or `locked: true` hard-locks an item. `lock_reason` optionally explains why. `recommended_action: "none"` documents the external mission's non-actionable recommendation; the group itself enforces the lock even if the recommendation is wrong.
+`group: "external-mission"`, `locked: true`, or a recommendation whose `recommendationVerb(item)` is `worktree` hard-locks an item. This includes `review_worktree_removal` regardless of kind or flags. `lock_reason` optionally explains why. Original recommendation text is preserved; neither `locked: false` nor a different recommendation overrides external ownership. The supplement importer additionally locks every worktree reference.
 
-Locked items are visually separated under **Other owners · not yours to act on**, have no selection or decision controls, are excluded from mass selection and progress denominators, and cannot acquire decisions through keyboard shortcuts or imported JSON. The pure data layer rejects even comments against locked IDs. Locking an owner also prevents routing a follow-up to that owner through another item. They remain visible in the source snapshot as references, not executable decisions.
+Locked items are visually separated under **Read-only references / other owners · not yours to act on**, have no selection or decision controls, are excluded from mass selection and progress denominators, and cannot acquire decisions through keyboard shortcuts or imported JSON. The pure data layer rejects even comments against locked IDs. Locking an owner also prevents routing a follow-up to that owner through another item. They remain visible in the source snapshot as references, not executable decisions.
 
 `protected` is different: it preserves archive/merge safeguards (for example pinned, running, unknown or non-engineering-workspace sessions). It can still receive a human review disposition, but cannot bypass execution gates. A generic lock is stronger: no disposition at all.
 
@@ -61,9 +61,9 @@ Locked items are visually separated under **Other owners · not yours to act on*
 
 Click **Export JSON**, then **Export Markdown**. Separate buttons avoid browser multiple-download restrictions. Files use `decisions-<timestamp>.json` and the matching `.md` stem. Check the actual downloads; the page cannot confirm where the browser saved them.
 
-- JSON includes exact source items, collection metadata, all decision events and current effective decisions.
+- JSON includes normalized source items, all optional feed metadata and read-only `actions_taken`, all decision events and current effective decisions. ISO timestamps normalize to UTC; source recommendations and validated URL/path IDs remain unchanged. History never becomes a decision or an instruction.
 - Markdown includes an effective-decision table, the event audit and conditional instructions for the audit agent.
-- **Restore decisions** accepts only the exact matching source items. Unknown IDs, changed evidence, locked-item decisions, invalid actions or inconsistent batch history are rejected. It replaces, not merges, the current local history after confirmation.
+- **Restore decisions** and browser storage accept only the exact matching source items **and provenance envelope**, including coverage and overnight history. Changed history invalidates earlier approvals even when item rows are identical. Older items-only browser storage is not automatically migrated; review again rather than silently replaying it. Unknown IDs, changed evidence, locked-item decisions, invalid actions or inconsistent batch history are rejected. It replaces, not merges, the current local history after confirmation.
 - Last appended event wins for each item. A later comment supersedes an earlier approval and moves the item to Commented; use Approve with a comment to retain approved intent. Deferred and follow-up/comment counts are separate from approved/declined progress.
 - Undo changes local history; previously exported files are unchanged. Mark old files superseded before giving an agent the replacement. This is not a tamper-proof or multi-user ledger.
 
@@ -87,6 +87,37 @@ The executor should record export identity, effective decision ID/batch/time, li
 
 `review-queue.schema.json` documents the contract. `core.mjs` supplies runtime validation plus pure immutable decision/undo/export functions. `convert.mjs` reads local source reports. `build.mjs` embeds validated JSON and static code into `template.html`; `ui.js` drives the view. `sample.json` is synthetic only.
 
+### Native feed API
+
+`validateFeed(input)` returns a deep-copied `Feed` with `items: Item[]` and `decisions: Decision[]`. JSDoc types expose all optional properties without fabricating defaults for missing metadata. Unknown fields are rejected at every contract object boundary. Existing item defaults and decision/batch validation remain unchanged; `latestDecisions(feed)` returns only `Decision` objects, never `undefined`.
+
+Optional top-level fields:
+
+- `schema_version`: safe integer; `status`: text (2,000 characters).
+- `as_of`, `session_inventory_as_of`, `generated_at`: calendar-valid timezone-qualified ISO timestamps normalized to UTC. Generation time does not refresh the inventory.
+- `coverage`: optional nonnegative safe-integer counts `initial_roots`, `known_session_items`, `latest_candidate_roots_observed`, `unknown_new_root_count`, `unidentified_candidate_count_at_observation`, `external_mission_count`, `pr_items`, `reclaimable_worktrees`, plus optional `caveat` text (20,000 characters). Only `unknown_new_root_count` also accepts `null`; null remains unknown, not zero.
+- `actions_taken`: up to 100,000 read-only historical records. Required: unique safe `id`, `kind` (session/pr/proposal/worktree), `action` text (200 characters), kind-appropriate `target_id`, and `status` text (2,000 characters). Optional: exact `created_session_id`, `title` (500 characters), `createdAt` (nonnegative integer epoch milliseconds within the JavaScript date range), `head` (100 characters, display-only), `summary` (20,000 characters), and up to 100 standard evidence records. Session targets require exact `ses_` IDs. History targets need not be current queue items. Action/status labels are data, not executable enums; arbitrary command objects and extra fields are rejected.
+
+Optional item fields: `age_days` is a finite nonnegative number or `null`; `stale_bound` and `archived` are booleans; `execution_policy` is text (2,000 characters), never authority. `archived: true` blocks archive instruction generation. Existing workspace/owner/PR/head/protection/lock fields remain optional and strictly typed.
+
+IDs retain the existing safe-identifier form. Additionally, PR IDs may be validated canonical HTTPS GitHub pull-request URLs, and worktree IDs may be absolute POSIX paths without traversal or controls. URL/path identity is accepted only for its appropriate kind and is preserved verbatim. A URL ID conflicting with an explicit `pr_url` is rejected. Decisions reference an exact validated item ID; URL/path IDs are not shell fragments. Merge instructions still require a separately supplied validated `pr_url`, full head SHA and all existing live authorization gates; no target/head is inferred from history.
+
+`recommendationVerb(item)` maps labels without mutating `recommended_action`:
+
+| Original recommendation | Verb |
+|---|---|
+| `review_merge_candidate` | `merge` |
+| `review_archive_eligibility` | `archive` |
+| `review_worktree_removal` | `worktree` |
+| `review_blockers`, `review_decision` | `review` |
+| `review_repeatability_followup` | `relaunch` |
+| `none` | `none` |
+| Anything else | Unchanged |
+
+The UI uses these verbs for filters/labels and shows the original recommendation as a sublabel. A coverage banner displays every supplied coverage field, including null unknown roots explicitly labeled unknown. **Done overnight** displays source history separately, with read-only expandable details and no decision controls; reported incomplete outcomes stay visible. Bulk homogeneity still compares the **original** recommendation. Archive/merge aliases use the same conditional instruction gates as their short verbs; no new authorization is granted.
+
+The native supplement is deliberately a narrower evidence importer, not a feed restore: it drops authority extras and native decisions/history, preserves canonical Markdown/JSONL rows, and strengthens locks. It accepts nullable unknown coverage and the additional observation count while dropping unknown coverage extras; original collection coverage remains quoted in the collection caveat. Existing feed metadata/history survive supplementation and export. New safe IDs and recommendation text are retained; when matching a PR URL or worktree path to an existing canonical row, that row's ID wins and the incoming identity is retained as `Native: Original ID` evidence. Every supplemented worktree stays locked even when its recommendation says otherwise. An incoming `archived: true` also tightens the archive gate; conflicting observations remain evidence instead of silently enabling an archive instruction.
+
 Inputs are bounded and schema-validated. Source text is rendered via `textContent`; unsafe URLs, credential-bearing URLs and script/data links are rejected. Embedded JSON escapes HTML opening delimiters and Unicode line separators. Content Security Policy denies connections, remote resources and form actions. The app has no network client, shell bridge or service credentials. **It is not a general secret scanner**: the feed producer must omit secrets, review source content and share built outputs only with authorized people. Explicitly opening an evidence link leaves the offline page and can contact that site.
 
 ## Verification
@@ -97,10 +128,20 @@ From this dedicated checkout, prepare dependencies yourself (do not delegate cre
 pnpm install --frozen-lockfile
 pnpm --dir evals install --frozen-lockfile
 pnpm --dir evals exec playwright install chromium
+pnpm typecheck
+pnpm evals:typecheck
 pnpm evals:pr specs/review-queue-core.test.ts
 OPENWORK_EVAL_E2E_TESTS=1 pnpm --dir evals exec vitest run --config vitest.config.ts --project e2e specs/review-queue.e2e.test.ts
 ```
 
 Both specs use `test` from `@openwork/testkit`. Core assertions cover conversion, normalization, locks, batch/undo/export, unsafe inputs and command gates. The Playwright smoke owns an isolated Chromium instance and synthetic 216-item `file://` page: selects three, confirms bulk approve, downloads JSON/Markdown, undoes/restores/reloads, checks homogeneous selection and both kinds of lock, tests keyboard/comment behavior and stale backups, and asserts no HTTP(S) requests or page errors. It never opens the operator's browser profile or calls live services. Local execution is the explicit offline proof lane; no Daytona credentials are needed for this tool-only smoke.
+
+A second smoke checks the native envelope, all six mapped verb filters and original sublabels, read-only history/worktrees, unknown coverage, and three-item approve/export/undo. By default it uses a nine-item synthetic fixture. To verify the existing private night page without modifying its bytes:
+
+```sh
+REVIEW_QUEUE_PAGE="/absolute/private/path/index.html" OPENWORK_EVAL_E2E_TESTS=1 pnpm --dir evals exec vitest run --config vitest.config.ts --project e2e specs/review-queue.e2e.test.ts
+```
+
+This explicit real-feed mode asserts 289 items (84 sessions / 134 PRs / 71 worktrees), five historical actions, and verb counts merge 3 / archive 36 / worktree 71 / review 61 / relaunch 1 / none 117. It uses a fresh profile and temporary downloads; public assertion evidence contains only counts and booleans, never source IDs/titles or screenshots. Evidence links are inert until clicked; zero network references means no external resource references, not removal of source evidence URLs.
 
 Publish exact-head test evidence with the repository's `publish-evidence` workflow before calling the PR ready. Read `docs/review-queue-concepts.md` for sources, design principles, alternative concepts and the future writable MCP App path.
