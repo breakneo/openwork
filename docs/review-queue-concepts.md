@@ -1,0 +1,107 @@
+# Review queue: concepts and overnight prototype
+
+## Decision
+
+**Build A: one offline HTML file with an embedded, versioned JSON snapshot.** Keep the source report, built private page and exported decisions outside the public repository. The page records intent; a separately authorized audit agent executes only after rechecking live state. This is a review tool, not an autonomous merger or a replacement for code review.
+
+Scores below are design estimates, not benchmark results. 1 = poor fit, 5 = strong fit. Time estimates assume dependencies/accounts are not already configured. Only A is implemented; B–D are concepts, **not built**.
+
+| Concept | Time to usable next morning | Batch actions | Per-item comment / ask | Evidence | Agent export | Reuse | Security / offline | Total / 35 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **A. Offline HTML + JSON** | **5** | **5** | **5** | **4** | **5** | **4** | **5** | **33** |
+| B. OpenWork-native MCP App | 2 | 4 | 4 | 5 | 4 | 5 | 3 | 27 |
+| C. Existing queue/board adapted | 3 | 3 | 4 | 4 | 2 | 4 | 2 | 22 |
+| D. Markdown PR table/checklists | 5 | 2 | 2 | 3 | 2 | 2 | 2 | 18 |
+
+A's evidence score is four because it shows evidence values and links, not a full diff viewer or live CI. Its reuse score is four because it has no multi-user concurrency or live synchronization. B's batch/comment scores describe a **custom writable MCP App**, not a generated Artifact view: generated views cannot submit writes. D scores poorly on security because a PR's audience may be inappropriate for private session inventories, even though Markdown itself is simple.
+
+## Research findings: documented behavior, not implementation claims
+
+Research was time-boxed to the initial design phase. Sources are primary documentation where available. Availability, plan restrictions and exact release capabilities must be checked before adopting a service; historical tools are included as UX precedents, not recommended installations.
+
+### Code review and triage before autonomous agents
+
+- **Gerrit:** query-defined dashboard sections and separate incoming/outgoing/closed queues make ownership visible. Borrow saved slices rather than one unstructured pile. [Gerrit dashboards](https://gerrit-documentation.storage.googleapis.com/beta/user-dashboards.html).
+- **Differential:** Action Required versus Waiting on Others, author/reviewer discussion, test plans and published inline-review batches separate whose turn it is from whether a revision exists. [Differential guide](https://secure.phabricator.com/book/phabricator/article/differential/), [inline comments](https://secure.phabricator.com/book/phabricator/article/differential_inlines/), [test plans](https://secure.phabricator.com/book/phabricator/article/differential_test_plans/). Phacility wound down in 2021; this is a historical precedent, not a maintained hosted-service claim. [Notice](https://admin.phacility.com/phame/post/11/phacility_is_winding_down_operations/).
+- **Reviewable:** reviewed state is per file, revision and reviewer. Revision-to-revision diff bounds answer “what changed since I looked?” [Files](https://docs.reviewable.io/files), [reviews](https://docs.reviewable.io/reviews). The prototype instead binds a decision backup to an exact item snapshot; it does not claim incremental diff review.
+- **Graphite:** stacks make dependency order explicit; reviewers can batch comments then submit a review. Bottom-up review avoids deciding a dependent PR independently of its base. [Review pull requests](https://graphite.com/docs/review-pull-requests), [PR page](https://graphite.com/docs/pr-page-overview). These mechanics are not a claim about the product's pre-AI chronology.
+- **GitHub:** Viewed markers, file filtering and line comments precede Comment / Approve / Request changes. Required-review rules, not merely a review label, determine enforcement. [PR review](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/reviewing-proposed-changes-in-a-pull-request). Projects provides fields, grouping, filters and bulk editing, but remains a planning layer rather than a diff reviewer. [Projects](https://docs.github.com/en/issues/planning-and-tracking-with-projects/learning-about-projects/about-projects), [bulk edits](https://docs.github.com/en/issues/planning-and-tracking-with-projects/managing-items-in-your-project/editing-items-in-your-project).
+- **Linear:** Triage is an intake buffer with accept, duplicate, decline and snooze actions, separate from the ordinary workflow. [Triage](https://linear.app/docs/triage). **Jira/Kanban:** map columns to actual states and constrain work in progress instead of filling every column. [Monitor Kanban](https://support.atlassian.com/jira-software-cloud/docs/monitor-work-in-a-kanban-project/), [configure columns](https://support.atlassian.com/jira-software-cloud/docs/configure-columns/).
+- **Inbox-zero/GTD processing:** processing is deciding the next action, not completing every project. The two-minute heuristic can dispatch a small routing/clarification task; it is not a reason to rush an irreversible merge. [GTD two-minute rule](https://gettingthingsdone.com/2011/06/when-to-use-gtds-two-minute-rule/). Applying this to an engineering inbox is a design inference, not an asserted GitHub feature.
+
+### Approval controls and moderation tasks
+
+- **CAB/change approvals and four-eyes:** configured approver roles/counts and ordered approvals separate a recommendation from authorization. Batch convenience cannot erase per-item eligibility, segregation of duties or exceptions. [Jira change-review approval](https://support.atlassian.com/jira-service-management-cloud/docs/enforce-an-approval-step-for-change-reviews/), [financial-services four-eye example](https://docs.oracle.com/en/industries/financial-services/ofs-analytical-applications/customer-screening-cloud/24.11.01/watch/314a-fincen-file-upload.html). This is a control pattern, not evidence that the prototype implements dual approval or that every finance system permits batch approval.
+- **Reddit modqueue:** a shared actionable queue with approve/remove/spam dispositions and visible handling markers. Different queues can still contain additional work. [Moderation queue](https://mods.reddithelp.com/hc/en-us/articles/360010090132-Moderation-Queue).
+- **Stack Overflow review tasks:** a bounded item, fixed verbs and a safe Skip make uncertainty a valid disposition. Triage routes needs-author versus needs-community work; skipping has no penalty. [Triage](https://stackoverflow.com/help/review-triage), [review queues](https://stackoverflow.com/help/privileges/access-review-queues). We borrow one-item focus, explicit uncertainty and audit history. Keyboard-first interaction is our proposed optimization, not an assertion that every cited queue shares the same shortcuts.
+
+### AI-era supervision
+
+- **Codex:** local code-review and GitHub-review surfaces operate on explicit changes; a task's completion is not proof its diff is safe. [Code review](https://developers.openai.com/codex/code-review), [GitHub integration](https://developers.openai.com/codex/third-party/github). The sources support change review; they do not establish cross-session batch dispositions in a universal Codex task inbox.
+- **Devin:** sessions have statuses and associated PRs; review provides organized diffs, explanations and discussion. [Review](https://docs.devin.ai/work-with-devin/devin-review), [session API](https://docs.devin.ai/api-reference/v3/sessions/get-enterprise-session). SCM-specific write behavior varies.
+- **Cursor / Claude:** Git-aware review and background subagent notifications are useful supervision precedents. [Cursor Git context](https://docs.cursor.com/en/context/@-symbols/@-git), [Claude subagents](https://docs.anthropic.com/en/docs/claude-code/sub-agents). The reviewed sources do not prove a unified, exportable background-agent inbox or universal plan availability; do not assume either.
+- **LangChain Agent Inbox / LangGraph interrupts:** persisted threads pause for human accept/edit/respond/ignore-style handling. This is a live tool-call authorization queue, not necessarily a bulk project-review system. It needs a graph deployment, compatible interrupts and persistent state. [Agent Inbox README](https://github.com/langchain-ai/agent-inbox), [interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts). Newer Fleet oversight similarly centralizes approve/edit/reject controls, with feature/plan constraints. [Fleet oversight](https://docs.langchain.com/langsmith/fleet/access-and-oversight).
+- **Copilot:** a coding-agent PR still needs human review; AI review comments do not themselves supply a required human approval. [Copilot code review](https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/copilot-code-review).
+- **Sweep / Ellipsis:** editor-side review and incremental commit review offer change summaries/findings, not authority to merge. [Sweep review](https://docs.sweep.dev/ai-code-review), [Ellipsis review setup](https://www.ellipsis.dev/docs/code-review/quick-start). Do not conflate Sweep's cited editor plugin with a hosted agent queue.
+- **Evidence first:** tests, exact heads, failed checks and independently inspectable artifacts should precede agent prose. This is our synthesis, consistent with Differential test plans and revision-aware review—not a claim that every AI product enforces evidence-first review.
+
+## Twelve design principles
+
+1. **Triage before deep review.** Filter kind/group/recommendation, identify unknowns and protected items, then review a small homogeneous set.
+2. **One focused item, fixed verbs.** Approve, decline, defer, ask for info, request changes, comment. Recommendation remains visually distinct from the human's decision.
+3. **Evidence above narrative.** Show tests/checks, head/base and source links before summary. Missing evidence says unknown, never green.
+4. **Keyboard-first without accidental actions.** j/k navigate; a/d decide only one focused item; c/? prepare text; Space selects. Native fields/buttons retain their own keys.
+5. **Batch only same-shape items.** Kind, group and recommendation must match. Show count and every selected identity before confirmation. Changing filters clears selection.
+6. **Comments are owned work.** Questions/changes require text and an explicit target session or a manual-routing warning. A comment is not completion.
+7. **Safe abstention and capped WIP.** Defer rather than guess. Finish a bounded lane before opening another. The prototype supports lanes, not an enforced numeric WIP cap.
+8. **Separate authorization from execution.** Nothing in the page calls session tools, merges, closes PRs or sends messages. Approving a recommendation cannot bypass rulesets, ownership or permission checks.
+9. **Read-only ownership is a hard boundary.** `group: "external-mission"` or `locked: true` means “Not yours to act on.” Separate these items visually; exclude all selection, actions, imports of decisions, progress denominators and executable instructions.
+10. **Portable history with honest undo.** Export event history and current effective decisions. Undo removes the last local batch; it cannot revoke a file already exported or an action already executed. Export replacement decisions before handing off.
+11. **Bind decisions to evidence identity.** Restore only against exact matching source items. Before execution recheck current head, checks, working/pinned state and permissions. A snapshot is never live truth.
+12. **Optimize reversibility, not just throughput.** Two-minute routing is fine; ambiguous merges or external writes need slower review. Distinguish approved/declined from deferred, follow-up and pending counts.
+
+## Concepts and wireframe descriptions
+
+These are layout descriptions, not additional runnable prototypes. Only A is built. Each alternative includes two states, so the reader can compare workflows without mistaking a mockup for a working app.
+
+### A — Offline review desk (implemented prototype)
+
+**What it proves:** one cross-kind feed, focused evidence review, comments, homogeneous batches, locked ownership and portable JSON/Markdown intent export without network requests. **Does not prove:** live freshness, authorization, successful execution, multi-user collaboration or OpenWork embedded-preview compatibility. **How to run:** build and open `tools/review-queue/` output following its README. Tests and their exact verdict belong to the PR evidence, not this concept score.
+
+- **Desk state:** top header contains progress and Load/Restore/Undo/Export. Filter row above a left list with checkboxes and a right detail pane. Detail order is identity/risk → evidence → narrative/recommendation → comment/action bar → history. Other owners occupy a separately labeled read-only section at the bottom of the filtered list.
+- **Batch state:** a bar names the selected count, shape, verb and shared comment. Review opens a confirmation listing exact item IDs. Confirm records one timestamped batch; Cancel makes no change. Mixed-shape selection is visible but cannot proceed.
+- **Handoff state:** separate JSON and Markdown download buttons avoid multi-download blocking. A read-only instructions block previews conditional agent operations; a warning explains that an exported decision is not an execution receipt.
+
+**Trade-off:** deterministic, private and immediately useful; localStorage is best-effort only. JSON backup is authoritative for portability. Browser preview sandboxes may block downloads/storage, so external `file://` remains the documented primary lane.
+
+### B — OpenWork-native review inbox (not built)
+
+**What it could prove:** durable authenticated decisions inside the normal workspace, live evidence refresh and shared audit receipts. **Does not yet prove:** that a generated Artifact view can persist approvals—it cannot. **How to run later:** implement and register a writable MCP App server, then launch through OpenWork Connect. Estimated work exceeds the overnight prototype budget.
+
+- **Inbox state:** dashboard tile shows review lanes, evidence freshness and locked items. A focused app view fetches the chosen snapshot through a read-only helper. Selection groups by owner/recommendation/head compatibility.
+- **Decision state:** one trusted user click submits one bounded decision batch to the originating app server. The server authenticates reviewer, checks ownership and snapshot version, stores per-item decisions with an idempotency key, and returns accepted/rejected item receipts. A later separately authorized executor consumes them; the UI does not equate save with execution.
+- **Conflict state:** changed head or ownership marks an item stale; refresh requires re-review rather than replay. A receipts panel compares original decision, server acceptance and actual execution.
+
+**Path to native:** retain this schema, converter and pure decision invariants; add a server-side immutable snapshot store, append-only decision ledger, actor identity, optimistic concurrency, batch idempotency, ownership policy, review/execute role split, live evidence adapters and execution receipts. Add a standard `ui://` MCP App resource plus separate read-only launch/read helpers and a writable `record_decisions` helper. Do not tunnel private files into an organization connection without explicit authorization.
+
+OpenWork's bundled docs state that writable MCP App helpers require a recent single-use trusted interaction, live originating lease and authorization; generated result previews have no tool/link privileges. Only inline display is supported; sessionless dashboard ownership differs from active conversation ownership. A batch must therefore be **one deliberate server call**, not N synthetic clicks. See `cloud/share-with-your-team/dashboards.mdx` and `cloud/run-in-the-cloud/cloud-mcp.mdx` (bundled documentation paths). The directly available `save_artifact_view` contract further restricts generated React views to displaying/filtering/exploring Workflow results, without approval writes or browser-global download tricks. It is suitable for a read-only evidence dashboard, not this decision recorder. A small custom MCP server is the writable alternative; no server was provisioned in this prototype.
+
+### C — Adapt an existing queue (not built)
+
+**What it could prove:** shared assignment, native discussions and reusable views. **Does not prove:** all required batch/comment/JSON operations in under an hour. **How to run later:** first test an exact version with a synthetic 210-item import, then verify bulk actions/comments/export before any private-data migration.
+
+- **Board state:** lanes for intake, needs evidence, needs owner, ready, decided; each card links back to the canonical PR/session. A GitHub Projects variant uses table groups instead of cards.
+- **Review state:** open a card/PR for discussion, then return to select same-shape cards for disposition. A separate adapter converts exported fields and linked comments into the decision contract; comments must not vanish from the export.
+
+**Candidate disposition:** Agent Inbox is purpose-built for graph interrupts, but no verified board-style batch/export path was established. Planka's older bulk/export issues and an export PR do not prove released functionality; validate the exact release rather than promise it. Focalboard documents card comments and archive export, but that is not the required JSON decision ledger and omits attachments. GitHub Projects has documented bulk edits and TSV export, so it is the strongest hosted triage alternative, but it is not offline and needs session/proposal wrappers plus a comment/export adapter. Linear already has strong triage, but a new integration/import/auth path fails the low-setup/offline requirement. None passed the explicit under-one-hour adoption gate, so no OSS service was installed.
+
+Sources: [Agent Inbox](https://github.com/langchain-ai/agent-inbox), [Planka bulk discussion](https://github.com/plankanban/planka/issues/31), [Planka export discussion](https://github.com/plankanban/planka/issues/670), [Planka export PR, not release proof](https://github.com/plankanban/planka/pull/1710), [Focalboard guide](https://www.focalboard.com/guide/user/), [GitHub Projects TSV export](https://docs.github.com/en/issues/planning-and-tracking-with-projects/managing-your-project/exporting-your-projects-data).
+
+### D — Markdown table in a PR (not built; zero-tooling baseline)
+
+**What it could prove:** one inspectable checklist and discussion thread with minimal setup. **Does not prove:** structured per-item comments, safe mass dispositions, reliable undo or confidential inventory storage. **How to run later:** publish only a redacted table to an appropriately private review location; manually translate signed-off decisions into JSON after confirming IDs.
+
+- **Checklist state:** columns ID/kind/evidence/recommendation/decision, with checkboxes for “reviewed,” not overloaded to mean “approve.” Group rows by action and ownership.
+- **Discussion state:** comments cite stable item IDs and explicit verbs. An agent drafts an export and the reviewer reconciles it against the final table revision before authorizing execution.
+
+**Trade-off:** fastest fallback for a handful of items; poor at 200+ items because checkboxes cannot represent six actions, comments are detached from rows, concurrent edits race, and a public PR must never contain the private inventory. Keep as an emergency redacted summary, not the primary queue.

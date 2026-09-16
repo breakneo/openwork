@@ -1,0 +1,48 @@
+{
+  "metadata": {
+    "source": "Synthetic demonstration — no real sessions, people, or pull requests",
+    "collection_time": "Synthetic fixture; no live collection",
+    "collection_caveat": "All entries are fictional. This offline demonstration is not evidence of current state or permission to execute anything."
+  },
+  "items": [
+    {
+      "id": "ses_exampleA", "kind": "session", "title": "Completed documentation explanation",
+      "summary": "Synthetic archive candidate. Current identity, ownership, pin, running state, worktree and authorization must be checked before any action.",
+      "evidence": [{"label": "Workspace", "value": "openwork"}, {"label": "Pinned", "value": "no"}, {"label": "Status", "value": "idle"}],
+      "recommended_action": "archive", "links": [], "age": "2 days at fictional collection", "risk": "low", "group": "openwork", "workspace_id": "ws_example", "protected": false
+    },
+    {
+      "id": "ses_exampleB", "kind": "session", "title": "Completed reference lookup",
+      "summary": "A second fictional item supports homogeneous bulk-review testing.",
+      "evidence": [{"label": "Workspace", "value": "openwork"}, {"label": "Pinned", "value": "no"}, {"label": "Status", "value": "idle"}],
+      "recommended_action": "archive", "links": [], "age": "3 days at fictional collection", "risk": "low", "group": "openwork", "workspace_id": "ws_example", "protected": false
+    },
+    {
+      "id": "pr-example-7", "kind": "pr", "title": "Example change awaiting fresh verification",
+      "summary": "Fictional PR only. A recorded head is not current proof. Review base, checks, exact-head reviews and merge authorization.",
+      "evidence": [{"label": "State", "value": "OPEN"}, {"label": "Base", "value": "dev"}, {"label": "Freshness", "value": "Not live; synthetic"}],
+      "recommended_action": "merge", "links": [{"label": "Fictional PR", "url": "https://github.com/example/review-demo/pull/7"}],
+      "age": "unknown", "risk": "high", "group": "PR / OPEN", "pr_url": "https://github.com/example/review-demo/pull/7", "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "owner_session_id": "ses_exampleA"
+    },
+    {
+      "id": "proposal-example", "kind": "proposal", "title": "Choose an implementation direction",
+      "summary": "A decision records intent only. No implementation or external write is authorized by this fixture.",
+      "evidence": [{"label": "Options", "value": "Continue the existing approach or request a smaller scope."}],
+      "recommended_action": "review", "links": [], "age": "unknown", "risk": "medium", "group": "decisions", "owner_session_id": "ses_exampleB"
+    },
+    {
+      "id": "worktree-example", "kind": "worktree", "title": "Example retained worktree",
+      "summary": "Cleanup needs separate ownership, cleanliness, ignored-file and process checks. No removal command is generated.",
+      "evidence": [{"label": "Path", "value": "/example/private-worktree"}],
+      "recommended_action": "remove", "links": [], "age": "unknown", "risk": "high", "group": "manual cleanup"
+    },
+    {
+      "id": "ses_externalExample", "kind": "session", "title": "Unrelated mission (read-only)",
+      "summary": "Synthetic external mission owned elsewhere. Reference only; not yours to act on.",
+      "evidence": [{"label": "Ownership", "value": "External mission; untouched"}],
+      "recommended_action": "none", "links": [], "age": "unknown", "risk": "unknown", "group": "external-mission", "locked": true,
+      "lock_reason": "External mission; no archive, nudge, relaunch, comment, or decision."
+    }
+  ],
+  "decisions": []
+}

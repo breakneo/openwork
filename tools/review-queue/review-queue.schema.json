@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openwork:review-queue:v1",
+  "title": "Offline review queue",
+  "description": "Synthetic or private-local review data. Decisions are explicit append-only events; no recommendation grants permission to execute. Runtime validation additionally enforces unique item IDs, decision references, calendar-valid dates, ordered contiguous homogeneous batches, safe URLs, and field control characters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/item"}},
+    "decisions": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/$defs/decision"}, "default": []},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "exported_at": {"$ref": "#/$defs/timestamp"},
+    "effective_decisions": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/decision"}},
+    "audit": {"type": "array", "maxItems": 100000, "items": {"$ref": "#/$defs/decision"}},
+    "drafts": {"type": "object", "description": "UI-only drafts, never decisions or execution authority.", "maxProperties": 10000, "additionalProperties": {"type": "string", "maxLength": 10000}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?(?:Z|[+-]\\d{2}:\\d{2})$"},
+    "url": {"type": "string", "format": "uri", "maxLength": 4096, "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\\\]+$", "description": "Runtime also rejects credentials, controls, malformed URLs and non-HTTP(S) schemes."},
+    "label": {"type": "string", "minLength": 1, "maxLength": 200},
+    "evidence": {
+      "type": "object", "additionalProperties": false, "required": ["label"],
+      "anyOf": [{"required": ["value"]}, {"required": ["url"]}],
+      "properties": {"label": {"$ref": "#/$defs/label"}, "value": {"type": "string", "maxLength": 20000}, "url": {"$ref": "#/$defs/url"}}
+    },
+    "link": {
+      "type": "object", "additionalProperties": false, "required": ["label", "url"],
+      "properties": {"label": {"$ref": "#/$defs/label"}, "url": {"$ref": "#/$defs/url"}}
+    },
+    "item": {
+      "type": "object", "additionalProperties": false, "required": ["id", "kind", "title"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["session", "pr", "proposal", "worktree"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 500},
+        "summary": {"type": "string", "maxLength": 20000, "default": ""},
+        "evidence": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/evidence"}, "default": []},
+        "recommended_action": {"type": "string", "minLength": 1, "maxLength": 200, "default": "review", "description": "Only exact archive and merge recommendations have conditional execution instructions. Other recommendations remain manual."},
+        "links": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/link"}, "default": []},
+        "age": {"type": "string", "maxLength": 500, "default": "unknown", "description": "Display text, not a parsed date."},
+        "risk": {"enum": ["low", "medium", "high", "unknown"], "default": "unknown"},
+        "group": {"type": "string", "minLength": 1, "maxLength": 200, "default": "ungrouped"},
+        "workspace_id": {"$ref": "#/$defs/id"},
+        "owner_session_id": {"type": "string", "pattern": "^ses_[A-Za-z0-9]+$", "maxLength": 200},
+        "pr_url": {"$ref": "#/$defs/url"},
+        "head_sha": {"type": "string", "maxLength": 100, "description": "Short/unknown values are display-only; merge instructions require 40 hex characters."},
+        "protected": {"type": "boolean", "description": "False is necessary but insufficient for archive. Missing is not permission."},
+        "locked": {"type": "boolean", "description": "Read-only. All decisions forbidden; external-mission group is always locked."},
+        "lock_reason": {"type": "string", "maxLength": 2000}
+      }
+    },
+    "decision": {
+      "type": "object", "additionalProperties": false, "required": ["id", "action", "batch_id", "decided_at"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "action": {"enum": ["approve", "decline", "defer", "ask_info", "request_changes", "comment"]},
+        "comment": {"type": "string", "maxLength": 10000, "default": ""},
+        "batch_id": {"$ref": "#/$defs/id"},
+        "decided_at": {"$ref": "#/$defs/timestamp"}
+      },
+      "allOf": [{"if": {"properties": {"action": {"enum": ["ask_info", "request_changes", "comment"]}}}, "then": {"required": ["comment"], "properties": {"comment": {"minLength": 1, "pattern": "\\S"}}}}]
+    },
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string", "maxLength": 20000},
+        "collected_at": {"$ref": "#/$defs/timestamp"},
+        "collection_time": {"type": "string", "maxLength": 20000},
+        "collection_caveat": {"type": "string", "maxLength": 20000}
+      }
+    }
+  }
+}
