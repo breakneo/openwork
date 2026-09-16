@@ -65,6 +65,14 @@ explicit recovery, never automatic stamping. This is not production rollout
 approval: the production transaction runner and generated primary-key drop/add
 compatibility remain unresolved. See [0097 notes](drizzle/0097_gateway_access_matrix.md).
 
+## Explicit 0097 partial-upgrade recovery
+
+For the original MySQL primary-key-enforcement failure, see the
+[opt-in recovery runbook](docs/mysql-0097-recovery.md). The source-only
+`db:recover:mysql-0097` command defaults to read-only inspection, refuses unknown
+states and preserves existing primary keys. It is not wired into bootstrap or
+included in the released 0.18.48 image.
+
 ## Automated migrations (CI)
 
 Two GitHub Actions workflows keep schema and database in sync:

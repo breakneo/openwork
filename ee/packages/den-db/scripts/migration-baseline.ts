@@ -79,29 +79,43 @@ function columnType(value: string) {
     .replace(/,\s+(?=')/g, ",").toLowerCase()
 }
 
-function defaultValue(value: unknown) {
+function defaultValue(type: string, value: unknown, snapshot: boolean) {
   if (value === undefined || value === null) return null
-  if (value === true || value === "true") return "1"
-  if (value === false || value === "false") return "0"
-  const text = String(value).replace(/\s+ON UPDATE .+$/i, "")
-  if (/^\(?(?:now|current_timestamp)\s*(?:\(\d*\))?\)?$/i.test(text)) return "CURRENT_TIMESTAMP"
-  if (/^\(?json_object\(\)\)?$/i.test(text)) return "json_object()"
-  if (/^\(?json_array\(\)\)?$/i.test(text)) return "json_array()"
-  return text.startsWith("'") && text.endsWith("'") ? text.slice(1, -1).replace(/''/g, "'") : text
+  const text = String(value)
+  if (/^(boolean|bool|tinyint\(1\))$/i.test(type)) {
+    if (value === true || text === "true") return "1"
+    if (value === false || text === "false") return "0"
+  }
+  if (/^(timestamp|datetime)(?:\(\d+\))?$/i.test(type)
+    && /^\(?(?:now|current_timestamp)\s*(?:\(\d*\))?\)?$/i.test(text)) return "CURRENT_TIMESTAMP"
+  if (/^json$/i.test(type)) {
+    if (/^\(?json_object\(\)\)?$/i.test(text)) return "json_object()"
+    if (/^\(?json_array\(\)\)?$/i.test(text)) return "json_array()"
+  }
+  return snapshot && /^'(?:[^'\\]|'')*'$/.test(text) ? text.slice(1, -1).replace(/''/g, "'") : text
 }
 
-function columnShape(type: string, nullable: boolean, value: unknown, extra: string) {
-  return JSON.stringify([columnType(type), nullable, defaultValue(value), /auto_increment/i.test(extra), /on update/i.test(extra)])
+function columnShape(type: string, nullable: boolean, value: unknown, extra: string, snapshot = false) {
+  const defaultInput = snapshot && /^(timestamp|datetime)(?:\(\d+\))?$/i.test(type) && typeof value === "string"
+    ? value.replace(/\s+ON UPDATE CURRENT_TIMESTAMP(?:\([0-6]?\))?$/i, "") : value
+  return JSON.stringify([columnType(type), nullable, defaultValue(type, defaultInput, snapshot),
+    /auto_increment/i.test(extra), /on update/i.test(extra) || defaultInput !== value])
 }
 
 function checkExpression(value: string) {
   // Normalize MySQL's serialization of the one matrix CHECK, keeping the OR
   // grouping intact (stripping all parentheses would accept a weaker check).
   // INFORMATION_SCHEMA on MySQL 8.4 escapes the known string delimiters.
-  let text = value.replace(/_utf8mb4\\'(member:|team:|organization)\\'/g, "'$1'")
-    .replace(/`gateway_provider_access`\./g, "").replace(/`|\s/g, "")
-    .split(/('[^']*')/).map((part, index) => index % 2 ? part : part.toLowerCase()).join("")
-    .replace(/_utf8mb4(?=')/g, "")
+  if (value.includes("\0")) throw new MigrationSafetyError("Unsupported CHECK serialization")
+  const literals: string[] = []
+  let text = value.replace(/_utf8mb4\\'(?:member:|team:|organization)\\'|'(?:''|\\[\s\S]|[^'\\])*'/gi, (literal) => {
+    const escaped = /^_utf8mb4\\'(member:|team:|organization)\\'$/i.exec(literal)
+    literals.push(escaped ? `'${escaped[1]}'` : literal)
+    return `\0${literals.length - 1}\0`
+  })
+  if (/['"]/.test(text)) throw new MigrationSafetyError("Unsupported CHECK literal serialization")
+  text = text.replace(/`gateway_provider_access`\./g, "").replace(/`|\s/g, "").toLowerCase()
+    .replace(/_utf8mb4(?=\0)/g, "")
     .replace(/\(((?:org_membership_id|team_id)is(?:not)?null)\)/g, "$1")
     .replace(/\((case[\s\S]*?end)\)/g, "$1")
     .replace(/\((audience_key=case[\s\S]*?end)\)/g, "$1")
@@ -116,7 +130,7 @@ function checkExpression(value: string) {
     if (!enclosed) break
     text = text.slice(1, -1)
   }
-  return text
+  return text.replace(/\0(\d+)\0/g, (_, index: string) => literals[Number(index)])
 }
 
 function indexShape(columns: string[], unique: boolean, type = "BTREE") {
@@ -130,7 +144,7 @@ export function snapshotShape(snapshot: Snapshot) {
     for (const column of Object.values(table.columns)) {
       if (column.generated) throw new MigrationSafetyError("Generated columns need explicit local migration recognition")
       shape.set(`column:${table.name}.${column.name}`, columnShape(column.type, !column.notNull, column.default,
-        `${column.autoincrement ? "auto_increment" : ""} ${column.onUpdate ? "on update" : ""} ${typeof column.default === "string" ? column.default : ""}`))
+        `${column.autoincrement ? "auto_increment" : ""} ${column.onUpdate ? "on update" : ""}`, true))
       if (column.primaryKey) shape.set(`index:${table.name}.PRIMARY`, indexShape([column.name], true))
     }
     for (const index of Object.values(table.indexes)) shape.set(`index:${table.name}.${index.name}`, indexShape(index.columns, index.isUnique, index.using?.toUpperCase()))
@@ -142,10 +156,9 @@ export function snapshotShape(snapshot: Snapshot) {
   return shape
 }
 
-export async function inspectSchema(executor: Executor) {
+export async function inspectSchema(executor: Executor, excluded = new Set([journalTable, stateTable])) {
   const shape = new Map<string, string>()
   const tables = await executor.query("SELECT table_name AS `name`, table_type AS `kind`, engine AS `engine` FROM information_schema.TABLES WHERE table_schema = DATABASE()")
-  const excluded = new Set([journalTable, stateTable])
   for (const table of tables) if (!excluded.has(String(table.name))) shape.set(`table:${table.name}`, `${table.kind}:${table.engine}`)
   const columns = await executor.query("SELECT table_name AS `tbl`, column_name AS `name`, column_type AS `type`, is_nullable AS `nullable`, column_default AS `def`, extra AS `extra`, generation_expression AS `generated` FROM information_schema.COLUMNS WHERE table_schema = DATABASE()")
   for (const column of columns) {

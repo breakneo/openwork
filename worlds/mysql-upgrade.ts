@@ -12,12 +12,13 @@ export async function main(): Promise<void> {
     to: { type: "string", default: "v0.18.48" },
     "pnpm-entry": { type: "string" },
     "temporary-parent": { type: "string" },
+    recovery: { type: "boolean", default: false },
   } });
   const pnpmEntry = values["pnpm-entry"] ?? process.env.npm_execpath;
   if (!pnpmEntry) throw new Error("Pass --pnpm-entry pointing to the installed pnpm.cjs");
-  await using world = await runMysqlUpgrade({ from: values.from, to: values.to, pnpmEntry, temporaryParent: values["temporary-parent"] });
   const outputDir = join("evals/results", `mysql-upgrade-${resolveStage(process.env) ?? "default"}`);
   await mkdir(outputDir, { recursive: true });
+  await using world = await runMysqlUpgrade({ from: values.from, to: values.to, pnpmEntry, temporaryParent: values["temporary-parent"], recoveryReport: values.recovery ? join(outputDir, "recovery.json") : undefined });
   const report = join(outputDir, "report.json");
   await writeFile(report, `${JSON.stringify(world.report, null, 2)}\n`, { mode: 0o600 });
   const expires = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();

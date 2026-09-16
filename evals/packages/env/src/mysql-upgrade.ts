@@ -106,9 +106,10 @@ async function inspect(url: string) {
   } finally { await sql.end(); }
 }
 
-export async function runMysqlUpgrade(input: { from: string; to: string; temporaryParent?: string; pnpmEntry: string }) {
+export async function runMysqlUpgrade(input: { from: string; to: string; temporaryParent?: string; pnpmEntry: string; recoveryReport?: string }) {
   releaseTag(input.from);
   releaseTag(input.to);
+  if (input.recoveryReport && (input.from !== "v0.18.35" || input.to !== "v0.18.48")) throw new Error("Recovery validation requires exact v0.18.35 -> v0.18.48 releases");
   const stack = new AsyncDisposableStack();
   try {
     const root = await mkdtemp(join(input.temporaryParent ?? tmpdir(), "ow-mysql-"));
@@ -200,7 +201,30 @@ export async function runMysqlUpgrade(input: { from: string; to: string; tempora
         checks.push(`${label}: expected upgrade/retry, ledger, partial DDL, primary key and marker verified`);
       }
     }
-    const report = { from, to, runtime: process.version, dependencies, checks, results, limitations: ["Source-built release bootstrap and SQL; not published container bytes", "Uses installed workspace dependency versions, not fresh release lockfile installs", "Synthetic organization marker only; no production data or populated inference fixture", "Local native MySQL; not managed MySQL or Docker deployment"] };
+    const recovery = input.recoveryReport ? await (await import("./mysql-recovery.ts")).runMysqlRecovery({
+      admin, env, reportPath: input.recoveryReport,
+      bootstrap: databaseUrl => bootstrap(to.db, databaseUrl, false, env),
+      fixture: async required => {
+        await admin.query(`SET GLOBAL sql_require_primary_key=${required ? "ON" : "OFF"}`);
+        const place = resolvePlace({ OPENWORK_EVAL_MYSQL_URL: url });
+        const database = stack.use(await place.db(ephemeralDatabaseName("recovery")));
+        const baseline = await bootstrap(from.db, database.url, false, env);
+        assert.equal(baseline.code, 0, baseline.stderr);
+        const connection = await createConnection(database.url);
+        try { await connection.query("INSERT INTO organization (id, name, slug) VALUES ('org_upgrade_fixture','Upgrade fixture','upgrade-fixture')"); } finally { await connection.end(); }
+        const before = await inspect(database.url);
+        assert.equal(before.ledger[0]?.count, 76);
+        const upgrade = await bootstrap(to.db, database.url, false, env);
+        assert.equal(upgrade.code, required ? 1 : 0, upgrade.stderr);
+        if (required) assert.match(upgrade.stderr, /ALTER TABLE `gateway_request_logs` DROP PRIMARY KEY/);
+        const after = await inspect(database.url);
+        assert.equal(after.ledger[0]?.count, required ? 96 : 101);
+        assert.deepEqual(after.marker, before.marker);
+        return database;
+      },
+    }) : undefined;
+    if (recovery) checks.push(...recovery.cases.map(result => result.name));
+    const report = { from, to, runtime: process.version, dependencies, checks, results, recovery: recovery ? { report: input.recoveryReport, status: recovery.status, counts: recovery.counts } : undefined, limitations: ["Source-built release bootstrap and SQL; not published container bytes", "Uses installed workspace dependency versions, not fresh release lockfile installs", "Synthetic organization marker only; no production data or populated inference fixture", "Local native MySQL; not managed MySQL or Docker deployment"] };
     return { report, root, async [Symbol.asyncDispose]() { await stack.disposeAsync(); } };
   } catch (error) { await stack.disposeAsync(); throw error; }
 }

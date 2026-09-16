@@ -77,6 +77,7 @@
     "build:utils": "pnpm --dir ../utils run build",
     "db:baseline": "node --import tsx scripts/baseline-migrations.ts",
     "db:migrate:local": "node --import tsx scripts/dev-migrate.ts",
+    "db:recover:mysql-0097": "node --import tsx scripts/recover-mysql-0097.ts",
     "db:bootstrap": "pnpm run build && node dist/scripts/bootstrap.js",
     "db:generate": "node --conditions=development --import tsx ./node_modules/drizzle-kit/bin.cjs generate --config drizzle.config.ts",
     "db:migrate": "node --conditions=development --import tsx ./node_modules/drizzle-kit/bin.cjs migrate --config drizzle.config.ts && node --conditions=development --import tsx scripts/ensure-schema-repairs.ts",
