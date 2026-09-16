@@ -4,6 +4,10 @@ import { pluginFlowPayloadSchema } from "@openwork/types/plugin-flow-app"
 import { Hono } from "hono"
 import { readFile } from "node:fs/promises"
 import { z } from "zod"
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
+import { McpServer } from "@modelcontextprotocol/server"
+import { runInNewContext } from "node:vm"
+import { PLUGIN_FLOW_APP_HTML, PLUGIN_FLOW_APP_RESOURCE_URI, registerAgentPluginFlowApp } from "../src/mcp/plugin-flow-app.js"
 import type { CapabilityRegistryContext } from "../src/mcp/capability-registry.js"
 import type { McpToolOperation } from "../src/mcp/catalog.js"
 
@@ -62,6 +66,62 @@ function context(app: Hono, operation: McpToolOperation): CapabilityRegistryCont
   }
 }
 
+test("legacy formatter is app-only and its exact bound resource resolves before and after calls", async () => {
+  const server = new McpServer({ name: "legacy-test", version: "1" })
+  registerAgentPluginFlowApp(server)
+  const client = new Client({ name: "legacy-host", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  try {
+    const tools = await client.listTools()
+    expect(tools.tools).toHaveLength(1)
+    expect(tools.tools[0]?._meta).toEqual({ ui: { resourceUri: PLUGIN_FLOW_APP_RESOURCE_URI, visibility: ["app"] }, "ui/resourceUri": PLUGIN_FLOW_APP_RESOURCE_URI })
+    expect(tools.tools[0]?.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false, destructiveHint: false })
+    const historical = await client.readResource({ uri: PLUGIN_FLOW_APP_RESOURCE_URI })
+    expect(historical.contents[0]).toMatchObject({ uri: PLUGIN_FLOW_APP_RESOURCE_URI, text: PLUGIN_FLOW_APP_HTML, mimeType: "text/html;profile=mcp-app", _meta: { ui: { csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] } } } })
+    const payload = { schemaVersion: "1", mode: "plugin_access_granted", pluginId: "plg_fixture", marketplaceId: null, recipient: null }
+    const result = await client.callTool({ name: "plugin_flow", arguments: payload })
+    expect(result.structuredContent).toEqual(payload)
+    expect(result._meta).toBeUndefined()
+    expect(await client.readResource({ uri: PLUGIN_FLOW_APP_RESOURCE_URI })).toEqual(historical)
+    const invalid = await client.callTool({ name: "plugin_flow", arguments: { mode: "plugin_access_granted" } })
+    expect(invalid.isError).toBe(true)
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+test("legacy HTML initializes and renders only validated received results using textContent", () => {
+  const output = { textContent: "No sharing result received." }
+  const sent: unknown[] = []
+  const parent = { postMessage: (message: unknown) => sent.push(message) }
+  let receive: (event: { source: unknown; data: unknown }) => void = () => { throw new Error("Missing message listener") }
+  const script = PLUGIN_FLOW_APP_HTML.split("<script>")[1]?.split("</script>")[0]
+  if (!script) throw new Error("Missing legacy script")
+  runInNewContext(script, {
+    document: { getElementById: () => output },
+    window: { parent, addEventListener: (_name: string, listener: typeof receive) => { receive = listener } },
+  })
+  expect(sent[0]).toMatchObject({ method: "ui/initialize" })
+  receive({ source: parent, data: { jsonrpc: "2.0", id: "openwork-plugin-flow:init", result: {} } })
+  expect(sent[1]).toMatchObject({ method: "ui/notifications/initialized" })
+  const payload = { schemaVersion: "1", mode: "plugin_access_granted", pluginId: "<img src=x onerror=alert(1)>", marketplaceId: null, recipient: { kind: "member", id: "om_fixture", role: "viewer" } }
+  const deliver = (params: unknown) => receive({ source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params } })
+  expect(output.textContent).toBe("No sharing result received.")
+  deliver({ structuredContent: payload })
+  expect(output.textContent).toContain(payload.pluginId)
+  expect(output.textContent).toContain("om_fixture")
+  deliver({ content: [{ type: "text", text: JSON.stringify(payload) }] })
+  expect(output.textContent).toContain("Plugin access granted")
+  for (const params of [{ structuredContent: { ...payload, schemaVersion: "2" } }, { structuredContent: { ...payload, recipient: {} } }, { isError: true, structuredContent: payload }, {}]) {
+    deliver(params)
+    expect(output.textContent).toBe("No sharing result received.")
+  }
+  expect(script).not.toMatch(/innerHTML|fetch\(|tools\/call|window\.open/)
+})
+
 const sharingOperations = [
   { name: "postMarketplacesPlugins", path: "/v1/marketplaces/{marketplaceId}/plugins", params: { marketplaceId: "mkt_fixture" }, body: { pluginId: "plg_fixture" } },
   { name: "postPluginsAccess", path: "/v1/plugins/{pluginId}/access", params: { pluginId: "plg_fixture" }, body: { orgMembershipId: "om_fixture", role: "viewer" } },
@@ -103,17 +163,16 @@ test.each(sharingOperations)("$name preserves the ordinary write response withou
   expect(requests).toHaveLength(2)
 })
 
-test("agent registration has no plugin confirmation tool, resource, or result attachment", async () => {
+test("agent retains legacy registration without automatic result attachments", async () => {
   const agent = await readFile(new URL("../src/mcp/agent.ts", import.meta.url), "utf8")
   const registry = await readFile(new URL("../src/mcp/capability-registry.ts", import.meta.url), "utf8")
-  expect(agent).not.toContain("registerAgentPluginFlow")
-  expect(agent).not.toContain("plugin-flow-app")
-  expect(agent).not.toContain('"plugin_flow"')
+  expect(agent).toContain("registerAgentPluginFlowApp(server)")
+  expect(agent).toContain("plugin-flow-app")
   expect(registry).not.toContain("attachPluginFlowCard")
   expect(registry).not.toContain("plugin-flow-app")
 })
 
-test("historical confirmation payloads remain parseable without a resource implementation", () => {
+test("historical confirmation payloads remain parseable", () => {
   const modes: Array<z.infer<typeof pluginFlowPayloadSchema>["mode"]> = ["marketplace_plugin_added", "plugin_access_granted", "marketplace_access_granted"]
   for (const mode of modes) {
     expect(pluginFlowPayloadSchema.parse({

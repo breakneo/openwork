@@ -377,7 +377,7 @@ async function attemptDrain(sessionId: string) {
       terminalObserved: draft.mode === "shell",
       deferredMessageID: draft.command ? draft.messageId : undefined,
     });
-    if (outcome === "cancelled" && !getQueuedDrainState(sessionId).held) {
+    if (outcome === "cancelled") {
       useComposerStateStore.getState().clearQueuedDrafts(sessionId);
     }
     revokeUnownedAttachmentPreviews(draft.attachments);

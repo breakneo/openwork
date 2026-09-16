@@ -238,8 +238,8 @@ export function registerAgentGeneratedArtifactViews(input: {
         "Create or improve an in-app dashboard or artifact view of Workflow results. Call this Cloud MCP tool directly, not through search_capabilities or execute_capability. Compile React source into a self-contained immutable MCP App revision bound to one Workflow output schema.",
         "Create the complete app in one request without asking the user about Workflow internals, naming, or runtime code. Reuse an existing app when editing. The current saved Workflow must declare outputSchema. New apps default to live: write the Workflow to read input.runtime.{now,today,timeZone,dayStart,dayEnd}, with an inputSchema accepting that object. Never hardcode creation dates or copy author example inputs. Live preview executes the saved version as the viewer. Snapshot mode is restricted to workflows without capability dependencies and receipts remain private to their caller.",
         "Provide a default-exported React component that receives { data, artifact }. React is already injected: use React.useState and other React APIs without imports. Do not import modules, fetch data, access browser globals, or add URL-bearing elements; all render-time data comes from data.",
-        "Every successful build is a draft. Explicitly call the standard preview tool named in the result so the user can try it. Activate a revision only when the user explicitly asks; never activate a draft merely because it built successfully. Editing never changes the saved app. Use one friendly name for the workflow and app. Only create an Automation when the user asks for a schedule. Generated views display, filter, and explore results; they do not submit approvals or other writes.",
-        "Saving returns revision details without loading data, opening a preview, or activating a revision. In every MCP client, explicitly call the registered render_artifact_* or preview_artifact_* tool named in the result to display the standard MCP App. A failed build returns artifact_view_build_failed with diagnostics; correct those diagnostics once and retry using the returned artifactViewId.",
+        "Every successful build is a draft. If no preview is shown, explicitly call the standard preview tool named in the result so the user can try it. Activate a revision only when the user explicitly asks; never activate a draft merely because it built successfully. Editing never changes the saved app. Use one friendly name for the workflow and app. Only create an Automation when the user asks for a schedule. Generated views display, filter, and explore results; they do not submit approvals or other writes.",
+        "Saving validates preview data and retains openwork/appDraft metadata for released OpenWork clients, which may open the legacy preview automatically. Modern OpenWork clients ignore that metadata and do not auto-open; explicitly call the registered render_artifact_* or preview_artifact_* tool named in the result to display the standard MCP App when no preview is shown. Saving never activates a revision. A failed build returns artifact_view_build_failed with diagnostics; correct those diagnostics once and retry using the returned artifactViewId.",
       ].join(" "),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       inputSchema: z.object({
@@ -278,14 +278,40 @@ export function registerAgentGeneratedArtifactViews(input: {
           },
         )
       }
+      const preview = await input.loadData({
+        configObjectId: view.configObjectId,
+        expectedOutputSchemaDigest: revision.outputSchemaDigest,
+        dataMode: view.dataMode ?? "snapshot",
+      })
+      if (!preview.ok) {
+        return errorToolResult(
+          "artifact_view_preview_unavailable",
+          "The app draft compiled, but its preview has no compatible readable Workflow result. Run the current saved Workflow version explicitly with its example inputs using execute_capability, then retry save_artifact_view with the artifactViewId below. An ad-hoc execute_capability_script run is not a saved Workflow result. Do not schedule an Automation or report the preview ready yet.",
+          {
+            artifactViewId: view.id,
+            viewRevisionId: revision.id,
+            configObjectId: view.configObjectId,
+            reason: preview.error,
+            detail: preview.message,
+            ...(preview.connectionStatus ? { connectionStatus: preview.connectionStatus } : {}),
+            ...(preview.connectionCard ? { connectionCard: preview.connectionCard } : {}),
+          },
+        )
+      }
       syncView(view)
       input.notifyCatalogChanged()
       const displayInstruction = `Call ${view.status === "active" && view.activeRevisionId === revision.id
         ? `render_artifact_${view.id}`
         : `preview_artifact_${view.id}`} to display that revision.`
       return {
-        content: [{ type: "text", text: `Saved immutable view revision ${revision.id} at ${revision.resourceUri}. ${displayInstruction} Saving does not open or activate the draft.` }],
+        content: [{ type: "text", text: `Saved immutable view revision ${revision.id} at ${revision.resourceUri}. Released OpenWork clients may open the legacy preview automatically; modern clients ignore the draft metadata. ${displayInstruction} Saving does not activate the draft.` }],
         structuredContent: { view },
+        _meta: { "openwork/appDraft": {
+          appId: view.id,
+          revisionId: revision.id,
+          ...(view.dataMode === "live" ? {} : { receiptId: preview.payload.artifact.receiptId }),
+          title: view.title,
+        } },
       }
     },
   )

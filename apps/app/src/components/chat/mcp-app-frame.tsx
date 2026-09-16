@@ -253,14 +253,14 @@ export function isActionableMcpAppResolutionError(cause: unknown): boolean {
   return cause instanceof OpenworkServerError && ACTIONABLE_MCP_APP_RESOLUTION_CODES.has(cause.code)
 }
 
-function isUnavailableHistoricalFirstPartyApp(toolName: string, launch: OpenworkMcpAppLaunchReference | null, cause: unknown): boolean {
-  if ((!toolName.startsWith("openwork-cloud_") && !toolName.startsWith("openwork_"))
-    || !launch || launch.connectionId !== undefined
-    || !(cause instanceof OpenworkServerError)) return false
-  if (launch.resourceUri !== "ui://openwork/skill-created/v1/view.html"
-    && launch.resourceUri !== "ui://openwork/plugin-flow/v1/view.html") return false
-  return ["tool_not_found", "tool_not_visible", "tool_resource_mismatch"].includes(cause.code)
-    || (cause.code === "resource_read_failed" && cause.status === 404)
+function isRetiredFirstPartyConfirmation(toolName: string, result: PreservedMcpAppResult | null): boolean {
+  const launch = gatewayMcpAppLaunch(result?._meta)
+  if (result?._meta?.["openwork/mcpApp"] !== undefined && !launch) return false
+  if (launch?.connectionId !== undefined) return false
+  if (/^(?:openwork_|openwork-cloud_)(?:create_skill|update_skill|plugin_flow)$/.test(toolName)) return true
+  return /^(?:openwork_|openwork-cloud_)execute_capability$/.test(toolName)
+    && (launch?.resourceUri === "ui://openwork/skill-created/v1/view.html"
+      || launch?.resourceUri === "ui://openwork/plugin-flow/v1/view.html")
 }
 
 const CHAT_MCP_APP_UNAVAILABLE_NOTICE = "Interactive view unavailable. The normal tool result is still available."
@@ -752,6 +752,7 @@ export function McpAppFrame({ part }: { part: DynamicToolUIPart }) {
   const action = reconnectActionFromChatToolResult(part.toolName, connectionResult, part.input)
   const connection = connectionCardPayloadFromChatToolResult(part.toolName, connectionResult, part.input)
   if (action || connection) return <ConnectionCard part={part} action={action} connection={connection} />
+  if (isRetiredFirstPartyConfirmation(part.toolName, result)) return null
   // First-party connection UI is native, including historical app launches.
   // Never route an unsupported connection response back into the old iframe.
   const launch = gatewayMcpAppLaunch(result?._meta)
@@ -820,7 +821,7 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
           setApp(resolved)
         })
         .catch((cause) => {
-          if (cancelled || isUnavailableHistoricalFirstPartyApp(part.toolName, launch, cause)) return
+          if (cancelled) return
           checkpoints.push(`resolve-failed-${attemptIndex + 1}+${Math.round(performance.now() - startedAt)}ms`)
           const retryDelayMs = mcpAppResolutionRetryDelayMs(cause, attemptIndex)
           if (retryDelayMs !== null) {

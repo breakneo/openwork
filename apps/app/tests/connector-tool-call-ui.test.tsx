@@ -2,11 +2,64 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DynamicToolUIPart } from "ai";
 
+import { CodeModeTool } from "../src/components/chat/code-mode-tool";
 import { CapabilityCallLine } from "../src/components/chat/capability-call-line";
 import {
   buildConnectorToolIdentities,
   resolveConnectorToolIdentity,
 } from "../src/react-app/domains/connections/connector-tool-identity";
+
+test("renders probe branding and accessible human labels in every state", () => {
+  const base = {
+    type: "dynamic-tool",
+    toolName: "openwork-cloud_execute_capability",
+    toolCallId: "probe-ui",
+    input: { name: "mcp:emc_probe:*" },
+  } satisfies Partial<DynamicToolUIPart>;
+  const parts: DynamicToolUIPart[] = [
+    { ...base, state: "input-available" },
+    { ...base, state: "output-available", output: {} },
+    { ...base, state: "output-error", errorText: "Probe failed" },
+  ];
+  const connector = {
+    id: "connection:emc_probe", connectionId: "emc_probe", name: "Notion",
+    iconUrl: "/ext-notion.svg", serviceUrl: null, toolNamespace: null,
+  };
+  for (const part of parts) {
+    const label = part.state === "input-available" ? "Checking Notion connection…"
+      : part.state === "output-error" ? "Couldn&#x27;t check Notion connection" : "Checked Notion connection";
+    const html = renderToStaticMarkup(<CapabilityCallLine part={part} connector={connector} />);
+    expect(html).toContain('data-connector-name="Notion"');
+    expect(html).toContain("/ext-notion.svg");
+    expect(html).toContain(label);
+    expect(html).toContain(`aria-label="${label}.`);
+    expect(html).not.toContain("Used *");
+    expect(html).not.toContain("mcp:emc_probe:*");
+    expect(html).not.toContain("Waiting for your action");
+  }
+  const html = renderToStaticMarkup(<CapabilityCallLine part={parts[0]!} statusUnknown />);
+  expect(html).toContain("status unavailable");
+  expect(html).not.toContain("animate-spin");
+});
+
+test("unfinished code mode calls do not resume animating after interruption", () => {
+  const part: DynamicToolUIPart = {
+    type: "dynamic-tool", toolName: "openwork-cloud_execute_capability_script", toolCallId: "script",
+    state: "input-available", input: {},
+  };
+  const call: DynamicToolUIPart = {
+    type: "dynamic-tool", toolName: "openwork-cloud_execute_capability", toolCallId: "nested",
+    state: "input-available", input: { name: "mcp:emc_probe:*" },
+  };
+  for (const lifecycle of [null, "interrupted"] satisfies Array<null | "interrupted">) {
+    const html = renderToStaticMarkup(<CodeModeTool part={part} calls={[call]} lifecycle={lifecycle} connectors={[]} />);
+    expect(html).toContain("Status unavailable");
+    expect(html).toContain("Checking connection");
+    expect(html).not.toContain("animate-spin");
+    expect(html).not.toContain("Task interrupted");
+    expect(html).not.toContain("Completed");
+  }
+});
 
 test("renders a connector logo beside a human-readable completed tool call", () => {
   const part: DynamicToolUIPart = {

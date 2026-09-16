@@ -7,7 +7,7 @@ import type { Den, MockHandle, Seed } from "@openwork/env";
 import { denFetch, evalIn as rawEvalIn } from "@openwork/behaviors";
 import type { DenFetchResult, DenSession } from "@openwork/behaviors";
 import { allocateFreePort } from "@openwork/cdp";
-import { startMockMcp } from "@openwork/labs";
+import { startMockMcp, type MockAgentWorkload } from "@openwork/labs";
 import { captureExternalBrowserUrls, electronProfilePaths } from "@openwork/hosts";
 import { configureProvider } from "./chat.ts";
 import { browserScriptValue, runBrowserHost } from "../packages/env/src/browser-task.ts";
@@ -1006,7 +1006,20 @@ async function reloadConfiguredApp(app: import("@openwork/cdp").Surface): Promis
   throw new Error("The configured desktop control did not return after reload.");
 }
 
-export const connectionActionReply = "Connect your Notion account to continue.";
+export const connectionActionReply = "Notion authentication finished. The original request continued.";
+export const connectionActionReplySkip = "I continued without Notion and did not retry the connection.";
+export const connectionActionSkipPrompt = "I want to connect Notion, but let me skip if I choose.";
+export const connectionStatusSkipPrompt = "Check my Notion connection so I can sign in, but let me skip if I choose.";
+export const connectionActionQuestion = {
+  header: "Connection",
+  question: "Connect Notion to continue?",
+  options: [
+    { label: "Authenticate", description: "Sign in to continue the request." },
+    { label: "Skip", description: "Continue without this connection." },
+  ],
+  multiple: false,
+  custom: false,
+};
 export const ordinaryDiscoveryPrompt = "Create a dashboard using my notes.";
 export const ordinaryDiscoveryReply = "I found the available capabilities for the dashboard.";
 export const connectionActionPrompt = "I want to connect Notion.";
@@ -1028,22 +1041,26 @@ export async function connectionActionMcpApp(seed: Seed) {
         latestUserTurn: true,
         finalReply: ordinaryDiscoveryReply,
         steps: [{ tool: "search_capabilities", arguments: { query: "Notion", type: "mcp" } }],
-      }, {
-        promptMarker: connectionActionPrompt,
+      }, ...[connectionActionPrompt, connectionActionSkipPrompt].map((promptMarker): MockAgentWorkload => ({
+        promptMarker,
         latestUserTurn: true,
-        finalReply: connectionActionReply,
-        finalReplyDelayMs: 10_000,
-        steps: [{ tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } }],
-      }, {
-        promptMarker: connectionStatusPrompt,
+        finalReply: promptMarker === connectionActionSkipPrompt ? connectionActionReplySkip : connectionActionReply,
+        steps: [
+          { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
+          { tool: "openwork_context", arguments: {} },
+          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
+        ],
+      })), ...[connectionStatusPrompt, connectionStatusSkipPrompt].map((promptMarker): MockAgentWorkload => ({
+        promptMarker,
         latestUserTurn: true,
-        finalReply: connectionActionReply,
-        finalReplyDelayMs: 10_000,
+        finalReply: promptMarker === connectionStatusSkipPrompt ? connectionActionReplySkip : connectionActionReply,
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
+          { tool: "openwork_context", arguments: {} },
+          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
-      }, {
+      })), {
         promptMarker: connectorCatalogPrompt,
         finalReply: connectorCatalogReply,
         steps: [{ tool: "search_capabilities", arguments: { query: "Slack", type: "mcp", intent: "connect" } }],

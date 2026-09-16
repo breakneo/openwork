@@ -106,7 +106,10 @@ test("gateway discovery preserves setup intent and execution scopes", { timeout:
   evidence.recordAssertionEvidence("Named setup does not invent a connection or launch a suggested catalog", "An unconfigured Slack search returned no connection action, setup catalog, or UI metadata even with explicit connect intent. Available setup options require a separate connector inventory request.", true);
 
   const full = await search({ query: "available services", type: "connectors" });
-  const entries = rows(full.payload.connectors);
+  const catalog = record(full.payload.connectorCatalog);
+  expect(catalog.version).toBe(1);
+  expect(catalog.selectedIds).toEqual([]);
+  const entries = rows(catalog.entries);
   const ids = entries.map(entry => entry.id);
   expect(ids).toHaveLength(13);
   expect(new Set(ids).size).toBe(13);
@@ -121,13 +124,13 @@ test("gateway discovery preserves setup intent and execution scopes", { timeout:
     expect(setupUrl.pathname).toBe("/dashboard/mcp-connections");
     expect(setupUrl.searchParams.get("quickAdd")).toBe(entry.id);
   }
-  expect(full.payload.connectorCatalog).toBeUndefined();
+  expect(full.payload.connectors).toBeUndefined();
   expect(full.payload.matches).toEqual([]);
   expect(full.payload.connectionAction).toBeUndefined();
   expect(full.result._meta).toBeUndefined();
   expect(await den.mocks.connector.toolCalls()).toEqual([]);
   expect((await den.mocks.connector.requests()).filter(entry => entry.path === "/authorize" || entry.path === "/token")).toEqual([]);
-  evidence.recordAssertionEvidence("Explicit connector browsing returns all quick adds as ordinary metadata without authorizing an account", "type connectors returned all 13 setup entries with valid setup URLs, no catalog envelope, no executable matches, no connection action or UI metadata, and no provider or OAuth calls.", true);
+  evidence.recordAssertionEvidence("Explicit connector browsing returns all quick adds as ordinary metadata without authorizing an account", "type connectors returned all 13 setup entries with valid setup URLs, the legacy version 1 catalog envelope with no selected IDs, no executable matches, no connection action or UI metadata, and no provider or OAuth calls.", true);
 
   // Discovery does not grant mutation authority. Use the same read-scoped
   // token against a healthy synthetic connector, not the private App token.

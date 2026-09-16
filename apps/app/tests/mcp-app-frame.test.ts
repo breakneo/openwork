@@ -989,10 +989,11 @@ describe("MCP App resolution", () => {
     } finally { await host.dispose() }
   })
 
-  test.each(["draft", "snapshot", "both"])("resolves %s metadata inline without opening or redirecting the side panel", async mode => {
+  test.each(["draft", "snapshot", "preview", "both"])("resolves %s metadata inline without opening or redirecting the side panel", async mode => {
     const host = resolutionFixture(true)
     const resourceUri = "ui://openwork/artifacts/arv_fixture/views/avr_fixture/index.html"
-    const toolName = mode === "snapshot" ? "openwork-cloud_render_artifact_fixture" : "openwork-cloud_save_artifact_view"
+    const toolName = mode === "snapshot" ? "openwork-cloud_render_artifact_fixture"
+      : mode === "preview" ? "openwork-cloud_preview_artifact_fixture" : "openwork-cloud_save_artifact_view"
     const launch = { toolName, resourceUri, arguments: {} }
     const part: DynamicToolUIPart = {
       ...host.part, toolName,
@@ -1046,20 +1047,22 @@ describe("MCP App resolution", () => {
   })
 
   test.each(["skill-created", "plugin-flow"].flatMap(resource =>
-    ["tool_not_found", "tool_not_visible", "tool_resource_mismatch", "resource_read_failed"].map(code => ({ resource, code }))
-  ))("silently retains the tool result when historical $resource is no longer offered ($code)", async ({ resource, code }) => {
+    ["openwork_", "openwork-cloud_"].flatMap(prefix =>
+      ["mcpResult", "mcpApp"].map(alias => ({ resource, prefix, alias })))
+  ))("suppresses retained historical $resource for $prefix through $alias before resolution", async ({ resource, prefix, alias }) => {
     const host = resolutionFixture(true)
-    host.resolveSpy.mockRejectedValue(new OpenworkServerError(404, code, "No longer offered"))
+    host.resolveSpy.mockResolvedValue({ app: fixture() })
     try {
       await host.render({
-        ...host.part, toolName: "openwork-cloud_execute_capability",
-        callProviderMetadata: { openwork: { mcpApp: {
+        ...host.part, toolName: `${prefix}execute_capability`,
+        callProviderMetadata: { openwork: { [alias]: {
           content: [{ type: "text", text: "Historical result" }],
           _meta: { "openwork/mcpApp": { toolName: "historical", resourceUri: `ui://openwork/${resource}/v1/view.html`, arguments: {} } },
         } } },
       })
-      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.resolveSpy).not.toHaveBeenCalled()
       expect(host.container.textContent).toBe("")
+      expect(host.container.querySelector("iframe")).toBeNull()
       expect(host.errorSpy).not.toHaveBeenCalled()
       expect(host.callSpy).not.toHaveBeenCalled()
     } finally { await host.dispose() }
@@ -1069,7 +1072,9 @@ describe("MCP App resolution", () => {
     { toolName: "provider_render", connectionId: undefined, resourceUri: "ui://openwork/skill-created/v1/view.html", code: "tool_not_found" },
     { toolName: "openwork-cloud_execute_capability", connectionId: "emc_fixture", resourceUri: "ui://openwork/plugin-flow/v1/view.html", code: "tool_not_found" },
     { toolName: "openwork-cloud_execute_capability", connectionId: undefined, resourceUri: "ui://provider/view.html", code: "tool_not_found" },
-    { toolName: "openwork-cloud_execute_capability", connectionId: undefined, resourceUri: "ui://openwork/skill-created/v1/view.html", code: "invalid_resource_csp" },
+    { toolName: "openwork-cloud_execute_capability", connectionId: "emc_fixture", resourceUri: "ui://openwork/skill-created/v1/view.html", code: "invalid_resource_csp" },
+    { toolName: "provider_create_skill", connectionId: undefined, resourceUri: "ui://openwork/skill-created/v1/view.html", code: "resource_read_failed" },
+    { toolName: "openwork-cloud_unknown", connectionId: undefined, resourceUri: "ui://openwork/skill-created/v1/view.html", code: "tool_not_found" },
   ])("preserves provider and security diagnostics for $toolName $resourceUri $code", async ({ toolName, connectionId, resourceUri, code }) => {
     const host = resolutionFixture(true)
     host.resolveSpy.mockRejectedValue(new OpenworkServerError(404, code, "Resolution failed"))
@@ -1086,19 +1091,75 @@ describe("MCP App resolution", () => {
     } finally { await host.dispose() }
   })
 
-  test.each(["skill-created", "plugin-flow"])("still renders an advertised %s resource through the standard sandbox", async resource => {
+  test.each(["skill-created", "plugin-flow"].flatMap(resource => [
+    { resource, toolName: "openwork-cloud_execute_capability", connectionId: "emc_fixture" },
+    { resource, toolName: "openwork_create_skill", connectionId: "emc_fixture" },
+    { resource, toolName: "provider_create_skill", connectionId: undefined },
+    { resource, toolName: "openwork-other_execute_capability", connectionId: undefined },
+    { resource, toolName: "openwork-cloud_execute_capability", connectionId: "" },
+    { resource, toolName: "openwork-cloud_render_artifact_fixture", connectionId: undefined },
+    { resource, toolName: "openwork-cloud_preview_artifact_fixture", connectionId: undefined },
+  ]))("still renders external $toolName $resource through the standard sandbox", async ({ resource, toolName, connectionId }) => {
     const host = resolutionFixture(true)
     const resourceUri = `ui://openwork/${resource}/v1/view.html`
     host.resolveSpy.mockResolvedValue({ app: fixture({ resourceUri }) })
     try {
       await host.render({
-        ...host.part, toolName: "openwork-cloud_execute_capability",
+        ...host.part, toolName,
         callProviderMetadata: { openwork: { mcpResult: {
-          content: [], _meta: { "openwork/mcpApp": { toolName: "render", resourceUri, arguments: {} } },
+          content: [], _meta: { "openwork/mcpApp": { toolName: "render", resourceUri, arguments: {}, ...(connectionId !== undefined ? { connectionId } : {}) } },
         } } },
       })
       expect(host.container.querySelector("iframe")).not.toBeNull()
       expect(host.errorSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each(["openwork_", "openwork-cloud_"].flatMap(prefix =>
+    ["create_skill", "update_skill", "plugin_flow"].flatMap(name =>
+      ["mcpResult", "mcpApp"].flatMap(alias => [false, true].map(launch => ({ prefix, name, alias, launch }))))
+  ))("suppresses backend binding $prefix$name ($alias, launch: $launch) without embedding or resolving", async ({ prefix, name, alias, launch }) => {
+    const host = resolutionFixture(false)
+    const resourceUri = `ui://openwork/${name === "plugin_flow" ? "plugin-flow" : "skill-created"}/v1/view.html`
+    host.resolveSpy.mockResolvedValue({ app: fixture({ resourceUri }) })
+    const part: DynamicToolUIPart = {
+      ...host.part, toolName: `${prefix}${name}`,
+      callProviderMetadata: { openwork: { [alias]: {
+        content: [{ type: "text", text: "Created successfully" }],
+        _meta: { ui: { resourceUri }, ...(launch ? { "openwork/mcpApp": { toolName: name, resourceUri, arguments: {} } } : {}) },
+      } } },
+    }
+    try {
+      expect(hasPreservedMcpAppResult(part)).toBe(true)
+      expect(McpAppFrame({ part })).toBeNull()
+      await host.render(part)
+      expect(host.resolveSpy).not.toHaveBeenCalled()
+      expect(host.container.querySelector("iframe")).toBeNull()
+      expect(host.container.textContent).toBe("")
+      expect(host.errorSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each([
+    { toolName: "openwork-cloud_execute_capability", arguments: null, connectionId: undefined },
+    { toolName: "openwork_execute_capability", arguments: {}, connectionId: null },
+    { toolName: "openwork-cloud_unknown", arguments: {}, connectionId: undefined },
+  ])("keeps malformed or unknown $toolName launches on the diagnostic path", async ({ toolName, arguments: args, connectionId }) => {
+    const host = resolutionFixture(false)
+    host.resolveSpy.mockRejectedValue(new OpenworkServerError(400, "invalid_launch_reference", "Invalid launch"))
+    try {
+      await host.render({
+        ...host.part, toolName,
+        callProviderMetadata: { openwork: { mcpResult: {
+          content: [], _meta: { "openwork/mcpApp": {
+            toolName: "render", resourceUri: "ui://openwork/skill-created/v1/view.html", arguments: args,
+            ...(connectionId !== undefined ? { connectionId } : {}),
+          } },
+        } } },
+      })
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.container.textContent).toContain("MCP_APP_RESOURCE_RESOLUTION_FAILED")
+      expect(host.container.textContent).toContain("invalid_launch_reference")
     } finally { await host.dispose() }
   })
 

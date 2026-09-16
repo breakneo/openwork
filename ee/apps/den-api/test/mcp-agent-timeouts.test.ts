@@ -511,11 +511,12 @@ test("structured search output remains compatible with marketplace match kinds a
   expect(result.success).toBe(true)
 })
 
-test("agent steering requires explicit standard previews and plain skill and sharing results", () => {
+test("agent steering separates legacy compatibility from modern presentation and plain sharing results", () => {
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("explicitly call the standard preview tool")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("without an App resource binding")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("original skill-created MCP App binding")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("Modern OpenWork clients ignore that metadata and do not auto-open")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("return ordinary operation results")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("without a setup card")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("No new setup card is introduced")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("chooses Save")
   for (const capability of [BUILTIN_CREATE_SKILL_CAPABILITY, BUILTIN_SHARE_PLUGIN_CAPABILITY, BUILTIN_ADD_TO_MARKETPLACE_CAPABILITY, BUILTIN_ADD_USER_TO_MARKETPLACE_CAPABILITY]) {
     const source = executeBuiltinSkillCapability(capability)?.content
@@ -575,15 +576,18 @@ test("connection status only outranks equally relevant callable tools", () => {
 })
 
 
-test("connector discovery returns every preset as plain setup metadata without a card", async () => {
+test("connector discovery preserves the released version 1 browse envelope without auth", async () => {
   const { EXTERNAL_MCP_PRESETS } = await import("../src/capability-sources/external-mcp-presets.js")
   const result = agentModule.connectorSetupToolResult()
-  const { connectors } = result.structuredContent
+  const { connectorCatalog } = result.structuredContent
+  const connectors = connectorCatalog.entries
+  expect(connectorCatalog.version).toBe(1)
+  expect(connectorCatalog.selectedIds).toEqual([])
   expect(connectors.map(entry => entry.id)).toEqual(["google-workspace", "microsoft-365", ...EXTERNAL_MCP_PRESETS.map(preset => preset.presetId)])
   expect(connectors.find(entry => entry.id === "slack")?.setup).toBe("oauth_client")
   expect(result.structuredContent.matches).toEqual([])
   expect(result.structuredContent.hint).toContain("not connected tools")
-  expect(result.structuredContent).not.toHaveProperty("connectorCatalog")
+  expect(result.structuredContent).not.toHaveProperty("connectors")
   expect(result.structuredContent).not.toHaveProperty("connectionAction")
   expect(result).not.toHaveProperty("_meta")
   expect(JSON.parse(toolText(result) || "{}")).toEqual(result.structuredContent)

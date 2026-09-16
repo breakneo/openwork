@@ -49,3 +49,17 @@ export const connectionActionPayloadSchema = z.object({
 })
 
 export type ConnectionActionPayload = z.infer<typeof connectionActionPayloadSchema>
+
+export const connectorCatalogSchema = z.object({
+  version: z.literal(1),
+  selectedIds: z.array(z.string()),
+  entries: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    name: z.string(),
+    description: z.string(),
+    serviceUrl: z.string().url().optional(),
+    setup: z.enum(["oauth", "oauth_client", "api_key", "instant", "suite"]),
+    setupUrl: z.string().url(),
+  })),
+})
+export type ConnectorCatalog = z.infer<typeof connectorCatalogSchema>

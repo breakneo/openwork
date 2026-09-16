@@ -212,7 +212,7 @@ test("save and retirement refresh the same session's resources and tools", async
       },
     })
     expect(JSON.stringify(saved.content)).toContain(`preview_artifact_${viewId}`)
-    expect(saved._meta).toBeUndefined()
+    expect(saved._meta).toEqual({ "openwork/appDraft": { appId: viewId, revisionId: savedRevisionId, receiptId: payload.artifact.receiptId, title: view.title } })
     expect(changed).toBeGreaterThan(0)
     expect(resourcesChanged).toBeGreaterThan(0)
     const resources = await client.listResources()
@@ -270,7 +270,7 @@ test("returns actionable tool errors for missing schemas and failed builds", asy
 
 const draftDataModes: Array<GeneratedArtifactView["dataMode"]> = ["live", "snapshot", undefined]
 
-test.each(draftDataModes)("%s draft save requires an explicit standard preview without loading data or activating", async (dataMode) => {
+test.each(draftDataModes)("%s draft save validates legacy preview metadata without activation and retains explicit standard preview", async (dataMode) => {
   let loads = 0
   let activations = 0
   const draftView = { ...view, dataMode, activeRevisionId: null }
@@ -280,11 +280,16 @@ test.each(draftDataModes)("%s draft save requires an explicit standard preview w
       arguments: { configObjectId, title: view.title, reactSource: "export default function View() { return <div /> }" },
     })
     expect(saved.isError, JSON.stringify(saved.content)).not.toBe(true)
-    expect(saved._meta).toBeUndefined()
+    expect(saved._meta).toEqual({ "openwork/appDraft": {
+      appId: viewId,
+      revisionId: draftRevisionId,
+      title: view.title,
+      ...(dataMode === "live" ? {} : { receiptId: payload.artifact.receiptId }),
+    } })
     expect(saved.structuredContent).toEqual({ view: draftView })
     expect(JSON.stringify(saved.content)).toContain(`Call preview_artifact_${viewId}`)
-    expect(JSON.stringify(saved.content)).not.toContain("automatically")
-    expect(loads).toBe(0)
+    expect(JSON.stringify(saved.content)).toContain("modern clients ignore the draft metadata")
+    expect(loads).toBe(1)
     expect(activations).toBe(0)
     const tools = await client.listTools()
     expect(tools.tools.some(tool => tool.name === `render_artifact_${viewId}`)).toBe(false)
@@ -293,7 +298,7 @@ test.each(draftDataModes)("%s draft save requires an explicit standard preview w
     const preview = await client.callTool({ name: `preview_artifact_${viewId}`, arguments: {} })
     expect(preview.structuredContent).toEqual(payload)
     expect(preview._meta?.["openwork/appDraft"]).toBeUndefined()
-    expect(loads).toBe(1)
+    expect(loads).toBe(2)
     expect(activations).toBe(0)
     const resource = await client.readResource({ uri: artifactViewResourceUri(viewId, draftRevisionId) })
     expect(resource.contents[0]).toMatchObject({ mimeType: "text/html;profile=mcp-app", text: html })
@@ -311,7 +316,7 @@ test.each(draftDataModes)("%s draft save requires an explicit standard preview w
   })
 })
 
-test("saving a compiled draft does not require data; explicit preview reports connection failures", async () => {
+test("saving a compiled draft rejects unavailable preview data without legacy ready metadata", async () => {
   let loads = 0
   const connectionCard = { state: "needs_connection", message: "Connect your account" }
   await withClient(async (client) => {
@@ -319,17 +324,21 @@ test("saving a compiled draft does not require data; explicit preview reports co
       name: "save_artifact_view",
       arguments: { configObjectId, title: view.title, reactSource: "export default function View() { return <div /> }" },
     })
-    expect(saved.isError, JSON.stringify(saved.content)).not.toBe(true)
+    expect(saved.isError).toBe(true)
     expect(saved._meta).toBeUndefined()
-    expect(loads).toBe(0)
-    const preview = await client.callTool({ name: `preview_artifact_${viewId}`, arguments: {} })
+    expect(saved.structuredContent).toBeUndefined()
     expect(loads).toBe(1)
-    expect(preview.isError).toBe(true)
-    expect(preview.structuredContent).toEqual(connectionCard)
-    expect(JSON.stringify(preview.content)).toContain("capability_unavailable")
-    expect(JSON.stringify(preview)).not.toContain(payload.artifact.receiptId)
-    const resource = await client.readResource({ uri: artifactViewResourceUri(viewId, draftRevisionId) })
-    expect(resource.contents[0]).toMatchObject({ text: html })
+    const first = saved.content[0]
+    expect(first?.type === "text" ? JSON.parse(first.text) : null).toMatchObject({
+      error: "artifact_view_preview_unavailable",
+      artifactViewId: viewId,
+      viewRevisionId: draftRevisionId,
+      configObjectId,
+      reason: "capability_unavailable",
+      connectionCard,
+    })
+    expect(JSON.stringify(saved)).not.toContain(payload.artifact.receiptId)
+    expect((await client.listTools()).tools.some(tool => tool.name === `preview_artifact_${viewId}`)).toBe(false)
   }, {
     views: [],
     save: async () => ({ ...view, dataMode: "live", activeRevisionId: null }),

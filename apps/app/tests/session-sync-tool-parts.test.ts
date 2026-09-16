@@ -94,7 +94,7 @@ describe("tool part mapper", () => {
       .toMatchObject({ callProviderMetadata: { openwork: { toolStartedAt: 1 } } });
     expect(parseDynamicToolUIPart(writeToolPart("pending", { description: "Review" }, { tool: "task" })))
       .toMatchObject({ callProviderMetadata: { opencode: { partId: "part-write" } } });
-    expect(parseDynamicToolUIPart(writeToolPart("pending", { description: "Review" }, { tool: "task" }))?.callProviderMetadata?.openwork)
+    expect(parseDynamicToolUIPart(writeToolPart("pending", { description: "Review" }, { tool: "task" }))?.callProviderMetadata?.openwork?.toolStartedAt)
       .toBeUndefined();
   });
 
@@ -186,6 +186,7 @@ describe("tool part mapper", () => {
     expect(parseDynamicToolUIPart(part)?.callProviderMetadata).toEqual({
       opencode: { partId: "part-write" },
       openwork: {
+        sourcePartId: "part-write",
         mcpResult: {
           ...(isError === undefined ? {} : { isError }),
           content: [{ type: "text", text: "Fallback" }],
@@ -207,7 +208,7 @@ describe("tool part mapper", () => {
 
     expect(parseDynamicToolUIPart(running)?.callProviderMetadata).toEqual({
       opencode: { partId: "part-task" },
-      openwork: { childSessionId: "ses_child_1", toolStartedAt: 1 },
+      openwork: { sourcePartId: "part-task", childSessionId: "ses_child_1", toolStartedAt: 1 },
     });
 
     const completed = writeToolPart(
@@ -220,7 +221,7 @@ describe("tool part mapper", () => {
 
     expect(parseDynamicToolUIPart(completed)?.callProviderMetadata).toEqual({
       opencode: { partId: "part-task" },
-      openwork: { childSessionId: "ses_child_1", toolStartedAt: 1 },
+      openwork: { sourcePartId: "part-task", childSessionId: "ses_child_1", toolStartedAt: 1 },
     });
   });
 
@@ -231,6 +232,7 @@ describe("tool part mapper", () => {
 
     expect(parseDynamicToolUIPart(part)?.callProviderMetadata).toEqual({
       opencode: { partId: "part-write" },
+      openwork: { sourcePartId: "part-write" },
     });
   });
 

@@ -30,13 +30,13 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
       await appUser.screenshot();
       await appUser.click({ role: "button", label: `Searched your connections for “${request.query}”. Show technical details` });
       if (request.ids.length === 0) {
-        await appUser.notSee({ text: /"connectors"\s*:/ });
+        await appUser.notSee({ text: /"connectorCatalog"\s*:/ });
         await appUser.notSee({ text: /"setupUrl"\s*:|quickAdd=/ });
       } else {
-        await appUser.see({ text: /"connectors"\s*:/ });
+        await appUser.see({ text: /"connectorCatalog"\s*:/ });
         for (const id of request.ids) await appUser.see({ text: new RegExp(`quickAdd=${id}`) });
       }
-      await appUser.notSee({ text: /"connectorCatalog"/ });
+      await appUser.notSee({ text: /"connectors"\s*:/ });
       await appUser.click({ role: "button", label: `Searched your connections for “${request.query}”. Hide technical details` });
       const calls = await world.den.mocks.connector.agentRequests({ promptMarker: request.prompt });
       expect(calls.filter(call => call.kind === "tool")).toHaveLength(1);

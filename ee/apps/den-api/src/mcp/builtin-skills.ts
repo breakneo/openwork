@@ -53,7 +53,7 @@ Produce one complete \`SKILL.md\` with:
      "skillMarkdown": "<complete SKILL.md>"
    }
    \`\`\`
-3. Use the returned plugin id and skill id to report that the skill is ready to use now. The result contains plain text and structured skill details, without a confirmation App.
+3. Use the returned plugin id and skill id to report that the skill is ready to use now. The result contains text and structured skill details with the original confirmation resource binding for released and historical clients. Modern OpenWork suppresses this first-party confirmation presentation; report the saved result in text.
 4. On a \`duplicate_plugin\` response, report the existing plugin id from the message and offer to update that skill through the direct \`update_skill\` tool with \`{ "skillId": "<cob_…>", "skillMarkdown": "<complete SKILL.md>" }\` instead of creating a duplicate. It returns the updated skill details and a text confirmation.
 5. On authorization or validation errors, report them. Do not fall back to a workspace-local skill unless the user explicitly asks for one.
 6. After reporting that the skill is ready, offer to share it with a person or team. If accepted, execute and follow the \`share-plugin\` skill.

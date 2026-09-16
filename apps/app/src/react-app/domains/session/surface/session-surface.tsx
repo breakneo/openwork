@@ -133,24 +133,20 @@ import {
   useComposerStateStore,
 } from "./composer-state-store";
 import { MessageList } from "@/components/chat/message-list";
-import { ConnectionCard } from "@/components/chat/connection-card";
 import { MessageListProvider, type DispatchAction } from "@/components/chat/message-list-provider";
 import type {
   ChatToolReconnectAction,
   ChatToolReconnectProgress,
   ChatToolReconnectResult,
 } from "@/components/tools/error-attribution";
-import { useChatMcpReconnectStore } from "@/components/tools/mcp-reconnect-state";
 import { MERMAID_LIMITS } from "@/components/markdown/mermaid";
 import {
-  chatConnectionRetryPrompt,
-  createChatConnectionDecisionTracker,
-  chatConnectionStops,
   isChatMcpReconnectScopeCurrent,
-  prepareChatStopQueue,
-  waitForFreshMcpAuthorization,
-  type ChatConnectionDecision,
-  type ChatConnectionStopState,
+  isCurrentChatConnectionDecision,
+  nativeChatConnectionDecision,
+  isReservedConnectionQuestion,
+  type ChatConnectionDecisionBinding,
+  authenticateChatConnection,
   type ChatMcpReconnectScope,
 } from "./mcp-chat-reconnect";
 import { OpenTargetProvider, type OpenTargetOptions } from "@/lib/target-provider";
@@ -646,7 +642,7 @@ export type SessionSurfaceProps = {
   respondPermission?: (requestID: string, reply: "once" | "always" | "reject") => void;
   activeQuestion?: PendingQuestion | null;
   questionReplyBusy?: boolean;
-  respondQuestion?: (requestID: string, answers: string[][]) => void;
+  respondQuestion?: (requestID: string, answers: string[][]) => void | Promise<void>;
   safeStringify?: (value: unknown) => string;
   onChangeModel?: (model: { providerID: string; modelID: string }) => void;
   onUploadInboxFiles?: ((files: File[], options?: { notify?: boolean }) => void | Promise<unknown>) | null;
@@ -1146,6 +1142,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const removeQueuedDraftFromStore = useComposerStateStore((state) => state.removeQueuedDraft);
   const updateQueuedDraftInStore = useComposerStateStore((state) => state.updateQueuedDraft);
   const reorderQueuedDrafts = useComposerStateStore((state) => state.reorderQueuedDrafts);
+  const clearQueuedDrafts = useComposerStateStore((state) => state.clearQueuedDrafts);
   // Per-conversation model controls: each pane resolves its own remembered
   // model (falling back to the global default) and owns its picker open
   // state, so split panes never control each other's model picker.
@@ -1194,22 +1191,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
   }), [props.draftScope, props.opencodeBaseUrl, props.workspaceId, props.sessionId]);
   const activeSessionOwnerRef = useRef(sessionOwner);
   activeSessionOwnerRef.current = sessionOwner;
-  const connectionDecisionTracker = useMemo(() => createChatConnectionDecisionTracker(), [sessionOwner]);
-  const connectionStops = chatConnectionStops;
-  const connectionStopPhase = useSyncExternalStore(connectionStops.subscribe,
-    useCallback(() => connectionStops.phase(sessionOwner), [connectionStops, sessionOwner]));
-  const connectionControlTargetRef = useRef(props.isControlTarget);
-  connectionControlTargetRef.current = props.isControlTarget;
-  const activeConnectionTrackerRef = useRef(connectionDecisionTracker);
-  activeConnectionTrackerRef.current = connectionDecisionTracker;
-  const [connectionDecisionState, setConnectionDecisionState] = useState<{
-    tracker: ReturnType<typeof createChatConnectionDecisionTracker>;
-    blocker: ChatConnectionDecision;
-    stopState: ChatConnectionStopState;
-  } | null>(null);
-  useEffect(() => () => {
-    connectionDecisionTracker.reset();
-  }, [connectionDecisionTracker]);
   const snapshotTargetRef = useRef<NativeSessionSnapshotTarget>({
     owner: sessionOwner,
     endpoint: { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken },
@@ -1577,9 +1558,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
   }, [baseRenderedMessages, pendingMessages, props.opencodeBaseUrl]);
   const inputHistory = useMemo(() => deriveComposerHistory(pendingReconciliation.messages), [pendingReconciliation.messages]);
   const remainingPendingMessages = pendingReconciliation.remaining;
-  useLayoutEffect(() => {
-    connectionDecisionTracker.reconcile(sessionOwner, baseRenderedMessages, pendingReconciliation.messageIdReplacements);
-  }, [baseRenderedMessages, connectionDecisionTracker, pendingReconciliation.messageIdReplacements, sessionOwner]);
   useEffect(() => {
     if (!pendingMessages || (pendingMessages.length === remainingPendingMessages.length
       && pendingMessages.every((item, index) => item === remainingPendingMessages[index]))) return;
@@ -2107,13 +2085,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
     nextDraft: ComposerDraft,
     itemId: string,
     onPrepared?: (text?: string) => void,
-    options: { consumeQueuedItem?: boolean; connectionGeneration?: number } = {},
+    options: { consumeQueuedItem?: boolean } = {},
   ): Promise<CloudMcpSubmissionResult | { outcome: "unknown" }> => {
     // Capture before interruption/readiness waits; later selections affect only later sends.
     const agent = getSessionAgentSelection(props.sessionId, props.selectedAgent);
     const messageId = nextDraft.messageId ?? createPromptMessageID();
-    const connectionGeneration = options.connectionGeneration ?? connectionDecisionTracker.begin(sessionOwner, messageId);
-    if (activeConnectionTrackerRef.current === connectionDecisionTracker) setConnectionDecisionState(null);
     const generation = getQueuedSendGeneration(props.sessionId);
     const submissionId = Symbol();
     pendingSendsRef.current.set(submissionId, sessionOwner);
@@ -2131,14 +2107,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           if (getQueuedSendGeneration(props.sessionId) !== generation) {
             return { outcome: "cancelled", reason: "context_changed" };
           }
-          if (!connectionDecisionTracker.isCurrent(sessionOwner, connectionGeneration)) return { outcome: "cancelled", reason: "context_changed" };
-          connectionDecisionTracker.dispatch(sessionOwner, connectionGeneration,
-            [...sendMessages.map(message => message.info.id), ...baseRenderedMessages.map(message => message.id)],
-            isOpencodeV2BaseUrl(props.opencodeBaseUrl));
-          return props.onSendDraft({ ...nextDraft, messageId }, props.sessionId, (text) => {
-            connectionDecisionTracker.prepared(sessionOwner, connectionGeneration, text);
-            onPrepared?.(text);
-          }, agent);
+          return props.onSendDraft({ ...nextDraft, messageId }, props.sessionId, onPrepared, agent);
         }, { directory: props.workspaceRoot.trim() || undefined, messageID: messageId });
       // Drain listeners can reconcile idle and claim another item synchronously.
       // Consume the submitted row while its send slot is still held.
@@ -2192,7 +2161,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       pendingSendsRef.current.delete(submissionId);
       setPendingSendSessions([...pendingSendsRef.current.values()]);
     }
-  }, [archived, archiveStateKnown, baseRenderedMessages, connectionDecisionTracker, opencodeClient, openingHistory.readSendHistory, props.onSendDraft, props.opencodeBaseUrl, props.selectedAgent, props.sessionId, props.workspaceId, props.workspaceRoot, removeQueuedDraftFromStore, renderedMessages.length, sessionOwner, setError]);
+  }, [archived, archiveStateKnown, opencodeClient, openingHistory.readSendHistory, props.onSendDraft, props.opencodeBaseUrl, props.selectedAgent, props.sessionId, props.workspaceId, props.workspaceRoot, removeQueuedDraftFromStore, renderedMessages.length, sessionOwner, setError]);
 
   const clearComposer = useCallback(() => {
     clearPersistedDraft();
@@ -2223,8 +2192,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
     // Immediate sends and queued sends share the same slot across all panes.
     dispatchQueuedDrain(props.sessionId, { type: "user_retry" });
     if (!claimQueuedSend(props.sessionId, nextDraft.messageId, true)) return;
-    const connectionGeneration = connectionDecisionTracker.begin(sessionOwner, nextDraft.messageId);
-    setConnectionDecisionState(null);
     for (const attachment of sentAttachments) {
       if (attachment.kind === "image" && !attachment.previewUrl) attachment.previewUrl = URL.createObjectURL(attachment.file);
     }
@@ -2281,7 +2248,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     };
     if (sentAttachments.length) setAttachmentsUploading(true);
     try {
-      const result = await sendDraft(nextDraft, nextDraft.messageId, markPrepared, { connectionGeneration });
+      const result = await sendDraft(nextDraft, nextDraft.messageId, markPrepared);
       if (result.outcome === "blocked" || result.outcome === "cancelled") {
         restore();
         return;
@@ -2300,7 +2267,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     } finally {
       setAttachmentsUploading(false);
     }
-  }, [archived, archiveStateKnown, attachments, baseRenderedMessages, buildDraft, clearComposer, connectionDecisionTracker, draft, mentions, pasteParts, persistedDraftKey, props.onDraftChange, props.opencodeBaseUrl, props.sessionId, sendDraft, sessionOwner]);
+  }, [archived, archiveStateKnown, attachments, baseRenderedMessages, buildDraft, clearComposer, draft, mentions, pasteParts, persistedDraftKey, props.onDraftChange, props.opencodeBaseUrl, props.sessionId, sendDraft, sessionOwner]);
 
   // One-step run from the empty-state hero: the route keeps the continuation
   // in this session's composer and marks the submitted snapshot for auto-send.
@@ -2400,84 +2367,44 @@ export function SessionSurface(props: SessionSurfaceProps) {
     sendingQueued,
   ]);
 
-  const handleAbort = useCallback((intent: "manual" | "connection" = "manual", isCurrent: () => boolean = () => true) => {
-    if (intent === "manual" && connectionStops.isPending(sessionOwner)) prepareChatStopQueue(props.sessionId, intent, isCurrent);
-    return connectionStops.run(sessionOwner, async () => {
-      if (!isCurrent()) return;
-      const phase = getQueuedDrainState(props.sessionId).phase;
-      if (intent === "manual" && !chatStreaming && !connectionStops.needsConfirmation(sessionOwner) && phase.kind !== "sending" && phase.kind !== "admission_unknown") return;
-      pendingStopsRef.current.add(sessionOwner);
+  const handleAbort = useCallback(async () => {
+    if (pendingStopsRef.current.has(sessionOwner)) return;
+    const phase = getQueuedDrainState(props.sessionId).phase;
+    if (!chatStreaming && phase.kind !== "sending" && phase.kind !== "admission_unknown") return;
+    pendingStopsRef.current.add(sessionOwner);
+    setPendingStopSessions([...pendingStopsRef.current]);
+    try {
+      setError(null);
+      // Stop means stop: drop queued follow-ups before aborting, otherwise the
+      // queue-drain effect below re-prompts the agent the moment the abort
+      // lands and the session reports idle (#2014).
+      getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId)
+        .forEach((item) => item.draft.attachments.forEach(revokeAttachmentPreview));
+      clearQueuedDrafts(props.sessionId);
+      dispatchQueuedDrain(props.sessionId, { type: "queue_cleared" });
+      // The prompt was sent through a directory-scoped client (session-route
+      // passes the workspace root), so the abort must target the same scope —
+      // without it the server resolves the default project, finds no live run,
+      // and answers `200: false` while the stream keeps going (#2014).
+      await interruptSessionTurn(props.opencodeBaseUrl, opencodeClient, props.sessionId,
+        props.workspaceRoot.trim() || undefined, {
+          admissionUnknown: phase.kind === "admission_unknown",
+          admissionMessageID: phase.kind === "admission_unknown" ? phase.messageID : undefined,
+          onStopped: () => dispatchQueuedDrain(props.sessionId, { type: "stop_confirmed" }),
+        });
+      captureAnalyticsEvent("task_run_stopped", {});
+      // The surface survives navigation; refresh the stopped conversation, not
+      // whichever query the observer is showing when cancellation finishes.
+      await queryClient.refetchQueries({ queryKey: snapshotQueryKey, exact: true });
+      return true;
+    } catch (error) {
+      setError({ message: error instanceof Error ? error.message : t("session.stop_failed") });
+      return false;
+    } finally {
+      pendingStopsRef.current.delete(sessionOwner);
       setPendingStopSessions([...pendingStopsRef.current]);
-      try {
-        setError(null);
-        if (!prepareChatStopQueue(props.sessionId, intent, isCurrent)) return;
-        // The prompt was sent through a directory-scoped client (session-route
-        // passes the workspace root), so the abort must target the same scope —
-        // without it the server resolves the default project, finds no live run,
-        // and answers `200: false` while the stream keeps going (#2014).
-        if (!isCurrent()) return;
-        await interruptSessionTurn(props.opencodeBaseUrl, opencodeClient, props.sessionId,
-          props.workspaceRoot.trim() || undefined, {
-            admissionUnknown: phase.kind === "admission_unknown",
-            admissionMessageID: phase.kind === "admission_unknown" ? phase.messageID : undefined,
-            onStopped: () => {
-              dispatchQueuedDrain(props.sessionId, { type: "stop_confirmed" });
-              setConnectionDecisionState(current => isCurrent() && current?.blocker.owner === sessionOwner ? { ...current, stopState: "stopped" } : current);
-            },
-          });
-        captureAnalyticsEvent("task_run_stopped", {});
-        // The surface survives navigation; refresh the stopped conversation, not
-        // whichever query the observer is showing when cancellation finishes.
-        void queryClient.refetchQueries({ queryKey: snapshotQueryKey, exact: true }).catch(() => {});
-        return true;
-      } catch (error) {
-        setError({ message: error instanceof Error ? error.message : t("session.stop_failed") });
-        return false;
-      } finally {
-        pendingStopsRef.current.delete(sessionOwner);
-        setPendingStopSessions([...pendingStopsRef.current]);
-      }
-    });
-  }, [chatStreaming, connectionStops, opencodeClient, props.opencodeBaseUrl, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
-
-  const stopForConnectionDecision = useCallback(async (blocker: ChatConnectionDecision, retry = false) => {
-    const isCurrent = () => activeSessionOwnerRef.current === blocker.owner
-      && activeConnectionTrackerRef.current === connectionDecisionTracker && connectionControlTargetRef.current
-      && connectionDecisionTracker.isCurrent(blocker.owner, blocker.generation)
-      && (retry || connectionDecisionTracker.canStop(blocker));
-    if (!isCurrent()) {
-      connectionDecisionTracker.releaseClaim(blocker);
-      return;
     }
-    setConnectionDecisionState({ tracker: connectionDecisionTracker, blocker, stopState: "stopping" });
-    const stopped = await handleAbort("connection", isCurrent);
-    if (stopped === undefined) connectionDecisionTracker.releaseClaim(blocker);
-    setConnectionDecisionState(current => current?.tracker === connectionDecisionTracker
-      && current.blocker.generation === blocker.generation && connectionDecisionTracker.isCurrent(blocker.owner, blocker.generation)
-      ? stopped === undefined ? null : { ...current, stopState: stopped ? "stopped" : "failed" }
-      : current);
-  }, [connectionDecisionTracker, handleAbort]);
-
-  useEffect(() => {
-    const blocker = connectionDecisionTracker.observe(sessionOwner, baseRenderedMessages, pendingReconciliation.messageIdReplacements);
-    setConnectionDecisionState(current => {
-      if (current?.tracker !== connectionDecisionTracker) return current;
-      if (!blocker || current.blocker.generation !== blocker.generation) return null;
-      return current.blocker.part !== blocker.part ? { ...current, blocker } : current;
-    });
-    if (!props.isControlTarget || props.activeQuestion || props.activePermission || archived || !archiveStateKnown || archiveHeld) return;
-    if (blocker && connectionDecisionTracker.claim(blocker)) void stopForConnectionDecision(blocker);
-  }, [archiveHeld, archived, archiveStateKnown, baseRenderedMessages, connectionDecisionTracker, pendingReconciliation.messageIdReplacements, props.activePermission, props.activeQuestion, props.isControlTarget, sessionOwner, stopForConnectionDecision]);
-
-  const currentConnectionTurn = baseRenderedMessages.findLast(message => message.role === "user");
-  const connectionDecision = connectionDecisionState?.tracker === connectionDecisionTracker
-    && connectionDecisionState.blocker.owner === sessionOwner
-    && connectionDecisionTracker.isCurrent(sessionOwner, connectionDecisionState.blocker.generation)
-    && currentConnectionTurn
-    && currentConnectionTurn.id === connectionDecisionState.blocker.turnId
-    && props.isControlTarget && !archived && archiveStateKnown && !archiveHeld
-    ? connectionDecisionState : null;
-  const visibleConnectionDecision = !props.activeQuestion && !props.activePermission ? connectionDecision : null;
+  }, [chatStreaming, clearQueuedDrafts, opencodeClient, props.opencodeBaseUrl, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
 
   const checkUnknownAdmission = useCallback(async (notify = false) => {
     const phase = getQueuedDrainState(props.sessionId).phase;
@@ -2819,10 +2746,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
     label: "Stop the current run",
     description: "Stop the run of the session the person currently has focused. Focus-bound: it never targets a session by id.",
     sideEffect: "mutation",
-    disabled: stopping || (!chatStreaming && connectionStopPhase !== "failed" && queuedDrainState.phase.kind !== "sending" && queuedDrainState.phase.kind !== "admission_unknown"),
+    disabled: stopping || (!chatStreaming && queuedDrainState.phase.kind !== "sending" && queuedDrainState.phase.kind !== "admission_unknown"),
     targetRef: composerShellRef,
-    execute: () => handleAbort(),
-  }), [chatStreaming, connectionStopPhase, handleAbort, queuedDrainState.phase.kind, stopping]);
+    execute: handleAbort,
+  }), [chatStreaming, handleAbort, queuedDrainState.phase.kind, stopping]);
   useControlAction(props.isControlTarget ? composerStopControlAction : null);
 
   const listSkills = useCallback(async (): Promise<SkillCard[]> => {
@@ -3060,8 +2987,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   }, [handleResumeInterrupted]);
 
   useEffect(() => {
-    const resetReconnectState = () => {
-      useChatMcpReconnectStore.getState().reset();
+    const refreshConnectionInventory = () => {
       clearCloudInventoryCache();
       setToolSkills((current) => current.filter((skill) => skill.origin !== "openwork-connect"));
       setToolMcpServers((current) => current.filter((server) => server.origin !== "openwork-connect"));
@@ -3072,26 +2998,20 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const refreshImportedPlugins = () => {
       void listImportedPlugins();
     };
-    window.addEventListener(denSettingsChangedEvent, resetReconnectState);
+    window.addEventListener(denSettingsChangedEvent, refreshConnectionInventory);
     window.addEventListener(CLOUD_INVENTORY_CHANGED_EVENT, refreshImportedPlugins);
     return () => {
-      window.removeEventListener(denSettingsChangedEvent, resetReconnectState);
+      window.removeEventListener(denSettingsChangedEvent, refreshConnectionInventory);
       window.removeEventListener(CLOUD_INVENTORY_CHANGED_EVENT, refreshImportedPlugins);
     };
   }, []);
 
-  const assertReconnectAllowed = useCallback(() => {
-    if (activeSessionOwnerRef.current !== sessionOwner) throw new Error("The active conversation changed.");
-    if (connectionStops.isBlocked(sessionOwner) || sessionNeedsStop(props.opencodeBaseUrl, props.sessionId)) {
-      throw new Error("Stop is not confirmed. Retry Stop before connecting.");
-    }
-  }, [connectionStops, props.opencodeBaseUrl, props.sessionId, sessionOwner]);
-
   const handleMcpReconnect = useCallback(async (
     action: ChatToolReconnectAction,
     onProgress: (progress: ChatToolReconnectProgress) => void,
+    isCurrent: () => boolean = () => true,
   ): Promise<ChatToolReconnectResult> => {
-    assertReconnectAllowed();
+    if (!isCurrent()) throw new Error("This connection request is no longer pending.");
     const settings = readDenSettings();
     const token = settings.authToken?.trim() ?? "";
     const organizationId = settings.activeOrgId?.trim() ?? "";
@@ -3115,50 +3035,23 @@ export function SessionSurface(props: SessionSurfaceProps) {
     };
     try {
       const denClient = createDenClient({ baseUrl: settings.baseUrl, token });
-      const connections = await denClient.listMcpConnections(organizationId, "usable");
-      if (!isChatMcpReconnectScopeCurrent(scope, currentScope())) throw new Error("Your OpenWork account changed. Try connecting again.");
-      const connection = connections.find((entry) => entry.id === action.connectionId);
-      if (!connection || connection.authType !== "oauth" || connection.credentialMode !== "per_member") {
-        throw new Error(`${action.connectionName} is no longer available as your reconnectable account.`);
-      }
-
-      recordInspectorEvent("mcp.chat_reconnect.started", {
-        workspaceId: props.workspaceId,
-        sessionId: props.sessionId,
-        connectionId: action.connectionId,
-      });
-      assertReconnectAllowed();
-      onProgress({ phase: "opening" });
-      const result = await denClient.startMcpConnectionConnect(organizationId, action.connectionId);
-      if (!isChatMcpReconnectScopeCurrent(scope, currentScope())) throw new Error("Your OpenWork account changed. Try connecting again.");
-      assertReconnectAllowed();
-      if (result.status === "connected") {
-        recordInspectorEvent("mcp.chat_reconnect.completed", {
-          workspaceId: props.workspaceId,
-          sessionId: props.sessionId,
-          connectionId: action.connectionId,
-          completion: "already_connected",
-        });
-        return "connected";
-      }
-      if (!result.authorizeUrl) throw new Error(`Could not start ${action.connectionName} authorization.`);
-
-      await openDesktopUrl(result.authorizeUrl);
-      onProgress({ phase: "authorization_opened", authorizeUrl: result.authorizeUrl });
-      await waitForFreshMcpAuthorization({
+      const isAuthorizationCurrent = () => isCurrent() && isChatMcpReconnectScopeCurrent(scope, currentScope());
+      const result = await authenticateChatConnection({
         connectionId: action.connectionId,
         connectionName: action.connectionName,
-        previousConnectedAt: connection.connectedAt,
         listConnections: () => denClient.listMcpConnections(organizationId, "usable"),
-        isScopeCurrent: () => isChatMcpReconnectScopeCurrent(scope, currentScope()),
+        startConnect: () => denClient.startMcpConnectionConnect(organizationId, action.connectionId),
+        openUrl: openDesktopUrl,
+        isCurrent: isAuthorizationCurrent,
+        onProgress,
       });
+      if (!isAuthorizationCurrent()) throw new Error("The connection request or account changed.");
       recordInspectorEvent("mcp.chat_reconnect.completed", {
         workspaceId: props.workspaceId,
         sessionId: props.sessionId,
         connectionId: action.connectionId,
-        completion: "fresh_authorization",
       });
-      return "connected";
+      return result;
     } catch (error) {
       recordInspectorEvent("mcp.chat_reconnect.failed", {
         workspaceId: props.workspaceId,
@@ -3168,35 +3061,58 @@ export function SessionSurface(props: SessionSurfaceProps) {
       });
       throw error;
     }
-  }, [assertReconnectAllowed, props.onOpenConnect, props.sessionId, props.workspaceId]);
+  }, [props.onOpenConnect, props.sessionId, props.workspaceId]);
 
   const handleMcpReopenAuthorization = useCallback(async (
     action: ChatToolReconnectAction,
     authorizeUrl: string,
+    isCurrent: () => boolean = () => true,
   ) => {
-    assertReconnectAllowed();
+    if (!isCurrent()) throw new Error("This connection request is no longer pending.");
     await openDesktopUrl(authorizeUrl);
+    if (!isCurrent()) throw new Error("This connection request is no longer pending.");
     recordInspectorEvent("mcp.chat_reconnect.authorization_reopened", {
       workspaceId: props.workspaceId,
       sessionId: props.sessionId,
       connectionId: action.connectionId,
     });
-  }, [assertReconnectAllowed, props.sessionId, props.workspaceId]);
+  }, [props.sessionId, props.workspaceId]);
 
-  const handleMcpRetry = useCallback((action: ChatToolReconnectAction) => {
-    if (activeSessionOwnerRef.current !== sessionOwner || archived || !archiveStateKnown || sessionWorkHeld(props.opencodeBaseUrl, props.sessionId)) return;
-    if (connectionStops.isBlocked(sessionOwner) || sessionNeedsStop(props.opencodeBaseUrl, props.sessionId)) return;
-    const currentDraft = getComposerDraft(useComposerStateStore.getState(), props.sessionId);
-    const prompt = [currentDraft, chatConnectionRetryPrompt(action.connectionName)].filter(Boolean).join("\n\n");
-    setComposerDraft(props.sessionId, prompt);
-    props.onDraftChange(buildDraft(prompt, attachments));
-    window.dispatchEvent(new Event("openwork:focusPrompt"));
-    recordInspectorEvent("mcp.chat_reconnect.retry_drafted", {
-      workspaceId: props.workspaceId,
-      sessionId: props.sessionId,
-      connectionId: action.connectionId,
-    });
-  }, [archived, archiveStateKnown, attachments, buildDraft, connectionStops, props.onDraftChange, props.opencodeBaseUrl, props.sessionId, props.workspaceId, sessionOwner, setComposerDraft]);
+  const nativeConnectionRequest = props.respondQuestion && props.draftScope && props.isControlTarget && !archived && archiveStateKnown && !archiveHeld
+    ? nativeChatConnectionDecision({ question: props.activeQuestion, owner: sessionOwner, sessionId: props.sessionId, messages: baseRenderedMessages })
+    : null;
+  const connectionContextRef = useRef({ owner: sessionOwner, messages: baseRenderedMessages, request: nativeConnectionRequest, respond: props.respondQuestion });
+  connectionContextRef.current = { owner: sessionOwner, messages: baseRenderedMessages, request: nativeConnectionRequest, respond: props.respondQuestion };
+  const getConnectionDecision = useCallback((toolCallId: string): ChatConnectionDecisionBinding | null => {
+    const request = connectionContextRef.current.request;
+    if (!request || request.toolCallId !== toolCallId) return null;
+    const account = readDenSettings();
+    const isCurrent = () => {
+      const context = connectionContextRef.current;
+      const currentAccount = readDenSettings();
+      return account.baseUrl === currentAccount.baseUrl && account.authToken === currentAccount.authToken
+        && account.activeOrgId === currentAccount.activeOrgId && context.owner === sessionOwner
+        && isCurrentChatConnectionDecision(request, context.owner, props.sessionId, context.messages);
+    };
+    const isPending = () => isCurrent() && connectionContextRef.current.request?.requestId === request.requestId
+      && connectionContextRef.current.request.connectionId === request.connectionId;
+    if (!isPending()) return null;
+    return {
+      request,
+      isPending,
+      respond: async response => {
+        const respond = connectionContextRef.current.respond;
+        if (!isPending() || !respond) throw new Error("This connection request is no longer pending.");
+        const reply = respond(request.requestId, [[response.outcome === "connected" ? "Authenticate" : "Skip"]]);
+        if (!reply) throw new Error("The question reply was not acknowledged.");
+        await reply;
+        if (!isCurrent()) throw new Error("The active conversation or account changed.");
+      },
+    };
+  }, [props.sessionId, sessionOwner, props.activeQuestion, props.respondQuestion, baseRenderedMessages, props.isControlTarget, props.draftScope, archived, archiveStateKnown, archiveHeld]);
+  const reservedConnectionQuestion = isReservedConnectionQuestion(props.activeQuestion);
+  const connectionQuestionPending = reservedConnectionQuestion && !nativeConnectionRequest;
+  const composerQuestion = reservedConnectionQuestion ? null : props.activeQuestion;
 
   const handleRevertToUserMessage = useCallback((messageId: string) => {
     if (archived || !archiveStateKnown || sessionWorkHeld(props.opencodeBaseUrl, props.sessionId)) return;
@@ -3430,9 +3346,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
                   >
                     <MessageListProvider
                       uiStateOwner={props.draftScope ? sessionOwner : null}
-                      connectionDecisionToolCallId={visibleConnectionDecision?.blocker.part.toolCallId ?? null}
-                      connectionDecisionConnectionId={visibleConnectionDecision?.blocker.connection.connectionId ?? null}
-                      connectionReconnectBlocked={needsStop || stopping || connectionStopPhase !== "idle"}
                       client={props.client}
                       mcpAppEngine={isOpencodeV2BaseUrl(props.opencodeBaseUrl) ? "v2" : "v1"}
                       readOnly={archived || !archiveStateKnown || archiveHeld}
@@ -3455,7 +3368,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
                       onResumeInterrupted={archived ? undefined : handleResumeInterrupted}
                       onMcpReconnect={handleMcpReconnect}
                       onMcpReopenAuthorization={handleMcpReopenAuthorization}
-                      onMcpRetry={handleMcpRetry}
+                      getConnectionDecision={getConnectionDecision}
+                      connectionQuestionToolCallId={nativeConnectionRequest?.questionToolCallId ?? null}
                     >
                       <MessageList
                         messageIdReplacements={pendingReconciliation.messageIdReplacements}
@@ -3557,15 +3471,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
             }}>Restore unsent message</button>
           </div>
         ) : null}
-        {queuedDrainState.held && queuedItems.length > 0 ? (
-          <div role="status" className="mx-3 mb-2 flex items-center gap-3 text-xs text-muted-foreground">
-            <span>Queued messages are paused after a connection blocker.</span>
-            <Button variant="ghost" size="sm" disabled={stopping || connectionStopPhase !== "idle" || needsStop || sendingQueued} onClick={() => {
-              if (connectionStops.isBlocked(sessionOwner) || sessionNeedsStop(props.opencodeBaseUrl, props.sessionId)) return;
-              dispatchQueuedDrain(props.sessionId, { type: "queue_released" });
-            }}>Resume queue</Button>
-          </div>
-        ) : null}
         {attachmentsUploading ? <div role="status" className="mx-3 mb-2 text-xs text-muted-foreground" data-attachment-status="uploading">
           Preparing attachments...
         </div> : null}
@@ -3578,8 +3483,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
         onSteer={handleSteer}
         onQueue={handleQueue}
         onStop={async () => { await handleAbort(); }}
-        busy={chatStreaming || connectionStopPhase !== "idle"}
-        stopping={stopping || connectionStopPhase === "stopping"}
+        busy={chatStreaming}
+        stopping={stopping}
         steering={steering}
         submissionPreparing={preparingCloudTools || sending || autoSending}
         queuedCount={queuedItems.length}
@@ -3599,7 +3504,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         modelUnavailable={sessionModelUnavailable}
         modelUnavailableMessage={sessionModelUnavailable ? props.modelUnavailableMessage : null}
         organizationModelsEmpty={props.organizationModelsEmpty}
-        statusLabel={connectionStopPhase === "failed" ? "Stop not confirmed" : statusLabel(liveStatus, chatStreaming)}
+        statusLabel={statusLabel(liveStatus, chatStreaming)}
         modelPickerOpen={modelPickerOpen}
         selectedModel={sessionModel.selectedModel}
         openWorkModelsEntitled={props.openWorkModelsEntitled}
@@ -3643,34 +3548,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
         isRemoteWorkspace={props.isRemoteWorkspace}
           isSandboxWorkspace={props.isSandboxWorkspace}
           onUploadInboxFiles={props.onUploadInboxFiles ?? handleUploadInboxFiles}
-          compactTopSpacing={Boolean(visibleConnectionDecision || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0)}
+          compactTopSpacing={Boolean(connectionQuestionPending || composerQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0)}
           topAccessory={
-            visibleConnectionDecision || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 ? (
+            connectionQuestionPending || composerQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 ? (
               <div>
-                {visibleConnectionDecision ? (
-                  <ConnectionCard
-                    part={visibleConnectionDecision.blocker.part}
-                    action={visibleConnectionDecision.blocker.action}
-                    connection={visibleConnectionDecision.blocker.connection}
-                    connectorIdentities={connectorIdentities}
-                    reconnectScope={props.draftScope ? sessionOwner : JSON.stringify([props.workspaceId, props.sessionId])}
-                    reconnectCallbacks={{ blocked: needsStop || stopping || connectionStopPhase !== "idle", onReconnect: handleMcpReconnect, onReopenAuthorization: handleMcpReopenAuthorization }}
-                    decision={{
-                      stopState: visibleConnectionDecision.stopState,
-                      onStop: () => { void stopForConnectionDecision(visibleConnectionDecision.blocker, true); },
-                      onDismiss: () => { if (visibleConnectionDecision.stopState === "stopped") setConnectionDecisionState(null); },
-                      onAlternate: () => {
-                        if (visibleConnectionDecision.stopState === "stopped") setConnectionDecisionState(null);
-                        window.dispatchEvent(new Event("openwork:focusPrompt"));
-                      },
-                      onContinue: () => {
-                        const connection = visibleConnectionDecision.blocker.connection;
-                        handleMcpRetry({ connectionId: connection.connectionId, connectionName: connection.connectionName, label: "Draft retry" });
-                        setConnectionDecisionState(null);
-                      },
-                    }}
-                  />
-                ) : null}
                 {queuedItems.length > 0 ? (
                   <QueuedMessagesPanel
                     items={queuedItems}
@@ -3682,13 +3563,14 @@ export function SessionSurface(props: SessionSurfaceProps) {
                     sendingId={sendingQueuedId}
                   />
                 ) : null}
-                {props.activeQuestion ? (
+                {connectionQuestionPending ? <p role="status" className="px-3 py-3 text-sm text-muted-foreground">Checking connection request…</p> : null}
+                {composerQuestion ? (
                   <QuestionPanel
-                    questions={props.activeQuestion.questions}
+                    questions={composerQuestion.questions}
                     busy={props.questionReplyBusy ?? false}
                     onReply={(answers) => {
-                      if (props.activeQuestion) {
-                        props.respondQuestion?.(props.activeQuestion.id, answers);
+                      if (composerQuestion) {
+                        void Promise.resolve(props.respondQuestion?.(composerQuestion.id, answers)).catch(() => {});
                       }
                     }}
                   />

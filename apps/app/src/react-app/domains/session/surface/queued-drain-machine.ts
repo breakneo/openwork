@@ -61,7 +61,6 @@ export type QueuedItemResolution =
   | "terminal_failure";
 
 export type QueuedDrainState = {
-  held?: boolean;
   phase: QueuedDrainPhase;
   attemptsByItemId: Record<string, number>;
   lastResolution: { itemId: string; resolution: QueuedItemResolution } | null;
@@ -82,9 +81,7 @@ export type QueuedDrainEvent =
    * admission time and dropped. */
   | { type: "idle_reconciled"; observedAt: number; terminalObserved?: boolean }
   | { type: "user_retry" }
-  | { type: "queue_cleared" }
-  | { type: "queue_held" }
-  | { type: "queue_released" };
+  | { type: "queue_cleared" };
 
 export const INITIAL_QUEUED_DRAIN_STATE: QueuedDrainState = {
   phase: { kind: "ready" },
@@ -100,7 +97,6 @@ function resolved(
   attemptsByItemId?: Record<string, number>,
 ): QueuedDrainState {
   return {
-    ...state,
     phase,
     attemptsByItemId: attemptsByItemId ?? state.attemptsByItemId,
     lastResolution: { itemId, resolution },
@@ -110,19 +106,13 @@ function resolved(
 export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEvent): QueuedDrainState {
   const { phase } = state;
   switch (event.type) {
-    case "queue_held":
-      return state.held ? state : { ...state, held: true };
-    case "queue_released":
-      if (!state.held || phase.kind === "sending" || phase.kind === "admission_unknown") return state;
-      return reduceQueuedDrain({ ...state, held: false }, { type: "user_retry" });
     case "stop_confirmed":
       // A replacement may already hold the send slot while awaiting Stop.
       // Keep that claim, but discard activity belonging to its predecessor.
       if (phase.kind === "sending") return { ...state, phase: { ...phase, busySeen: false } };
       if (phase.kind === "admission_unknown") return state;
-      return { ...state, ...INITIAL_QUEUED_DRAIN_STATE, lastResolution: state.lastResolution };
+      return { ...INITIAL_QUEUED_DRAIN_STATE, lastResolution: state.lastResolution };
     case "send_started": {
-      if (state.held && !event.steer) return state;
       if (phase.kind !== "ready") {
         if (!event.steer) return state;
         if (phase.kind === "running" || phase.kind === "awaiting_observation") {
@@ -131,7 +121,6 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
       }
       const attempts = (state.attemptsByItemId[event.itemId] ?? 0) + 1;
       return {
-        ...state,
         phase: { kind: "sending", itemId: event.itemId, busySeen: phase.kind === "running" },
         attemptsByItemId: { ...state.attemptsByItemId, [event.itemId]: attempts },
         lastResolution: state.lastResolution,
@@ -217,7 +206,6 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
     case "user_retry": {
       if (phase.kind !== "halted") return state;
       return {
-        ...state,
         phase: { kind: "ready" },
         attemptsByItemId: dropAttempt(state, phase.itemId),
         lastResolution: state.lastResolution,
@@ -226,7 +214,7 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
     case "queue_cleared": {
       // Stop invalidates preflight work, but cannot prove whether an in-flight
       // POST was accepted. Keep its slot until that send settles or is observed.
-      if (phase.kind === "running" || phase.kind === "sending" || phase.kind === "admission_unknown" || phase.kind === "awaiting_observation") return state.held ? { ...state, held: false } : state;
+      if (phase.kind === "running" || phase.kind === "sending" || phase.kind === "admission_unknown" || phase.kind === "awaiting_observation") return state;
       return { ...INITIAL_QUEUED_DRAIN_STATE, lastResolution: state.lastResolution };
     }
   }
@@ -241,7 +229,7 @@ function dropAttempt(state: QueuedDrainState, itemId: string): Record<string, nu
 
 /** True when the drain may admit the next queued item. */
 export function canAdmitNextQueuedItem(state: QueuedDrainState): boolean {
-  return !state.held && state.phase.kind === "ready";
+  return state.phase.kind === "ready";
 }
 
 export function hasPendingQueuedAdmission(state: QueuedDrainState): boolean {
@@ -282,13 +270,13 @@ export function getQueuedDrainState(sessionId: string): QueuedDrainState {
 }
 
 export function dispatchQueuedDrain(sessionId: string, event: QueuedDrainEvent): QueuedDrainState {
-  if (event.type === "queue_cleared" || event.type === "queue_held") {
+  if (event.type === "queue_cleared") {
     sendGenerationBySession.set(sessionId, getQueuedSendGeneration(sessionId) + 1);
   }
   const current = getQueuedDrainState(sessionId);
   const next = reduceQueuedDrain(current, event);
   if (next === current) return current;
-  if (!next.held && next.phase.kind === "ready" && Object.keys(next.attemptsByItemId).length === 0 && next.lastResolution === null) {
+  if (next.phase.kind === "ready" && Object.keys(next.attemptsByItemId).length === 0 && next.lastResolution === null) {
     drainStateBySession.delete(sessionId);
   } else {
     drainStateBySession.set(sessionId, next);

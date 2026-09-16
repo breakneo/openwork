@@ -1,201 +1,146 @@
-import type { DynamicToolUIPart, UIMessage } from "ai"
-import type { ConnectionActionPayload } from "@openwork/types/connection-action-app"
-import type { DenExternalMcpConnection } from "@/app/lib/den"
-import {
-  connectionCardPayloadFromChatToolResult,
-  connectionResultFromChatToolPart,
-  reconnectActionFromChatToolResult,
-  type ChatToolReconnectAction,
-} from "@/components/tools/error-attribution"
+import type { DenExternalMcpConnection, DenMcpConnectionConnectStart } from "@/app/lib/den"
+import type { UIMessage } from "ai"
+import { z } from "zod"
+import { connectionCardPayloadFromChatToolResult, connectionResultFromChatToolPart, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution"
 
-import { getComposerQueuedDrafts, useComposerStateStore } from "./composer-state-store"
-import { dispatchQueuedDrain } from "./queued-drain-machine"
-
-export function prepareChatStopQueue(sessionId: string, intent: "manual" | "connection", isCurrent: () => boolean): boolean {
-  if (!isCurrent()) return false
-  if (intent === "connection") {
-    dispatchQueuedDrain(sessionId, { type: "queue_held" })
-  } else {
-    const state = useComposerStateStore.getState()
-    for (const item of getComposerQueuedDrafts(state, sessionId)) {
-      for (const attachment of item.draft.attachments) {
-        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl)
-      }
-    }
-    state.clearQueuedDrafts(sessionId)
-    dispatchQueuedDrain(sessionId, { type: "queue_cleared" })
-  }
-  return true
-}
-
-export type ChatConnectionDecision = {
+export type ChatConnectionDecisionRequest = {
+  requestId: string
   owner: string
+  sessionId: string
   turnId: string
-  generation: number
-  part: DynamicToolUIPart
-  connection: ConnectionActionPayload
-  action: ChatToolReconnectAction | null
+  toolCallId: string
+  connectionId: string
+  questionToolCallId?: string
 }
 
-export type ChatConnectionStopState = "stopping" | "stopped" | "failed"
+export type ChatConnectionDecisionResponse =
+  | { outcome: "connected"; continuation: "review_remaining_work"; repeatCompletedWrites: false }
+  | { outcome: "skipped"; continuation: "without_connection"; alternativeAuthorization: false }
 
-export function createChatConnectionDecisionTracker() {
-  let generation = 0
-  let submission: {
-    owner: string
-    generation: number
-    clientTurnId: string
-    turnId: string | null
-    dispatched: boolean
-    native: boolean
-    previousIds: Set<string>
-    preparedText: string | null
-    claimed: boolean
-  } | null = null
-  let latest: ChatConnectionDecision | null = null
-  const current = (owner: string, expected: number) => submission?.owner === owner && submission.generation === expected
-  const reconcile = (owner: string, messages: readonly UIMessage[], replacements: ReadonlyMap<string, string>) => {
-    if (!submission || submission.owner !== owner || !submission.dispatched) return
-    if (submission.turnId) return
-    const exact = messages.find(message => message.role === "user"
-      && (message.id === submission?.clientTurnId || replacements.get(message.id) === submission?.clientTurnId))
-    if (exact) {
-      submission.turnId = exact.id
-      return
+export type ChatConnectionDecisionBinding = {
+  request: ChatConnectionDecisionRequest
+  isPending: () => boolean
+  respond: (response: ChatConnectionDecisionResponse) => Promise<void>
+}
+
+export function isCurrentChatConnectionDecision(
+  request: ChatConnectionDecisionRequest,
+  owner: string | null,
+  sessionId: string,
+  messages: readonly UIMessage[],
+): boolean {
+  if (!owner || request.owner !== owner || request.sessionId !== sessionId || !request.requestId) return false
+  const turnIndex = messages.findLastIndex(message => message.role === "user")
+  if (turnIndex < 0 || messages[turnIndex].id !== request.turnId) return false
+  return messages.slice(turnIndex + 1).some(message => message.role === "assistant"
+    && message.parts.some(part => part.type === "dynamic-tool" && part.toolCallId === request.toolCallId))
+}
+
+const reservedConnectionQuestionItemSchema = z.object({
+  header: z.literal("Connection"),
+  options: z.tuple([z.object({ label: z.literal("Authenticate") }), z.object({ label: z.literal("Skip") })]),
+  multiple: z.literal(false),
+  custom: z.literal(false),
+})
+const questionItemsSchema = z.object({ questions: z.array(z.unknown()) })
+
+export function isReservedConnectionQuestion(question: unknown): boolean {
+  const parsed = questionItemsSchema.safeParse(question)
+  return parsed.success && parsed.data.questions.some(item => reservedConnectionQuestionItemSchema.safeParse(item).success)
+}
+
+const nativeConnectionQuestionSchema = z.object({
+  questions: z.tuple([reservedConnectionQuestionItemSchema.extend({ question: z.string() })]),
+  id: z.string().min(1),
+  sessionID: z.string().optional(),
+  tool: z.object({ callID: z.string().min(1), messageID: z.string().optional() }).optional(),
+})
+
+export function nativeChatConnectionDecision(input: {
+  question: unknown
+  owner: string | null
+  sessionId: string
+  messages: readonly UIMessage[]
+}): ChatConnectionDecisionRequest | null {
+  if (!input.owner) return null
+  const parsed = nativeConnectionQuestionSchema.safeParse(input.question)
+  if (!parsed.success) return null
+  const question = parsed.data
+  if (question.sessionID !== undefined && question.sessionID !== input.sessionId) return null
+  const turnIndex = input.messages.findLastIndex(message => message.role === "user")
+  if (turnIndex < 0) return null
+  const currentMessages = input.messages.slice(turnIndex + 1).filter(message => message.role === "assistant")
+  const questionTool = question.tool
+  const questionParts = currentMessages.flatMap(message => message.parts.flatMap(part => {
+    if (!questionTool || part.type !== "dynamic-tool" || part.toolName !== "question"
+      || (part.state !== "input-available" && part.state !== "input-streaming")
+      || (questionTool.messageID && questionTool.messageID !== message.id)) return []
+    const sourcePartId = part.callProviderMetadata?.openwork?.sourcePartId
+    const matches = part.toolCallId === questionTool.callID
+      || (Boolean(questionTool.messageID) && typeof sourcePartId === "string" && sourcePartId === questionTool.callID)
+    return matches ? [part.toolCallId] : []
+  }))
+  if (questionTool && questionParts.length !== 1) return null
+  const connections = new Map<string, { connection: NonNullable<ReturnType<typeof connectionCardPayloadFromChatToolResult>>; toolCallId: string; oauth: boolean }>()
+  for (const message of currentMessages) {
+    for (const part of message.parts) {
+      if (part.type !== "dynamic-tool" || (part.state !== "output-available" && part.state !== "output-error")) continue
+      const result = connectionResultFromChatToolPart(part)
+      const connection = connectionCardPayloadFromChatToolResult(part.toolName, result, part.input)
+      if (!connection) continue
+      const action = reconnectActionFromChatToolResult(part.toolName, result, part.input)
+      connections.set(connection.connectionId, { connection, toolCallId: part.toolCallId, oauth: action?.connectionId === connection.connectionId })
     }
-    if (!submission.native || !submission.preparedText) return
-    const newUsers = messages.filter(message => message.role === "user" && !submission?.previousIds.has(message.id))
-    if (newUsers.length !== 1) return
-    const user = newUsers[0]
-    const text = user.parts.flatMap(part => part.type === "text" ? [part.text] : []).join("")
-    if (text === submission.preparedText) submission.turnId = user.id
   }
+  const blockers = [...connections.values()].filter(entry => entry.connection.state !== "connected")
+  if (blockers.length !== 1) return null
+  const blocker = blockers[0]
+  if (!blocker.oauth || blocker.connection.actor !== "member"
+    || (blocker.connection.action?.type !== "connect" && blocker.connection.action?.type !== "reconnect")
+    || question.questions[0].question !== `Connect ${blocker.connection.connectionName} to continue?`) return null
   return {
-    reset() {
-      generation += 1
-      submission = null
-      latest = null
-    },
-    begin(owner: string, clientTurnId: string) {
-      generation += 1
-      submission = { owner, generation, clientTurnId, turnId: null, dispatched: false, native: false,
-        previousIds: new Set(), preparedText: null, claimed: false }
-      latest = null
-      return generation
-    },
-    isCurrent: current,
-    dispatch(owner: string, expected: number, previousIds: readonly string[], native: boolean) {
-      if (!submission || !current(owner, expected)) return false
-      submission.previousIds = new Set(previousIds)
-      submission.native = native
-      submission.dispatched = true
-      return true
-    },
-    prepared(owner: string, expected: number, text: string | undefined) {
-      if (submission && current(owner, expected) && text !== undefined) submission.preparedText = text
-    },
-    reconcile,
-    observe(owner: string, messages: readonly UIMessage[], replacements: ReadonlyMap<string, string>): ChatConnectionDecision | null {
-      reconcile(owner, messages, replacements)
-      if (!submission || submission.owner !== owner || !submission.dispatched || !submission.turnId) return null
-      const turnIndex = messages.findLastIndex(message => message.role === "user")
-      if (messages[turnIndex]?.id !== submission.turnId) {
-        latest = null
-        return null
-      }
-      const statuses = new Map<string, ChatConnectionDecision>()
-      for (const message of messages.slice(turnIndex + 1)) {
-        if (message.role !== "assistant") continue
-        for (const part of message.parts) {
-          if (part.type !== "dynamic-tool" || (part.state !== "output-available" && part.state !== "output-error")) continue
-          const result = connectionResultFromChatToolPart(part)
-          const connection = connectionCardPayloadFromChatToolResult(part.toolName, result, part.input)
-          if (!connection) continue
-          statuses.set(connection.connectionId, { owner, generation: submission.generation, turnId: submission.turnId, part, connection,
-            action: reconnectActionFromChatToolResult(part.toolName, result, part.input) })
-        }
-      }
-      latest = statuses.size === 1 ? statuses.values().next().value ?? null : null
-      return latest
-    },
-    canStop(decision: ChatConnectionDecision) {
-      return current(decision.owner, decision.generation) && latest?.turnId === decision.turnId
-        && latest.part.toolCallId === decision.part.toolCallId && latest.connection.state !== "connected"
-        && Boolean(latest.connection.actor && latest.connection.action)
-    },
-    releaseClaim(decision: ChatConnectionDecision) {
-      if (submission && current(decision.owner, decision.generation)) submission.claimed = false
-    },
-    claim(decision: ChatConnectionDecision) {
-      if (!submission || submission.claimed || !current(decision.owner, decision.generation)
-        || latest?.part.toolCallId !== decision.part.toolCallId || latest.connection.state === "connected"
-        || !latest.connection.actor || !latest.connection.action) return false
-      submission.claimed = true
-      return true
-    },
+    requestId: question.id, owner: input.owner, sessionId: input.sessionId,
+    turnId: input.messages[turnIndex].id, toolCallId: blocker.toolCallId, connectionId: blocker.connection.connectionId,
+    ...(questionParts[0] ? { questionToolCallId: questionParts[0] } : {}),
   }
 }
 
-export function createChatConnectionStopCoordinator() {
-  const pending = new Map<string, Promise<boolean | undefined>>()
-  const unconfirmed = new Set<string>()
-  const listeners = new Set<() => void>()
-  const notify = () => { for (const listener of listeners) listener() }
-  return {
-    subscribe(listener: () => void) {
-      listeners.add(listener)
-      return () => { listeners.delete(listener) }
-    },
-    phase(owner: string): "idle" | "stopping" | "failed" {
-      return pending.has(owner) ? "stopping" : unconfirmed.has(owner) ? "failed" : "idle"
-    },
-    isPending(owner: string) {
-      return pending.has(owner)
-    },
-    isBlocked(owner: string) {
-      return pending.has(owner) || unconfirmed.has(owner)
-    },
-    needsConfirmation(owner: string) {
-      return unconfirmed.has(owner)
-    },
-    run(owner: string, stop: () => Promise<boolean | undefined>) {
-      const existing = pending.get(owner)
-      if (existing) return existing
-      let resolve: (result: boolean | undefined) => void = () => {}
-      let reject: (error: unknown) => void = () => {}
-      const promise = new Promise<boolean | undefined>((onResolve, onReject) => {
-        resolve = onResolve
-        reject = onReject
-      })
-      pending.set(owner, promise)
-      notify()
-      const finish = () => {
-        if (pending.get(owner) === promise) pending.delete(owner)
-        notify()
-      }
-      const execute = async () => {
-        try {
-          const result = await stop()
-          if (result === true) unconfirmed.delete(owner)
-          else if (result === false) unconfirmed.add(owner)
-          finish()
-          resolve(result)
-        } catch (error) {
-          unconfirmed.add(owner)
-          finish()
-          reject(error)
-        }
-      }
-      void execute()
-      return promise
-    },
+export async function authenticateChatConnection(input: {
+  connectionId: string
+  connectionName: string
+  isCurrent: () => boolean
+  listConnections: () => Promise<DenExternalMcpConnection[]>
+  startConnect: () => Promise<DenMcpConnectionConnectStart>
+  openUrl: (url: string) => Promise<void>
+  onProgress: (progress: { phase: "opening" } | { phase: "authorization_opened"; authorizeUrl: string }) => void
+}): Promise<"connected"> {
+  const assertCurrent = () => {
+    if (!input.isCurrent()) throw new Error("The connection request or account changed.")
   }
-}
-
-export const chatConnectionStops = createChatConnectionStopCoordinator()
-
-export function chatConnectionRetryPrompt(connectionName: string): string {
-  return `Check whether the ${connectionName} connection is ready, then review the interrupted request. Verify whether any earlier operation completed before proposing a retry. Ask me before repeating a send, post, purchase, delete, or other consequential action.`
+  assertCurrent()
+  const connections = await input.listConnections()
+  assertCurrent()
+  const connection = connections.find(entry => entry.id === input.connectionId)
+  if (!connection || connection.authType !== "oauth" || connection.credentialMode !== "per_member") {
+    throw new Error(`${input.connectionName} is no longer available as your reconnectable account.`)
+  }
+  input.onProgress({ phase: "opening" })
+  assertCurrent()
+  const result = await input.startConnect()
+  assertCurrent()
+  if (result.status === "connected") return "connected"
+  if (!result.authorizeUrl) throw new Error(`Could not start ${input.connectionName} authorization.`)
+  assertCurrent()
+  await input.openUrl(result.authorizeUrl)
+  assertCurrent()
+  input.onProgress({ phase: "authorization_opened", authorizeUrl: result.authorizeUrl })
+  assertCurrent()
+  await waitForFreshMcpAuthorization({
+    connectionId: input.connectionId, connectionName: input.connectionName,
+    previousConnectedAt: connection.connectedAt, listConnections: input.listConnections, isScopeCurrent: input.isCurrent,
+  })
+  assertCurrent()
+  return "connected"
 }
 
 export const CHAT_MCP_RECONNECT_POLL_INTERVAL_MS = 2_000

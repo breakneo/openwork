@@ -221,19 +221,24 @@ test("a Code Mode result becomes a cloud Automation and a durable artifact resul
     name: "save_artifact_view",
     arguments: { configObjectId: appConfigObjectId, dataMode: "snapshot", title: "Briefing app", reactSource: initialDraftSource },
   })
-  expect(emptyDraft.isError).not.toBe(true)
+  expect(emptyDraft.isError).toBe(true)
   expect(emptyDraft._meta).toBeUndefined()
-  const emptyView = requireRecord(requireRecord(emptyDraft.structuredContent, "empty draft result").view, "empty draft view")
+  expect(emptyDraft.structuredContent).toBeUndefined()
+  const emptyText = records(emptyDraft.content)[0]?.text
+  if (typeof emptyText !== "string") throw new Error("Missing preview failure result")
+  const emptyFailure = requireRecord(JSON.parse(emptyText), "empty preview failure")
+  expect(emptyFailure.error).toBe("artifact_view_preview_unavailable")
+  expect(emptyFailure.reason).toBe("workflow_snapshot_not_found")
+  expect(emptyFailure.message).toContain("Run the current saved Workflow version")
+  expect(emptyFailure.configObjectId).toBe(appConfigObjectId)
+  expect(emptyFailure.viewRevisionId).toBeTypeOf("string")
+  const emptyView = { id: emptyFailure.artifactViewId }
   expect(emptyView.id).toBeTypeOf("string")
-  expect(emptyView.activeRevisionId).toBeNull()
-  expect(records(emptyView.revisions)[0]?.buildStatus).toBe("ready")
-  expect(JSON.stringify(emptyDraft.content)).toContain(`preview_artifact_${emptyView.id}`)
-  expect(emptyDraft.structuredContent).not.toHaveProperty("data")
   const beforeExplicitRun = await readWorkflowDetail(den.admin, appConfigObjectId)
   expect(beforeExplicitRun.script.latestSuccessfulSnapshot).toBeNull()
   evidence.recordAssertionEvidence(
-    "Saving an app draft does not require loading data or open an empty ready preview",
-    "The builder saved a ready immutable revision and named its explicit preview tool, without host preview metadata, activation, result data, or implicit Workflow execution.",
+    "Legacy draft readiness requires a readable saved Workflow result",
+    "The builder returned artifact_view_preview_unavailable with the compiled revision identity, without ready metadata, activation, result data, or implicit snapshot Workflow execution.",
     true,
   )
 
@@ -279,8 +284,8 @@ test("a Code Mode result becomes a cloud Automation and a durable artifact resul
   expect(revision?.buildStatus).toBe("ready")
   expect(revision?.resourceUri).toBeTypeOf("string")
   expect(revision?.id).toBeTypeOf("string")
-  expect(draft._meta).toBeUndefined()
-  expect(draft).not.toHaveProperty("_meta.openwork/appDraft")
+  expect(draft._meta).toEqual({ "openwork/appDraft": { appId: view.id, revisionId: revision?.id, receiptId: appResult.receiptId, title: "Briefing app" } })
+  expect(JSON.stringify(draft.content)).toContain("modern clients ignore the draft metadata")
   expect(view.activeRevisionId).toBeNull()
   const previewToolName = `preview_artifact_${view.id}`
   expect(JSON.stringify(draft.content)).toContain(previewToolName)
@@ -358,7 +363,7 @@ test("a Code Mode result becomes a cloud Automation and a durable artifact resul
   expect((await appRequest(den.admin, appPath)).body).toMatchObject({ onDashboard: true })
   evidence.recordAssertionEvidence(
     "A draft app can be saved and reopened with personal placement without running, scheduling, or granting workflow access",
-    "The real MCP builder returned a draft without openwork/appDraft. The advertised preview tool's standard UI metadata resolved to the same immutable HTML served by the explicitly requested Apps preview path. The Apps routes retained its exact revision and HTML, saved personal placement without changing workflow version or snapshots, rejected stale saves and an ungranted member, and removed/re-added only the author's card.",
+    "The real MCP builder retained exact openwork/appDraft revision and receipt metadata for released clients; modern-client suppression is independent of this backend contract. The advertised preview tool's standard UI metadata resolved to the same immutable HTML served by the explicitly requested Apps preview path. The Apps routes retained its exact revision and HTML, saved personal placement without changing workflow version or snapshots, rejected stale saves and an ungranted member, and removed/re-added only the author's card.",
     true,
   )
 
@@ -604,9 +609,14 @@ test("a Code Mode result becomes a cloud Automation and a durable artifact resul
     },
   })
   expect(externalDraft.isError).not.toBe(true)
-  expect(externalDraft._meta).toBeUndefined()
   const externalView = requireRecord(requireRecord(externalDraft.structuredContent, "external app draft").view, "external view")
   const externalRevision = records(externalView.revisions)[0]
+  expect(externalDraft._meta).toEqual({ "openwork/appDraft": {
+    appId: externalView.id,
+    revisionId: externalRevision?.id,
+    title: "Report app",
+    ...(externalView.dataMode === "live" ? {} : { receiptId: externalManualRun.receiptId }),
+  } })
   expect(externalRevision?.buildStatus).toBe("ready")
   const externalAppPath = `/v1/apps/${externalView.id}`
   const externalAppSaved = await appRequest(den.admin, `${externalAppPath}/save`, {
