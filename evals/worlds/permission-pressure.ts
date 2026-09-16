@@ -28,7 +28,7 @@ function text(value: unknown): string {
   return value;
 }
 
-type MainRequest = { path: string; method: string; status: number | null; elapsedMs: number | null; failed: boolean; transport: string };
+type MainRequest = { path: string; method: string; body: string; reply: string; status: number | null; elapsedMs: number | null; failed: boolean; transport: string };
 
 export async function permissionPressure(seed: Seed, context: { place: Place }) {
   if (context.place.kind !== "local" || resolveEvalEngine() !== "v1"
@@ -52,10 +52,14 @@ export async function permissionPressure(seed: Seed, context: { place: Place }) 
   const prompt = "Read the external fixture document for the timeout investigation.";
   const otherPrompt = "Read the external fixture document for the unrelated task.";
   const reply = "The external fixture document was read.";
-  const definition = seed.mock({ isolatedProcessEnv: true, agentWorkloads: [prompt, otherPrompt].map(promptMarker => ({
-    promptMarker, latestUserTurn: true, finalReply: reply,
-    steps: [{ tool: "read", arguments: { filePath } }],
-  })) });
+  const followup = { prompt: "Confirm fresh work after the external read was stopped.", reply: "Fresh work completed after Stop." };
+  const definition = seed.mock({ isolatedProcessEnv: true, agentWorkloads: [
+    ...[prompt, otherPrompt].map(promptMarker => ({
+      promptMarker, latestUserTurn: true, finalReply: reply,
+      steps: [{ tool: "read", arguments: { filePath } }],
+    })),
+    { promptMarker: followup.prompt, latestUserTurn: true, finalReply: followup.reply, steps: [] },
+  ] });
   const booted = await definition.boot(context.place);
   const mock = resources.use(booted.handle);
   const inference = async (held = true) => {
@@ -106,6 +110,7 @@ export async function permissionPressure(seed: Seed, context: { place: Place }) 
     if (state.witness !== "permission-main-fetch-v1") throw new Error("Permission main witness missing");
     return list(state.requests).map(item => ({
       path: text(item.path), method: text(item.method), transport: text(item.transport), failed: item.failed === true,
+      body: text(item.body), reply: text(item.reply),
       status: typeof item.status === "number" ? item.status : null,
       elapsedMs: typeof item.elapsedMs === "number" ? item.elapsedMs : null,
     }));
@@ -154,7 +159,7 @@ export async function permissionPressure(seed: Seed, context: { place: Place }) 
   });
   const lifetime = resources.move();
   return {
-    ...pressure, app, workspace, target, unrelated, filePath, marker, reply, pending, transcript,
+    ...pressure, app, workspace, target, unrelated, filePath, marker, reply, followup, pending, transcript,
     replyPath: (id: string) => `${mount}/permission/${encodeURIComponent(id)}/reply`,
     mainRequests: () => mainControl(false),
     providerCalls: (promptMarker: string) => mock.agentRequests({ promptMarker }),

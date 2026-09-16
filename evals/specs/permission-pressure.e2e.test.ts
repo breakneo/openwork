@@ -200,6 +200,79 @@ test(`${mode}: external-directory Allow once under real SSE pressure preserves u
     expect((await world.providerCalls(world.target.prompt)).filter(call => call.kind !== "utility").map(call => ({ kind: call.kind, completedTools: call.completedTools })))
       .toEqual([{ kind: "tool", completedTools: 0 }, { kind: "final", completedTools: 1 }]);
     expect((await world.providerCalls(world.unrelated.prompt)).some(call => call.kind === "final")).toBe(false);
+    const approvalMain = await world.mainRequests();
+    expect(approvalMain).toEqual(mode === "fixed" ? [expect.objectContaining({
+      path: replyPath, method: "POST", reply: "once", status: 200, failed: false,
+    })] : []);
+    // Baseline mode ends after failure/recovery; fixed mode also proves native Stop cleanup.
+    if (mode === "baseline") return;
+    const onlyScopedRejection = async () => {
+      const path = world.replyPath(unrelated.id);
+      const renderer = (await world.renderer()).requests.filter(item => item.path === path && item.method === "POST");
+      const allMain = await world.mainRequests();
+      const main = allMain.filter(item => item.path === path && item.method === "POST");
+      const network = world.network().filter(item => item.path === path && item.method === "POST");
+      expect(renderer).toEqual([]);
+      expect(main).toEqual([expect.objectContaining({ reply: "reject", status: 200, failed: false, transport: "main" })]);
+      expect(main.some(item => item.reply === "once" || item.reply === "always")).toBe(false);
+      expect(allMain.filter(item => item.path !== path)).toEqual(approvalMain);
+      expect(network).toEqual([]);
+      return { renderer, main, network };
+    };
+    const stopped = await step("native Stop clears the remaining approval with only a scoped rejection and no final inference", async () => {
+      expect((await world.renderer()).released).toBe(true);
+      const targetBeforeStop = await probe.eventually(() => world.transcript(world.target.sessionId), {
+        within: 10_000, label: "approved target final response is complete before Stop",
+        until: messages => messages.some(message => message.text.includes(world.reply) && message.completed),
+      });
+      expect(await agent.run("session.open", { sessionId: world.unrelated.sessionId })).toMatchObject({ ok: true });
+      await user.see("Allow once", { timeoutMs: 30_000 });
+      await user.see({ role: "button", label: "Stop" });
+      const before = await world.pending();
+      expect(before).toEqual([unrelated]);
+      expect(await world.transcript(world.unrelated.sessionId)).toEqual(otherBefore);
+      await user.click({ role: "button", label: "Stop" });
+      const state = await probe.eventually(async () => ({
+        pending: await world.pending(), messages: await world.transcript(world.unrelated.sessionId),
+      }), {
+        within: 30_000, label: "native Stop removes only the stopped request and interrupts its read",
+        until: value => value.pending.length === 0
+          && value.messages.some(message => message.tools.some(tool => tool.status === "error")),
+      });
+      expect(state.pending).toEqual(before.filter(item => item.id !== unrelated.id));
+      const tools = state.messages.flatMap(message => message.tools);
+      expect(tools).toEqual([expect.objectContaining({
+        callId: otherBefore.flatMap(message => message.tools)[0]?.callId, tool: "read", status: "error", output: "",
+      })]);
+      expect(state.messages.some(message => message.text.includes(world.reply))).toBe(false);
+      const calls = await world.providerCalls(world.unrelated.prompt);
+      expect(calls.filter(call => call.kind !== "utility").map(call => call.kind)).toEqual(["tool"]);
+      expect(await world.transcript(world.target.sessionId)).toEqual(targetBeforeStop);
+      await user.notSee("Allow once", { timeoutMs: 15_000 });
+      await user.notSee({ role: "button", label: "Stop" });
+      const replies = await onlyScopedRejection();
+      evidence.recordJsonArtifact("Native Stop cleanup after permission recovery", {
+        approvalPhase: { targetRequest: target, main: approvalMain, messages: targetBeforeStop },
+        stopPhase: { before, stoppedRequest: unrelated, state, calls, replies },
+      });
+      evidence.recordAssertionEvidence("Native Stop cleans up its pending external-directory request", "After pressure release and the approved target's final reply, a trusted user Stop click removes the remaining native request through exactly one successful main-process reject reply scoped to it, with no once/always grant, duplicate, or renderer reply. Its read remains in error with no output and no final inference; the completed target transcript and earlier approval replies are unchanged. This verifies existing native Stop behavior, not an isolation improvement.", true);
+      return { tools, targetBeforeStop };
+    });
+    await step("fresh work completes after native Stop without resuming the interrupted read", async () => {
+      await user.type("composer", world.followup.prompt, { verify: true });
+      await user.press("Enter");
+      await user.see({ text: world.followup.reply }, { timeoutMs: 30_000 });
+      expect((await world.providerCalls(world.followup.prompt)).filter(call => call.kind !== "utility").map(call => call.kind)).toEqual(["final"]);
+      expect((await world.providerCalls(world.unrelated.prompt)).some(call => call.kind === "final")).toBe(false);
+      expect(await world.pending()).toEqual([]);
+      expect((await world.transcript(world.unrelated.sessionId)).flatMap(message => message.tools)).toEqual(stopped.tools);
+      expect(await world.transcript(world.target.sessionId)).toEqual(stopped.targetBeforeStop);
+      const replies = await onlyScopedRejection();
+      evidence.recordJsonArtifact("Scoped rejection remains singular after fresh work", {
+        replies, calls: await world.providerCalls(world.followup.prompt),
+      });
+      evidence.recordAssertionEvidence("Fresh work after native Stop", "A fresh composer turn completes exactly once without reload, new pending permissions, additional replies or grants for the stopped request, final inference for the stopped turn, or changes to its interrupted read and the approved target transcript. The stopped request retains exactly one scoped main-process reject reply and no renderer reply.", true);
+    });
   } finally {
     try {
       evidence.recordJsonArtifact("Final permission pressure metadata", { renderer: await world.renderer(), network: world.network(), main: await world.mainRequests() });

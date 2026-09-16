@@ -20,7 +20,9 @@ if (process.versions.electron && process.type === "browser") {
     }
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     if (url.origin !== origin || !url.pathname.startsWith(`${mount}/permission/`) || method !== "POST") return delegate(input, init);
-    const entry = { path: url.pathname, method, status: null, elapsedMs: null, failed: false, transport: "main" };
+    const body = await new Request(input instanceof Request ? input.clone() : input, init).text();
+    const entry = { path: url.pathname, method, body, reply: JSON.parse(body).reply,
+      status: null, elapsedMs: null, failed: false, transport: "main" };
     requests.push(entry);
     const start = performance.now();
     try {
