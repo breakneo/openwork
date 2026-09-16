@@ -7949,7 +7949,7 @@ export type PostV1AppsByAppIdShareData = {
 
 export type PostV1AppsByAppIdShareErrors = {
   /**
-   * Only organization owners and admins can share apps.
+   * Only app managers can share.
    */
   403: ForbiddenError;
   /**

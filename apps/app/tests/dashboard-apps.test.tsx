@@ -419,10 +419,10 @@ test("yesterday's successful live payload cannot be loaded after midnight", () =
   window.localStorage.removeItem(cacheScope);
 });
 
-test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member", "unknown"].map((role) => [mode, role])))("%s saved tiles retain open and refresh with role %s", async (mode, role) => {
+test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member", "unknown"].map((role) => [mode, role])))("legacy canManage=true: %s saved tiles retain open and refresh with role %s", async (mode, role) => {
   organizationRole = role;
   workingDetail();
-  detail.canManage = role !== "member";
+  detail.canManage = true;
   if (mode === "live") detail.view = { ...detail.view, dataMode: "live", revisions: detail.revision ? [detail.revision] : [] };
   await render("dashboard");
   const tile = container.querySelector<HTMLElement>("[data-personal-dashboard-app]");
@@ -448,7 +448,11 @@ test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member", "u
   const isAdmin = role === "admin" || role === "owner";
   expect(removal !== null).toBe(isAdmin);
   expect(deletion !== null).toBe(isAdmin);
-  if (!isAdmin) expect(document.querySelector('[role="separator"]')).toBeNull();
+  if (!isAdmin) {
+    expect(document.querySelector('[role="separator"]')).toBeNull();
+    expect(Array.from(document.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent))
+      .toEqual(mode === "live" ? ["Open app", "Refresh"] : ["Open app"]);
+  }
   expect(document.body.textContent).not.toContain("Only organization owners and admins");
   const menu = document.querySelector('[data-slot="dropdown-menu-content"]');
   expect(menu?.className).toContain("w-64");
