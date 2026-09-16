@@ -12,7 +12,7 @@ import type { DashboardMcpAppEntry } from "../src/react-app/domains/dashboard/gr
 import type { GeneratedArtifactView, GeneratedArtifactViewRevision } from "@openwork/types/workflows";
 import { liveGeneratedAppCacheScope, liveGeneratedAppEntry, nextViewerDayBoundary } from "../src/react-app/domains/apps/live-generated-app-model";
 import { DASHBOARD_AUTO_REFRESH_INTERVAL_MS, readDashboardTileCache, writeDashboardTileCache } from "../src/react-app/domains/dashboard/dashboard-tile-cache";
-import { resetDashboardTileCacheMemory } from "../src/app/lib/dashboard-cache-storage";
+import { flushDashboardTileCacheStorage, resetDashboardTileCacheMemory } from "../src/app/lib/dashboard-cache-storage";
 import * as launchScheduler from "../src/react-app/domains/dashboard/dashboard-launch-scheduler";
 import * as tileGeometry from "../src/react-app/domains/dashboard/use-dashboard-tile-geometry";
 
@@ -948,6 +948,38 @@ test("the freshness label ages on its own without another state change", async (
   } finally { await host.dispose(); clock.mockRestore(); interval.mockRestore(); }
 });
 
+test.each([true, false])("artifact freshness follows generated data, not successful fetches (guarded: %j)", async guarded => {
+  let now = Date.parse("2026-09-15T20:00:00Z");
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  let generatedAt = "2026-09-13T20:00:00.000Z";
+  const fixture = continuityFixture({ guarded, call: async () => ({
+    content: [], structuredContent: { schemaVersion: "1", artifact: { generatedAt }, data: { events: [] } },
+  }) });
+  const host = await mountContinuityTile(fixture);
+  const label = () => document.querySelector('[role="menu"] [data-dashboard-cache-state]')?.textContent ?? "";
+  try {
+    const refresh = await compactRefreshItem(host.container);
+    expect(label()).toContain("Updated 48 hours ago");
+    expect(readDashboardTileCache("continuity-scope", fixture.entry.id)?.cachedAt).toBe(now);
+    now += 3 * 60_000;
+    await act(async () => refresh.click());
+    const nextRefresh = await compactRefreshItem(host.container);
+    expect(label()).toContain("Updated 48 hours ago");
+    expect(fixture.calls).toHaveLength(2);
+    for (let i = 0; i < 5; i++) await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(fixture.calls).toHaveLength(2);
+    expect(readDashboardTileCache("continuity-scope", fixture.entry.id)?.cachedAt).toBe(now);
+    flushDashboardTileCacheStorage();
+    resetDashboardTileCacheMemory();
+    expect(readDashboardTileCache("continuity-scope", fixture.entry.id)?.result.structuredContent).toMatchObject({ artifact: { generatedAt } });
+    generatedAt = new Date(now).toISOString();
+    await act(async () => nextRefresh.click());
+    await compactRefreshItem(host.container);
+    expect(label()).toContain("Updated just now");
+    expect(fixture.calls).toHaveLength(3);
+  } finally { await host.dispose(); clock.mockRestore(); }
+});
+
 test.each(["success", "failure"])("generated dashboard refresh is bounded across rerenders, timer and focus (%s)", async (outcome) => {
   const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
@@ -1040,9 +1072,11 @@ test.each(["timer", "focus"])("generated day rollover via %s and caller changes 
   let calls = 0;
   let resolutions = 0;
   const released: string[] = [];
+  const inputs: unknown[] = [];
   const client: OpenworkServerClient = { ...createOpenworkServerClient({ baseUrl: "http://fixture.invalid" }),
     resolveMcpApp: async () => ({ app: { ...resource, serverName: "openwork-cloud", toolName: "run_artifact_arv_fixture", resourceUri: liveRevision.resourceUri, launchId: `day-${++resolutions}` } }),
-    callMcpAppTool: async () => {
+    callMcpAppTool: async (_workspace, request) => {
+      inputs.push(request.arguments);
       if (++calls === 1) return first.promise;
       if (calls === 3) return third.promise;
       return { content: [{ type: "text", text: "new-day" }] };
@@ -1081,8 +1115,21 @@ test.each(["timer", "focus"])("generated day rollover via %s and caller changes 
     for (let i = 0; i < 5; i++) await act(async () => { render(); window.dispatchEvent(new Event("focus")); });
     expect(calls).toBe(3);
     expect(sandboxView?.origin.readOnly).toBe(false);
-    expect(window.localStorage.getItem(liveGeneratedAppCacheScope(initialScope))).not.toContain("late-old-day");
-    expect(window.localStorage.getItem(liveGeneratedAppCacheScope(nextScope))).not.toContain("new-day");
+    expect(inputs).toEqual([{ timeZone: zone }, { timeZone: zone }, { timeZone: zone }]);
+    const initialCacheScope = liveGeneratedAppCacheScope(initialScope);
+    const nextCacheScope = liveGeneratedAppCacheScope(nextScope);
+    const oldEntryId = liveGeneratedAppEntry(liveView, liveRevision, zone, boundary - 1).id;
+    const newEntryId = liveGeneratedAppEntry(liveView, liveRevision, zone, boundary).id;
+    flushDashboardTileCacheStorage();
+    expect(window.localStorage.getItem(initialCacheScope)).toContain("new-day");
+    expect(window.localStorage.getItem(initialCacheScope)).not.toContain("late-old-day");
+    expect(window.localStorage.getItem(nextCacheScope)).toContain("another-viewer");
+    expect(window.localStorage.getItem(nextCacheScope)).not.toContain("new-day");
+    resetDashboardTileCacheMemory();
+    expect(readDashboardTileCache(initialCacheScope, oldEntryId)).toBeNull();
+    expect(readDashboardTileCache(nextCacheScope, oldEntryId)).toBeNull();
+    expect(readDashboardTileCache(initialCacheScope, newEntryId)?.result.content).toEqual([{ type: "text", text: "new-day" }]);
+    expect(readDashboardTileCache(nextCacheScope, newEntryId)?.result.content).toEqual([{ type: "text", text: "another-viewer" }]);
   } finally {
     await act(async () => root.unmount());
     container.remove();

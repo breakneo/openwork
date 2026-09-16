@@ -102,8 +102,12 @@ function launchFailureMessage(content: Array<Record<string, unknown>>): string |
   return text;
 }
 
-function freshnessLabel(cachedAt: number, now = Date.now()): string {
-  const ageMinutes = Math.max(0, Math.floor((now - cachedAt) / 60_000));
+function freshnessLabel({ result, cachedAt }: Pick<ReadyTileState, "result" | "cachedAt">, now = Date.now()): string {
+  const payload = result.structuredContent;
+  const artifact = payload?.schemaVersion === "1" && isRecord(payload.artifact) ? payload.artifact : null;
+  const generatedAt = typeof artifact?.generatedAt === "string" ? Date.parse(artifact.generatedAt) : NaN;
+  const updatedAt = Number.isFinite(generatedAt) ? generatedAt : cachedAt;
+  const ageMinutes = Math.max(0, Math.floor((now - updatedAt) / 60_000));
   if (ageMinutes < 1) return "Updated just now";
   if (ageMinutes === 1) return "Updated 1 minute ago";
   if (ageMinutes < 60) return `Updated ${ageMinutes} minutes ago`;
@@ -590,10 +594,10 @@ function McpAppTileContent({
     if (state.phase === "ready" && refreshState === "refreshing") return "Saved locally · refreshing";
     if (state.phase === "ready" && refreshState === "failed") return "Saved locally · refresh failed";
     if (state.phase === "ready" && entry.organizationAutoLaunch === true) {
-      return `Organization auto-run · ${freshnessLabel(state.cachedAt, freshnessNow)}`;
+      return `Organization auto-run · ${freshnessLabel(state, freshnessNow)}`;
     }
     if (state.phase === "ready" && entry.requiresApproval === true) return "Saved locally · run on request";
-    if (state.phase === "ready") return freshnessLabel(state.cachedAt, freshnessNow);
+    if (state.phase === "ready") return freshnessLabel(state, freshnessNow);
     if (state.phase === "loading") return "Loading";
     if (state.phase === "error") return "Refresh failed";
     if (entry.organizationAutoLaunch === true) return "Organization auto-run";
