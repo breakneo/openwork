@@ -403,6 +403,17 @@ function isLoopbackUrl(input: RequestInfo | URL): boolean {
   }
 }
 
+export function isPermissionReplyRequest(input: RequestInfo | URL, init?: RequestInit): boolean {
+  const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+  if (method.toUpperCase() !== "POST") return false;
+  const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  try {
+    return /\/permission\/[A-Za-z0-9_-]+\/reply$/.test(new URL(raw).pathname);
+  } catch {
+    return false;
+  }
+}
+
 function desktopTransferId(): string {
   return crypto.randomUUID();
 }
@@ -512,7 +523,8 @@ async function desktopFetchThroughMain(
   // Stop must retain its transport deadline when archive uses IPC. Prompt and
   // command POSTs keep their distinct admission/unknown-outcome contract.
   const cancellable = ["GET", "PATCH"].includes(requestMethod)
-    || (requestMethod === "POST" && /\/session\/[^/]+\/abort$/.test(new URL(url).pathname));
+    || (requestMethod === "POST" && /\/session\/[^/]+\/abort$/.test(new URL(url).pathname))
+    || isPermissionReplyRequest(url, { method: requestMethod });
   const signal = cancellable && diagnosticsDeadlineAtMs === undefined
     ? init?.signal === undefined ? (input instanceof Request ? input.signal : undefined) : init.signal
     : undefined;
