@@ -4,6 +4,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import ssl
 import sys
 
@@ -25,10 +26,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             connection.request(self.command, self.path, body=raw, headers=headers)
             upstream = connection.getresponse()
             result = upstream.read()
+            response_headers = [(k, v) for k, v in upstream.getheaders() if k.lower() not in ['transfer-encoding', 'content-length', 'connection']]
+            if any(not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", k) or not re.fullmatch(r'[\t\x20-\x7e\x80-\xff]*', v) for k, v in response_headers):
+                connection.close()
+                self.send_error(502, 'Invalid upstream response header')
+                return
             self.send_response(upstream.status)
-            for k, v in upstream.getheaders():
-                if k.lower() not in ['transfer-encoding', 'content-length', 'connection']:
-                    self.send_header(k, v)
+            for k, v in response_headers:
+                self.send_header(k.replace('\r', '').replace('\n', ''), v.replace('\r', '').replace('\n', ''))
             self.send_header('Content-Length', str(len(result)))
             self.end_headers()
             self.wfile.write(result)
@@ -71,6 +76,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1' if MODE == 'proxy' else '0.0.0.0', 18443 if MODE == 'proxy' else 8080), Handler)
 if MODE == 'proxy':
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(os.environ['PROOF_TLS_CERT'], os.environ['PROOF_TLS_KEY'])
     server.socket = context.wrap_socket(server.socket, server_side=True)
 server.serve_forever()

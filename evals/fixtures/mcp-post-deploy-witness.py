@@ -1,8 +1,10 @@
 import base64
 import hashlib
+import hmac
 import http.server
 import json
 import os
+import re
 import secrets
 import time
 import urllib.parse
@@ -11,6 +13,10 @@ PROVIDER_SECRET = os.environ['PROVIDER_SECRET']
 OAUTH_SECRET = os.environ['OAUTH_SECRET']
 CODES = {}
 TOKENS = set()
+
+
+def fingerprint(value):
+    return hmac.new(value.encode(), b'openwork-release-proof-fingerprint-v1', hashlib.sha256).hexdigest()[:16]
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -89,18 +95,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result = {'jsonrpc': '2.0', 'id': body['id'], 'result': payload}
         else:
             status, result = 404, {'error': 'not_found'}
+        if any(not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key) or not re.fullmatch(r'[\t\x20-\x7e\x80-\xff]*', value) for key, value in headers.items()):
+            self.send_error(400, 'Invalid response header')
+            return
         encoded = json.dumps(result).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(encoded)))
         for key, value in headers.items():
-            self.send_header(key, value)
+            self.send_header(key.replace('\r', '').replace('\n', ''), value.replace('\r', '').replace('\n', ''))
         self.end_headers()
         self.wfile.write(encoded)
         secret = body.get('client_secret') if path == '/token' else bearer
         safe_body = {k: v for k, v in body.items() if k not in ['client_secret', 'code', 'code_verifier']}
         safe_result = {k: '[REDACTED]' if k in ['access_token', 'refresh_token'] else v for k, v in result.items()}
-        print(json.dumps({'at': time.time(), 'request': {'method': self.command, 'path': path, 'body': safe_body, 'secretFingerprint': hashlib.sha256(secret.encode()).hexdigest()[:16] if secret else None}, 'response': {'status': status, 'body': safe_result}, 'authenticated': authenticated}), flush=True)
+        print(json.dumps({'at': time.time(), 'request': {'method': self.command, 'path': path, 'body': safe_body, 'secretFingerprint': fingerprint(secret) if secret else None}, 'response': {'status': status, 'body': safe_result}, 'authenticated': authenticated}), flush=True)
 
     do_GET = handle_request
     do_POST = handle_request

@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import hmac
 import importlib
 import json
 import os
@@ -14,6 +15,10 @@ import urllib.parse
 sys.dont_write_bytecode = True
 client = importlib.import_module('mcp-put-release-client')
 ROOT = client.ROOT
+
+
+def fingerprint(value):
+    return hmac.new(value.encode(), b'openwork-release-proof-fingerprint-v1', hashlib.sha256).hexdigest()[:16]
 
 
 def prepare():
@@ -192,7 +197,7 @@ def export():
     inspection['containerImage'] = subprocess.check_output(['docker', 'inspect', 'mcp-put-proof-release-den-1', '--format', '{{.Config.Image}}'], text=True).strip()
     inspection['composeSha256'] = hashlib.sha256(pathlib.Path('packaging/docker/docker-compose.eval.yml').read_bytes()).hexdigest()
     witness = [json.loads(line) for line in (ROOT / 'witness.jsonl').read_text().splitlines()]
-    output = {'schemaVersion': 2, 'kind': 'recorded-release-post-deploy-job', 'recordingRevision': 2, 'recordedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'supersedesTranscriptSha256': supersedes, 'inspection': inspection, 'jobSha256': execution_sha, 'jobInvocations': clean(applies), 'otherInvocations': clean([row for row in invocations if row['mode'] != 'apply']), 'priorTranscripts': immutable, 'comparison': json.loads((ROOT / 'comparison.json').read_text()), 'credentialChecksBeforeRedaction': checks, 'expectedSyntheticClientSecretFingerprint': hashlib.sha256(state['oauthSecret'].encode()).hexdigest()[:16], 'expectedSyntheticProviderSecretFingerprint': hashlib.sha256(state['providerSecret'].encode()).hexdigest()[:16], 'testkit': 'deferred_to_orchestrator', 'witnessReceipts': clean(witness), 'requests': clean(receipts)}
+    output = {'schemaVersion': 2, 'kind': 'recorded-release-post-deploy-job', 'recordingRevision': 2, 'recordedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'supersedesTranscriptSha256': supersedes, 'inspection': inspection, 'jobSha256': execution_sha, 'jobInvocations': clean(applies), 'otherInvocations': clean([row for row in invocations if row['mode'] != 'apply']), 'priorTranscripts': immutable, 'comparison': json.loads((ROOT / 'comparison.json').read_text()), 'credentialChecksBeforeRedaction': checks, 'expectedSyntheticClientSecretFingerprint': fingerprint(state['oauthSecret']), 'expectedSyntheticProviderSecretFingerprint': fingerprint(state['providerSecret']), 'testkit': 'deferred_to_orchestrator', 'witnessReceipts': clean(witness), 'requests': clean(receipts)}
     serialized = json.dumps(output, indent=2) + '\n'
     if any(secret in serialized for secret in hidden):
         raise RuntimeError('Secret remains; refusing export')

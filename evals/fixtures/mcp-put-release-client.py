@@ -100,10 +100,10 @@ def export(destination):
     inspection['composeSha256'] = hashlib.sha256(pathlib.Path('packaging/docker/docker-compose.eval.yml').read_bytes()).hexdigest()
     inspection['dockerServerVersion'] = subprocess.check_output(['docker', 'version', '--format', '{{.Server.Version}}'], text=True).strip()
     secret = dict(line.split('=', 1) for line in (ROOT / 'witness.env').read_text().splitlines())['WITNESS_SECRET']
-    secret_checks = [{'label': r['label'], 'rawResponseContainsWitnessSecret': secret in json.dumps(r['response']), 'responseHasApiKeyField': 'apiKey' in r['response']['body']} for r in receipts if r['label'] in ['case6-secret-create', 'case6-secret-read', 'case6-omit-secret', 'case6-secret-read-after']]
+    response_checks = [{'label': r['label'], 'rawResponseContainsWitnessSecret': secret in json.dumps(r['response']), 'responseHasApiKeyField': 'apiKey' in r['response']['body']} for r in receipts if r['label'] in ['case6-secret-create', 'case6-secret-read', 'case6-omit-secret', 'case6-secret-read-after']]
     witness = [json.loads(line) for line in (ROOT / 'witness.jsonl').read_text().splitlines()]
-    output = {'schemaVersion': 1, 'kind': 'recorded-release-blackbox', 'image': 'ghcr.io/different-ai/openwork-den-api:0.18.46@sha256:e254a3842e7ecb6d0c7128b5f17201e92ac4ee566ad82c70c468938a3faa6407', 'inspection': inspection, 'coverage': {'foreignOrgId': 'not_executed_single_org_bootstrap_409', 'testkit': 'deferred_to_orchestrator'}, 'secretChecksBeforeRedaction': secret_checks, 'witnessCalls': [row for row in witness if row['method'] == 'tools/call'], 'requests': clean(receipts)}
-    serialized = json.dumps(output, indent=2) + '\n'
+    output = {'schemaVersion': 1, 'kind': 'recorded-release-blackbox', 'image': 'ghcr.io/different-ai/openwork-den-api:0.18.46@sha256:e254a3842e7ecb6d0c7128b5f17201e92ac4ee566ad82c70c468938a3faa6407', 'inspection': inspection, 'coverage': {'foreignOrgId': 'not_executed_single_org_bootstrap_409', 'testkit': 'deferred_to_orchestrator'}, 'secretChecksBeforeRedaction': response_checks, 'witnessCalls': [row for row in witness if row['method'] == 'tools/call'], 'requests': clean(receipts)}
+    serialized = json.dumps(clean(output), indent=2) + '\n'
     if any(value and value in serialized for value in secrets):
         raise RuntimeError('Secret remains in transcript; refusing export')
     pathlib.Path(destination).write_text(serialized)
