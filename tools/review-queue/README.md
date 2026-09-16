@@ -106,6 +106,8 @@ Coordinator reads are still needed for **original purpose beyond a condensed tit
 4. Use checkboxes or **Select visible** for mass approval/decline. All selected items must have the same kind, group and recommendation. The confirmation lists every ID. Filter changes clear selection; hidden items never remain selected.
 5. **Undo last** removes the entire latest local batch, not just one row. It cannot undo an exported file or an already executed action.
 
+After a confirmed LIVE receipt (or an offline local decision), focus advances in displayed order to the next unanswered card, wrapping once. Bulk selection is cleared together; unrelated filters remain unchanged. Queued/running decisions leave **Needs a human** and remain in **Decided**; new blocked/waiting outcomes can surface for attention. Failed or uncertain delivery never advances automatically. When no unanswered card remains, the detail pane names Decided and filters rather than selecting an already-decided item.
+
 Keyboard shortcuts: `j`/`k` next/previous, `a` approve, `d` decline, `c` focus comment, `?` prepare clarification, `Space` select. Text inputs/selects retain all typing behavior, and native buttons retain Space activation. Approval shortcuts are blocked while multi-selection is active: use the explicit bulk confirmation.
 
 Draft comments survive switching items through best-effort browser storage, but are **not decisions or part of decision exports**. Record a comment action if it must be handed off. Browser storage can be unavailable in private browsing or preview sandboxes; a visible warning explains when the tab is the only copy.

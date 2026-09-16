@@ -26,6 +26,13 @@
   const events = new Map();
   const localRequests = new Map();
   const threadDrafts = new Map();
+  const advances = new Map();
+  function advanceReview(order, anchor) {
+    const pending = new Set([...visibleItems(), ...archiveItems()].filter((item) => !decisionsById().has(item.id) && !isLocked(item)).map((item) => item.id));
+    const index = order.indexOf(anchor);
+    activeId = [...order.slice(index + 1), ...order.slice(0, index + 1)].find((id) => pending.has(id)) ?? null;
+    render(true); $('detail').focus({ preventScroll: true });
+  }
   function unavailable() { return liveSession && (!connected || writing); }
   function syncControls() {
     $('mode-badge').textContent = liveSession ? connected ? 'LIVE' : 'CONNECTION LOST' : 'OFFLINE';
@@ -91,6 +98,11 @@
     persist();
     if (before !== listState()) renderList(true);
     renderMetrics(); renderPlan(); renderHistory(); renderThreadEvents(); syncControls();
+    for (const [id, advance] of advances) {
+      if (!events.has(id)) continue;
+      advances.delete(id);
+      if (activeId === advance.anchor) advanceReview(advance.order, advance.anchor);
+    }
   }
   async function pollResults() {
     if (!connected) return;
@@ -288,8 +300,8 @@
       if (['blocked', 'waiting'].includes(result.status)) return true;
       if (terminalStatuses.includes(result.status)) return false;
     }
-    if (item.archived || ['decline', 'defer'].includes(decision?.action)) return false;
-    if (decision?.action === 'approve') return ['queued', 'rechecking'].includes(result?.status);
+    if ([...localRequests.values()].some((local) => local.item_ids.includes(item.id))) return true;
+    if (item.archived || decision) return false;
     return ['merge', 'review', 'relaunch', 'blockers'].includes(recommendationVerb(item));
   }
   function archiveEligible(item, decisions = decisionsById(), results = resultById()) {
@@ -313,7 +325,8 @@
     const results = resultById();
     return filteredItems().filter((item) => $('status').value === 'human'
       ? needsHuman(item, decisions.get(item.id), results.get(item.id))
-      : !$('status').value || (isLocked(item) ? 'locked' : decisions.get(item.id)?.action ?? 'pending') === $('status').value)
+      : $('status').value === 'decided' ? decisions.has(item.id)
+        : !$('status').value || (isLocked(item) ? 'locked' : decisions.get(item.id)?.action ?? 'pending') === $('status').value)
       .sort((a, b) => Number(isLocked(a)) - Number(isLocked(b)));
   }
   function archiveItems() {
@@ -449,7 +462,7 @@
   function renderDetail() {
     const root = $('detail'); root.replaceChildren();
     const item = feed.items.find((candidate) => candidate.id === activeId);
-    if (!item) { root.append(element('p', 'Choose an item or load a feed to start reviewing.', 'empty')); return; }
+    if (!item) { root.append(element('p', 'No more cards needing a decision in this view. Open Decided to review recorded choices, or change filters.', 'empty')); return; }
     const heading = element('h2', item.title); heading.dataset.testid = 'detail-title';
     root.append(heading);
     function field(name, label, value) {
@@ -638,19 +651,25 @@
   }
   function decide(ids, action, comment) {
     validateAction(ids, action);
+    const order = [...visibleItems(), ...archiveItems()].map((item) => item.id);
+    const anchor = activeId;
     const now = new Date().toISOString();
     const batch = crypto.randomUUID();
     const candidate = applyDecision({ ...feed, decisions: reviewHistory() }, ids, action, comment, now, batch);
     for (const id of ids) delete drafts[id];
     if (liveSession) {
       writing = true;
+      advances.set(batch, { order, anchor });
       localRequests.set(batch, { id: batch, kind: 'decision', item_ids: ids, text: comment, action, at: now, decisions: candidate.decisions.filter((entry) => entry.batch_id === batch), state: 'Sending — receipt not confirmed' });
     } else feed = candidate;
     dirty = true; exportStamp = ''; selected.clear(); persist(); render(liveSession); $('detail').focus({ preventScroll: true });
     if (liveSession) {
       message('Recorded locally. Sending once; receipt not yet confirmed.');
       void postOnce('/decisions', { id: batch, ids, action, comment, decided_at: now, snapshot: serverSnapshot });
-    } else message(`Recorded ${labels[action].toLowerCase()} for ${ids.length} item${ids.length === 1 ? '' : 's'}. Nothing was executed. Undo is available.`);
+    } else {
+      advanceReview(order, anchor);
+      message(`Recorded ${labels[action].toLowerCase()} for ${ids.length} item${ids.length === 1 ? '' : 's'}. Nothing was executed. Undo is available.`);
+    }
   }
   function prepareBatch() {
     confirmBatch([...selected], $('bulk-action').value, $('bulk-comment').value);
