@@ -828,8 +828,9 @@
   function renderThreadEvents() {
     const root = document.querySelector('[data-testid="thread-events"]'); if (!root) return;
     const nodes = [];
-    for (const event of [...events.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
-      if (!event.item_ids.includes(activeId)) continue;
+    for (const original of [...events.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+      if (!original.item_ids.includes(activeId)) continue;
+      const event = resultForItem(original, activeId);
       const time = new Date(event.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
       const status = { queued: 'Queued for owner recheck', rechecking: 'Rechecking…', done: `Done · ${time}`, archived: `Done · archived ${time}`, merged: `Merged · ${time}`, blocked: `Blocked: ${event.text}`, reply: `Reply from owner: ${event.text}`, waiting: `Waiting: ${event.text}`, declined: `Kept · ${time}`, deferred: `Deferred · ${time}`, stopped: `Stopped · ${time}` }[event.status];
       const row = element('div', undefined, 'history'); row.dataset.eventId = event.id;

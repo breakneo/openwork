@@ -106,18 +106,22 @@ test('mixed homogeneous results project each target onto its card and replies pr
     expect(await page.locator('[data-id="ses_targetB"]').count()).toBe(1);
     expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
     expect(await page.getByTestId('archive-batch').count()).toBe(0);
+    await page.locator('[data-id="ses_targetB"] .row-open').click();
+    expect(await page.getByTestId('thread-events').textContent()).toContain('Blocked: Target B needs descendant verification');
     result(work.id, 'reply', 'Synthetic reply is not verification', live.directory);
     await expect.poll(() => page.getByTestId('action-log').textContent(), { timeout: 8000 }).toContain('Synthetic reply is not verification');
     expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
     await page.locator('#status').selectOption('');
     expect(await page.locator('[data-id="ses_targetA"] .row-meta').textContent()).toContain('archived');
     expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
+    await page.locator('[data-id="ses_targetA"] .row-open').click();
+    expect(await page.getByTestId('thread-events').textContent()).toContain('Done · archived');
     await page.reload(); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     expect(await page.locator('[data-id="ses_targetA"]').count()).toBe(0);
     expect(await page.locator('[data-id="ses_targetB"]').count()).toBe(1);
     expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
     expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(1);
-    evidence.recordAssertionEvidence('Card state matches its own structured outcome', 'One homogeneous batch reports aggregate done with A archived and B blocked. Only B remains in Needs human with its exact blocker; All items shows distinct statuses. A reply and reload preserve the projection, with no re-enqueue or archive-batch revival.', true);
+    evidence.recordAssertionEvidence('Card state matches its own structured outcome', 'One homogeneous batch reports aggregate done with A archived and B blocked. Only B remains in Needs human with its exact blocker; All items and both card threads show their distinct statuses. A reply and reload preserve the projection, with no re-enqueue or archive-batch revival.', true);
   } finally { await browser.close(); await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); }); await rm(directory, { recursive: true, force: true }); }
 });
 
