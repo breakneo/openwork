@@ -2,7 +2,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { isMessage } from './core.mjs';
-import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, compensationCurrent, compensationSucceeded, appendEvent, statusEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
+import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, compensationCurrent, compensationSucceeded, executionResult, appendEvent, statusEvent, blockedEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
 
 function publishedInputs(directory) {
   const { inputs, events, entries } = readQueue(directory);
@@ -24,7 +24,7 @@ export function next(directory = 'reports/review-queue') {
     const ordered = [...pending.filter((input) => input.action === 'stop'), ...pending.filter((input) => input.action !== 'stop')];
     for (const input of ordered) {
       if (!dependencyReady(input, inputs, events)) {
-        if (!workHistory(input, events).some((event) => event.status === 'blocked')) appendEvent(dir, 'results.jsonl', statusEvent(input, 'blocked', 'Replacement cannot run until compensation explicitly succeeds for every target. Failure or uncertainty keeps it blocked.'));
+        if (!workHistory(input, events).some((event) => event.status === 'blocked')) appendEvent(dir, 'results.jsonl', blockedEvent(input, 'compensation-dependency', 'executor', 'Replacement cannot run until compensation explicitly succeeds for every target. Failure or uncertainty keeps it blocked.'));
         continue;
       }
       const state = JSON.parse(readBounded(join(dir, 'feed-state.json'), 16 * 1024 * 1024));
@@ -32,15 +32,15 @@ export function next(directory = 'reports/review-queue') {
       const stale = entry.snapshot !== undefined ? entry.snapshot !== state.snapshot : input.items.some((item) => !state.items.some((current) => isDeepStrictEqual(current, item)));
       const overlap = input.kind === 'decision' && !isMessage(input.action) && outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.kind === 'decision' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (input.action === 'approve') requireDeliveryRead(input.items, entries, entry.snapshot);
-      const running = inputs.some((other) => other.id !== input.id && claimed.has(other.id) && workHistory(other, events).at(-1)?.status === 'rechecking' && other.item_ids.some((id) => input.item_ids.includes(id)));
+      const running = inputs.some((other) => other.id !== input.id && claimed.has(other.id) && executionResult(other, events)?.status === 'rechecking' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (running && input.action !== 'stop') continue;
       const effectCurrent = compensationCurrent(input, events);
       appendEvent(dir, 'results.jsonl', statusEvent(input, 'rechecking', 'Claimed before returning work; never automatically replay uncertain work.'));
       if (!effectCurrent) {
-        appendEvent(dir, 'results.jsonl', statusEvent(input, 'blocked', 'Original effect is unverified or a later independent archive exists. Reconcile identity and archive generation; do not undo later work.')); continue;
+        appendEvent(dir, 'results.jsonl', blockedEvent(input, 'original-effect-identity', 'operator', 'Original effect is unverified or a later independent archive exists. Reconcile identity and archive generation; do not undo later work.')); continue;
       }
       if ((stale || overlap) && input.action !== 'stop') {
-        appendEvent(dir, 'results.jsonl', statusEvent(input, 'blocked', stale ? 'Stale feed: no external action attempted by this claim. Reconcile against the current snapshot.' : 'Multiple same-item decisions: no external action attempted by this claim. Reconcile instead of executing superseded work.'));
+        appendEvent(dir, 'results.jsonl', blockedEvent(input, stale ? 'snapshot' : 'same-item-overlap', 'coordinator', stale ? 'Stale feed: no external action attempted by this claim. Reconcile against the current snapshot.' : 'Multiple same-item decisions: no external action attempted by this claim. Reconcile instead of executing superseded work.'));
         continue;
       }
       return input;

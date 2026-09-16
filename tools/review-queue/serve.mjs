@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { validateFeed, applyDecision, isLocked, recommendationVerb, chatOnly, deliveryOf, deliveryIdentity, isMessage } from './core.mjs';
 import { buildHtml } from './build.mjs';
 import { writeDeliverables } from './deliverables.mjs';
-import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan, requireDeliveryRead, queueProtocol, workHistory } from './protocol.mjs';
+import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan, requireDeliveryRead, queueProtocol, executionResult } from './protocol.mjs';
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -148,7 +148,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
             const id = randomUUID();
             compensation = { id, decision_id: id, kind: 'compensation', action: plan.action, status: 'queued',
               item_ids: plan.items.map((item) => item.id), items: plan.items, decisions: [], text: body.text,
-              at: now, control_id: body.id, target_id: target.event.id, effect_receipt_id: workHistory(target.event, events).at(-1).id };
+              at: now, control_id: body.id, target_id: target.event.id, effect_receipt_id: executionResult(target.event, events).id };
             children.push(compensation);
           }
           let replacement;

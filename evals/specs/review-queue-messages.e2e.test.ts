@@ -8,6 +8,41 @@ import { startServer } from '../../tools/review-queue/serve.mjs';
 import { next, result } from '../../tools/review-queue/executor.mjs';
 import { readLog } from '../../tools/review-queue/protocol.mjs';
 
+test('page incident counts link current outcomes without replay or history overcount', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-incidents-browser-'));
+  const feed = join(directory, 'feed.json');
+  await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_incident', title: 'Synthetic incident', kind: 'session', recommended_action: 'archive', if_approved: 'Archive after live checks.' }], decisions: [] }));
+  const live = await startServer({ feed, dir: join(directory, 'queue') });
+  const browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+  page.on('dialog', (dialog) => dialog.accept());
+  try {
+    await page.goto(live.url); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+    await page.getByRole('button', { name: 'Review archive batch', exact: true }).click(); await page.getByTestId('confirm-bulk').click();
+    await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(1);
+    const work = next(live.directory);
+    result(work.id, 'blocked', 'gate=descendants; observed_at=2026-01-01T12:00:00Z; who=executor; unblock=Read descendant state', live.directory);
+    result(work.id, 'blocked', 'gate=descendants; observed_at=2026-01-01T12:01:00Z; who=executor; unblock=Read descendant state', live.directory);
+    await expect.poll(() => page.locator('#show-blocked').textContent(), { timeout: 8000 }).toBe('Blocked (1)');
+    await page.locator('#show-blocked').click(); expect(await page.locator('[data-log-id]').count()).toBe(1);
+    expect(await page.getByTestId('latest-verification').textContent()).toContain('12:01:00Z');
+    result(work.id, 'archived', 'Verified synthetic archive', live.directory);
+    await expect.poll(() => page.locator('#show-blocked').textContent(), { timeout: 8000 }).toBe('Blocked (0)');
+    expect(await page.locator('[data-log-id]').count()).toBe(0);
+    await page.locator('#show-all-actions').click();
+    expect(await page.getByTestId('action-log').textContent()).toContain('Historical blocked');
+    expect(await page.getByTestId('latest-verification').textContent()).toContain('archived');
+    await page.locator('#status').selectOption('decided'); await page.locator('#comment').fill('Please confirm the retained deliverable.'); await page.getByTestId('thread-send').click();
+    await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(2);
+    const message = next(live.directory); result(message.id, 'waiting', 'owner=synthetic; outstanding=confirmation; next_check_at=2026-01-01T12:05:00Z', live.directory); result(message.id, 'reply', 'Owner reply is not a completion receipt', live.directory);
+    await expect.poll(() => page.locator('#show-waiting').textContent(), { timeout: 8000 }).toBe('Waiting (1)');
+    await page.locator('#show-waiting').click(); expect(await page.locator('[data-log-id]').count()).toBe(1);
+    expect(await page.getByTestId('latest-verification').textContent()).toContain('waiting');
+    expect(await page.getByRole('button', { name: /replay/i }).count()).toBe(0);
+    await page.reload(); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE'); expect(await page.locator('#show-waiting').textContent()).toBe('Waiting (1)');
+    evidence.recordAssertionEvidence('Action attention is current and navigable', 'Repeated blocked results count once and filter to one logged request; archived removes the incident without erasing historical blocks. Latest verification includes observed gate text. Message reply preserves waiting and original archive, survives reload, and no replay control exists.', true);
+  } finally { await browser.close(); await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); }); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('Later is browser-local and messages do not replace approval', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-message-browser-'));
   const feed = join(directory, 'feed.json');

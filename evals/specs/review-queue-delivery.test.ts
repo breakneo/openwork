@@ -2,6 +2,8 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { expect } from 'vitest';
 import { test } from '@openwork/testkit';
 import { validateFeed, validateDelivery, deliveryOf, deliveryIdentity, deliveryClassification, sessionRoute } from '../../tools/review-queue/core.mjs';
@@ -31,6 +33,24 @@ test('structured session delivery preserves all supplied questions and answers w
   expect(() => validateDelivery({ ...syntheticDelivery(), exchanges: [{ question: 'Q?', at: null, answers: [{ text: 'x'.repeat(1000001), at: null }] }] })).toThrow();
   expect(deliveryIdentity(feed.items[0])).not.toBe(deliveryIdentity(validateFeed(base).items[0]));
   evidence.recordAssertionEvidence('Produced is not delivered to the user', 'Full two-question/three-answer transcript survives enrichment byte-for-byte, including long text. Explicit chat-only classification and safe copyable route; absent completeness remains unknown, invalid source/empty complete/oversize text rejected rather than truncated.', true);
+});
+
+test('offline builder exports the full private deliverable beside its HTML', async ({ evidence }) => {
+  const root = mkdtempSync(join(tmpdir(), 'queue-delivery-build-'));
+  const input = join(root, 'source.json'); const output = join(root, 'index.html');
+  writeFileSync(input, JSON.stringify({ items: [{ id: 'ses_delivery', workspace_id: 'ws_fixture', kind: 'session', title: 'Synthetic full export', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: syntheticDelivery() }] }));
+  try {
+    const script = fileURLToPath(new URL('../../tools/review-queue/build.mjs', import.meta.url));
+    const run = spawnSync(process.execPath, [script, input, output], { encoding: 'utf8', timeout: 10000 });
+    expect(run.status, run.stderr).toBe(0);
+    const markdown = readFileSync(join(root, 'deliverables', 'ses_delivery.md'), 'utf8');
+    for (const exchange of syntheticDelivery().exchanges) { expect(markdown).toContain(exchange.question); for (const answer of exchange.answers) expect(markdown).toContain(answer.text); }
+    expect(markdown).toContain('Synthetic full export'); expect(markdown).toContain('/workspace/ws_fixture/session/ses_delivery');
+    expect(statSync(join(root, 'deliverables', 'ses_delivery.md')).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(root, 'deliverables', '.gitignore'), 'utf8')).toBe('*\n');
+    expect(spawnSync(process.execPath, [script, input, output], { encoding: 'utf8', timeout: 10000 }).status).toBe(1);
+    evidence.recordAssertionEvidence('Build-time export is full and private', 'Real offline builder subprocess produces HTML plus ignored mode0600 Markdown preserving both Q/A pairs, all answer continuations and the copyable route. Rebuilding without explicit replacement rejects. Only synthetic outside-repository inputs were used.', true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('read acknowledgement binds the exact delivery and snapshot, gates archive server-side, and is never work', async ({ evidence }) => {

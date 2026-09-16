@@ -415,7 +415,8 @@ test('short actions have one collapsed safety footer and evidence distinguishes 
     expect(await checks.innerText()).not.toContain('Unknown');
     await page.getByTestId('safety-gates').locator('summary').click();
     expect(await page.getByTestId('safety-gates').locator('p').isVisible()).toBe(true);
-    expect(await page.getByTestId('safety-gates').textContent()).toContain('Never automatically archive OpenWork Chat');
+    expect(await page.getByTestId('safety-gates').textContent()).toContain('Explicit LIVE human approval can authorize cross-workspace archival');
+    expect(await page.getByTestId('safety-gates').textContent()).toContain('pins, the operator’s active root, external ownership');
     await page.locator('[data-id="pr-unknown"] .row-open').click();
     expect(await page.locator('[data-field="if_approved"]').textContent()).toBe('merge this PR');
     expect(await checks.innerText()).toContain('Code checks not supplied — recheck before approving');

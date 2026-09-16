@@ -73,6 +73,27 @@ const COVERAGE_COUNTS = ['initial_roots', 'known_session_items', 'latest_candida
 const ACTIONS = ['approve', 'decline', 'defer', 'ask_info', 'request_changes', 'comment', 'message'];
 const COMMENT_ACTIONS = ['ask_info', 'request_changes', 'comment', 'message'];
 export function isMessage(action) { return COMMENT_ACTIONS.includes(action); }
+export function effectiveActionStatuses(events) {
+  const unique = new Map();
+  for (const event of events) {
+    if (unique.has(event.id) && JSON.stringify(unique.get(event.id)) !== JSON.stringify(event)) throw new Error('Conflicting action event');
+    unique.set(event.id, event);
+  }
+  const ordered = [...unique.values()];
+  const withdrawn = new Map(ordered.filter((event) => event.kind === 'control').map((event) => [event.target_id, event]));
+  return ordered.filter((event) => event.id === event.decision_id && ['decision', 'thread', 'compensation'].includes(event.kind)).flatMap((input) => {
+    const history = ordered.filter((event) => event.decision_id === input.id && event.id !== input.id && event.kind === 'status' && event.status !== 'reply');
+    const latest = withdrawn.get(input.id) ?? history.at(-1) ?? input;
+    return input.item_ids.map((item_id) => {
+      const target = latest.outcomes?.find((outcome) => outcome.item_id === item_id);
+      const status = withdrawn.has(input.id) ? 'withdrawn' : target?.status ?? latest.status;
+      const claimed = history.some((event) => event.status === 'rechecking');
+      const phase = status === 'queued' ? 'accepted — not claimed' : status === 'rechecking' ? 'claimed — running or unresolved' : ['blocked', 'waiting'].includes(status) ? status : 'terminal report — not independent proof';
+      return { request_id: input.id, item_id, status, phase, claimed, at: latest.at, text: target?.text ?? latest.text,
+        historical_blocked: history.filter((event) => event.id !== latest.id && (event.outcomes ? event.outcomes.some((outcome) => outcome.item_id === item_id && outcome.status === 'blocked') : event.status === 'blocked')) };
+    });
+  });
+}
 const RISKS = ['low', 'medium', 'high', 'unknown'];
 const SESSION_ID = /^ses_[A-Za-z0-9]+$/;
 const FULL_SHA = /^[a-fA-F0-9]{40}$/;

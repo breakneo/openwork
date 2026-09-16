@@ -28,6 +28,7 @@
   let currentInputIds = new Set();
   let controlTarget = null;
   let logSignature = '';
+  let logFilter = '';
   let readDeliveries = new Set();
   let laterIds = new Set();
   function restoreLater(value) {
@@ -43,11 +44,12 @@
     else { laterIds.add(item.id); selected.delete(item.id); persist(); advanceReview(order, item.id); }
     message('Later is saved only in this browser. No decision, message or owner action was sent.');
   }
-  function readAllowed(item) {
-    return !chatOnly(item) || recommendationVerb(item) !== 'archive' || (deliveryOf(item).completeness === 'complete' && (liveSession
+  function deliveryWasRead(item) {
+    return deliveryOf(item)?.completeness === 'complete' && (liveSession
       ? [...events.values()].some((event) => event.kind === 'read' && currentInputIds.has(event.id) && event.deliverable === deliveryIdentity(item))
-      : readDeliveries.has(deliveryIdentity(item))));
+      : readDeliveries.has(deliveryIdentity(item)));
   }
+  function readAllowed(item) { return !chatOnly(item) || recommendationVerb(item) !== 'archive' || deliveryWasRead(item); }
   const localRequests = new Map();
   const threadDrafts = new Map();
   const advances = new Map();
@@ -75,7 +77,7 @@
     renderBulk(); renderActionLog(); renderCardControls();
     $('confirm-control').disabled = unavailable();
     const read = document.querySelector('[data-testid="mark-read"]');
-    if (read) { const item = feed.items.find((entry) => entry.id === activeId); read.disabled = unavailable() || deliveryOf(item).completeness !== 'complete'; read.textContent = readAllowed(item) ? 'Marked read' : 'Mark read'; }
+    if (read) { const item = feed.items.find((entry) => entry.id === activeId); read.disabled = unavailable() || deliveryOf(item).completeness !== 'complete'; read.textContent = deliveryWasRead(item) ? 'Marked read' : 'Mark read'; }
   }
   function connectionLost() {
     connected = false;
@@ -532,7 +534,7 @@
     const route = sessionRoute(item);
     if (isLocked(item)) { root.append(element('div', route || `Session: ${item.id} · workspace unknown`, 'raw-value')); return; }
     const routeField = element('textarea'); routeField.readOnly = true; routeField.rows = 2; routeField.setAttribute('aria-label', 'Open in OpenWork — copy route and IDs');
-    routeField.value = `${route || 'Route unknown'}\nSession: ${item.id} · Workspace: ${item.workspace_id || 'unknown'}`; root.append(routeField);
+    routeField.value = `${route || 'Route unknown'}\nSession: ${item.id} · Workspace: ${item.workspace_id || 'unknown'}`; root.append(element('div', 'Open in OpenWork — copy route and IDs', 'small muted'), routeField);
     if (!delivery) return;
     const answers = element('details'); answers.dataset.testid = 'delivery-answers'; answers.append(element('summary', 'Read full questions and answers'));
     for (const exchange of delivery.exchanges) {
@@ -540,7 +542,7 @@
       for (const answer of exchange.answers) answers.append(element('h3', `Assistant · ${answer.at || 'date unknown'}`), element('pre', answer.text, 'raw-value'));
     }
     if (chatOnly(item) && !isLocked(item)) {
-      const read = element('button', readAllowed(item) ? 'Marked read' : 'Mark read'); read.dataset.testid = 'mark-read';
+      const read = element('button', deliveryWasRead(item) ? 'Marked read' : 'Mark read'); read.dataset.testid = 'mark-read';
       read.disabled = delivery.completeness !== 'complete' || unavailable();
       read.addEventListener('click', guarded(() => {
         if (!answers.open || delivery.completeness !== 'complete' || unavailable()) throw new Error('Expand complete answers before marking read');
@@ -670,7 +672,7 @@
     const gates = item.kind === 'pr'
       ? 'Recheck the exact head and base, open state, required checks, specs, reviews and conflicts. Merge requires current explicit authorization; declining never closes a PR.'
       : item.kind === 'session'
-        ? 'Recheck ownership, workspace identity, pins, running and descendant work, captured learnings, pending decisions and a clean worktree. Never automatically archive OpenWork Chat or another owner’s sessions. Follow-ups and relaunches require an explicit owner and reviewed scope.'
+        ? 'Recheck exact identity, pins, the operator’s active root, external ownership, busy/working and descendants, read acknowledgement and unresolved safety. Explicit LIVE human approval can authorize cross-workspace archival; agent-only scope and owned-task-worktree rules must not become a scope-only veto or use coordinator dirt as a substitute. Follow-ups require an explicit owner and reviewed text.'
         : 'Recheck ownership, current evidence, permissions and the exact requested scope. Proposals and worktree changes require separate authorization.';
     safety.append(element('p', `${gates} Protected items remain protected. ${liveSession ? 'New decisions are sent once for recheck, not proof of completion; they cannot be unsent.' : 'Offline decisions record intent only; nothing is executed.'}`, 'small muted'));
     root.append(safety);
@@ -705,7 +707,7 @@
     const root = element('div', undefined, 'actions');
     if (!liveSession || !['decision', 'thread'].includes(input.kind) || input.action === 'stop') return root;
     const history = [...events.values()].filter((event) => event.decision_id === input.id && event.id !== input.id);
-    const lastEvent = history.some((event) => event.status === 'rechecking') ? history.at(-1) : undefined;
+    const lastEvent = history.some((event) => event.status === 'rechecking') ? history.filter((event) => event.kind === 'status' && event.status !== 'reply').at(-1) : undefined;
     const last = lastEvent?.status;
     const outcomes = lastEvent?.outcomes?.map((entry) => entry.status);
     const knownTargets = outcomes?.length === input.item_ids.length && outcomes.every((status) => ['no_effect', 'archived', 'sent', 'waiting', 'reply'].includes(status));
@@ -748,6 +750,11 @@
   }
   function renderActionLog() {
     const root = $('action-log');
+    const states = effectiveActionStatuses([...events.values()]);
+    for (const status of ['blocked', 'waiting']) {
+      $(`show-${status}`).textContent = `${status === 'blocked' ? 'Blocked' : 'Waiting'} (${states.filter((entry) => entry.status === status).length})`;
+      $(`show-${status}`).setAttribute('aria-pressed', String(logFilter === status));
+    }
     const requests = new Map(ledgerInputs);
     for (const event of events.values()) if (event.id === event.decision_id) requests.set(event.id, event);
     for (const decision of feed?.decisions ?? []) {
@@ -756,14 +763,17 @@
       requests.set(decision.batch_id, { id: decision.batch_id, item_ids: batch.map((entry) => entry.id), action: decision.action, at: decision.decided_at, text: decision.comment, status: liveSession ? 'Source history — not replayed' : 'Recorded offline — not executed' });
     }
     for (const [id, local] of localRequests) requests.set(id, { ...local, status: local.state });
-    const signature = JSON.stringify([snapshot, [...requests], [...events.values()], [...currentInputIds], unavailable()]);
+    const signature = JSON.stringify([snapshot, logFilter, [...requests], [...events.values()], [...currentInputIds], unavailable()]);
     if (signature === logSignature) return;
     logSignature = signature;
     const nodes = [];
     for (const input of [...requests.values()].reverse()) {
+      const current = states.filter((entry) => entry.request_id === input.id);
+      if (logFilter && !current.some((entry) => entry.status === logFilter)) continue;
       const history = [...events.values()].filter((event) => event.decision_id === input.id && event.id !== input.id);
-      const latest = history.at(-1);
-      const state = latest?.status || (liveSession && ledgerInputs.has(input.id) && !events.has(input.id) ? 'Unpublished — reconciliation needed' : input.status);
+      const latest = history.filter((event) => event.kind === 'status' && event.status !== 'reply').at(-1);
+      const currentStatuses = new Set(current.map((entry) => entry.status));
+      const state = currentStatuses.size > 1 ? 'mixed target outcomes' : current[0]?.status || latest?.status || (liveSession && ledgerInputs.has(input.id) && !events.has(input.id) ? 'Unpublished — reconciliation needed' : input.status);
       const row = element('section', undefined, 'history'); row.dataset.logId = input.id;
       row.append(element('strong', `${labels[input.action] || input.action} · ${state === 'rechecking' ? 'running / rechecking' : state} · ${input.at}`));
       for (const id of input.item_ids) {
@@ -771,6 +781,10 @@
         const open = element('button', `${item?.title || id} · ${id}`); open.addEventListener('click', () => openLoggedCard(id)); row.append(open);
       }
       row.append(element('div', input.text || '(no comment)'), controlActions(input));
+      for (const entry of current) {
+        const verification = element('div', `Latest verification · ${entry.item_id} · ${entry.at} · ${entry.status} · ${entry.phase}\n${entry.text}`); verification.dataset.testid = 'latest-verification'; row.append(verification);
+        for (const previous of entry.historical_blocked) row.append(element('div', `Historical blocked · ${previous.at} · ${previous.text}`, 'small muted'));
+      }
       for (const name of ['target_id', 'control_id', 'compensation_id', 'replacement_id', 'depends_on']) {
         if (input[name]) row.append(element('div', `${name}: ${input[name]}`, 'small muted'));
       }
@@ -780,7 +794,7 @@
       }
       nodes.push(row);
     }
-    root.replaceChildren(...(nodes.length ? nodes : [element('p', 'No decisions recorded yet.', 'muted')]));
+    root.replaceChildren(...(nodes.length ? nodes : [element('p', logFilter ? 'No matching current incidents. All action history retains prior outcomes.' : 'No decisions recorded yet.', 'muted')]));
   }
   function renderHistory() {
     const root = $('decision-history'); if (!root) return;
@@ -926,6 +940,8 @@
     void postOnce('/controls', { id, target_id: input.id, mode, replacement, text, snapshot: serverSnapshot });
   }));
   $('undo').addEventListener('click', guarded(() => { if (liveSession) throw new Error('Live decisions cannot be unsent or undone.'); feed = undoLast(feed); dirty = true; exportStamp = ''; selected.clear(); persist(); render(); message('Undid the last recorded batch. Previously exported files are unchanged: export a replacement and do not execute the old one.'); }));
+  for (const status of ['blocked', 'waiting']) $(`show-${status}`).addEventListener('click', () => { logFilter = status; renderActionLog(); $('action-log').scrollIntoView({ block: 'nearest' }); });
+  $('show-all-actions').addEventListener('click', () => { logFilter = ''; renderActionLog(); });
   $('export-json').addEventListener('click', guarded(() => download('json')));
   $('export-markdown').addEventListener('click', guarded(() => download('markdown')));
   window.addEventListener('beforeunload', (event) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });

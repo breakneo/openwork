@@ -257,6 +257,8 @@ export function workHistory(input, events) {
   return events.filter((event) => event.decision_id === input.id && event.id !== input.id);
 }
 
+export function executionResult(input, events) { return workHistory(input, events).filter((event) => event.kind === 'status' && event.status !== 'reply').at(-1); }
+
 export function controlledIds(inputs) {
   return new Set(inputs.filter((input) => input.kind === 'control').map((input) => input.target_id));
 }
@@ -279,14 +281,14 @@ export function reversalPlan(input, inputs, events, mode = 'undo') {
   if (history.some((event) => event.status === 'merged' || event.outcomes?.some((outcome) => outcome.status === 'merged'))) fail('Merge is not reversible', 409);
   const withdrawal = { action: 'withdraw', items: [] };
   if (!history.some((event) => event.status === 'rechecking')) return withdrawal;
-  const last = history.at(-1);
+  const last = executionResult(input, events);
   if (last.status === 'rechecking') fail('Running work cannot be interrupted; inspect its outcome first', 409);
   if (last.status === 'no_effect') return withdrawal;
   if (['decline', 'defer'].includes(input.action) && ['done', 'declined', 'deferred'].includes(last.status)) {
     if (history.some((event) => [event.status, ...(event.outcomes ?? []).map((outcome) => outcome.status)].some((status) => ['archived', 'sent', 'waiting', 'reply'].includes(status)))) fail('Unexpected external effects require manual reconciliation', 409);
     return withdrawal;
   }
-  if (overlap) fail('Other same-item work exists; reconcile all affected requests first', 409);
+  if (overlap && !isMessage(input.action)) fail('Other same-item work exists; reconcile all affected requests first', 409);
   if (input.items.length > 1 && !last.outcomes) fail('Bulk outcome needs complete per-target receipts before compensation; partial effects may exist', 409);
   const affected = [];
   let action = 'withdraw';
@@ -302,7 +304,7 @@ export function reversalPlan(input, inputs, events, mode = 'undo') {
 }
 
 export function compensationSucceeded(input, events) {
-  const last = workHistory(input, events).at(-1);
+  const last = executionResult(input, events);
   const expected = input.action === 'unarchive' ? 'unarchived' : 'cancelled';
   return last?.status === expected && Array.isArray(last.outcomes) && last.outcomes.length === input.item_ids.length && new Set(last.outcomes.map((outcome) => outcome.item_id)).size === input.item_ids.length && last.outcomes.every((outcome) => input.item_ids.includes(outcome.item_id) && outcome.status === expected);
 }
@@ -333,6 +335,12 @@ export function validateOutcomes(input, status, outcomes) {
     if (!input.item_ids.includes(entry.item_id) || !STATES.includes(entry.status) || entry.status === 'rechecking') fail('Invalid per-target outcome');
     if (!['done', 'blocked'].includes(status) && entry.status !== status) fail('Aggregate status contradicts per-target outcomes');
   }
+}
+
+export function blockedEvent(input, gate, who, unblock) {
+  boundedText(gate); boundedText(who); boundedText(unblock);
+  const event = statusEvent(input, 'blocked', unblock);
+  return { ...event, verification: { gate, observed_at: event.at, who, unblock }, text: `gate=${gate}; observed_at=${event.at}; who=${who}; unblock=${unblock}` };
 }
 
 export function statusEvent(input, status, text) {

@@ -50,6 +50,8 @@ test('queued withdrawal beats claims durably; running claims cannot be interrupt
     const refused = await f.post('/controls', f.control(second.id));
     expect(refused.status).toBe(409);
     expect(refused.value.error).toContain('Running');
+    result(second.id, 'reply', 'A discussion reply does not resolve the execution claim', f.directory);
+    expect((await f.post('/controls', f.control(second.id))).value.error).toContain('Running');
     expect(readFileSync(join(f.directory, 'decisions.jsonl'), 'utf8')).toBe(before);
     expect(next(f.directory)).toBeNull();
     evidence.recordAssertionEvidence('Withdrawal and claim share one durable linearization point', 'Duplicate concurrent undo has one receipt, withdraw prevents every claim, same-item decision conflicts, running undo returns 409 without an append and abandoned claims never replay.', true);
@@ -256,26 +258,29 @@ test('withdrawal and CLI claim races have only one winner in both arrival orders
 });
 
 test('every control publication prefix and legacy publication hole repairs exactly once before claim', async ({ evidence }) => {
-  for (const prefix of [0, 1, 2, 3]) {
+  for (const plan of ['undo-queued', 'change-queued', 'undo-archived', 'change-archived']) {
+    const total = 1 + Number(plan.startsWith('change')) + Number(plan.endsWith('archived'));
+    for (let prefix = 0; prefix <= total; prefix++) {
     const f = await fixture();
     try {
-      const original = f.decide(); await f.post('/decisions', original); next(f.directory);
-      result(original.id, 'archived', 'Original archive confirmed', f.directory);
+      const original = f.decide(); await f.post('/decisions', original);
+      if (plan.endsWith('archived')) { next(f.directory); result(original.id, 'archived', 'Original archive confirmed', f.directory); }
       const before = readLog(f.directory, 'results.jsonl');
-      const request = f.control(original.id, { mode: 'change', replacement: { action: 'decline', comment: '', decided_at: new Date().toISOString() } });
+      const request = f.control(original.id, plan.startsWith('change') ? { mode: 'change', replacement: { action: 'decline', comment: '', decided_at: new Date().toISOString() } } : {});
       const control = (await f.post('/controls', request)).value;
       const published = readLog(f.directory, 'results.jsonl').slice(before.length);
-      expect(published).toHaveLength(3);
+      expect(published).toHaveLength(total);
       writeFileSync(join(f.directory, 'results.jsonl'), [...before, ...published.slice(0, prefix)].map((event) => JSON.stringify(event) + '\n').join(''));
       if (prefix % 2) expect((await f.post('/controls', request)).value).toEqual(control);
-      expect(next(f.directory).id).toBe(control.compensation_id);
+      expect(next(f.directory)?.id ?? null).toBe(control.compensation_id ?? control.replacement_id);
       expect(next(f.directory)).toBeNull();
       expect((await f.post('/controls', request)).value).toEqual(control);
       const recovered = readLog(f.directory, 'results.jsonl');
       for (const event of published) expect(recovered.filter((entry) => entry.id === event.id)).toEqual([event]);
-      expect(recovered.some((event) => event.decision_id === control.replacement_id && event.status === 'rechecking')).toBe(false);
+      expect(recovered.some((event) => event.decision_id === control.replacement_id && event.status === 'rechecking')).toBe(plan === 'change-queued');
       expect(readLog(f.directory, 'decisions.jsonl')).toHaveLength(2);
     } finally { await f.close(); }
+    }
   }
   const f = await fixture();
   try {
@@ -287,7 +292,7 @@ test('every control publication prefix and legacy publication hole repairs exact
     appendEvent(f.directory, 'results.jsonl', { ...receipt, text: 'unequal duplicate' });
     expect(() => next(f.directory)).toThrow(/Unequal duplicate/);
   } finally { await f.close(); }
-  evidence.recordAssertionEvidence('All durable publication boundaries fail safely', 'Control envelope prefixes0/1/2/3 recover the exact ordered stored root and two children via retry or next, each once, with no premature replacement. Legacy missing publication uses the same repair before claim. Unequal duplicate receipt blocks further work.', true);
+  evidence.recordAssertionEvidence('All durable publication boundaries fail safely', 'Every prefix of queued undo/change and archived undo/change envelopes recovers the exact stored plan via retry or next, once, with no child exposed before full publication and no premature dependent replacement. Legacy missing publication uses the same repair before claim. Unequal duplicate receipt blocks further work.', true);
 });
 
 test('single-target compensation needs structured success and cannot undo a later independent archive', async ({ evidence }) => {

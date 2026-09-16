@@ -34,6 +34,12 @@ A completed assistant turn in another session is not a delivered answer for the 
 
 Private Markdown exports retain both question/answer pairs and all answer continuations. A safe existing-session protocol handler was not found in the inspected desktop routing, so copyable app routes and exact IDs are provided rather than a misleading new-chat link. Tests use only synthetic transcripts; real collection and rollout remain with the authorized owners.
 
+## Incident RCA: counts, replies and authority are separate facts
+
+A historical blocked receipt is not a new incident on every poll; a reply is not completion; an accepted human decision is not an execution receipt. The log now derives one latest state per request/item, shows dated latest verification and prior historical blocks, and provides page-level Blocked/Waiting filters without a replay control. Structured per-target outcomes govern mixed batches. Replies leave the last execution state intact, including unresolved claims.
+
+The executor policy must not downgrade explicit LIVE per-item human approval into an agent-initiated recommendation. Human-approved cross-workspace archive is not blocked on standing scope alone. Applicable identity, pin, exact active-user-root, external-prefix, busy/working/descendant, read and unresolved-safety gates still apply. Parentless does not mean active; no owned reporting/watchdog worktree is N/A, not the coordinator's worktree. The pure gate evaluator tests these distinctions and produces deterministic first-gate/observation/who/unblock receipts; it does not fake service observations or dispatch. Waiting names owner, outstanding information and the next check, never done.
+
 ## Research findings: documented behavior, not implementation claims
 
 Research was time-boxed to the initial design phase. Sources are primary documentation where available. Availability, plan restrictions and exact release capabilities must be checked before adopting a service; historical tools are included as UX precedents, not recommended installations.
