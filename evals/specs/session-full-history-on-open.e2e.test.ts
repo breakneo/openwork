@@ -121,7 +121,8 @@ function ancillaryFault(value: unknown) {
 }
 
 function openingPaint(value: unknown, openedAt: number | null, deadlineMs: number) {
-  if (!isRecord(value) || typeof value.at !== "number" || typeof value.elapsedMs !== "number" || openedAt === null) {
+  if (!isRecord(value) || typeof value.at !== "number" || typeof value.elapsedMs !== "number"
+    || typeof value.messageCount !== "number" || typeof value.historyComplete !== "boolean" || openedAt === null) {
     throw new Error(`The trusted opening did not produce a frame witness: ${JSON.stringify(value)}`);
   }
   expect(value.elapsedMs, JSON.stringify(value)).toBeLessThan(deadlineMs);
@@ -145,7 +146,7 @@ function openingPaint(value: unknown, openedAt: number | null, deadlineMs: numbe
     if (!original) throw new Error(`No original post-click ${kind} read was pending at the frame: ${JSON.stringify(value)}`);
     return original;
   });
-  return { ...value, at: value.at, elapsedMs: value.elapsedMs, originals };
+  return { ...value, at: value.at, elapsedMs: value.elapsedMs, messageCount: value.messageCount, historyComplete: value.historyComplete, originals };
 }
 
 test("a long conversation pages on demand, restores its saved page cold and loads full history only for explicit top navigation", async ({ user, agent, probe, step, world, evidence }) => {
