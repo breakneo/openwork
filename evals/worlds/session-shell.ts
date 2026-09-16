@@ -6,6 +6,7 @@ import { resolveEvalEngine, SkipError } from "@openwork/env";
 import type { Place, Seed } from "@openwork/env";
 import { daytonaSandbox, defaultDaytonaExec, desktop as launchDesktop, execInSandbox, startMockOnSandbox } from "@openwork/hosts";
 import { startMockMcp } from "@openwork/labs";
+import { configureProvider } from "./chat.ts";
 
 const stormProviderId = "active-session-storm-mock";
 const stormModelId = "mock-agent-workload-model";
@@ -30,7 +31,7 @@ export interface StormPlan extends ShellSession, ShellWorkspace {
   finalReply: string;
 }
 
-type InstantMetricKind = "new-task" | "user-row";
+type InstantMetricKind = "new-task" | "hero-preparing" | "user-row";
 type InstantBoundaryKind = "creation" | "prompt";
 type InstantBoundaryStage = "request" | "response";
 
@@ -78,6 +79,9 @@ async function observeInstantRenderer(
     };
     let startedAt = 0;
     let frame = 0;
+    let submittedHero: HTMLElement | null = null;
+    let submittedEditor: HTMLElement | null = null;
+    let submittedEditorRect: DOMRect | null = null;
 
     const visibleInViewport = (node: HTMLElement) => {
       const rect = node.getBoundingClientRect();
@@ -128,6 +132,22 @@ async function observeInstantRenderer(
         const hit = document.elementFromPoint(x, y);
         return hit instanceof Node && node.contains(hit);
       }
+      if (kind === "hero-preparing") {
+        const composer = editor();
+        const heading = [...surface.root.querySelectorAll<HTMLElement>("h2")]
+          .find((node) => node.textContent?.trim() === "What do you need done?" && visibleInViewport(node));
+        const hero = heading?.parentElement?.parentElement;
+        if (surface.kind !== "new-task" || !surface.headingVisible || !hero || hero !== submittedHero
+          || !composer || composer !== submittedEditor || !submittedEditorRect
+          || !hero.contains(composer) || !visibleInViewport(composer)
+          || surface.root.querySelector('[data-message-role="user"]')) return false;
+        const rect = composer.getBoundingClientRect();
+        if (rect.x !== submittedEditorRect.x || rect.y !== submittedEditorRect.y
+          || rect.width !== submittedEditorRect.width || rect.height !== submittedEditorRect.height) return false;
+        return !surface.root.querySelector('[data-loading-message="starting"], [data-loading-message="working"]')
+          && [...hero.querySelectorAll<HTMLElement>('button[aria-label="Creating conversation..."][aria-busy="true"]')]
+            .some((node) => visibleInViewport(node) && Boolean(node.querySelector('.animate-spin')));
+      }
       if (requireStarting) {
         const starting = [...surface.root.querySelectorAll<HTMLElement>('[data-loading-message="starting"]')].filter(visibleInViewport);
         if (starting.length !== 1 || starting[0]?.getAttribute("role") !== "status" || starting[0]?.innerText.trim() !== "Starting…"
@@ -155,6 +175,18 @@ async function observeInstantRenderer(
         if (!(event instanceof KeyboardEvent) || event.key !== "Enter") return;
         const node = editor();
         if (!node || !(event.target instanceof Node) || !(event.target === node || node.contains(event.target))) return;
+        if (kind === "hero-preparing") {
+          if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.repeat) return;
+          const surface = surfaceRoot();
+          const heading = [...(surface?.root.querySelectorAll<HTMLElement>("h2") ?? [])]
+            .find((candidate) => candidate.textContent?.trim() === "What do you need done?" && visibleInViewport(candidate));
+          const hero = heading?.parentElement?.parentElement;
+          if (surface?.kind !== "new-task" || !hero || !hero.contains(node) || !visibleInViewport(node)
+            || !node.innerText.includes(marker) || !node.innerText.trim()) return;
+          submittedHero = hero;
+          submittedEditor = node;
+          submittedEditorRect = node.getBoundingClientRect();
+        }
       }
       state.started = true;
       state.trusted = true;
@@ -178,7 +210,7 @@ async function observeInstantRenderer(
   return {
     async read(): Promise<InstantRendererState> {
       const value = await seed.evalIn(app, () => window.__instantSendMetric?.state ?? null);
-      if (!isRecord(value) || (value.kind !== "new-task" && value.kind !== "user-row")
+      if (!isRecord(value) || (value.kind !== "new-task" && value.kind !== "hero-preparing" && value.kind !== "user-row")
         || typeof value.started !== "boolean" || typeof value.trusted !== "boolean"
         || !(value.elapsedMs === null || typeof value.elapsedMs === "number")
         || typeof value.frames !== "number" || typeof value.mutations !== "number"
@@ -1411,10 +1443,41 @@ export async function pinnedSessions(seed: Seed) {
 }
 
 export async function commandPaletteSearch(seed: Seed) {
-  return oneWorkspace(seed, `command-palette-search-${Date.now()}`);
+  const name = `command-palette-search-${Date.now()}`;
+  const workspacePath = seed.tmpPath(name);
+  const longModelId = "gwm_01m292tscteantqy79spgyvbcs_01m292tsbxehmvrpjxfn7m4n86_01m292tsbgey6s6q4hbnvd6a8h";
+  const providerId = "palette-model-witness";
+  const app = await seed.appWeb({ name, workspacePath });
+  const workspace = await seed.workspace(app, workspacePath);
+  await configureProvider(seed, app, workspace.workspaceId, providerId, longModelId, {
+    model: `${providerId}/${longModelId}`,
+    provider: {
+      [providerId]: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Palette model witness",
+        options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "palette-model-fixture" },
+        models: { [longModelId]: { name: longModelId } },
+      },
+    },
+  });
+  await waitFor(app, () => Boolean(window.__openworkControl), {
+    timeoutMs: 60_000,
+    label: "reloaded app-web command palette is interactive",
+  });
+  return {
+    app,
+    workspace,
+    workspacePath,
+    longModelId,
+    location: () => seed.evalIn(app, () => window.location.pathname),
+    runtimeFacts: () => seed.evalIn(app, () => ({
+      browser: navigator.userAgent,
+      electronBridge: Boolean(window.__OPENWORK_ELECTRON__),
+    })),
+  };
 }
 
-type ArchiveFault = "none" | "false" | "error" | "timeout" | "unconfirmed" | "hold" | "retry" | "permission" | "question" | "prompt_error" | "hold_prompt" | "accepted_command" | "hold_archive";
+type ArchiveFault = "none" | "false" | "error" | "timeout" | "unconfirmed" | "hold" | "retry" | "permission" | "question" | "prompt_error" | "hold_prompt" | "accepted_command" | "accepted_prompt" | "hold_archive";
 type ArchiveRequest = {
   path: string; sessionId: string; action: string; messageID: string | null; result: string | number | null;
   command?: { name: string; arguments: string; model: string | null; agent: string | null };
@@ -1611,7 +1674,10 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
         await new Promise<void>(resolve => { state.release = resolve; });
         state.release = null;
       }
-      if (record?.action === "command" && target && state.mode === "accepted_command") {
+      if (record && target && (
+        (record.action === "command" && state.mode === "accepted_command")
+        || (record.action === "prompt_async" && state.mode === "accepted_prompt")
+      )) {
         record.result = "accepted, not dispatched";
         const admitted = new Request(request, { signal: new AbortController().signal });
         state.release = async () => {
@@ -1620,13 +1686,13 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
             const response = await original(admitted);
             record.result = response.status;
             record.responseBody = (await response.text()).slice(0, 2000);
-            if (!response.ok) throw new Error("Admitted command dispatch failed: " + response.status + " " + record.responseBody);
+            if (!response.ok) throw new Error("Admitted " + record.action + " dispatch failed: " + response.status + " " + record.responseBody);
           } catch (error) {
             record.dispatchError = error instanceof Error ? error.message : String(error);
             throw error;
           }
         };
-        return Response.json({ ok: true, accepted: true });
+        return record.action === "prompt_async" ? new Response(null, { status: 204 }) : Response.json({ ok: true, accepted: true });
       }
       if (record?.action === "prompt_async" && target && state.mode === "prompt_error") {
         record.result = 400;

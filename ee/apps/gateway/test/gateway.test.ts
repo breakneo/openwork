@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Hono } from "hono"
 import { createDenTypeId } from "@openwork-ee/utils/typeid"
+import { GATEWAY_REQUEST_MODEL_HEADER } from "@openwork/types/den/gateway"
 import { createGatewayModelAlias } from "@openwork-ee/utils/gateway-routing"
 import type { GatewayCredential, GatewayProvider } from "../src/gateway.js"
 import type { InferenceReporter } from "../src/inference-reporting.js"
@@ -149,7 +150,12 @@ function createTestServer(options: TestServerOptions = {}) {
   const credentialLookups: Array<Parameters<LoadProviderCredential>[0]> = []
   const handledErrors: Array<Parameters<InferenceReporter["handledError"]>[0]> = []
   const tokenCalls = { mint: 0, refresh: 0 }
-  const reporter: InferenceReporter = { request() {}, handledError(report) { handledErrors.push(report) } }
+  const terminals: Parameters<NonNullable<InferenceReporter["terminal"]>>[0][] = []
+  const reporter: InferenceReporter = {
+    request() {},
+    handledError(report) { handledErrors.push(report) },
+    terminal(report) { terminals.push(report) },
+  }
   const capturingFetch: typeof fetch = async (input, init) => {
     upstreamRequests.push({
       url: requestUrl(input),
@@ -226,7 +232,7 @@ function createTestServer(options: TestServerOptions = {}) {
     },
   })
 
-  return { app, upstreamRequests, logRows, accessChecks, credentialLookups, accessRows, handledErrors, tokenCalls }
+  return { app, upstreamRequests, logRows, accessChecks, credentialLookups, accessRows, handledErrors, tokenCalls, terminals }
 }
 
 function gatewayRequest(input: { path: string; method?: string; body?: unknown; rawBody?: string; headers?: Record<string, string>; id?: string }) {
@@ -1390,4 +1396,73 @@ test("OpenRouter alternate models and server tools stay blocked without matching
   assert.equal(response.status, 200)
   await response.text()
   assert.equal(fixture.upstreamRequests.length, 1)
+})
+
+
+test("payload rejections retain the requested model before policy validation", async () => {
+  const fixture = createTestServer()
+  await assertRejectedBeforeCredentials(fixture, gatewayRequest({ path: "/responses", body: {
+    model: "gpt-4o", previous_response_id: "provider-owned-response", stream: true,
+  } }), "unsupported_gateway_resource")
+  const row = await waitForRows(fixture.logRows)
+  assert.equal(row.requested_model, "gpt-4o")
+  assert.equal(row.upstream_model, "gpt-4o")
+  assert.equal(row.stream, true)
+  assert.equal(row.metadata?.requested_model_source, "request")
+})
+
+test("a failed body upload retains the desktop model hint without dispatching upstream", async () => {
+  const fixture = createTestServer()
+  const selected = fixture.accessRows.find((row) => row.model?.model_id === "gpt-4o")
+  assert.ok(selected?.model)
+  const alias = createGatewayModelAlias({ modelGroupId: selected.group.id, credentialSetId: selected.credentialSet.id, gatewayProviderModelId: selected.model.id })
+  const init = { method: "POST", duplex: "half", headers: {
+    authorization: `Bearer ${gatewayKey}`, "content-type": "application/json", [GATEWAY_REQUEST_MODEL_HEADER]: alias,
+  }, body: new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("Interrupted fixture upload")) } }) }
+  const request = new Request(`http://openwork.test/api/v1/providers/${providerId}/responses`, init)
+  await assertRejectedBeforeCredentials(fixture, request, "request_body_failed")
+  const row = await waitForRows(fixture.logRows)
+  assert.equal(row.requested_model, alias)
+  assert.equal(row.upstream_model, "gpt-4o")
+  assert.equal(row.metadata?.requested_model_source, "header")
+  assert.equal(row.model_group_id, selected.group.id)
+  assert.equal(row.total_tokens, null)
+  assert.equal(fixture.terminals.length, 1)
+  assert.equal(fixture.terminals[0]?.modelAlias, selected.model.id)
+  assert.equal(fixture.terminals[0]?.transportOutcome, "rejected")
+  assert.equal(fixture.terminals[0]?.generationOutcome, "unknown")
+})
+
+test("diagnostic model hints cannot override a body selection or leak upstream", async () => {
+  const fixture = createTestServer()
+  const hinted = fixture.accessRows.find((row) => row.model?.model_id === "gpt-5")
+  assert.ok(hinted?.model)
+  const alias = createGatewayModelAlias({ modelGroupId: hinted.group.id, credentialSetId: hinted.credentialSet.id, gatewayProviderModelId: hinted.model.id })
+  const response = await fixture.app.fetch(gatewayRequest({ path: "/responses", body: { model: "gpt-4o", input: "fixture" }, headers: { [GATEWAY_REQUEST_MODEL_HEADER]: alias } }))
+  assert.equal(response.status, 200)
+  await response.text()
+  const row = await waitForRows(fixture.logRows)
+  assert.equal(row.requested_model, "gpt-4o")
+  assert.equal(row.upstream_model, "gpt-4o")
+  assert.equal(row.metadata?.requested_model_source, "request")
+  const selected = fixture.accessRows.find((entry) => entry.model?.model_id === "gpt-4o")
+  assert.ok(selected?.model)
+  assert.equal(fixture.terminals.length, 1)
+  assert.equal(fixture.terminals[0]?.modelAlias, selected.model.id)
+  assert.notEqual(fixture.terminals[0]?.modelAlias, hinted.model.id)
+  assert.equal(fixture.upstreamRequests[0]?.headers.get(GATEWAY_REQUEST_MODEL_HEADER), null)
+  assert.equal(parseJsonObject(fixture.upstreamRequests[0]?.body ?? null).model, "gpt-4o")
+})
+
+test("a valid diagnostic hint cannot authorize a denied body model", async () => {
+  const fixture = createTestServer()
+  const hinted = fixture.accessRows[0]
+  assert.ok(hinted.model)
+  const alias = createGatewayModelAlias({ modelGroupId: hinted.group.id, credentialSetId: hinted.credentialSet.id, gatewayProviderModelId: hinted.model.id })
+  await assertRejectedBeforeCredentials(fixture, gatewayRequest({ path: "/responses", body: { model: "denied-model", input: "fixture" }, headers: { [GATEWAY_REQUEST_MODEL_HEADER]: alias } }), "model_access_denied", 403)
+  const row = await waitForRows(fixture.logRows)
+  assert.equal(row.requested_model, "denied-model")
+  assert.equal(row.upstream_model, null)
+  assert.equal(fixture.terminals.length, 1)
+  assert.equal(fixture.terminals[0]?.modelAlias, null)
 })

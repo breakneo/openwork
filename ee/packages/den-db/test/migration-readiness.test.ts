@@ -26,6 +26,15 @@ describe("local startup migration safety (offline)", () => {
     assert.ok(saved.tables.inference_usage_ledger_entries.columns.provider_usage)
     assert.ok(saved.tables.gateway_providers.columns.model_ids)
     assert.ok(saved.tables.gateway_credential_sets.columns.created_by_org_membership_id)
+    for (const column of ["generation_outcome", "provider_terminal_reason"]) {
+      assert.equal(saved.tables.gateway_request_logs.columns[column].notNull, true)
+      assert.equal(saved.tables.gateway_request_logs.columns[column].default, "'unknown'")
+    }
+    for (const outcome of ["ok", "upstream_error", "upstream_unreachable", "client_aborted", "rejected"]) {
+      const column = saved.tables.gateway_usage_rollups.columns[`uncountable_${outcome}_count`]
+      assert.equal(column.type, "bigint")
+      assert.equal(column.notNull, false)
+    }
   })
   function shapeAt(tag: string) {
     const snapshot = plan.find((entry) => entry.tag.startsWith(tag))?.snapshot
@@ -111,7 +120,7 @@ describe("local startup migration safety (offline)", () => {
     assert.throws(() => historyPrefix(plan, [...receipts, receipts[95]]), /exact hash\/timestamp prefix/)
   })
 
-  test("consolidated 0097 receipts retain their prefix and leave later migrations pending", () => {
+  test("consolidated 0097 receipts retain their prefix without restamping and leave later migrations pending", () => {
     const current = plan[96]
     assert.equal(current.tag, "0097_gateway_access_matrix")
     assert.equal(current.folderMillis, 1788895934602)
@@ -123,6 +132,7 @@ describe("local startup migration safety (offline)", () => {
       assert.equal(historyPrefix(plan, recorded), 97)
       assert.deepEqual(recorded, before)
       assert.deepEqual(plan.slice(historyPrefix(plan, recorded)), plan.slice(97))
+      assert.equal(plan[historyPrefix(plan, recorded)]?.tag, "0098_gateway_uncountable_usage")
     }
   })
 

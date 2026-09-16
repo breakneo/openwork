@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "96e5d523-f7a9-49f4-8ef1-220f6887ecf8",
+  "id": "6184a09d-c978-40d3-bb51-7a01cbc8307d",
   "prevId": "f7b78d83-818b-4d27-b696-73e0e3cf6dda",
   "tables": {
     "account": {
@@ -3058,22 +3058,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "generation_outcome": {
-          "name": "generation_outcome",
-          "type": "enum('completed','content_filtered','refused','length_limited','tool_calls','unknown')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'unknown'"
-        },
-        "provider_terminal_reason": {
-          "name": "provider_terminal_reason",
-          "type": "enum('stop','length','tool_calls','content_filter','end_turn','stop_sequence','max_tokens','tool_use','refusal','completed','incomplete','max_output_tokens','unknown')",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'unknown'"
-        },
         "error_code": {
           "name": "error_code",
           "type": "varchar(64)",
@@ -3539,6 +3523,41 @@
         },
         "total_tokens_count": {
           "name": "total_tokens_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uncountable_ok_count": {
+          "name": "uncountable_ok_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uncountable_upstream_error_count": {
+          "name": "uncountable_upstream_error_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uncountable_upstream_unreachable_count": {
+          "name": "uncountable_upstream_unreachable_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uncountable_client_aborted_count": {
+          "name": "uncountable_client_aborted_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uncountable_rejected_count": {
+          "name": "uncountable_rejected_count",
           "type": "bigint",
           "primaryKey": false,
           "notNull": false,
