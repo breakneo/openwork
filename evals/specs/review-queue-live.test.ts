@@ -86,7 +86,7 @@ async function withLive(run: (live: Live, feedPath: string) => Promise<void>) {
 
 function records(directory: string, name = 'results.jsonl') {
   const text = readFileSync(join(directory, name), 'utf8');
-  return text ? text.trimEnd().split('\n').map((line) => JSON.parse(line)) : [];
+  return text ? text.trimEnd().split('\n').map((line) => JSON.parse(line)).filter((entry) => entry.kind !== 'protocol') : [];
 }
 
 function execute(directory: string, ...args: string[]) {
@@ -111,8 +111,8 @@ test('live queue binds random loopback, protects every data route and refuses cr
     for (const name of ['server.json', 'decisions.jsonl', 'results.jsonl']) expect(statSync(join(live.directory, name)).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(join(live.directory, 'server.json'), 'utf8'))).toEqual({ origin: live.origin, token: live.token });
     expect(JSON.parse((await http(live, '/server.json')).text)).toEqual({ origin: live.origin, token: live.token });
-    for (const path of ['/server.json', '/feed', '/results?since=0', '/decisions', '/threads/ses_exampleA']) {
-      const body = path === '/decisions' ? decision() : path.startsWith('/threads') ? { id: randomUUID(), text: 'Please clarify' } : undefined;
+    for (const path of ['/server.json', '/feed', '/protocol', '/results?since=0', '/decisions', '/controls', '/reads', '/deliverables/ses_exampleA.md', '/threads/ses_exampleA']) {
+      const body = ['/controls', '/reads'].includes(path) ? {} : path === '/decisions' ? decision() : path.startsWith('/threads') ? { id: randomUUID(), text: 'Please clarify' } : undefined;
       for (const token of [undefined, 'wrong', 'x'.repeat(live.token.length)]) {
         const response = await http(live, path, { body, headers: { 'X-Review-Token': token } });
         expect(response.status).toBe(401);
@@ -323,7 +323,7 @@ test('server CLI honors default private directory and fragment token without sup
   const feedPath = join(root, 'feed.json');
   writeFileSync(feedPath, JSON.stringify(source()), { mode: 0o600 });
   const script = join(sourceDirectory, 'serve.mjs');
-  for (const args of [[], ['--feed', feedPath, '--port', '9999'], ['--feed', feedPath, '--token', 'short'],
+  for (const args of [[], ['--feed', feedPath, '--port', '70000'], ['--feed', feedPath, '--token', 'short'],
     ['--feed', feedPath, '--feed', feedPath], ['--feed', feedPath, 'extra']]) {
     const failed = spawnSync(process.execPath, [script, ...args], { cwd: root, encoding: 'utf8', timeout: 5000 });
     expect(failed.status).toBe(1);
@@ -370,9 +370,9 @@ test('startup, bounded storage and crash recovery refuse unsafe files or uncerta
     const body = decision();
     expect((await http(live, '/decisions', { body })).status).toBe(200);
     writeFileSync(join(live.directory, 'results.jsonl'), '', { mode: 0o600 });
-    expect(execute(live.directory, 'next').status).toBe(1);
+    expect(execute(live.directory, 'next').status).toBe(0);
     expect((await http(live, '/decisions', { body })).status).toBe(200);
-    expect(records(live.directory)).toHaveLength(1);
+    expect(records(live.directory)).toHaveLength(2);
     expect(records(live.directory, 'decisions.jsonl')).toHaveLength(1);
     writeFileSync(join(live.directory, '.ledger.lock'), '', { mode: 0o600 });
     expect((await http(live, '/decisions', { body: decision() })).status).toBe(503);

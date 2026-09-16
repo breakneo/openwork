@@ -8,7 +8,7 @@ import { expect } from 'vitest';
 import { test } from '@openwork/testkit';
 import { startServer } from '../../tools/review-queue/serve.mjs';
 import { next, result } from '../../tools/review-queue/executor.mjs';
-import { readLog, withLedger, appendEvent, exclusiveFile } from '../../tools/review-queue/protocol.mjs';
+import { readLog, withLedger, appendEvent, exclusiveFile, statusEvent, queueProtocol } from '../../tools/review-queue/protocol.mjs';
 import { applyDecision, validateFeed } from '../../tools/review-queue/core.mjs';
 
 async function fixture() {
@@ -112,7 +112,7 @@ test('mixed bulk effects compensate only explicit affected targets and unknown t
     expect(compensation.item_ids).toEqual(['ses_fixtureA']);
     expect(compensation.id).toBe(control.compensation_id);
     expect(next(f.directory)).toBeNull();
-    result(compensation.id, 'unarchived', 'Affected target restored', f.directory);
+    result(compensation.id, 'unarchived', 'Affected target restored', f.directory, [{ item_id: 'ses_fixtureA', status: 'unarchived', text: 'Verified original archive restored' }]);
     expect(next(f.directory).item_ids).toEqual(original.ids);
     evidence.recordAssertionEvidence('Mixed bulk effects never become fictional all-or-none outcomes', 'Partial outcome arrays reject. Complete archived/unknown outcomes block control with no child writes. After explicit per-target reconciliation to archived/no_effect, only the archived target is compensated; the complete replacement batch waits for that success.', true);
   } finally { await f.close(); }
@@ -136,7 +136,7 @@ test('sent questions need explicit follow-up; generic done, blocked and merged o
     const cancel = next(f.directory);
     expect(cancel.action).toBe('cancel_followup');
     expect(cancel.text).toBe('Please disregard the previous synthetic request.');
-    result(cancel.id, 'cancelled', 'Follow-up sent; original cannot be unsent', f.directory);
+    result(cancel.id, 'cancelled', 'Follow-up sent; original cannot be unsent', f.directory, [{ item_id: 'ses_fixtureA', status: 'cancelled', text: 'Reviewed follow-up sent' }]);
     expect(next(f.directory)).toBeNull();
     const other = f.decide({ ids: ['ses_fixtureB'] });
     await f.post('/decisions', other); next(f.directory);
@@ -220,11 +220,120 @@ test('a dependent replacement can be withdrawn before claim without interrupting
     expect(next(f.directory)).toBeNull();
     expect((await f.post('/controls', f.control(change.replacement_id))).status).toBe(200);
     expect((await f.post('/decisions', f.decide())).status).toBe(409);
-    result(compensation.id, 'unarchived', 'Compensation completed despite replacement withdrawal', f.directory);
+    result(compensation.id, 'unarchived', 'Compensation completed despite replacement withdrawal', f.directory, [{ item_id: 'ses_fixtureA', status: 'unarchived', text: 'Original archive verified and restored' }]);
     expect(next(f.directory)).toBeNull();
     expect(readLog(f.directory, 'results.jsonl').some((event) => event.decision_id === change.replacement_id && event.status === 'rechecking')).toBe(false);
     evidence.recordAssertionEvidence('Queued replacement withdrawal does not interrupt compensation', 'A dependency-blocked but unclaimed replacement can be withdrawn under the same lock. Running compensation continues, prevents unrelated replacement admission, then completes without ever claiming the withdrawn replacement.', true);
   } finally { await f.close(); }
+});
+
+test('withdrawal and CLI claim races have only one winner in both arrival orders', async ({ evidence }) => {
+  const script = fileURLToPath(new URL('../../tools/review-queue/executor.mjs', import.meta.url));
+  const claim = (directory: string) => new Promise<{ code: number | null; output: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [script, '--dir', directory, 'next']); let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk; }); child.stderr.resume(); child.on('error', reject);
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, output }); });
+  });
+  for (const order of ['withdraw-first', 'claim-first', 'concurrent']) {
+    const f = await fixture();
+    try {
+      const original = f.decide(); await f.post('/decisions', original);
+      const request = f.control(original.id);
+      let control;
+      let worker;
+      if (order === 'withdraw-first') { control = await f.post('/controls', request); worker = await claim(f.directory); }
+      else if (order === 'claim-first') { worker = await claim(f.directory); control = await f.post('/controls', request); }
+      else { [control, worker] = await Promise.all([f.post('/controls', request), claim(f.directory)]); }
+      const claims = readLog(f.directory, 'results.jsonl').filter((event) => event.decision_id === original.id && event.status === 'rechecking');
+      expect(claims.length).toBeLessThanOrEqual(1);
+      if (control.status === 200) { expect(claims).toHaveLength(0); if (worker.code === 0) expect(JSON.parse(worker.output)).toBeNull(); }
+      else { expect([409, 503]).toContain(control.status); expect(claims).toHaveLength(1); }
+      expect(next(f.directory)).toBeNull();
+    } finally { await f.close(); }
+  }
+  evidence.recordAssertionEvidence('Withdrawal/claim arrival order is linearizable', 'Real CLI subprocess and HTTP control tested withdrawal-first, claim-first and concurrent. Accepted withdrawal has zero claims; claim wins reject control, and no path reclaims the request. No wall-clock/idleness inference.', true);
+});
+
+test('every control publication prefix and legacy publication hole repairs exactly once before claim', async ({ evidence }) => {
+  for (const prefix of [0, 1, 2, 3]) {
+    const f = await fixture();
+    try {
+      const original = f.decide(); await f.post('/decisions', original); next(f.directory);
+      result(original.id, 'archived', 'Original archive confirmed', f.directory);
+      const before = readLog(f.directory, 'results.jsonl');
+      const request = f.control(original.id, { mode: 'change', replacement: { action: 'decline', comment: '', decided_at: new Date().toISOString() } });
+      const control = (await f.post('/controls', request)).value;
+      const published = readLog(f.directory, 'results.jsonl').slice(before.length);
+      expect(published).toHaveLength(3);
+      writeFileSync(join(f.directory, 'results.jsonl'), [...before, ...published.slice(0, prefix)].map((event) => JSON.stringify(event) + '\n').join(''));
+      if (prefix % 2) expect((await f.post('/controls', request)).value).toEqual(control);
+      expect(next(f.directory).id).toBe(control.compensation_id);
+      expect(next(f.directory)).toBeNull();
+      expect((await f.post('/controls', request)).value).toEqual(control);
+      const recovered = readLog(f.directory, 'results.jsonl');
+      for (const event of published) expect(recovered.filter((entry) => entry.id === event.id)).toEqual([event]);
+      expect(recovered.some((event) => event.decision_id === control.replacement_id && event.status === 'rechecking')).toBe(false);
+      expect(readLog(f.directory, 'decisions.jsonl')).toHaveLength(2);
+    } finally { await f.close(); }
+  }
+  const f = await fixture();
+  try {
+    const original = f.decide(); await f.post('/decisions', original);
+    writeFileSync(join(f.directory, 'results.jsonl'), '');
+    expect(next(f.directory).id).toBe(original.id);
+    expect(next(f.directory)).toBeNull();
+    const receipt = readLog(f.directory, 'results.jsonl')[0];
+    appendEvent(f.directory, 'results.jsonl', { ...receipt, text: 'unequal duplicate' });
+    expect(() => next(f.directory)).toThrow(/Unequal duplicate/);
+  } finally { await f.close(); }
+  evidence.recordAssertionEvidence('All durable publication boundaries fail safely', 'Control envelope prefixes0/1/2/3 recover the exact ordered stored root and two children via retry or next, each once, with no premature replacement. Legacy missing publication uses the same repair before claim. Unequal duplicate receipt blocks further work.', true);
+});
+
+test('single-target compensation needs structured success and cannot undo a later independent archive', async ({ evidence }) => {
+  const f = await fixture();
+  try {
+    const original = f.decide(); await f.post('/decisions', original); next(f.directory); result(original.id, 'archived', 'Original effect', f.directory);
+    const control = (await f.post('/controls', f.control(original.id, { mode: 'change', replacement: { action: 'decline', comment: '', decided_at: new Date().toISOString() } }))).value;
+    const compensation = next(f.directory);
+    expect(compensation.effect_receipt_id).toBeTruthy();
+    expect(() => result(compensation.id, 'unarchived', 'No structured targets', f.directory)).toThrow(/structured/);
+    withLedger(f.directory, () => appendEvent(f.directory, 'results.jsonl', statusEvent(compensation, 'unarchived', 'Legacy scalar receipt is not structured success')));
+    expect(next(f.directory)).toBeNull();
+    const independent = { ...original, id: randomUUID() };
+    const event = { id: independent.id, decision_id: independent.id, item_ids: original.ids, kind: 'decision', action: 'approve', status: 'queued', text: '', at: original.decided_at, items: [f.feed.items[0]], decisions: [] };
+    withLedger(f.directory, () => {
+      appendEvent(f.directory, 'decisions.jsonl', { request: { route: '/decisions', body: independent }, event });
+      appendEvent(f.directory, 'results.jsonl', event);
+      appendEvent(f.directory, 'results.jsonl', statusEvent(event, 'rechecking', 'Independent legacy claim'));
+      appendEvent(f.directory, 'results.jsonl', statusEvent(event, 'archived', 'Later independent archive'));
+    });
+    expect(() => result(compensation.id, 'unarchived', 'Must not overwrite later archive', f.directory, [{ item_id: original.ids[0], status: 'unarchived', text: 'Invalid later effect' }])).toThrow(/no longer current/);
+    expect(next(f.directory)).toBeNull();
+    expect(readLog(f.directory, 'results.jsonl').some((entry) => entry.decision_id === control.replacement_id && entry.status === 'rechecking')).toBe(false);
+  } finally { await f.close(); }
+  evidence.recordAssertionEvidence('Structured compensation is tied to the original effect', 'Single-target scalar completion cannot release replacement. The claim carries its exact original-effect receipt. A later independent archive prevents compensation success/replacement rather than undoing later work.', true);
+});
+
+test('protocol epoch rejects old readers, survives restart and preserves stop; fixed ports fail without fallback', async ({ evidence }) => {
+  const f = await fixture();
+  try {
+    const protocol = queueProtocol(f.directory);
+    expect(protocol.protocol).toBe(3);
+    const raw = readFileSync(join(f.directory, 'decisions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(() => raw.map((record) => record.event).map((event) => event.id)).toThrow();
+    expect((await fetch(f.origin + '/protocol')).status).toBe(401);
+    const response = await fetch(f.origin + '/protocol', { headers: { 'X-Review-Token': f.token } });
+    expect(await response.json()).toEqual(protocol);
+    for (const port of [-1, 65536, 1.5]) await expect(startServer({ feed: f.path, dir: join(f.directory, 'invalid'), port })).rejects.toThrow(/Port/);
+    await expect(startServer({ feed: f.path, dir: join(f.directory, 'occupied'), port: Number(new URL(f.origin).port) })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    const stop = { id: randomUUID(), text: 'stop' }; await f.post('/threads/ses_fixtureA', stop); expect(next(f.directory).id).toBe(stop.id);
+    await new Promise<void>((resolve) => { f.server.close(() => resolve()); f.server.closeAllConnections(); });
+    const restarted = await startServer({ feed: f.path, dir: f.directory, port: Number(new URL(f.origin).port), token: f.token });
+    try { expect(restarted.origin).toBe(f.origin); expect(queueProtocol(f.directory)).toEqual(protocol); expect(next(f.directory)).toBeNull(); }
+    finally { await new Promise<void>((resolve) => { restarted.server.close(() => resolve()); restarted.server.closeAllConnections(); }); }
+  } finally { await f.close(); }
+  evidence.recordAssertionEvidence('Versioned deployment cannot accidentally resume or fall back', 'Durable protocol sentinel has no event and makes old reader shape fail before claim; authenticated epoch survives same-port restart and stop remains latched. Invalid bounded ports reject and occupied loopback port reports EADDRINUSE with no fallback.', true);
 });
 
 test('a restarted feed blocks old queued work and old-target controls without replaying them', async ({ evidence }) => {

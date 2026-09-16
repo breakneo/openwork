@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { validateFeed, applyDecision, isLocked, recommendationVerb, chatOnly, deliveryOf, deliveryIdentity, isMessage } from './core.mjs';
 import { buildHtml } from './build.mjs';
 import { writeDeliverables } from './deliverables.mjs';
-import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan, requireDeliveryRead } from './protocol.mjs';
+import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan, requireDeliveryRead, queueProtocol, workHistory } from './protocol.mjs';
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -51,7 +51,7 @@ async function readBody(request) {
 }
 
 function routeFor(method, path) {
-  if (method === 'GET' && ['/', '/index.html', '/server.json', '/feed'].includes(path)) return path;
+  if (method === 'GET' && ['/', '/index.html', '/server.json', '/feed', '/protocol'].includes(path)) return path;
   if (method === 'GET' && /^\/results(?:\?since=(?:0|[1-9]\d*))?$/.test(path)) return '/results';
   if (method === 'GET' && /^\/deliverables\/ses_[A-Za-z0-9]+\.md$/.test(path)) return '/deliverables';
   if (method === 'POST' && ['/decisions', '/controls', '/reads'].includes(path)) return path;
@@ -59,7 +59,8 @@ function routeFor(method, path) {
   fail('Not found', 404);
 }
 
-export async function startServer({ feed: feedPath, dir = 'reports/review-queue', token = randomBytes(32).toString('base64url') }) {
+export async function startServer({ feed: feedPath, dir = 'reports/review-queue', port = 0, token = randomBytes(32).toString('base64url') }) {
+  if (!Number.isInteger(port) || port < 0 || port > 65535) fail('Port must be an integer from 0 through 65535');
   if (typeof token !== 'string' || token.length < 32 || token.length > 512 || !/^[\x21-\x7e]+$/.test(token)) fail('Token must contain 32–512 printable non-space ASCII characters');
   if (typeof feedPath !== 'string' || !feedPath) fail('--feed is required');
   const feed = freeze(validateFeed(JSON.parse(readBounded(resolve(feedPath), MAX_FEED))));
@@ -95,6 +96,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
       authenticate(request, token);
       if (route === '/server.json') { send(200, { origin, token }); return; }
       if (route === '/feed') { send(200, feed); return; }
+      if (route === '/protocol') { send(200, withLedger(directory, () => queueProtocol(directory))); return; }
       if (route === '/deliverables') {
         const name = path.slice('/deliverables/'.length);
         const item = feed.items.find((entry) => `${entry.id}.md` === name);
@@ -146,7 +148,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
             const id = randomUUID();
             compensation = { id, decision_id: id, kind: 'compensation', action: plan.action, status: 'queued',
               item_ids: plan.items.map((item) => item.id), items: plan.items, decisions: [], text: body.text,
-              at: now, control_id: body.id, target_id: target.event.id };
+              at: now, control_id: body.id, target_id: target.event.id, effect_receipt_id: workHistory(target.event, events).at(-1).id };
             children.push(compensation);
           }
           let replacement;
@@ -210,10 +212,10 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
   server.maxRequestsPerSocket = 100;
   server.on('close', release);
   try {
-    withLedger(directory, () => { readQueue(directory); writeServerFile(directory, { snapshot, items: feed.items }, 'feed-state.json'); writeDeliverables(feed, directory, { replace: true, inputs: [feedPath] }); });
+    withLedger(directory, () => { queueProtocol(directory, true); readQueue(directory); writeServerFile(directory, { snapshot, items: feed.items }, 'feed-state.json'); writeDeliverables(feed, directory, { replace: true, inputs: [feedPath] }); });
     await new Promise((ready, reject) => {
       server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); ready(); });
+      server.listen(port, '127.0.0.1', () => { server.removeListener('error', reject); ready(); });
     });
     const address = server.address();
     origin = `http://127.0.0.1:${address.port}`;
@@ -227,9 +229,10 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
 }
 
 async function main(args) {
-  const { options, positionals } = cliArgs(args, ['feed', 'dir', 'token']);
+  const { options, positionals } = cliArgs(args, ['feed', 'dir', 'token', 'port']);
   if (positionals.length || !options.feed) fail('Usage: serve.mjs --feed PATH [--dir PATH] [--token TOKEN]');
-  const live = await startServer({ feed: options.feed, dir: options.dir, token: options.token });
+  if (options.port !== undefined && !/^(0|[1-9][0-9]{0,4})$/.test(options.port)) fail('Invalid --port');
+  const live = await startServer({ feed: options.feed, dir: options.dir, token: options.token, port: options.port === undefined ? 0 : Number(options.port) });
   console.log(live.url);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { live.server.close(); live.server.closeAllConnections(); });
 }

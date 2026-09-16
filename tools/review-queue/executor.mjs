@@ -2,7 +2,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { isMessage } from './core.mjs';
-import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, appendEvent, statusEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
+import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, compensationCurrent, compensationSucceeded, appendEvent, statusEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
 
 function publishedInputs(directory) {
   const { inputs, events, entries } = readQueue(directory);
@@ -34,7 +34,11 @@ export function next(directory = 'reports/review-queue') {
       if (input.action === 'approve') requireDeliveryRead(input.items, entries, entry.snapshot);
       const running = inputs.some((other) => other.id !== input.id && claimed.has(other.id) && workHistory(other, events).at(-1)?.status === 'rechecking' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (running && input.action !== 'stop') continue;
+      const effectCurrent = compensationCurrent(input, events);
       appendEvent(dir, 'results.jsonl', statusEvent(input, 'rechecking', 'Claimed before returning work; never automatically replay uncertain work.'));
+      if (!effectCurrent) {
+        appendEvent(dir, 'results.jsonl', statusEvent(input, 'blocked', 'Original effect is unverified or a later independent archive exists. Reconcile identity and archive generation; do not undo later work.')); continue;
+      }
       if ((stale || overlap) && input.action !== 'stop') {
         appendEvent(dir, 'results.jsonl', statusEvent(input, 'blocked', stale ? 'Stale feed: no external action attempted by this claim. Reconcile against the current snapshot.' : 'Multiple same-item decisions: no external action attempted by this claim. Reconcile instead of executing superseded work.'));
         continue;
@@ -62,7 +66,8 @@ export function result(id, status, text, directory = 'reports/review-queue', ...
     validateOutcomes(input, status, outcomes);
     if (last.status === status && last.text === text && isDeepStrictEqual(last.outcomes, outcomes)) return last;
     if (controlledIds(inputs).has(id)) fail('Controlled work is frozen; report on its compensation or replacement', 409);
-    if (input.kind === 'compensation' && ['unarchived', 'cancelled'].includes(last.status)) fail('Successful compensation is final; do not invalidate a replacement dependency', 409);
+    if (input.kind === 'compensation' && ['unarchived', 'cancelled'].includes(status) && !compensationCurrent(input, events)) fail('Compensation effect identity is no longer current', 409);
+    if (input.kind === 'compensation' && compensationSucceeded(input, events)) fail('Successful compensation is final; do not invalidate a replacement dependency', 409);
     if ([status, ...(outcomes ?? []).map((entry) => entry.status)].some((value) => ['unarchived', 'cancelled'].includes(value) && (input.kind !== 'compensation' || value !== (input.action === 'unarchive' ? 'unarchived' : 'cancelled')))) fail('Result does not match the compensation action', 409);
     const noEffectIds = status === 'no_effect' ? input.item_ids : (outcomes ?? []).filter((entry) => entry.status === 'no_effect').map((entry) => entry.item_id);
     if (history.some((event) => noEffectIds.some((id) => ['archived', 'merged', 'sent', 'waiting', 'reply'].includes(event.outcomes ? event.outcomes.find((entry) => entry.item_id === id)?.status : event.status)))) fail('Known external effect cannot be relabeled no_effect', 409);

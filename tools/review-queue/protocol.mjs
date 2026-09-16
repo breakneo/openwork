@@ -1,9 +1,10 @@
-import { constants, openSync, closeSync, fstatSync, readSync, writeSync, fsyncSync, mkdirSync, lstatSync, realpathSync, unlinkSync, ftruncateSync } from 'node:fs';
+import { constants, openSync, closeSync, fstatSync, readSync, writeSync, fsyncSync, mkdirSync, lstatSync, realpathSync, unlinkSync, ftruncateSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { chatOnly, deliveryOf, deliveryIdentity, recommendationVerb, isMessage } from './core.mjs';
 
+export const PROTOCOL_VERSION = 3;
 export const MAX_BODY = 8 * 1024 * 1024;
 export const MAX_FEED = 4 * 1024 * 1024;
 export const MAX_RECORD = 16 * 1024 * 1024;
@@ -100,11 +101,11 @@ export function exclusiveFile(directory, name) {
 }
 
 export function withLedger(directory, callback) {
-  const release = exclusiveFile(directory, '.ledger.lock');
+  const release = exclusiveFile(privateDirectory(directory), '.ledger.lock');
   try { return callback(); } finally { release(); }
 }
 
-export function readLog(directory, name) {
+export function readLog(directory, name, includeProtocol = false) {
   const fd = privateFile(join(directory, name), constants.O_RDONLY | constants.O_CREAT);
   try {
     if (fstatSync(fd).size > MAX_LOG) fail('Queue log is full', 507);
@@ -113,10 +114,11 @@ export function readLog(directory, name) {
     if (!text) return [];
     const lines = text.slice(0, -1).split('\n');
     if (lines.length > 100000) fail('Too many queue records', 507);
-    return lines.map((line) => {
+    const entries = lines.map((line) => {
       if (!line || Buffer.byteLength(line) > MAX_RECORD) fail('Invalid queue record; manual recovery required', 503);
       try { return JSON.parse(line); } catch { fail('Invalid queue JSON; manual recovery required', 503); }
     });
+    return name === 'decisions.jsonl' && !includeProtocol ? entries.filter((entry) => entry.kind !== 'protocol') : entries;
   } finally { closeSync(fd); }
 }
 
@@ -161,13 +163,37 @@ export function writePrivateText(directory, name, text) {
   } finally { closeSync(fd); }
 }
 
+export function queueProtocol(directory, initialize = false) {
+  const markers = readLog(directory, 'decisions.jsonl', true).filter((entry) => entry.kind === 'protocol');
+  if (markers.length > 1) fail('Multiple protocol epochs; manual inspection required', 503);
+  const saved = existsSync(join(directory, 'protocol.json')) ? readLog(directory, 'protocol.json') : [];
+  if (saved.length > 1) fail('Invalid protocol metadata', 503);
+  const marker = markers[0];
+  if (marker) {
+    exactObject(marker, ['kind', 'protocol', 'epoch']); requestId(marker.epoch, true);
+    if (marker.protocol !== PROTOCOL_VERSION) fail('Unsupported queue protocol epoch', 503);
+    if (saved.length && !isDeepStrictEqual(saved[0], marker)) fail('Protocol epoch mismatch; do not downgrade or recreate ledgers', 503);
+    if (!saved.length) {
+      if (!initialize) fail('Missing protocol metadata; coordinated restart required', 503);
+      writeServerFile(directory, marker, 'protocol.json');
+    }
+    return marker;
+  }
+  if (saved.length) fail('Protocol sentinel missing; ledger integrity is unknown', 503);
+  if (!initialize) return null;
+  const created = { kind: 'protocol', protocol: PROTOCOL_VERSION, epoch: randomUUID() };
+  appendEvent(directory, 'decisions.jsonl', created);
+  writeServerFile(directory, created, 'protocol.json');
+  return created;
+}
+
 export function existingReceipt(directory, inputs, request) {
   const existing = inputs.find((entry) => entry.event.id === request.body?.id);
   if (!existing) return null;
   if (!isDeepStrictEqual(existing.request, request)) fail('Request id already used for a different body or route', 409);
   const published = readLog(directory, 'results.jsonl').find((event) => event.id === existing.event.id);
   if (published && !isDeepStrictEqual(published, existing.event)) fail('Inconsistent receipt; manual recovery required', 503);
-  if (!published) appendEvent(directory, 'results.jsonl', existing.event);
+  if (!published) fail('Publication must be reconciled under the shared ledger lock', 503);
   return existing.event;
 }
 
@@ -181,24 +207,40 @@ export function enqueue(directory, request, event, children, snapshot) {
 }
 
 export function readQueue(directory) {
+  const version = queueProtocol(directory);
   const records = readLog(directory, 'decisions.jsonl');
   const events = readLog(directory, 'results.jsonl');
+  const published = new Map();
+  for (const event of events) {
+    if (!event || typeof event.id !== 'string') fail('Invalid result record', 503);
+    if (published.has(event.id) && !isDeepStrictEqual(published.get(event.id), event)) fail('Unequal duplicate result; manual recovery required', 503);
+    published.set(event.id, event);
+  }
   const entries = [];
   const ids = new Set();
   for (const record of records) {
     if (record.protocol !== undefined && record.protocol !== 2) fail('Unknown queue protocol', 503);
-    if (record.protocol === 2 && (!Array.isArray(record.children) || record.event.kind !== 'control')) fail('Invalid control envelope', 503);
+    if (record.protocol === 2) {
+      if (!version) fail('Coordinated protocol upgrade required before controls can run', 503);
+      if (!Array.isArray(record.children) || record.children.length > 2 || record.event.kind !== 'control') fail('Invalid control envelope', 503);
+      const compensation = record.children.find((child) => child.kind === 'compensation');
+      const replacement = record.children.find((child) => child.kind === 'decision');
+      if ((compensation?.id ?? null) !== record.event.compensation_id || (replacement?.id ?? null) !== record.event.replacement_id || (record.children.length === 2 && record.children[0] !== compensation)) fail('Control children are not the frozen ordered plan', 503);
+      for (const child of record.children) {
+        if (!['compensation', 'decision'].includes(child.kind) || child.control_id !== record.event.id || child.target_id !== record.event.target_id || child.item_ids.some((id) => !record.event.item_ids.includes(id))) fail('Uncorrelated control child', 503);
+        if (child.kind === 'decision' && child.depends_on !== compensation?.id) fail('Invalid replacement dependency', 503);
+      }
+    } else if (record.children !== undefined) fail('Unversioned child events', 503);
     for (const event of [record.event, ...(record.children ?? [])]) {
       if (!event || ids.has(event.id) || event.id !== event.decision_id || !Array.isArray(event.item_ids)) fail('Invalid or duplicate work input', 503);
       ids.add(event.id);
-      const published = events.find((entry) => entry.id === event.id);
-      if (published && !isDeepStrictEqual(published, event)) fail('Inconsistent receipt; manual recovery required', 503);
-      if (!published && record.protocol === 2) {
-        appendEvent(directory, 'results.jsonl', event);
-        events.push(event);
-      }
+      if (published.has(event.id) && !isDeepStrictEqual(published.get(event.id), event)) fail('Inconsistent receipt; manual recovery required', 503);
       entries.push({ event, snapshot: record.snapshot ?? record.request.body.snapshot });
     }
+  }
+  for (const { event } of entries) {
+    if (published.has(event.id)) continue;
+    appendEvent(directory, 'results.jsonl', event); events.push(event); published.set(event.id, event);
   }
   return { records, entries, inputs: entries.map((entry) => entry.event), events };
 }
@@ -223,7 +265,7 @@ export function outstandingInputs(inputs, events) {
   const controlled = controlledIds(inputs);
   return inputs.filter((input) => {
     if (input.kind === 'control' || controlled.has(input.id) || input.action === 'stop') return false;
-    if (input.kind === 'compensation') return !['unarchived', 'cancelled'].includes(workHistory(input, events).at(-1)?.status);
+    if (input.kind === 'compensation') return !compensationSucceeded(input, events);
     return input.kind === 'decision' && !isMessage(input.action);
   });
 }
@@ -259,17 +301,30 @@ export function reversalPlan(input, inputs, events, mode = 'undo') {
   return { action, items: affected };
 }
 
+export function compensationSucceeded(input, events) {
+  const last = workHistory(input, events).at(-1);
+  const expected = input.action === 'unarchive' ? 'unarchived' : 'cancelled';
+  return last?.status === expected && Array.isArray(last.outcomes) && last.outcomes.length === input.item_ids.length && new Set(last.outcomes.map((outcome) => outcome.item_id)).size === input.item_ids.length && last.outcomes.every((outcome) => input.item_ids.includes(outcome.item_id) && outcome.status === expected);
+}
+export function compensationCurrent(input, events) {
+  if (input.kind !== 'compensation') return true;
+  const index = events.findIndex((event) => event.id === input.effect_receipt_id && event.decision_id === input.target_id);
+  if (index === -1) return false;
+  const effect = events[index];
+  const expected = input.action === 'unarchive' ? ['archived'] : ['sent', 'waiting', 'reply'];
+  if (!input.item_ids.every((id) => expected.includes(effect.outcomes ? effect.outcomes.find((outcome) => outcome.item_id === id)?.status : effect.status))) return false;
+  return input.action !== 'unarchive' || !events.slice(index + 1).some((event) => event.decision_id !== input.target_id && input.item_ids.some((id) => event.item_ids.includes(id) && (event.outcomes ? event.outcomes.some((outcome) => outcome.item_id === id && outcome.status === 'archived') : event.status === 'archived')));
+}
 export function dependencyReady(input, inputs, events) {
   if (!input.depends_on) return true;
   const dependency = inputs.find((entry) => entry.id === input.depends_on);
   if (!dependency || dependency.kind !== 'compensation') fail('Invalid compensation dependency', 503);
-  const expected = dependency.action === 'unarchive' ? 'unarchived' : 'cancelled';
-  return workHistory(dependency, events).at(-1)?.status === expected;
+  return compensationSucceeded(dependency, events) && compensationCurrent(dependency, events);
 }
 
 export function validateOutcomes(input, status, outcomes) {
   if (outcomes === undefined) {
-    if (input.kind === 'compensation' && input.item_ids.length > 1 && ['unarchived', 'cancelled'].includes(status)) fail('Successful bulk compensation requires complete per-target outcomes');
+    if (input.kind === 'compensation' && ['unarchived', 'cancelled'].includes(status)) fail('Successful compensation requires complete structured per-target outcomes');
     return;
   }
   if (!Array.isArray(outcomes) || outcomes.length !== input.item_ids.length || new Set(outcomes.map((entry) => entry.item_id)).size !== outcomes.length) fail('Outcomes must cover every claimed target exactly once');

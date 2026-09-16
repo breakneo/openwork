@@ -172,6 +172,9 @@
     try {
       const metadata = await request('/server.json');
       if (metadata.origin !== location.origin) throw new Error('Server origin mismatch');
+      const protocol = await request('/protocol');
+      if (protocol.protocol !== 3 || typeof protocol.epoch !== 'string') throw new Error('Unsupported queue protocol; coordinated owner upgrade required');
+      $('mode-badge').title = `Queue protocol ${protocol.protocol} · epoch ${protocol.epoch}`;
       const original = validateFeed(await request('/feed'));
       originalServerFeed = original;
       serverSnapshot = JSON.stringify({ ...original, decisions: [] });
