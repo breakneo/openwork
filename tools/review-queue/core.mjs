@@ -163,6 +163,38 @@ export function hasConcreteQuestion(item) {
   return Boolean(question && !/^(?:none|unknown|n\/?a|tbd|not supplied|no (?:concrete )?question(?: supplied)?|review|[?]+)[.!?]*$/i.test(question));
 }
 
+export function validateDelivery(value) {
+  object(value, 'delivery', ['kind', 'completeness', 'source', 'provenance', 'observed_at', 'exchanges']);
+  const delivery = {
+    kind: enumeration(value.kind ?? 'unknown', ['chat-only', 'artifact', 'unknown'], 'delivery.kind'),
+    completeness: enumeration(value.completeness ?? 'unknown', ['complete', 'truncated', 'unknown'], 'delivery.completeness'),
+    source: enumeration(value.source, ['session.read'], 'delivery.source'),
+    provenance: text(value.provenance, 'delivery.provenance', 2000, true),
+    observed_at: timestamp(value.observed_at, 'delivery.observed_at'),
+    exchanges: list(value.exchanges, 'delivery.exchanges', 100).map((exchange) => {
+      object(exchange, 'exchange', ['question', 'at', 'answers']);
+      return { question: text(exchange.question, 'question text', 200000, true),
+        at: exchange.at === null ? null : timestamp(exchange.at, 'question.at'),
+        answers: list(exchange.answers, 'answers', 100).map((answer) => {
+          object(answer, 'answer', ['text', 'at']);
+          return { text: text(answer.text, 'answer text', 1000000, true), at: answer.at === null ? null : timestamp(answer.at, 'answer.at') };
+        }) };
+    }),
+  };
+  if (JSON.stringify(delivery).length > 2000000) throw new Error('Delivery exceeds two million characters; supply a complete bounded deliverable, never silently truncate');
+  if (delivery.completeness === 'complete' && (!delivery.exchanges.length || delivery.exchanges.some((exchange) => !exchange.answers.length))) throw new Error('Complete delivery requires answers for every supplied question');
+  return delivery;
+}
+export function deliveryOf(item) { return item.delivery ?? null; }
+export function chatOnly(item) { return item.kind === 'session' && deliveryOf(item)?.kind === 'chat-only'; }
+export function deliveryIdentity(item) { return JSON.stringify([item.id, item.workspace_id ?? null, deliveryOf(item)]); }
+export function sessionRoute(item) {
+  return item.kind === 'session' && SESSION_ID.test(item.id) && /^ws_[A-Za-z0-9]+$/.test(item.workspace_id ?? '') ? `/workspace/${item.workspace_id}/session/${item.id}` : null;
+}
+export function deliveryClassification(item) {
+  return chatOnly(item) ? 'Read → archive' : deliveryOf(item)?.kind === 'artifact' ? 'Artifact delivery' : 'Delivery type unknown';
+}
+
 export function canApprove(item) {
   return !isLocked(item) && typeof item.if_approved === 'string' && Boolean(item.if_approved.trim()) &&
     (recommendationVerb(item) !== 'review' || hasConcreteQuestion(item));
@@ -204,7 +236,7 @@ export function validateFeed(feed) {
   const ids = new Set();
   const items = list(feed.items, 'items', 10000).map((raw, index) => {
     const label = `items[${index}]`;
-    object(raw, label, ['id', 'kind', 'title', 'summary', 'purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence', 'evidence', 'recommended_action', 'links', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived']);
+    object(raw, label, ['id', 'kind', 'title', 'summary', 'purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question', 'raw_evidence', 'evidence', 'recommended_action', 'links', 'age', 'risk', 'group', 'workspace_id', 'owner_session_id', 'pr_url', 'head_sha', 'protected', 'locked', 'lock_reason', 'age_days', 'stale_bound', 'execution_policy', 'archived', 'delivery']);
     const id = itemIdentity(raw.id, raw.kind, `${label}.id`);
     if (ids.has(id)) throw new Error(`Duplicate item id: ${id}`);
     ids.add(id);
@@ -260,6 +292,10 @@ export function validateFeed(feed) {
     }
     if (raw.execution_policy !== undefined) item.execution_policy = text(raw.execution_policy, `${label}.execution_policy`, 2000);
     if (item.kind === 'pr' && githubPr(item.id) && item.pr_url !== undefined && githubPr(item.id) !== githubPr(item.pr_url)) throw new Error('PR id disagrees with pr_url');
+    if (raw.delivery !== undefined) {
+      if (item.kind !== 'session' || !SESSION_ID.test(item.id)) throw new Error('Structured delivery requires an exact session identity');
+      Object.assign(item, { delivery: validateDelivery(raw.delivery) });
+    }
     return item;
   });
   const byId = new Map(items.map((item) => [item.id, item]));

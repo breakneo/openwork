@@ -1,7 +1,7 @@
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, appendEvent, statusEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
+import { privateDirectory, withLedger, readQueue, readBounded, controlledIds, outstandingInputs, workHistory, dependencyReady, validateOutcomes, requireDeliveryRead, appendEvent, statusEvent, requestId, boundedText, STATES, fail, cliArgs } from './protocol.mjs';
 
 function publishedInputs(directory) {
   const { inputs, events, entries } = readQueue(directory);
@@ -19,7 +19,7 @@ export function next(directory = 'reports/review-queue') {
     const claimed = new Set(events.filter((event) => event.kind === 'status' && event.status === 'rechecking').map((event) => event.decision_id));
     if (inputs.some((input) => input.action === 'stop' && claimed.has(input.id))) return null;
     const withdrawn = controlledIds(inputs);
-    const pending = inputs.filter((input) => input.kind !== 'control' && !claimed.has(input.id) && !withdrawn.has(input.id));
+    const pending = inputs.filter((input) => !['control', 'read'].includes(input.kind) && !claimed.has(input.id) && !withdrawn.has(input.id));
     const ordered = [...pending.filter((input) => input.action === 'stop'), ...pending.filter((input) => input.action !== 'stop')];
     for (const input of ordered) {
       if (!dependencyReady(input, inputs, events)) {
@@ -30,6 +30,7 @@ export function next(directory = 'reports/review-queue') {
       const entry = entries.find((entry) => entry.event.id === input.id);
       const stale = entry.snapshot !== undefined ? entry.snapshot !== state.snapshot : input.items.some((item) => !state.items.some((current) => isDeepStrictEqual(current, item)));
       const overlap = input.kind === 'decision' && outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.kind === 'decision' && other.item_ids.some((id) => input.item_ids.includes(id)));
+      if (input.action === 'approve') requireDeliveryRead(input.items, entries, entry.snapshot);
       const running = inputs.some((other) => other.id !== input.id && claimed.has(other.id) && workHistory(other, events).at(-1)?.status === 'rechecking' && other.item_ids.some((id) => input.item_ids.includes(id)));
       if (running && input.action !== 'stop') continue;
       appendEvent(dir, 'results.jsonl', statusEvent(input, 'rechecking', 'Claimed before returning work; never automatically replay uncertain work.'));

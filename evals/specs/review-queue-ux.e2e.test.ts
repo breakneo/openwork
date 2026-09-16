@@ -8,6 +8,44 @@ import { startServer } from '../../tools/review-queue/serve.mjs';
 import { next, result } from '../../tools/review-queue/executor.mjs';
 import { readLog } from '../../tools/review-queue/protocol.mjs';
 
+const fullAnswer = 'Full synthetic answer ' + 'x'.repeat(1600);
+
+test('chat-only answers expand in full and a persisted read acknowledgement unlocks archive', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-read-browser-'));
+  const feed = join(directory, 'feed.json');
+  await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_read', workspace_id: 'ws_fixture', title: 'Read synthetic answers', kind: 'session', group: 'example', recommended_action: 'archive', if_approved: 'Archive after reading.', delivery: {
+    kind: 'chat-only', completeness: 'complete', source: 'session.read', provenance: 'Synthetic full transcript', observed_at: '2026-01-01T00:00:00.000Z', exchanges: [
+      { question: 'First question?', at: null, answers: [{ text: fullAnswer, at: null }] },
+      { question: 'Second question?', at: null, answers: [{ text: 'Second full answer.', at: null }] },
+    ],
+  } }], decisions: [] }));
+  const live = await startServer({ feed, dir: join(directory, 'queue') });
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.goto(live.url);
+    await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+    expect(await page.getByTestId('archive-batch').count()).toBe(0);
+    expect(await page.locator('[data-action="approve"]').isDisabled()).toBe(true);
+    expect(await page.getByTestId('delivery-answers').getAttribute('open')).toBeNull();
+    await page.getByTestId('delivery-answers').locator('summary').click();
+    expect(await page.getByTestId('delivery-answers').innerText()).toContain(fullAnswer);
+    expect(await page.getByTestId('delivery-answers').innerText()).toContain('Second full answer.');
+    expect(await page.locator('[data-action="approve"]').isDisabled()).toBe(true);
+    await page.getByTestId('mark-read').click();
+    await expect.poll(() => page.locator('[data-action="approve"]').isDisabled()).toBe(false);
+    expect(next(live.directory)).toBeNull();
+    await page.reload();
+    await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+    expect(await page.getByTestId('archive-batch').count()).toBe(1);
+    expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(1);
+    evidence.recordAssertionEvidence('Read before archive means the full delivered answers', 'Collapsed-by-default two-question transcript reveals full long answer and second answer. Expansion alone does not authorize archive; explicit durable Mark read unlocks it, is never claimed as work, survives reload and admits the session to the archive batch.', true);
+  } finally {
+    await browser.close(); await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); });
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('review advances in displayed order after acceptance, preserves uncertain cards and reaches Decided', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-ux-'));
   const feed = join(directory, 'feed.json');

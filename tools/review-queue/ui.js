@@ -28,6 +28,12 @@
   let currentInputIds = new Set();
   let controlTarget = null;
   let logSignature = '';
+  let readDeliveries = new Set();
+  function readAllowed(item) {
+    return !chatOnly(item) || recommendationVerb(item) !== 'archive' || (deliveryOf(item).completeness === 'complete' && (liveSession
+      ? [...events.values()].some((event) => event.kind === 'read' && currentInputIds.has(event.id) && event.deliverable === deliveryIdentity(item))
+      : readDeliveries.has(deliveryIdentity(item))));
+  }
   const localRequests = new Map();
   const threadDrafts = new Map();
   const advances = new Map();
@@ -44,7 +50,7 @@
     $('undo').disabled = liveSession || !feed?.decisions.length;
     for (const button of document.querySelectorAll('#detail [data-action]')) {
       const item = feed.items.find((entry) => entry.id === activeId);
-      button.disabled = unavailable() || (button.dataset.action === 'approve' && !canApprove(item));
+      button.disabled = unavailable() || (button.dataset.action === 'approve' && (!canApprove(item) || !readAllowed(item)));
     }
     const send = document.querySelector('[data-testid="thread-send"]');
     if (send) send.disabled = unavailable();
@@ -54,6 +60,8 @@
     if (batch) batch.disabled = unavailable() || new Set(archiveItems().map(shape)).size !== 1;
     renderBulk(); renderActionLog(); renderCardControls();
     $('confirm-control').disabled = unavailable();
+    const read = document.querySelector('[data-testid="mark-read"]');
+    if (read) { const item = feed.items.find((entry) => entry.id === activeId); read.disabled = unavailable() || deliveryOf(item).completeness !== 'complete'; read.textContent = readAllowed(item) ? 'Marked read' : 'Mark read'; }
   }
   function connectionLost() {
     connected = false;
@@ -82,8 +90,8 @@
     for (const event of [...events.values(), ...incoming]) {
       if (!event || typeof event.id !== 'string' || typeof event.decision_id !== 'string' ||
           !Array.isArray(event.item_ids) || !event.item_ids.every((id) => typeof id === 'string') ||
-          !['decision', 'thread', 'status', 'control', 'compensation'].includes(event.kind) ||
-          !['queued', 'rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'waiting', 'declined', 'deferred', 'stopped', 'withdrawn', 'no_effect', 'sent', 'unarchived', 'cancelled'].includes(event.status) ||
+          !['decision', 'thread', 'status', 'control', 'compensation', 'read'].includes(event.kind) ||
+          !['queued', 'rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'waiting', 'declined', 'deferred', 'stopped', 'withdrawn', 'no_effect', 'sent', 'unarchived', 'cancelled', 'read'].includes(event.status) ||
           typeof event.text !== 'string' || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))) throw new Error('Invalid result event');
       if (nextEvents.has(event.id) && JSON.stringify(nextEvents.get(event.id)) !== JSON.stringify(event)) throw new Error('Conflicting result event');
       nextEvents.set(event.id, event);
@@ -206,13 +214,15 @@
           const keys = ['id', 'kind', 'item_ids', 'text', 'action', 'at', 'decisions', 'state'];
           if (!local || Object.keys(local).length !== keys.length || keys.some((key) => !Object.hasOwn(local, key)) ||
               typeof local.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(local.id) || restored.has(local.id) ||
-              !['decision', 'thread', 'control'].includes(local.kind) || !Array.isArray(local.item_ids) || !local.item_ids.length || new Set(local.item_ids).size !== local.item_ids.length ||
+              !['decision', 'thread', 'control', 'read'].includes(local.kind) || !Array.isArray(local.item_ids) || !local.item_ids.length || new Set(local.item_ids).size !== local.item_ids.length ||
               !local.item_ids.every((id) => feed.items.some((item) => item.id === id && !isLocked(item))) ||
               typeof local.text !== 'string' || local.text.length > 10000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(local.text) ||
               typeof local.at !== 'string' || !Number.isFinite(Date.parse(local.at)) || !Array.isArray(local.decisions) || typeof local.state !== 'string') throw new Error('Invalid local audit entry');
           if (local.kind === 'decision') {
             const validated = validateFeed({ ...feed, decisions: local.decisions }).decisions;
             if (validated.length !== local.item_ids.length || validated.some((entry, index) => entry.id !== local.item_ids[index] || entry.batch_id !== local.id || entry.action !== local.action || entry.comment !== local.text || entry.decided_at !== local.at)) throw new Error('Uncorrelated local decision');
+          } else if (local.kind === 'read') {
+            if (local.decisions.length || local.item_ids.length !== 1 || local.action !== 'read') throw new Error('Invalid local read');
           } else if (local.kind === 'control') {
             if (local.decisions.length || !['undo', 'change'].includes(local.action)) throw new Error('Invalid local control');
           } else if (local.decisions.length || local.item_ids.length !== 1 || !local.text.trim() || !['stop', 'ask_info'].includes(local.action)) throw new Error('Invalid local thread');
@@ -234,7 +244,7 @@
       if (!liveStorageReady) { $('storage-status').textContent = restoreProblem || 'Recovering the live local audit before saving.'; return; }
     }
     try {
-      localStorage.setItem(savedKey, JSON.stringify(liveSession ? liveRecord() : { sourceSnapshot: snapshot, decisions: feed.decisions, drafts }));
+      localStorage.setItem(savedKey, JSON.stringify(liveSession ? liveRecord() : { sourceSnapshot: snapshot, decisions: feed.decisions, drafts, reads: [...readDeliveries] }));
       $('storage-status').textContent = 'Saved in this browser for this exact feed. Download JSON for a portable backup; private browsing and previews may clear storage.';
     } catch {
       $('storage-status').textContent = 'Browser storage unavailable. Decisions remain in this tab only: export JSON before closing.';
@@ -246,6 +256,7 @@
     snapshot = sourceSnapshot(feed);
     savedKey = `review-queue-${liveSession ? 'live' : 'v1'}-${fingerprint(snapshot)}`;
     drafts = Object.create(null);
+    readDeliveries = new Set();
     dirty = false;
     if (restore) {
       try {
@@ -255,6 +266,10 @@
           if (saved.sourceSnapshot !== snapshot) throw new Error('Stored feed does not match this snapshot. No decisions restored.');
           const restored = validateFeed({ ...feed, decisions: saved.decisions, drafts: saved.drafts ?? {} });
           feed = restored;
+          if (saved.reads !== undefined) {
+            if (!Array.isArray(saved.reads) || saved.reads.some((identity) => !feed.items.some((item) => deliveryIdentity(item) === identity))) throw new Error('Invalid stored read acknowledgement');
+            readDeliveries = new Set(saved.reads);
+          }
           if (saved.drafts && typeof saved.drafts === 'object' && !Array.isArray(saved.drafts)) {
             for (const item of feed.items) if (typeof saved.drafts[item.id] === 'string') drafts[item.id] = saved.drafts[item.id].slice(0, 10000);
           }
@@ -309,7 +324,7 @@
     const withdrawn = withdrawnIds();
     for (const event of events.values()) {
       if (!currentInputIds.has(event.decision_id) || withdrawn.has(event.decision_id)) continue;
-      if (event.kind === 'thread' || (event.status === 'rechecking' && events.get(event.decision_id)?.kind === 'thread')) continue;
+      if (['thread', 'read'].includes(event.kind) || (event.status === 'rechecking' && events.get(event.decision_id)?.kind === 'thread')) continue;
       for (const id of event.item_ids) result.set(id, event);
     }
     return result;
@@ -325,10 +340,10 @@
     }
     if ([...localRequests.values()].some((local) => local.item_ids.includes(item.id))) return true;
     if (item.archived || decision) return false;
-    return ['merge', 'review', 'relaunch', 'blockers'].includes(recommendationVerb(item));
+    return (chatOnly(item) && recommendationVerb(item) === 'archive' && !readAllowed(item)) || ['merge', 'review', 'relaunch', 'blockers'].includes(recommendationVerb(item));
   }
   function archiveEligible(item, decisions = decisionsById(), results = resultById()) {
-    return item.kind === 'session' && recommendationVerb(item) === 'archive' && canApprove(item) && !item.protected && !item.archived && !isLocked(item)
+    return item.kind === 'session' && recommendationVerb(item) === 'archive' && canApprove(item) && readAllowed(item) && !item.protected && !item.archived && !isLocked(item)
       && !decisions.has(item.id) && ![...localRequests.values()].some((local) => local.item_ids.includes(item.id))
       && !['blocked', 'waiting', ...terminalStatuses].includes(results.get(item.id)?.status)
       && ![...events.values()].some((event) => event.kind === 'compensation' && event.item_ids.includes(item.id) && !['unarchived', 'cancelled'].includes([...events.values()].filter((entry) => entry.decision_id === event.id).at(-1)?.status))
@@ -439,7 +454,7 @@
     const homogeneous = new Set(items.map(shape)).size <= 1 && !items.some(isLocked);
     $('bulk-shape').textContent = homogeneous && items.length ? `${items[0].kind} · ${items[0].group} · ${items[0].recommended_action}` : 'Mixed kinds, groups or recommendations. Filter to matching items before batching.';
     const bulkMerge = items.length > 1 && items.some((item) => recommendationVerb(item).toLowerCase().trim() === 'merge');
-    const missingOutcome = bulkMerge || items.some((item) => !canApprove(item));
+    const missingOutcome = bulkMerge || items.some((item) => !canApprove(item) || !readAllowed(item));
     $('bulk-action').querySelector('option[value="approve"]').disabled = missingOutcome;
     const approvalBlocked = $('bulk-action').value === 'approve' && missingOutcome;
     if (approvalBlocked) $('bulk-shape').textContent = 'Approval unavailable: every selected item needs an approval outcome.';
@@ -483,6 +498,45 @@
     return item.kind !== 'pr' && !item.pr_url && !item.links.some((link) => /\/pull\//.test(link.url))
       && /\b(?:non-code|documentation only|no runtime change|no (?:code|product-code) change|(?:review )?report only|Notion (?:page|note|document))\b/i.test(`${item.status_on_dev} ${item.purpose}`);
   }
+  function renderDelivery(item, root) {
+    const delivery = deliveryOf(item);
+    root.append(element('strong', deliveryClassification(item)), element('p', delivery ? `Completeness: ${delivery.completeness} · ${delivery.observed_at} · ${delivery.provenance}` : 'Complete answers and delivery type are unknown. A summary is not the delivered answer.', 'small muted'));
+    const route = sessionRoute(item);
+    if (isLocked(item)) { root.append(element('pre', route || `Session: ${item.id} · workspace unknown`, 'raw-value')); return; }
+    const routeField = element('textarea'); routeField.readOnly = true; routeField.rows = 2; routeField.setAttribute('aria-label', 'Open in OpenWork — copy route and IDs');
+    routeField.value = `${route || 'Route unknown'}\nSession: ${item.id} · Workspace: ${item.workspace_id || 'unknown'}`; root.append(routeField);
+    if (!delivery) return;
+    const answers = element('details'); answers.dataset.testid = 'delivery-answers'; answers.append(element('summary', 'Read full questions and answers'));
+    for (const exchange of delivery.exchanges) {
+      answers.append(element('h3', `Question · ${exchange.at || 'date unknown'}`), element('pre', exchange.question, 'raw-value'));
+      for (const answer of exchange.answers) answers.append(element('h3', `Assistant · ${answer.at || 'date unknown'}`), element('pre', answer.text, 'raw-value'));
+    }
+    if (chatOnly(item) && !isLocked(item)) {
+      const read = element('button', readAllowed(item) ? 'Marked read' : 'Mark read'); read.dataset.testid = 'mark-read';
+      read.disabled = delivery.completeness !== 'complete' || unavailable();
+      read.addEventListener('click', guarded(() => {
+        if (!answers.open || delivery.completeness !== 'complete' || unavailable()) throw new Error('Expand complete answers before marking read');
+        if (!liveSession) { readDeliveries.add(deliveryIdentity(item)); persist(); renderList(true); syncControls(); read.textContent = 'Marked read'; return; }
+        const id = crypto.randomUUID();
+        localRequests.set(id, { id, kind: 'read', item_ids: [item.id], action: 'read', text: 'Mark complete answers read', at: new Date().toISOString(), decisions: [], state: 'Sending read acknowledgement' });
+        writing = true; persist(); syncControls();
+        void postOnce('/reads', { id, item_id: item.id, snapshot: serverSnapshot, deliverable: deliveryIdentity(item) });
+      }));
+      answers.append(read);
+    }
+    root.append(answers);
+    if (liveSession && !isLocked(item)) {
+      const download = element('button', 'Download full deliverable (.md)');
+      download.addEventListener('click', () => {
+        void request(`/deliverables/${item.id}.md`).then((file) => {
+          const url = URL.createObjectURL(new Blob([file.markdown], { type: 'text/markdown;charset=utf-8' }));
+          const link = element('a'); link.href = url; link.download = `${item.id}.md`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+        }).catch(() => message('Deliverable download failed; no read acknowledgement was recorded.'));
+      }); root.append(download);
+    } else if (!isLocked(item)) {
+      const link = element('a', 'Open private deliverable (.md)'); link.href = `deliverables/${item.id}.md`; link.download = `${item.id}.md`; root.append(link);
+    }
+  }
   function renderDetail() {
     const root = $('detail'); root.replaceChildren();
     const item = feed.items.find((candidate) => candidate.id === activeId);
@@ -496,6 +550,7 @@
     field('purpose', 'Purpose', item.purpose || 'Purpose not supplied.');
     field('status_on_dev', 'Status on dev', item.status_on_dev || 'Not verified on dev.');
     const delivered = field('delivered', 'Delivered', item.delivered || 'No delivery summary supplied.');
+    if (item.kind === 'session') renderDelivery(item, delivered);
     if (item.links.length) {
       const links = element('div', undefined, 'actions'); links.dataset.field = 'links';
       for (const link of item.links) links.append(safeLink(link.label, link.url));
@@ -516,7 +571,7 @@
       for (const [action, label] of Object.entries(labels)) {
         const row = element('div', undefined, 'decision-action');
         const button = element('button', label, action); button.dataset.action = action;
-        button.disabled = unavailable() || (action === 'approve' && !canApprove(item));
+        button.disabled = unavailable() || (action === 'approve' && (!canApprove(item) || !readAllowed(item)));
         button.addEventListener('click', guarded(() => decide([item.id], action, comment.value))); row.append(button);
         if (action === 'approve' || action === 'decline') {
           const name = action === 'approve' ? 'if_approved' : 'if_declined';

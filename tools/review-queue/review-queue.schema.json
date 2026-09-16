@@ -76,6 +76,27 @@
       "type": "object", "additionalProperties": false, "required": ["label", "url"],
       "properties": {"label": {"$ref": "#/$defs/label"}, "url": {"$ref": "#/$defs/url"}}
     },
+    "delivery": {
+      "type": "object", "additionalProperties": false, "required": ["source", "provenance", "observed_at", "exchanges"],
+      "properties": {
+        "kind": {"enum": ["chat-only", "artifact", "unknown"], "default": "unknown"},
+        "completeness": {"enum": ["complete", "truncated", "unknown"], "default": "unknown"},
+        "source": {"const": "session.read"},
+        "provenance": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "exchanges": {"type": "array", "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false, "required": ["question", "at", "answers"],
+          "properties": {
+            "question": {"type": "string", "minLength": 1, "maxLength": 200000},
+            "at": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+            "answers": {"type": "array", "maxItems": 100, "items": {
+              "type": "object", "additionalProperties": false, "required": ["text", "at"],
+              "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 1000000}, "at": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]}}
+            }}
+          }
+        }}
+      }
+    },
     "item": {
       "type": "object", "additionalProperties": false, "required": ["id", "kind", "title"],
       "allOf": [
@@ -90,6 +111,7 @@
         "summary": {"type": "string", "maxLength": 20000, "default": ""},
         "purpose": {"type": "string", "maxLength": 20000, "default": "Purpose not supplied."},
         "delivered": {"type": "string", "maxLength": 20000, "default": "No delivery summary supplied."},
+        "delivery": {"$ref": "#/$defs/delivery"},
         "status_on_dev": {"type": "string", "maxLength": 20000, "default": "Not verified on dev."},
         "why": {"type": "string", "maxLength": 20000, "default": "No rationale supplied."},
         "if_approved": {"type": "string", "maxLength": 20000, "default": "", "description": "Plain-language outcome. Missing or whitespace-only text blocks approval, including imported decisions and batches."},

@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, copyFileSync, chmodSync, constants } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateFeed, safeUrl, isLocked, recommendationVerb, hasConcreteQuestion } from './core.mjs';
+import { validateFeed, safeUrl, isLocked, recommendationVerb, hasConcreteQuestion, validateDelivery } from './core.mjs';
 import { tables, linksIn, parseQueueArgs, privateOutputPath, writePrivateOutput } from './convert.mjs';
 
 const fields = ['purpose', 'delivered', 'status_on_dev', 'why', 'if_approved', 'if_declined', 'question'];
@@ -156,6 +156,7 @@ function summariesIndex(raw, ids) {
     if (!ids.has(entry.id)) throw new Error('Summary ID is not in the input feed');
     if (result.has(entry.id)) throw new Error('Duplicate summary ID');
     const selected = {};
+    if (entry.delivery !== undefined) selected.delivery = validateDelivery(entry.delivery);
     for (const key of [...fields, 'last_user', 'last_assistant', 'source', 'observed_at']) if (entry[key] !== undefined) selected[key] = textInput(entry[key], `Summary ${key}`, key.startsWith('last_') ? 200000 : 20000);
     for (const key of ['evidence', 'raw_evidence']) if (entry[key] !== undefined) selected[key] = evidenceList(entry[key], `Summary ${key}`);
     if (entry.links !== undefined) selected.links = validateFeed({ items: [{ id: 'validation', kind: 'proposal', title: 'Validation', recommended_action: 'keep', links: entry.links }] }).items[0].links;
@@ -400,6 +401,7 @@ export function enrichFeed(input, { report = '', reportSource, prs = '', tracker
     const links = [...item.links];
     for (const link of [...(extra.links ?? []), ...rows.flatMap((row) => row.links), ...prRows.flatMap((row) => row.links)]) if (!links.some((existing) => existing.url === link.url && existing.label === link.label)) links.push(link);
     const enriched = { ...item, purpose: bounded(purpose), delivered: bounded(external ? 'Identity/title inventory only; mission deliverables deliberately not inspected.' : delivered || 'Unknown — no deliverable summary supplied.'), status_on_dev: bounded(external ? 'Not inspected; external mission is read-only.' : nightReview ? 'Review report only; no implementation or dev deployment is asserted.' : pr || associated.some(({ record }) => record) ? status : extra.status_on_dev ?? (useful(original.status_on_dev) ? original.status_on_dev : status)), why: bounded(why), question: bounded(question), if_approved: bounded(approved), if_declined: bounded(declined), recommended_action: action, evidence: unique(curated).map((entry) => /^(?:Last message|Last assistant)$/i.test(entry.label) && entry.value !== undefined ? { ...entry, value: bounded(entry.value, 800) } : entry), raw_evidence: rawFacts(raw), links };
+    if (extra.delivery !== undefined) Object.assign(enriched, { delivery: extra.delivery });
     if (locked || completedPr) { enriched.locked = true; enriched.protected = true; }
     if (external) { enriched.group = 'external-mission'; enriched.recommended_action = 'none'; }
     if (pr) {

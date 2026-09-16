@@ -2,9 +2,10 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateFeed, applyDecision, isLocked, recommendationVerb } from './core.mjs';
+import { validateFeed, applyDecision, isLocked, recommendationVerb, chatOnly, deliveryOf, deliveryIdentity } from './core.mjs';
 import { buildHtml } from './build.mjs';
-import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan } from './protocol.mjs';
+import { writeDeliverables } from './deliverables.mjs';
+import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan, requireDeliveryRead } from './protocol.mjs';
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -52,7 +53,8 @@ async function readBody(request) {
 function routeFor(method, path) {
   if (method === 'GET' && ['/', '/index.html', '/server.json', '/feed'].includes(path)) return path;
   if (method === 'GET' && /^\/results(?:\?since=(?:0|[1-9]\d*))?$/.test(path)) return '/results';
-  if (method === 'POST' && ['/decisions', '/controls'].includes(path)) return path;
+  if (method === 'GET' && /^\/deliverables\/ses_[A-Za-z0-9]+\.md$/.test(path)) return '/deliverables';
+  if (method === 'POST' && ['/decisions', '/controls', '/reads'].includes(path)) return path;
   if (method === 'POST' && /^\/threads\/[^/?#]+$/.test(path)) return '/threads';
   fail('Not found', 404);
 }
@@ -93,6 +95,12 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
       authenticate(request, token);
       if (route === '/server.json') { send(200, { origin, token }); return; }
       if (route === '/feed') { send(200, feed); return; }
+      if (route === '/deliverables') {
+        const name = path.slice('/deliverables/'.length);
+        const item = feed.items.find((entry) => `${entry.id}.md` === name);
+        if (!item || isLocked(item) || !deliveryOf(item)) fail('Deliverable not available', 404);
+        send(200, { markdown: readBounded(join(directory, 'deliverables', name), MAX_FEED), filename: name }); return;
+      }
       if (route === '/results') {
         const since = path.includes('?') ? Number(path.slice(path.indexOf('=') + 1)) : 0;
         if (!Number.isSafeInteger(since)) fail('Invalid cursor');
@@ -112,6 +120,15 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
         const existing = existingReceipt(directory, records, savedRequest);
         if (existing) return existing;
         if (events.some((event) => event.id === body?.id)) fail('Request id conflicts with an existing event', 409);
+        if (route === '/reads') {
+          exactObject(body, ['id', 'item_id', 'snapshot', 'deliverable']); requestId(body.id);
+          if (body.snapshot !== snapshot) fail('Stale read acknowledgement', 409);
+          const item = feed.items.find((entry) => entry.id === body.item_id);
+          if (!item || isLocked(item) || !chatOnly(item)) fail('Read acknowledgement requires an unlocked chat-only session');
+          if (deliveryOf(item).completeness !== 'complete' || body.deliverable !== deliveryIdentity(item)) fail('Complete exact delivery required before marking read', 409);
+          return enqueue(directory, savedRequest, { id: body.id, decision_id: body.id, kind: 'read', action: 'read', status: 'read',
+            item_ids: [item.id], items: [item], decisions: [], deliverable: body.deliverable, text: 'Human marked complete answers read.', at: new Date().toISOString() });
+        }
         if (route === '/controls') {
           exactObject(body, ['id', 'target_id', 'mode', 'replacement', 'text', 'snapshot']);
           requestId(body.id); requestId(body.target_id); boundedText(body.text, false);
@@ -137,6 +154,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
             exactObject(body.replacement, ['action', 'comment', 'decided_at']);
             boundedText(body.replacement.comment, false);
             const previous = [...feed.decisions, ...entries.filter((entry) => entry.event.kind === 'decision' && entry.snapshot === snapshot).flatMap((entry) => entry.event.decisions)];
+            if (body.replacement.action === 'approve') requireDeliveryRead(target.event.items, entries, snapshot);
             const id = randomUUID();
             const next = applyDecision({ ...feed, decisions: previous }, target.event.item_ids, body.replacement.action, body.replacement.comment, body.replacement.decided_at, id);
             if (body.replacement.action === 'approve' && target.event.items.length > 1 && target.event.items.some((item) => recommendationVerb(item) === 'merge')) fail('Bulk merge approval is forbidden');
@@ -161,6 +179,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
           const next = applyDecision({ ...feed, decisions: previous }, body.ids, body.action, body.comment, body.decided_at, body.id);
           if (outstandingInputs(inputs, events).some((input) => input.item_ids.some((id) => body.ids.includes(id)))) fail('An existing decision or compensation affects this card. Use Undo/change on its exact request', 409);
           const items = body.ids.map((id) => feed.items.find((item) => item.id === id));
+          if (body.action === 'approve') requireDeliveryRead(items, entries, snapshot);
           if (body.action === 'approve' && items.length > 1 && items.some((item) => recommendationVerb(item).toLowerCase().trim() === 'merge')) fail('Bulk merge approval is forbidden');
           return enqueue(directory, savedRequest, { id: body.id, decision_id: body.id, item_ids: body.ids,
             kind: 'decision', action: body.action, status: 'queued', text: body.comment, at: next.decisions.at(-1).decided_at,
@@ -191,7 +210,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
   server.maxRequestsPerSocket = 100;
   server.on('close', release);
   try {
-    withLedger(directory, () => { readQueue(directory); writeServerFile(directory, { snapshot, items: feed.items }, 'feed-state.json'); });
+    withLedger(directory, () => { readQueue(directory); writeServerFile(directory, { snapshot, items: feed.items }, 'feed-state.json'); writeDeliverables(feed, directory, { replace: true, inputs: [feedPath] }); });
     await new Promise((ready, reject) => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); ready(); });

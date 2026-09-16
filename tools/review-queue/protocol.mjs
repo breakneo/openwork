@@ -2,6 +2,7 @@ import { constants, openSync, closeSync, fstatSync, readSync, writeSync, fsyncSy
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { chatOnly, deliveryOf, deliveryIdentity, recommendationVerb } from './core.mjs';
 
 export const MAX_BODY = 8 * 1024 * 1024;
 export const MAX_FEED = 4 * 1024 * 1024;
@@ -147,9 +148,13 @@ export function appendEvent(directory, name, value) {
 }
 
 export function writeServerFile(directory, value, name = 'server.json') {
+  return writePrivateText(directory, name, JSON.stringify(value) + '\n');
+}
+export function writePrivateText(directory, name, text) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(name)) fail('Invalid private filename');
   const fd = privateFile(join(directory, name), constants.O_WRONLY | constants.O_CREAT);
   try {
-    const bytes = Buffer.from(JSON.stringify(value) + '\n');
+    const bytes = Buffer.from(text);
     ftruncateSync(fd, 0);
     if (writeSync(fd, bytes) !== bytes.length) fail('Incomplete server metadata write', 503);
     fsyncSync(fd);
@@ -196,6 +201,14 @@ export function readQueue(directory) {
     }
   }
   return { records, entries, inputs: entries.map((entry) => entry.event), events };
+}
+
+export function requireDeliveryRead(items, entries, snapshot) {
+  for (const item of items) {
+    if (!chatOnly(item) || recommendationVerb(item) !== 'archive') continue;
+    if (deliveryOf(item).completeness !== 'complete') fail('Read gate: chat-only delivery is incomplete or unknown; request complete answers', 409);
+    if (!entries.some((entry) => entry.snapshot === snapshot && entry.event.kind === 'read' && entry.event.item_ids.length === 1 && entry.event.item_ids[0] === item.id && entry.event.deliverable === deliveryIdentity(item))) fail('Read gate: expand the complete answers and Mark read before archive', 409);
+  }
 }
 
 export function workHistory(input, events) {

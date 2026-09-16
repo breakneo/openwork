@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateFeed } from './core.mjs';
+import { writeDeliverables } from './deliverables.mjs';
 import { privateOutputPath, writePrivateOutput, parseQueueArgs } from './convert.mjs';
 
 /** JSON embedded in HTML must never contain a literal HTML opening delimiter. */
@@ -34,8 +35,10 @@ function main(args) {
   const directory = dirname(fileURLToPath(import.meta.url));
   const inputs = [options.input, ...['template.html', 'core.mjs', 'ui.js'].map((file) => join(directory, file))];
   privateOutputPath(options.output, inputs, options);
-  const html = buildHtml(JSON.parse(readFileSync(options.input, 'utf8')), readFileSync(inputs[1], 'utf8'), readFileSync(inputs[2], 'utf8'), readFileSync(inputs[3], 'utf8'));
+  const feed = validateFeed(JSON.parse(readFileSync(options.input, 'utf8')));
+  const html = buildHtml(feed, readFileSync(inputs[1], 'utf8'), readFileSync(inputs[2], 'utf8'), readFileSync(inputs[3], 'utf8'));
   const target = writePrivateOutput(options.output, html, inputs, options);
+  writeDeliverables(feed, dirname(target), { replace: options.replace, inputs });
   console.log(`Built one offline HTML file; no external actions. Private output: ${target}`);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
