@@ -4,11 +4,13 @@ import type { SavedAppSummary } from "@openwork/types/workflows";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useAppsClient } from "../apps/use-apps";
+import { useAppsClient, dashboardManagementReason } from "../apps/use-apps";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DenApiError, readDenSettings } from "@/app/lib/den";
 import { DenReauthNotice } from "../cloud/den-reauth-notice";
 
 export function ShareDashboardButton({ apps }: { apps: SavedAppSummary[] }) {
+  const { canManage } = useAppsClient();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const commitSession = useRef<(() => void) | null>(null);
@@ -18,8 +20,8 @@ export function ShareDashboardButton({ apps }: { apps: SavedAppSummary[] }) {
     commitSession.current = null;
     commit?.();
   };
-  return <Dialog open={open} onOpenChange={(next) => { if (!pending) { if (next) setOpen(true); else close(); } }}>
-    <Button variant="outline" onClick={() => setOpen(true)}><Share2 className="size-4" />Share</Button>
+  return <Dialog open={canManage && open} onOpenChange={(next) => { if (!pending) { if (next) setOpen(true); else close(); } }}>
+    <Tooltip><TooltipTrigger render={<span tabIndex={canManage ? undefined : 0} />}><Button variant="outline" disabled={!canManage} onClick={() => setOpen(true)}><Share2 className="size-4" />Share</Button></TooltipTrigger>{!canManage ? <TooltipContent>{dashboardManagementReason}</TooltipContent> : null}</Tooltip>
     {open ? <DialogContent className="max-h-[90dvh] overflow-y-auto">
       <DialogHeader>
         <DialogTitle>Share your dashboard</DialogTitle>

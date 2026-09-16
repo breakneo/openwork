@@ -24,8 +24,10 @@ let detail: SavedAppDetail;
 let settings = { baseUrl: "fixture", apiBaseUrl: "fixture-api", authToken: "fixture-token", activeOrgId: "org" };
 let authStatus: DenAuthStatus = "signed_in";
 let memberId: string | null = "member";
+let organizationRole = "admin";
 const workspace = { workspaceId: "workspace", openworkServerClient: {} };
 const client = {
+  listOrgs: mock(async () => ({ orgs: [{ id: settings.activeOrgId, role: organizationRole }] })),
   listSavedApps: mock(async (_orgId: string) => ({ enabled: true, sharingEnabled: false, items: [detail] })),
   listGrantedDashboards: mock(async (_orgId: string): Promise<DenGrantedDashboard[]> => []),
   getSavedApp: mock(async () => detail),
@@ -36,7 +38,8 @@ const client = {
 const den = await import("../src/app/lib/den");
 mock.module("../src/app/lib/den", () => ({ ...den, createDenClient: () => client, readDenSettings: () => settings }));
 mock.module("../src/react-app/domains/cloud/den-auth-provider", () => ({
-  useDenAuth: () => ({ status: authStatus, isSignedIn: authStatus === "signed_in", user: memberId ? { id: memberId } : null }),
+  useDenAuth: () => ({ status: authStatus, isSignedIn: authStatus === "signed_in", user: memberId ? { id: memberId } : null,
+    verifiedIdentity: memberId ? { principalId: memberId, organizationId: settings.activeOrgId } : null }),
 }));
 mock.module("../src/react-app/shell/workspace-provider", () => ({ useWorkspace: () => workspace }));
 let previewHeight: number | undefined = 720;
@@ -103,6 +106,8 @@ beforeEach(() => {
   settings = { baseUrl: "fixture", apiBaseUrl: "fixture-api", authToken: "fixture-token", activeOrgId: "org" };
   authStatus = "signed_in";
   memberId = "member";
+  organizationRole = "admin";
+  client.listOrgs.mockReset().mockImplementation(async () => ({ orgs: [{ id: settings.activeOrgId, role: organizationRole }] }));
   workspace.workspaceId = "workspace";
   previewHeight = 720;
   previewReady = true;
@@ -207,8 +212,8 @@ function button(text: string) {
   return found;
 }
 
-async function openMenu() {
-  const trigger = container.querySelector<HTMLButtonElement>(`[aria-label="App options for ${detail.view.title}"]`);
+async function openMenu(title = detail.view.title) {
+  const trigger = container.querySelector<HTMLButtonElement>(`[aria-label="App options for ${title}"]`);
   if (!trigger) throw new Error("Missing app menu");
   await act(async () => trigger.click());
 }
@@ -262,14 +267,27 @@ test.each(["dashboard", "artifact"])("%s disables update while opening and suppo
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
 
-test.each(["dashboard", "artifact"])("%s viewers see the warning but no editing controls", async (surface) => {
+test.each(["dashboard", "artifact"])("%s members see locked management controls without losing app access", async (surface) => {
+  organizationRole = "member";
   detail.canManage = false;
   await render(surface);
   expect(container.textContent).toContain(detail.previewNotice);
   expect(findButton("Update app")).toBeUndefined();
-  if (surface === "dashboard") await openMenu();
-  expect(updateMenuItem()).toBeUndefined();
-  expect(Array.from(document.querySelectorAll('[role="menuitem"]')).some((item) => item.textContent === "Ask for changes")).toBe(false);
+  if (surface === "dashboard") {
+    expect(button("Add").disabled).toBe(true);
+    await act(async () => button("Add").click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  }
+  await openMenu();
+  expect(document.body.textContent).toContain("Only organization owners and admins can manage dashboards and apps.");
+  for (const item of document.querySelectorAll<HTMLElement>('[role="menuitem"]')) {
+    if (["Update app", "Ask for changes", "Remove from dashboard", "Delete app"].includes(item.textContent ?? "")) {
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      await act(async () => item.click());
+    }
+  }
+  expect(updateMenuItem()).toBeDefined();
+  expect(client.setAppOnDashboard).not.toHaveBeenCalled();
   expect(launch).not.toHaveBeenCalled();
 });
 
@@ -402,8 +420,10 @@ test("yesterday's successful live payload cannot be loaded after midnight", () =
   window.localStorage.removeItem(cacheScope);
 });
 
-test.each(["live", "snapshot"])("%s saved tiles have no duplicate card or height cap and keep one accessible actions menu", async (mode) => {
+test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member"].map((role) => [mode, role])))("%s saved tiles retain open and refresh with role %s", async (mode, role) => {
+  organizationRole = role;
   workingDetail();
+  detail.canManage = role !== "member";
   if (mode === "live") detail.view = { ...detail.view, dataMode: "live", revisions: detail.revision ? [detail.revision] : [] };
   await render("dashboard");
   const tile = container.querySelector<HTMLElement>("[data-personal-dashboard-app]");
@@ -424,8 +444,15 @@ test.each(["live", "snapshot"])("%s saved tiles have no duplicate card or height
   expect(triggers?.[0]?.tabIndex).toBe(0);
   expect(triggers?.[0]?.parentElement?.className).toContain("focus-within:opacity-100");
   await openMenu();
-  expect(document.querySelector(`[aria-label="Remove ${detail.view.title} from dashboard"]`)).not.toBeNull();
-  expect(document.querySelector(`[aria-label="Delete ${detail.view.title}"]`)).not.toBeNull();
+  const removal = document.querySelector(`[aria-label="Remove ${detail.view.title} from dashboard"]`);
+  const deletion = document.querySelector(`[aria-label="Delete ${detail.view.title}"]`);
+  expect(removal).not.toBeNull();
+  expect(deletion).not.toBeNull();
+  expect(removal?.getAttribute("aria-disabled") === "true").toBe(role === "member");
+  expect(deletion?.getAttribute("aria-disabled") === "true").toBe(role === "member");
+  const menu = document.querySelector('[data-slot="dropdown-menu-content"]');
+  expect(menu?.className).toContain("w-64");
+  expect(menu?.className).toContain("max-w-[calc(100vw-2rem)]");
   const open = document.querySelector<HTMLElement>(`[role="menuitem"][aria-label="Open ${detail.view.title}"]`);
   expect(open).not.toBeNull();
   await act(async () => open?.click());
@@ -438,6 +465,47 @@ test.each(["live", "snapshot"])("%s saved tiles have no duplicate card or height
     await act(async () => item?.click());
     expect(refresh).toHaveBeenCalledTimes(1);
   }
+});
+
+test.each(["admin", "owner", "member"])("%s can only open dashboard add, sharing and draft save controls with admin authority", async (role) => {
+  organizationRole = role;
+  workingDetail();
+  await render("dashboard");
+  await act(async () => cache.setQueryData(["saved-apps", ...scope], { enabled: true, sharingEnabled: true, items: [detail] }));
+  expect(button("Add").disabled).toBe(role === "member");
+  expect(button("Share").disabled).toBe(role === "member");
+  if (role === "member") {
+    await act(async () => { button("Add").click(); button("Share").click(); });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  }
+  detail.view.activeRevisionId = null;
+  await render("artifact");
+  expect(button("Save").disabled).toBe(role === "member");
+  await act(async () => button("Save").click());
+  expect(document.querySelector('[role="dialog"]') !== null).toBe(role !== "member");
+  expect(launch).not.toHaveBeenCalled();
+});
+
+test("unverified organization authority keeps management blocked without blocking previews", async () => {
+  client.listOrgs.mockImplementation(async () => { throw new Error("Role unavailable"); });
+  workingDetail();
+  await render("dashboard");
+  expect(button("Add").disabled).toBe(true);
+  expect(container.querySelector("[data-preview]")).not.toBeNull();
+  await openMenu();
+  expect(document.querySelector(`[aria-label="Delete ${detail.view.title}"]`)?.getAttribute("aria-disabled")).toBe("true");
+});
+
+test.each(["admin", "member"])("external managed MCP tiles remain refresh-only for %s", async (role) => {
+  organizationRole = role;
+  await act(async () => root.render(<DashboardTileShell title="Provider app" compact onRefresh={refresh}>Provider view</DashboardTileShell>));
+  await openMenu("Provider app");
+  const items = document.querySelectorAll<HTMLElement>('[role="menuitem"]');
+  expect(items).toHaveLength(1);
+  expect(items[0]?.getAttribute("aria-label")).toBe("Refresh Provider app");
+  await act(async () => items[0]?.click());
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(writes).not.toHaveBeenCalled();
 });
 
 test("saved app options open by keyboard and deletion still requires confirmation", async () => {
