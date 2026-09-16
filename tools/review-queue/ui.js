@@ -374,7 +374,7 @@
       const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.id); checkbox.dataset.testid = 'item-select'; checkbox.setAttribute('aria-label', `Select ${item.title}`);
       checkbox.addEventListener('change', () => { checkbox.checked ? selected.add(item.id) : selected.delete(item.id); renderList(); renderBulk(); $('list').querySelector(`[data-id="${CSS.escape(item.id)}"] input`)?.focus({ preventScroll: true }); });
       const open = element('button', undefined, 'row-open'); open.setAttribute('aria-label', `Review ${item.title}`); open.setAttribute('aria-current', item.id === activeId ? 'true' : 'false');
-      open.append(element('span', item.title, 'row-title'), element('span', item.purpose, 'row-summary'));
+      open.append(element('span', item.title, 'row-title'), element('span', displayProse(item.purpose, item), 'row-summary'));
       const meta = element('span', undefined, 'row-meta'); meta.append(element('span', item.kind, 'tag'), element('span', isLocked(item) ? 'Nothing to decide' : results.has(item.id) ? `${results.get(item.id).status}${['blocked', 'waiting'].includes(results.get(item.id).status) ? `: ${results.get(item.id).text}` : ''}` : statuses[decisions.get(item.id)?.action] ?? 'Pending'), element('span', `→ ${recommendationVerb(item).replaceAll('_', ' ')}`)); open.append(meta);
       open.addEventListener('click', () => { activeId = item.id; renderList(); renderDetail(); $('list').querySelector('.active .row-open')?.focus({ preventScroll: true }); });
       if (!isLocked(item)) row.append(checkbox);
@@ -414,6 +414,21 @@
     if (!allowed) return element('span', `${label} (unsafe or unavailable link)`, 'muted');
     const link = element('a', label); link.href = allowed; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.referrerPolicy = 'no-referrer'; return link;
   }
+  function displayProse(value, item) {
+    const sessionTools = { read: 'session details', send: 'session messaging', archive: 'session archiving', search: 'session search', 'search/read': 'session search and details', activity: 'session activity', create: 'session creation', stop: 'session stopping' };
+    const prActions = { merge: 'merge pull request', view: 'view pull request', checks: 'pull-request checks', diff: 'pull-request diff', list: 'list pull requests', status: 'pull-request status', review: 'review pull request', close: 'close pull request', reopen: 'reopen pull request' };
+    const treeActions = { add: 'create working copy', remove: 'remove working copy', list: 'list working copies', prune: 'clean up working-copy references' };
+    return value.replace(/\bses_[A-Za-z0-9]+\b/g, (id) => {
+      if (id === item.id) return 'this session';
+      const related = feed.items.find((entry) => entry.id === id);
+      return related ? `“${related.title.replace(/\bses_[A-Za-z0-9]+\b/g, 'related session')}”` : 'related session';
+    }).replace(/\bOpenWork Chat session this session\b/g, 'this OpenWork Chat session')
+      .replace(/\bsession (this session|related session)\b/g, '$1')
+      .replace(/\bsession\.(search\/read|read|send|archive|search|activity|create|stop)\b/g, (_, tool) => sessionTools[tool])
+      .replace(/\bgh pr(?: (merge|view|checks|diff|list|status|review|close|reopen))?\b/g, (_, action) => prActions[action] || 'pull requests')
+      .replace(/\bgit worktree(?: (add|remove|list|prune))?\b/g, (_, action) => treeActions[action] || 'working copy')
+      .replace(/`+/g, '');
+  }
   function renderDetail() {
     const root = $('detail'); root.replaceChildren();
     const item = feed.items.find((candidate) => candidate.id === activeId);
@@ -422,7 +437,7 @@
     root.append(heading);
     function field(name, label, value) {
       const section = element('section', undefined, 'section'); section.dataset.field = name;
-      section.append(element('h3', label), element('p', value, 'summary')); root.append(section); return section;
+      section.append(element('h3', label), element('p', displayProse(value, item), 'summary')); root.append(section); return section;
     }
     field('purpose', 'Purpose', item.purpose || 'Purpose not supplied.');
     field('status_on_dev', 'Status on dev', item.status_on_dev || 'Not verified on dev.');
@@ -452,7 +467,7 @@
         button.addEventListener('click', guarded(() => decide([item.id], action, comment.value))); row.append(button);
         if (action === 'approve' || action === 'decline') {
           const name = action === 'approve' ? 'if_approved' : 'if_declined';
-          const outcome = element('span', item[name].trim() || (action === 'approve' ? 'Unavailable: no approval outcome supplied.' : 'Records disagreement only; no external action.'), 'outcome');
+          const outcome = element('span', displayProse(item[name].trim(), item) || (action === 'approve' ? 'Unavailable: no approval outcome supplied.' : 'Records disagreement only; no external action.'), 'outcome');
           outcome.dataset.field = name; outcome.id = `${action}-outcome`; button.setAttribute('aria-describedby', outcome.id); row.append(outcome);
         }
         actions.append(row);
@@ -498,6 +513,11 @@
       const row = element('div', undefined, 'evidence'); row.append(element('div', entry.label, 'evidence-label'));
       if (entry.value !== undefined) row.append(element('pre', entry.value, 'raw-value'));
       if (entry.url) row.append(safeLink('Open source', entry.url)); raw.append(row);
+    }
+    for (const name of ['purpose', 'delivered', 'status_on_dev', 'why', 'question', 'if_approved', 'if_declined']) {
+      if (displayProse(item[name], item) === item[name]) continue;
+      const original = element('pre', item[name], 'raw-value'); original.dataset.proseSource = name;
+      raw.append(element('h3', `Original ${name.replaceAll('_', ' ')}`), original);
     }
     raw.append(element('h3', 'Decision history'));
     const history = element('div'); history.id = 'decision-history'; raw.append(history);

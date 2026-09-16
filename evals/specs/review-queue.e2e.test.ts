@@ -36,6 +36,20 @@ function fixture() {
     ], decisions: [],
   });
 }
+function expectedProse(value: string, item: ReturnType<typeof validateFeed>['items'][number], items: ReturnType<typeof validateFeed>['items']) {
+  let expected = value.replace(/\bses_[A-Za-z0-9]+\b/g, (id) => {
+    if (id === item.id) return 'this session';
+    const related = items.find((entry) => entry.id === id);
+    return related ? `“${related.title.replace(/\bses_[A-Za-z0-9]+\b/g, 'related session')}”` : 'related session';
+  }).replace(/\bOpenWork Chat session this session\b/g, 'this OpenWork Chat session').replace(/\bsession (this session|related session)\b/g, '$1');
+  const phrases = {
+    'session.search/read': 'session search and details', 'session.read': 'session details', 'session.send': 'session messaging', 'session.archive': 'session archiving', 'session.search': 'session search', 'session.activity': 'session activity', 'session.create': 'session creation', 'session.stop': 'session stopping',
+    'gh pr merge': 'merge pull request', 'gh pr view': 'view pull request', 'gh pr checks': 'pull-request checks', 'gh pr diff': 'pull-request diff', 'gh pr list': 'list pull requests', 'gh pr status': 'pull-request status', 'gh pr review': 'review pull request', 'gh pr close': 'close pull request', 'gh pr reopen': 'reopen pull request', 'gh pr': 'pull requests',
+    'git worktree add': 'create working copy', 'git worktree remove': 'remove working copy', 'git worktree list': 'list working copies', 'git worktree prune': 'clean up working-copy references', 'git worktree': 'working copy',
+  };
+  for (const [phrase, readable] of Object.entries(phrases).sort((a, b) => b[0].length - a[0].length)) expected = expected.replace(new RegExp(`\\b${phrase.replaceAll('.', '\\.')}\\b`, 'g'), readable);
+  return expected.replace(/`+/g, '');
+}
 async function exportJson(page: Page) {
   const download = page.waitForEvent('download');
   await page.getByTestId('export-json').click();
@@ -189,10 +203,12 @@ test('ten seeded cards render readable prose in decision order with raw evidence
   page.on('pageerror', () => errors++);
   try {
     let input: ReturnType<typeof validateFeed>;
+    let originalSource: string;
     try {
       const source = realFeed || join(root, 'sample.json');
       if ((await stat(source)).size > 12 * 1024 * 1024) throw new Error('Feed too large');
-      input = validateFeed(JSON.parse(await readFile(source, 'utf8')));
+      originalSource = await readFile(source, 'utf8');
+      input = validateFeed(JSON.parse(originalSource));
     } catch {
       throw new Error('Card input failed validation; private source details withheld.');
     }
@@ -236,11 +252,12 @@ test('ten seeded cards render readable prose in decision order with raw evidence
       expect(await card.locator(':scope > :first-child').getAttribute('data-testid')).toBe('detail-title');
       for (const [name, value] of Object.entries({ purpose: item.purpose, status_on_dev: item.status_on_dev, delivered: item.delivered, why: item.why })) {
         expect(typeof value === 'string' && value.trim().length > 0).toBe(true);
-        expect((await card.locator(`[data-field="${name}"] > p`).textContent()) === value).toBe(true);
+        expect((await card.locator(`[data-field="${name}"] > p`).textContent()) === expectedProse(value, item, input.items)).toBe(true);
       }
       expect(await card.locator('[data-field="why"] [data-field="recommendation"]').count()).toBe(1);
       expect(await card.locator('[data-field="delivered"] a').count()).toBe(item.links.length);
       expect(await card.locator('[data-field="question"]').count()).toBe(item.question.trim() ? 1 : 0);
+      if (item.question.trim()) expect((await card.locator('[data-field="question"] > p').textContent()) === expectedProse(item.question, item, input.items)).toBe(true);
       const raw = card.locator('.raw-evidence');
       expect(await raw.getAttribute('open')).toBeNull();
       expect(await raw.locator('.detail-id').isVisible()).toBe(false);
@@ -251,11 +268,17 @@ test('ten seeded cards render readable prose in decision order with raw evidence
         for (const action of ['approve', 'decline']) {
           const field = action === 'approve' ? 'if_approved' : 'if_declined';
           expect(await card.locator(`.decision-action:has([data-action="${action}"]) [data-field="${field}"]`).count()).toBe(1);
-          if (item[field].trim()) expect((await card.locator(`[data-field="${field}"]`).textContent()) === item[field].trim()).toBe(true);
+          if (item[field].trim()) expect((await card.locator(`[data-field="${field}"]`).textContent()) === expectedProse(item[field].trim(), item, input.items)).toBe(true);
         }
       }
       const text = await card.innerText();
-      expect(/session\.(?:read|send|archive)|gh pr |git worktree |\{\s*"|ses_[a-zA-Z0-9]{6,}|<script|```/.test(text)).toBe(false);
+      const prose = (await card.locator('[data-field="purpose"] > p,[data-field="status_on_dev"] > p,[data-field="delivered"] > p,[data-field="why"] > p,[data-field="question"] > p,[data-field="if_approved"],[data-field="if_declined"]').allTextContents()).join('\n');
+      expect(/session\.(?:read|send|archive)|gh pr |git worktree |\{\s*"|ses_[a-zA-Z0-9]{6,}|<script|`/.test(prose)).toBe(false);
+      for (const entry of item.evidence.filter((entry) => ['last assistant', 'last message'].includes(entry.label.toLowerCase()))) {
+        const value = entry.value?.trim() || 'Unverified — not supplied';
+        const excerpt = value.length > 800 ? `${value.slice(0, 799)}…` : value;
+        expect((await card.locator('[data-field="evidence"] .evidence-value').allTextContents()).includes(excerpt)).toBe(true);
+      }
       expect(await card.locator('script,iframe,pre:visible').count()).toBe(0);
       for (const link of await card.locator('a:visible').all()) {
         expect(await link.getAttribute('rel')).toBe('noopener noreferrer');
@@ -264,6 +287,7 @@ test('ten seeded cards render readable prose in decision order with raw evidence
       report.push(`Card ${report.length + 1}\n${text}`);
     }
     expect(report.length).toBe(10);
+    expect((await readFile(realFeed || join(root, 'sample.json'), 'utf8')) === originalSource).toBe(true);
     try {
       const output = cardReport || join(directory, 'cards.txt');
       writePrivateOutput(output, report.join('\n\n---\n\n') + '\n', [realFeed || join(root, 'sample.json'), path], { replace: true });
@@ -274,9 +298,67 @@ test('ten seeded cards render readable prose in decision order with raw evidence
     }
     expect(requests).toBe(0);
     expect(errors).toBe(0);
-    evidence.recordAssertionEvidence('Ten seeded cards satisfy the prose-first contract', `${realFeed ? 'Private actual feed' : 'Synthetic sample'}: ten cards including archive, merge and a concrete review question checked. Field order, readable prose, outcome adjacency, safe links, lock exclusion, disabled approval, three-line Guide and collapsed raw verified. No raw code in normal card text; zero HTTP requests or page errors. ${cardReport ? 'Rendered card text written only to the private report.' : 'No card text persisted.'}`, true);
+    evidence.recordAssertionEvidence('Ten seeded cards satisfy the prose-first contract', `${realFeed ? 'Private actual feed' : 'Synthetic sample'}: ten cards including archive, merge and a concrete review question checked. Field order, readable prose, outcome adjacency, safe links, lock exclusion, disabled approval, three-line Guide and collapsed raw verified. No raw code in prose or outcomes; curated last-message/assistant excerpts remain literal and bounded to 800 characters. Zero HTTP requests or page errors. ${cardReport ? 'Rendered card text written only to the private report.' : 'No card text persisted.'}`, true);
   } finally {
     await context.close();
+    await browser.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('display prose is readable without changing source identity, evidence excerpts or export data', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-queue-display-'));
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ acceptDownloads: true });
+  const sourceProse = {
+    purpose: 'Explain `session.read` for ses_displaySelf while retaining INC-104 and session.readiness.',
+    delivered: 'Sent via session.send to ses_displayOther; report docs/guide.md remains.',
+    status_on_dev: 'Not merged: `gh pr checks 42` failed; `git worktree list` showed two copies.',
+    why: 'session.archive is conditional; unknown session ses_unknownFixture is not authorization.',
+    if_approved: 'The audit archives session ses_displaySelf only after checks pass; never auto-run.',
+    if_declined: 'Keep OpenWork Chat session ses_displaySelf untouched; do not run `gh pr merge 42`.',
+    question: 'Use `git worktree add` or `session.search/read` before contacting ses_displayOther?',
+  };
+  const expected: Record<string, string> = {
+    purpose: 'Explain session details for this session while retaining INC-104 and session.readiness.',
+    delivered: 'Sent via session messaging to “Related synthetic task”; report docs/guide.md remains.',
+    status_on_dev: 'Not merged: pull-request checks 42 failed; list working copies showed two copies.',
+    why: 'session archiving is conditional; unknown related session is not authorization.',
+    if_approved: 'The audit archives this session only after checks pass; never auto-run.',
+    if_declined: 'Keep this OpenWork Chat session untouched; do not run merge pull request 42.',
+    question: 'Use create working copy or session search and details before contacting “Related synthetic task”?',
+  };
+  const excerpt = 'Literal session.send to ses_displayOther: `<script>quoted only</script>` ' + 'context '.repeat(120);
+  const input = validateFeed({ items: [
+    { ...baseItem, ...sourceProse, id: 'ses_displaySelf', kind: 'session', title: 'Synthetic normalization task', evidence: [{ label: 'Last assistant', value: excerpt }] },
+    { ...baseItem, id: 'ses_displayOther', kind: 'session', title: 'Related synthetic task', recommended_action: 'keep' },
+  ], decisions: [] });
+  const requests: string[] = [];
+  page.on('request', (request) => { if (/^https?:/.test(request.url())) requests.push(request.url()); });
+  try {
+    const path = join(directory, 'index.html');
+    await writeFile(path, buildHtml(input, await readFile(join(root, 'template.html'), 'utf8'), await readFile(join(root, 'core.mjs'), 'utf8'), await readFile(join(root, 'ui.js'), 'utf8')));
+    await page.goto(pathToFileURL(path).href);
+    await page.locator('#status').selectOption('');
+    for (const [name, value] of Object.entries(sourceProse)) {
+      const field = page.locator(`#detail [data-field="${name}"]${name.startsWith('if_') ? '' : ' > p'}`);
+      expect(await field.textContent()).toBe(expected[name]);
+      expect(expectedProse(value, input.items[0], input.items)).toBe(expected[name]);
+      expect(await page.locator(`[data-prose-source="${name}"]`).textContent()).toBe(value);
+      expect(await page.locator(`[data-prose-source="${name}"]`).isVisible()).toBe(false);
+    }
+    expect(await page.locator('[data-id="ses_displaySelf"] .row-summary').textContent()).toBe(expected.purpose);
+    expect(await page.locator('#detail [data-field="evidence"] .evidence-value').allTextContents()).toContain(`${excerpt.slice(0, 799)}…`);
+    expect(await page.locator('#detail script, #detail iframe').count()).toBe(0);
+    expect(await page.locator('#detail > [data-field]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-field')))).toEqual(['purpose', 'status_on_dev', 'delivered', 'why', 'question', 'decision', 'evidence', 'raw_evidence']);
+    expect(validateFeed((await exportJson(page)).data)).toEqual(input);
+    await page.locator('#detail [data-action="approve"]').click();
+    const approved = validateFeed((await exportJson(page)).data);
+    expect(approved.items).toEqual(input.items);
+    expect(approved.decisions.map((entry) => entry.id)).toEqual(['ses_displaySelf']);
+    expect(requests).toEqual([]);
+    evidence.recordAssertionEvidence('Display normalization preserves meaning and immutable source', 'Seven prose/outcome fields have exact independently specified readable text: self/known/unknown session references, tool names and command phrases are normalized while issue identifiers, report paths, conditional wording and unrelated API names remain. Raw prose and exported items retain exact originals; last-assistant code is a literal bounded excerpt. Field order, action identity and zero network traffic verified.', true);
+  } finally {
     await browser.close();
     await rm(directory, { recursive: true, force: true });
   }
