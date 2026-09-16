@@ -25,13 +25,16 @@
   const terminalStatuses = ['done', 'archived', 'merged', 'declined', 'deferred', 'stopped'];
   const events = new Map();
   const ledgerInputs = new Map();
+  let currentInputIds = new Set();
+  let controlTarget = null;
+  let logSignature = '';
   const localRequests = new Map();
   const threadDrafts = new Map();
   const advances = new Map();
   function advanceReview(order, anchor) {
     const pending = new Set([...visibleItems(), ...archiveItems()].filter((item) => !decisionsById().has(item.id) && !isLocked(item)).map((item) => item.id));
     const index = order.indexOf(anchor);
-    activeId = [...order.slice(index + 1), ...order.slice(0, index + 1)].find((id) => pending.has(id)) ?? null;
+    activeId = pending.has(anchor) ? anchor : [...order.slice(index + 1), ...order.slice(0, index + 1)].find((id) => pending.has(id)) ?? null;
     render(true); $('detail').focus({ preventScroll: true });
   }
   function unavailable() { return liveSession && (!connected || writing); }
@@ -49,7 +52,8 @@
     if (input) input.disabled = !connected;
     const batch = document.querySelector('[data-testid="archive-batch"] button[data-batch-approve]');
     if (batch) batch.disabled = unavailable() || new Set(archiveItems().map(shape)).size !== 1;
-    renderBulk(); renderActionLog();
+    renderBulk(); renderActionLog(); renderCardControls();
+    $('confirm-control').disabled = unavailable();
   }
   function connectionLost() {
     connected = false;
@@ -67,7 +71,9 @@
     if (!response.ok) throw new Error(`Server rejected request (${response.status})`);
     return response.json();
   }
-  function acceptEvents(incoming, inputs = []) {
+  function acceptEvents(incoming, inputs = [], currentIds) {
+    if (currentIds) currentInputIds = new Set(currentIds);
+    else for (const event of incoming) if (event.id === event.decision_id) currentInputIds.add(event.id);
     if (!Array.isArray(incoming) || !Array.isArray(inputs)) throw new Error('Invalid result events');
     for (const input of inputs) ledgerInputs.set(input.id, input);
     const nextEvents = new Map(events);
@@ -75,13 +81,13 @@
     const decisions = new Map(originalServerFeed.decisions.map((entry) => [JSON.stringify([entry.batch_id, entry.id]), entry]));
     for (const event of [...events.values(), ...incoming]) {
       if (!event || typeof event.id !== 'string' || typeof event.decision_id !== 'string' ||
-          !Array.isArray(event.item_ids) || !event.item_ids.every((id) => feed.items.some((item) => item.id === id)) ||
-          !['decision', 'thread', 'status'].includes(event.kind) ||
-          !['queued', 'rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'waiting', 'declined', 'deferred', 'stopped'].includes(event.status) ||
+          !Array.isArray(event.item_ids) || !event.item_ids.every((id) => typeof id === 'string') ||
+          !['decision', 'thread', 'status', 'control', 'compensation'].includes(event.kind) ||
+          !['queued', 'rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'waiting', 'declined', 'deferred', 'stopped', 'withdrawn', 'no_effect', 'sent', 'unarchived', 'cancelled'].includes(event.status) ||
           typeof event.text !== 'string' || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))) throw new Error('Invalid result event');
       if (nextEvents.has(event.id) && JSON.stringify(nextEvents.get(event.id)) !== JSON.stringify(event)) throw new Error('Conflicting result event');
       nextEvents.set(event.id, event);
-      if (event.kind === 'decision') {
+      if (event.kind === 'decision' && currentInputIds.has(event.id)) {
         if (!Array.isArray(event.decisions)) throw new Error('Missing decision history');
         for (const entry of event.decisions) {
           if (entry.batch_id !== event.decision_id || !event.item_ids.includes(entry.id)) throw new Error('Uncorrelated decision');
@@ -111,7 +117,7 @@
     try {
       const result = await request(`/results?since=${cursor}`);
       if (!Number.isSafeInteger(result.cursor) || result.cursor < cursor) throw new Error('Invalid result cursor');
-      acceptEvents(result.events, result.inputs); cursor = result.cursor;
+      acceptEvents(result.events, result.inputs, result.current_ids); cursor = result.cursor;
     } catch { connectionLost(); }
     if (connected) setTimeout(pollResults, 3000);
   }
@@ -120,14 +126,18 @@
       const receipt = await request(path, body);
       if (receipt.id !== body.id) throw new Error('Uncorrelated receipt');
       acceptEvents([receipt]);
-      message('Received by the server. Queued for owner recheck, not proof of execution; follow the thread.');
-    } catch {
+      if (receipt.kind === 'control') {
+        const result = await request(`/results?since=${cursor}`);
+        acceptEvents(result.events, result.inputs, result.current_ids); cursor = result.cursor;
+      }
+      message('Received by the server. Inspect the action log for withdrawal, dependencies and execution outcomes; acceptance is not completion.');
+    } catch (error) {
       if (events.has(body.id)) {
         message('Server receipt confirmed by polling. Follow the thread; this request will not be retried.');
       } else {
         const local = localRequests.get(body.id);
         if (local) local.state = uncertainState;
-        connectionLost(); renderThreadEvents();
+        connectionLost(); message(`${error.message}. Unconfirmed change is local only / delivery uncertain. Inspect the action log; no automatic retry.`); renderThreadEvents();
       }
     } finally { writing = false; persist(); syncControls(); }
   }
@@ -145,7 +155,7 @@
       initialize(original, false);
       const result = await request('/results?since=0');
       if (!Number.isSafeInteger(result.cursor) || result.cursor < 0) throw new Error('Invalid result cursor');
-      acceptEvents(result.events, result.inputs); cursor = result.cursor;
+      acceptEvents(result.events, result.inputs, result.current_ids); cursor = result.cursor;
       connected = true; render();
       $('source').textContent = 'Live decisions and owner results · source evidence is a frozen snapshot, not live verification. Every approval requires a fresh recheck.';
       message(restoreProblem || (localRequests.size ? 'Connected. Restored LOCAL ONLY / UNCERTAIN audit entries; inspect them in All items. No request was replayed.' : 'Connected. New decisions are sent immediately once; old decisions are never replayed.'));
@@ -196,13 +206,15 @@
           const keys = ['id', 'kind', 'item_ids', 'text', 'action', 'at', 'decisions', 'state'];
           if (!local || Object.keys(local).length !== keys.length || keys.some((key) => !Object.hasOwn(local, key)) ||
               typeof local.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(local.id) || restored.has(local.id) ||
-              !['decision', 'thread'].includes(local.kind) || !Array.isArray(local.item_ids) || !local.item_ids.length || new Set(local.item_ids).size !== local.item_ids.length ||
+              !['decision', 'thread', 'control'].includes(local.kind) || !Array.isArray(local.item_ids) || !local.item_ids.length || new Set(local.item_ids).size !== local.item_ids.length ||
               !local.item_ids.every((id) => feed.items.some((item) => item.id === id && !isLocked(item))) ||
               typeof local.text !== 'string' || local.text.length > 10000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(local.text) ||
               typeof local.at !== 'string' || !Number.isFinite(Date.parse(local.at)) || !Array.isArray(local.decisions) || typeof local.state !== 'string') throw new Error('Invalid local audit entry');
           if (local.kind === 'decision') {
             const validated = validateFeed({ ...feed, decisions: local.decisions }).decisions;
             if (validated.length !== local.item_ids.length || validated.some((entry, index) => entry.id !== local.item_ids[index] || entry.batch_id !== local.id || entry.action !== local.action || entry.comment !== local.text || entry.decided_at !== local.at)) throw new Error('Uncorrelated local decision');
+          } else if (local.kind === 'control') {
+            if (local.decisions.length || !['undo', 'change'].includes(local.action)) throw new Error('Invalid local control');
           } else if (local.decisions.length || local.item_ids.length !== 1 || !local.text.trim() || !['stop', 'ask_info'].includes(local.action)) throw new Error('Invalid local thread');
           restored.set(local.id, { ...local, state: uncertainState });
         }
@@ -287,11 +299,17 @@
   }
   function localDecisions() { return [...localRequests.values()].flatMap((local) => local.decisions); }
   function reviewHistory() { return [...feed.decisions, ...localDecisions()].sort((a, b) => Date.parse(a.decided_at) - Date.parse(b.decided_at)); }
-  function decisionsById() { return new Map(reviewHistory().map((decision) => [decision.id, decision])); }
+  function withdrawnIds() { return new Set([...events.values()].filter((event) => event.kind === 'control').map((event) => event.target_id)); }
+  function decisionsById() {
+    const withdrawn = withdrawnIds();
+    return new Map(reviewHistory().filter((decision) => !withdrawn.has(decision.batch_id)).map((decision) => [decision.id, decision]));
+  }
   function resultById() {
     const result = new Map();
-    for (const event of [...events.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
-      if (event.kind !== 'decision' && !(event.kind === 'status' && (event.status !== 'rechecking' || events.get(event.decision_id)?.kind === 'decision'))) continue;
+    const withdrawn = withdrawnIds();
+    for (const event of events.values()) {
+      if (!currentInputIds.has(event.decision_id) || withdrawn.has(event.decision_id)) continue;
+      if (event.kind === 'thread' || (event.status === 'rechecking' && events.get(event.decision_id)?.kind === 'thread')) continue;
       for (const id of event.item_ids) result.set(id, event);
     }
     return result;
@@ -300,6 +318,9 @@
     if (isLocked(item)) return false;
     if (result && (!decision || Date.parse(result.at) >= Date.parse(decision.decided_at))) {
       if (['blocked', 'waiting'].includes(result.status)) return true;
+      if (['unarchived', 'cancelled', 'no_effect'].includes(result.status)) return !decision && !archiveEligible(item);
+      if (result.kind === 'control') return result.status === 'withdrawn' && !result.replacement_id && !archiveEligible(item);
+      if (result.kind === 'compensation') return false;
       if (terminalStatuses.includes(result.status)) return false;
     }
     if ([...localRequests.values()].some((local) => local.item_ids.includes(item.id))) return true;
@@ -310,7 +331,8 @@
     return item.kind === 'session' && recommendationVerb(item) === 'archive' && canApprove(item) && !item.protected && !item.archived && !isLocked(item)
       && !decisions.has(item.id) && ![...localRequests.values()].some((local) => local.item_ids.includes(item.id))
       && !['blocked', 'waiting', ...terminalStatuses].includes(results.get(item.id)?.status)
-      && ![...events.values()].some((event) => event.item_ids.includes(item.id) && terminalStatuses.includes(event.status));
+      && ![...events.values()].some((event) => event.kind === 'compensation' && event.item_ids.includes(item.id) && !['unarchived', 'cancelled'].includes([...events.values()].filter((entry) => entry.decision_id === event.id).at(-1)?.status))
+      && ![...events.values()].some((event) => event.item_ids.includes(item.id) && terminalStatuses.includes(event.status) && !withdrawnIds().has(event.decision_id));
   }
   function listState() {
     return JSON.stringify([reviewHistory(), [...resultById()].map(([id, event]) => [id, event.id]), [...localRequests.values()].map((local) => [local.id, local.item_ids])]);
@@ -508,6 +530,7 @@
         const button = element('button', title); button.addEventListener('click', () => { comment.value = text; saveDraft(); comment.focus(); }); templates.append(button);
       }
       review.append(actions, commentLabel, comment, templates);
+      if (liveSession) { const controls = element('div'); controls.id = 'card-controls'; review.append(controls); renderCardControls(); }
     }
     const evidence = element('section', undefined, 'section'); evidence.dataset.field = 'evidence'; evidence.append(element('h3', 'Evidence checks'));
     const curated = ['PR checks', 'Diff stat', 'Spec results', 'Warden', 'Conflicts', 'Last message', 'Last assistant'];
@@ -608,6 +631,46 @@
     });
     return checks.every(Boolean) ? checks : [];
   }
+  function controlActions(input) {
+    const root = element('div', undefined, 'actions');
+    if (!liveSession || !['decision', 'thread'].includes(input.kind) || input.action === 'stop') return root;
+    const history = [...events.values()].filter((event) => event.decision_id === input.id && event.id !== input.id);
+    const lastEvent = history.some((event) => event.status === 'rechecking') ? history.at(-1) : undefined;
+    const last = lastEvent?.status;
+    const outcomes = lastEvent?.outcomes?.map((entry) => entry.status);
+    const knownTargets = outcomes?.length === input.item_ids.length && outcomes.every((status) => ['no_effect', 'archived', 'sent', 'waiting', 'reply'].includes(status));
+    const archiveEffect = last === 'archived' || outcomes?.includes('archived');
+    const completedMessage = ['ask_info', 'request_changes', 'comment'].includes(input.action) && [last, ...(outcomes ?? [])].some((status) => ['sent', 'waiting', 'reply'].includes(status));
+    const reason = !currentInputIds.has(input.id) ? 'Older snapshot — reconcile first'
+      : withdrawnIds().has(input.id) ? 'Withdrawn / changed — follow the linked requests'
+        : history.some((event) => event.status === 'merged' || event.outcomes?.some((outcome) => outcome.status === 'merged')) ? 'Merge is not reversible'
+          : last === 'rechecking' ? 'Running — cannot interrupt'
+            : last && input.item_ids.length > 1 && !outcomes && !['no_effect', 'declined', 'deferred'].includes(last) && !['decline', 'defer'].includes(input.action) ? 'Bulk outcome needs complete per-target receipts first'
+              : last && !knownTargets && !['archived', 'no_effect', 'declined', 'deferred'].includes(last) && !completedMessage && !(last === 'done' && ['decline', 'defer'].includes(input.action)) ? 'Blocked, mixed or unknown — reconcile external effects first' : '';
+    root.append(element('span', reason || (completedMessage ? 'Cannot unsend. A reviewed cancellation/follow-up will be sent.' : archiveEffect ? 'Undo queues unarchive after fresh checks.' : 'Queued withdrawal wins only before the atomic claim.'), 'small muted'));
+    for (const mode of ['undo', 'change']) {
+      const button = element('button', mode === 'undo' ? 'Undo decision' : 'Change decision');
+      button.dataset.controlMode = mode; button.disabled = unavailable() || Boolean(reason) || localRequests.size > 0;
+      button.addEventListener('click', () => {
+        controlTarget = { input, mode };
+        $('control-title').textContent = mode === 'undo' ? 'Undo this entire decision?' : 'Change this entire decision?';
+        $('control-items').replaceChildren(...input.item_ids.map((id) => element('li', `${feed.items.find((item) => item.id === id)?.title || id} · ${id}`)));
+        $('replacement-fields').hidden = mode !== 'change';
+        $('replacement-action').value = input.action in labels ? input.action : 'decline';
+        $('replacement-comment').value = '';
+        $('control-text').value = '';
+        $('control-effect').textContent = `${input.item_ids.length} target(s), whole batch only. ${completedMessage ? 'The original message cannot be unsent. Enter the exact cancellation/follow-up message.' : archiveEffect ? 'Queue unarchive only for targets explicitly reported archived, after live rechecks. Explicit no-effect targets need no compensation.' : 'Withdraw only if still unclaimed; running work cannot be interrupted.'} ${mode === 'change' ? 'The replacement waits for successful compensation. Failure or uncertainty blocks it.' : ''} History is append-only.`;
+        $('control-dialog').showModal();
+      });
+      root.append(button);
+    }
+    return root;
+  }
+  function renderCardControls() {
+    const root = $('card-controls'); if (!root) return;
+    const latest = [...events.values()].filter((event) => event.id === event.decision_id && ['decision', 'thread'].includes(event.kind) && event.item_ids.includes(activeId)).at(-1);
+    root.replaceChildren(...(latest ? [controlActions(latest)] : []));
+  }
   function openLoggedCard(id) {
     if (!feed.items.some((item) => item.id === id)) { message('This card is from an older snapshot. Its history is retained; reload the matching source to inspect it.'); return; }
     for (const name of ['search', 'kind', 'group', 'recommendation', 'status']) $(name).value = '';
@@ -623,6 +686,9 @@
       requests.set(decision.batch_id, { id: decision.batch_id, item_ids: batch.map((entry) => entry.id), action: decision.action, at: decision.decided_at, text: decision.comment, status: liveSession ? 'Source history — not replayed' : 'Recorded offline — not executed' });
     }
     for (const [id, local] of localRequests) requests.set(id, { ...local, status: local.state });
+    const signature = JSON.stringify([snapshot, [...requests], [...events.values()], [...currentInputIds], unavailable()]);
+    if (signature === logSignature) return;
+    logSignature = signature;
     const nodes = [];
     for (const input of [...requests.values()].reverse()) {
       const history = [...events.values()].filter((event) => event.decision_id === input.id && event.id !== input.id);
@@ -634,8 +700,14 @@
         const item = feed.items.find((entry) => entry.id === id) || input.items?.find((entry) => entry.id === id);
         const open = element('button', `${item?.title || id} · ${id}`); open.addEventListener('click', () => openLoggedCard(id)); row.append(open);
       }
-      row.append(element('div', input.text || '(no comment)'));
-      for (const event of history) row.append(element('div', `${event.at} · ${event.status === 'rechecking' ? 'running / rechecking' : event.status} · ${event.text}`));
+      row.append(element('div', input.text || '(no comment)'), controlActions(input));
+      for (const name of ['target_id', 'control_id', 'compensation_id', 'replacement_id', 'depends_on']) {
+        if (input[name]) row.append(element('div', `${name}: ${input[name]}`, 'small muted'));
+      }
+      for (const event of history) {
+        row.append(element('div', `${event.at} · ${event.status === 'rechecking' ? 'running / rechecking' : event.status} · ${event.text}`));
+        for (const outcome of event.outcomes ?? []) row.append(element('div', `${outcome.item_id} · ${outcome.status} · ${outcome.text}`));
+      }
       nodes.push(row);
     }
     root.replaceChildren(...(nodes.length ? nodes : [element('p', 'No decisions recorded yet.', 'muted')]));
@@ -654,7 +726,7 @@
       const time = new Date(event.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
       const status = { queued: 'Queued for owner recheck', rechecking: 'Rechecking…', done: `Done · ${time}`, archived: `Done · archived ${time}`, merged: `Merged · ${time}`, blocked: `Blocked: ${event.text}`, reply: `Reply from owner: ${event.text}`, waiting: `Waiting: ${event.text}`, declined: `Declined · ${time}`, deferred: `Deferred · ${time}`, stopped: `Stopped · ${time}` }[event.status];
       const row = element('div', undefined, 'history'); row.dataset.eventId = event.id;
-      row.append(element('strong', status));
+      row.append(element('strong', status || `${event.status} · ${event.action} · ${time}`));
       if (event.kind === 'decision') row.append(element('div', labels[event.action] || event.action));
       if (event.text && !['blocked', 'reply', 'waiting'].includes(event.status)) row.append(element('div', `${event.author === 'human' || event.kind === 'decision' ? 'You: ' : ''}${event.text}`));
       nodes.push(row);
@@ -680,6 +752,7 @@
       const item = feed.items.find((entry) => entry.id === id);
       return item?.kind === 'session' && recommendationVerb(item) === 'archive' && !archiveEligible(item);
     })) throw new Error('Archive approval unavailable: already decided, completed, blocked or awaiting human follow-up. It cannot be included in another archive batch.');
+    if (liveSession && ids.some((id) => [...localRequests.values()].some((entry) => entry.item_ids.includes(id)) || decisionsById().has(id))) throw new Error('Existing or uncertain decision: use Undo/change on its exact request in the action log.');
     if (unavailable()) throw new Error('Wait for the pending request or inspect the lost connection. Nothing was sent.');
     if (action === 'approve' && ids.length > 1 && feed.items.some((item) => ids.includes(item.id) && recommendationVerb(item).toLowerCase().trim() === 'merge')) throw new Error('Bulk merge approval is forbidden.');
   }
@@ -715,7 +788,7 @@
     $('confirm-title').textContent = `${labels[action]} ${ids.length} items?`;
     $('confirm-description').textContent = comment ? `Shared comment: ${comment}` : 'No shared comment. All listed items have the same kind, group and recommendation.';
     $('batch-preview').replaceChildren(...ids.map((id) => element('li', `${feed.items.find((item) => item.id === id).title} — ${id}`)));
-    $('confirm-effect').textContent = liveSession ? 'Confirmation sends this batch immediately once to the executor for rechecking. It cannot be undone or unsent here.' : 'This records decisions only. It does not merge, close, archive or message anything.';
+    $('confirm-effect').textContent = liveSession ? 'Confirmation sends this entire batch once for rechecking. Queued work can be withdrawn before claim; running work cannot be interrupted. Later undo/change requires the action log and outcome-specific compensation.' : 'This records decisions only. It does not merge, close, archive or message anything.';
     $('confirm-dialog').showModal();
   }
   function liveExport() {
@@ -767,12 +840,27 @@
     if (!pendingBatch) return;
     const { ids, action, comment } = pendingBatch; decide(ids, action, comment); pendingBatch = null; $('bulk-comment').value = ''; $('confirm-dialog').close(); $('detail').focus({ preventScroll: true });
   }));
+  $('cancel-control').addEventListener('click', () => { controlTarget = null; $('control-dialog').close(); });
+  $('control-dialog').addEventListener('cancel', () => { controlTarget = null; });
+  $('confirm-control').addEventListener('click', guarded(() => {
+    if (!controlTarget || unavailable() || localRequests.size) throw new Error('Inspect pending requests before changing a decision.');
+    const { input, mode } = controlTarget;
+    const id = crypto.randomUUID();
+    const at = new Date().toISOString();
+    const text = $('control-text').value;
+    const replacement = mode === 'change' ? { action: $('replacement-action').value, comment: $('replacement-comment').value, decided_at: at } : null;
+    if (replacement) applyDecision({ ...feed, decisions: reviewHistory() }, input.item_ids, replacement.action, replacement.comment, at, id);
+    localRequests.set(id, { id, kind: 'control', item_ids: input.item_ids, text, action: mode, at, decisions: [], state: 'Sending control — receipt not confirmed' });
+    writing = true; persist(); syncControls(); renderThreadEvents();
+    controlTarget = null; $('control-dialog').close();
+    void postOnce('/controls', { id, target_id: input.id, mode, replacement, text, snapshot: serverSnapshot });
+  }));
   $('undo').addEventListener('click', guarded(() => { if (liveSession) throw new Error('Live decisions cannot be unsent or undone.'); feed = undoLast(feed); dirty = true; exportStamp = ''; selected.clear(); persist(); render(); message('Undid the last recorded batch. Previously exported files are unchanged: export a replacement and do not execute the old one.'); }));
   $('export-json').addEventListener('click', guarded(() => download('json')));
   $('export-markdown').addEventListener('click', guarded(() => download('markdown')));
   window.addEventListener('beforeunload', (event) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
   document.addEventListener('keydown', guarded((event) => {
-    if (!feed || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.repeat || event.isComposing || $('confirm-dialog').open || unavailable()) return;
+    if (!feed || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.repeat || event.isComposing || $('confirm-dialog').open || $('control-dialog').open || unavailable()) return;
     if (!(event.target instanceof Element) || event.target.closest('input,textarea,select,button,a,summary,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
     const items = visibleItems(); const index = items.findIndex((item) => item.id === activeId);
     if (event.key === 'j' || event.key === 'k') {

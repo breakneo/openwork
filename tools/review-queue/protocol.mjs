@@ -7,7 +7,7 @@ export const MAX_BODY = 8 * 1024 * 1024;
 export const MAX_FEED = 4 * 1024 * 1024;
 export const MAX_RECORD = 16 * 1024 * 1024;
 export const MAX_LOG = 64 * 1024 * 1024;
-export const STATES = ['rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'deferred', 'declined', 'waiting', 'stopped'];
+export const STATES = ['rechecking', 'done', 'archived', 'merged', 'blocked', 'reply', 'deferred', 'declined', 'waiting', 'stopped', 'no_effect', 'sent', 'unarchived', 'cancelled'];
 
 export function fail(message, status = 400) {
   const error = new Error(message);
@@ -146,8 +146,8 @@ export function appendEvent(directory, name, value) {
   } finally { closeSync(fd); }
 }
 
-export function writeServerFile(directory, value) {
-  const fd = privateFile(join(directory, 'server.json'), constants.O_WRONLY | constants.O_CREAT);
+export function writeServerFile(directory, value, name = 'server.json') {
+  const fd = privateFile(join(directory, name), constants.O_WRONLY | constants.O_CREAT);
   try {
     const bytes = Buffer.from(JSON.stringify(value) + '\n');
     ftruncateSync(fd, 0);
@@ -166,13 +166,105 @@ export function existingReceipt(directory, inputs, request) {
   return existing.event;
 }
 
-export function enqueue(directory, request, event) {
-  const input = { request, event };
+export function enqueue(directory, request, event, children, snapshot) {
+  const input = { request, event, ...(children ? { protocol: 2, children } : {}), ...(snapshot ? { snapshot } : {}) };
   checkAppend(directory, 'decisions.jsonl', input);
-  checkAppend(directory, 'results.jsonl', event);
+  for (const entry of [event, ...(children ?? [])]) checkAppend(directory, 'results.jsonl', entry);
   appendEvent(directory, 'decisions.jsonl', input);
-  appendEvent(directory, 'results.jsonl', event);
+  for (const entry of [event, ...(children ?? [])]) appendEvent(directory, 'results.jsonl', entry);
   return event;
+}
+
+export function readQueue(directory) {
+  const records = readLog(directory, 'decisions.jsonl');
+  const events = readLog(directory, 'results.jsonl');
+  const entries = [];
+  const ids = new Set();
+  for (const record of records) {
+    if (record.protocol !== undefined && record.protocol !== 2) fail('Unknown queue protocol', 503);
+    if (record.protocol === 2 && (!Array.isArray(record.children) || record.event.kind !== 'control')) fail('Invalid control envelope', 503);
+    for (const event of [record.event, ...(record.children ?? [])]) {
+      if (!event || ids.has(event.id) || event.id !== event.decision_id || !Array.isArray(event.item_ids)) fail('Invalid or duplicate work input', 503);
+      ids.add(event.id);
+      const published = events.find((entry) => entry.id === event.id);
+      if (published && !isDeepStrictEqual(published, event)) fail('Inconsistent receipt; manual recovery required', 503);
+      if (!published && record.protocol === 2) {
+        appendEvent(directory, 'results.jsonl', event);
+        events.push(event);
+      }
+      entries.push({ event, snapshot: record.snapshot ?? record.request.body.snapshot });
+    }
+  }
+  return { records, entries, inputs: entries.map((entry) => entry.event), events };
+}
+
+export function workHistory(input, events) {
+  return events.filter((event) => event.decision_id === input.id && event.id !== input.id);
+}
+
+export function controlledIds(inputs) {
+  return new Set(inputs.filter((input) => input.kind === 'control').map((input) => input.target_id));
+}
+
+export function outstandingInputs(inputs, events) {
+  const controlled = controlledIds(inputs);
+  return inputs.filter((input) => {
+    if (input.kind === 'control' || controlled.has(input.id) || input.action === 'stop') return false;
+    if (input.kind === 'compensation') return !['unarchived', 'cancelled'].includes(workHistory(input, events).at(-1)?.status);
+    return input.kind === 'decision';
+  });
+}
+
+export function reversalPlan(input, inputs, events, mode = 'undo') {
+  if (!input || !['decision', 'thread'].includes(input.kind) || input.action === 'stop') fail('This request cannot be controlled', 409);
+  if (controlledIds(inputs).has(input.id)) fail('Already withdrawn or changed; inspect its linked requests', 409);
+  const history = workHistory(input, events);
+  const overlap = outstandingInputs(inputs, events).some((other) => other.id !== input.id && other.item_ids.some((id) => input.item_ids.includes(id)));
+  if (mode === 'change' && overlap) fail('Other same-item work exists; reconcile all affected requests first', 409);
+  if (history.some((event) => event.status === 'merged' || event.outcomes?.some((outcome) => outcome.status === 'merged'))) fail('Merge is not reversible', 409);
+  const withdrawal = { action: 'withdraw', items: [] };
+  if (!history.some((event) => event.status === 'rechecking')) return withdrawal;
+  const last = history.at(-1);
+  if (last.status === 'rechecking') fail('Running work cannot be interrupted; inspect its outcome first', 409);
+  if (last.status === 'no_effect') return withdrawal;
+  if (['decline', 'defer'].includes(input.action) && ['done', 'declined', 'deferred'].includes(last.status)) {
+    if (history.some((event) => [event.status, ...(event.outcomes ?? []).map((outcome) => outcome.status)].some((status) => ['archived', 'sent', 'waiting', 'reply'].includes(status)))) fail('Unexpected external effects require manual reconciliation', 409);
+    return withdrawal;
+  }
+  if (overlap) fail('Other same-item work exists; reconcile all affected requests first', 409);
+  if (input.items.length > 1 && !last.outcomes) fail('Bulk outcome needs complete per-target receipts before compensation; partial effects may exist', 409);
+  const affected = [];
+  let action = 'withdraw';
+  for (const item of input.items) {
+    const status = last.outcomes ? last.outcomes.find((outcome) => outcome.item_id === item.id)?.status : last.status;
+    if (status === 'no_effect') continue;
+    if (status === 'archived' && input.action === 'approve' && item.kind === 'session' && ['archive', 'review_archive_eligibility'].includes(item.recommended_action)) action = 'unarchive';
+    else if (['ask_info', 'request_changes', 'comment'].includes(input.action) && ['sent', 'waiting', 'reply'].includes(status)) action = 'cancel_followup';
+    else fail('Outcome is blocked, mixed or unknown; external effects may exist. Reconcile every target before undo/change', 409);
+    affected.push(item);
+  }
+  return { action, items: affected };
+}
+
+export function dependencyReady(input, inputs, events) {
+  if (!input.depends_on) return true;
+  const dependency = inputs.find((entry) => entry.id === input.depends_on);
+  if (!dependency || dependency.kind !== 'compensation') fail('Invalid compensation dependency', 503);
+  const expected = dependency.action === 'unarchive' ? 'unarchived' : 'cancelled';
+  return workHistory(dependency, events).at(-1)?.status === expected;
+}
+
+export function validateOutcomes(input, status, outcomes) {
+  if (outcomes === undefined) {
+    if (input.kind === 'compensation' && input.item_ids.length > 1 && ['unarchived', 'cancelled'].includes(status)) fail('Successful bulk compensation requires complete per-target outcomes');
+    return;
+  }
+  if (!Array.isArray(outcomes) || outcomes.length !== input.item_ids.length || new Set(outcomes.map((entry) => entry.item_id)).size !== outcomes.length) fail('Outcomes must cover every claimed target exactly once');
+  for (const entry of outcomes) {
+    exactObject(entry, ['item_id', 'status', 'text']); boundedText(entry.text);
+    if (!input.item_ids.includes(entry.item_id) || !STATES.includes(entry.status) || entry.status === 'rechecking') fail('Invalid per-target outcome');
+    if (!['done', 'blocked'].includes(status) && entry.status !== status) fail('Aggregate status contradicts per-target outcomes');
+  }
 }
 
 export function statusEvent(input, status, text) {

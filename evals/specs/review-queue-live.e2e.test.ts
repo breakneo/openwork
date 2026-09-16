@@ -54,6 +54,9 @@ test('live review posts explicit decisions, polls correlated threads and keeps p
     expect(await page.locator('#detail [data-field="evidence"] table').count()).toBe(1);
     expect(await page.locator('#detail script').count()).toBe(0);
     await page.locator('#detail [data-action="approve"]').click();
+    await expect.poll(() => page.getByTestId('action-log').textContent()).toContain('queued');
+    await page.locator('#status').selectOption('decided');
+    await page.locator('[data-id="ses_review"] .row-open').click();
     await expect.poll(() => page.getByTestId('thread-events').textContent()).toContain('Queued');
     const work = next(live.directory);
     expect(work?.action).toBe('approve');
@@ -61,12 +64,10 @@ test('live review posts explicit decisions, polls correlated threads and keeps p
     await page.getByTestId('thread-input').fill('Preserve editor on result changes');
     await page.getByTestId('thread-input').focus();
     const editor = await page.getByTestId('thread-input').elementHandle();
-    const archiveDetails = await page.getByTestId('archive-batch').locator('details').elementHandle();
     result(work.id, 'blocked', 'Synthetic recheck needs owner evidence.', live.directory);
     await expect.poll(() => page.getByTestId('thread-events').textContent(), { timeout: 10000 }).toContain('Blocked: Synthetic recheck needs owner evidence.');
     expect(await page.locator('[data-id="ses_review"] .row-meta').textContent()).toContain('blocked: Synthetic recheck');
     expect(await editor?.evaluate((node) => node.isConnected && node === document.activeElement)).toBe(true);
-    expect(await archiveDetails?.evaluate((node) => node.isConnected && node.hasAttribute('open'))).toBe(true);
     expect(await page.getByTestId('thread-input').inputValue()).toBe('Preserve editor on result changes');
     await page.getByTestId('thread-input').fill('Please explain <script>literal</script>');
     await page.getByTestId('thread-send').click();
@@ -198,6 +199,7 @@ test('uncertain delivery stays local, disables writes and never replays on poll 
     await page.unroute('**/decisions');
     await page.reload();
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+    await page.locator('#status').selectOption('decided');
     expect(await page.locator('#decision-history .history').count()).toBe(1);
     expect(await page.getByTestId('thread-events').textContent()).toContain('Queued');
     expect(posts).toHaveLength(1);
@@ -308,7 +310,8 @@ test('a polling receipt wins over a later failed POST response without retrying'
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     await page.route('**/decisions', async (route) => { await route.fetch(); await gate; await route.abort('connectionfailed'); });
     await page.locator('[data-action="approve"]').click();
-    await expect.poll(() => page.getByTestId('thread-events').textContent(), { timeout: 8000 }).toContain('Queued');
+    await expect.poll(() => page.getByTestId('action-log').textContent(), { timeout: 8000 }).toContain('queued');
+    await page.locator('#status').selectOption('decided');
     expect(await page.locator('[data-action="decline"]').isDisabled()).toBe(true);
     release();
     await expect.poll(() => page.locator('#message').textContent()).toContain('confirmed by polling');
@@ -401,12 +404,13 @@ test('human filtering follows terminal dispositions and surfaces blocked archive
     await page.getByTestId('archive-batch').locator('summary').click();
     await page.getByTestId('archive-batch').getByRole('button', { name: 'fresh', exact: true }).click();
     await page.locator('[data-action="approve"]').click();
-    await expect.poll(() => page.getByTestId('thread-events').textContent()).toContain('Queued');
+    await expect.poll(() => page.getByTestId('action-log').textContent()).toContain('queued');
     expect(await page.getByTestId('archive-batch').count()).toBe(0);
     const archive = next(live.directory);
     result(archive.id, 'blocked', 'Missing archive evidence', live.directory);
     await expect.poll(() => page.locator('[data-id="ses_fresh"] .row-meta').textContent(), { timeout: 8000 }).toContain('blocked: Missing archive evidence');
     expect(await page.getByTestId('archive-batch').count()).toBe(0);
+    await page.locator('[data-id="ses_fresh"] .row-open').click();
     await page.getByTestId('thread-input').fill('Draft kept as the row disappears');
     await page.getByTestId('thread-input').focus();
     const editor = await page.getByTestId('thread-input').elementHandle();
@@ -432,7 +436,7 @@ test('human filtering follows terminal dispositions and surfaces blocked archive
     for (const action of ['decline', 'defer']) {
       await page.locator(`[data-id="ses_review${action}"] .row-open`).click();
       await page.locator(`[data-action="${action}"]`).click();
-      await expect.poll(() => page.getByTestId('thread-send').isDisabled()).toBe(false);
+      await expect.poll(() => page.locator(`[data-id="ses_review${action}"]`).count()).toBe(0);
       expect(await page.locator(`[data-id="ses_review${action}"]`).count()).toBe(0);
     }
     expect(await page.getByTestId('queue-row').count()).toBe(0);

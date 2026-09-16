@@ -263,8 +263,10 @@ test('request idempotency is durable and threads use encoded identities, UUIDs a
     expect(records(live.directory).some((event) => event.decision_id === thread.id && event.status === 'rechecking')).toBe(false);
     expect(existsSync(marker)).toBe(false);
     const full = JSON.parse((await http(live, '/results?since=0')).text);
-    expect(full).toEqual({ cursor: records(live.directory).length, events: records(live.directory) });
-    expect(JSON.parse((await http(live, `/results?since=${full.cursor}`)).text)).toEqual({ cursor: full.cursor, events: [] });
+    const inputs = records(live.directory, 'decisions.jsonl').map((record) => record.event);
+    const current_ids = [body.id, thread.id, stop.id];
+    expect(full).toEqual({ cursor: records(live.directory).length, events: records(live.directory), inputs, current_ids });
+    expect(JSON.parse((await http(live, `/results?since=${full.cursor}`)).text)).toEqual({ cursor: full.cursor, events: [], inputs, current_ids });
     expect(JSON.parse((await http(live, '/results?since=3')).text).events).toEqual(full.events.slice(3));
   });
   evidence.recordAssertionEvidence('Durable idempotency and per-item human threads', 'Concurrent/equivalent key-order requests produce one original receipt, changed bodies/routes conflict, encoded PR thread identity and UUID/text bounds validated; stop claims first and durably prevents later work claims, cursors return exact suffixes and claimed work never reappears.', true);
@@ -297,7 +299,8 @@ test('executor subprocess persists claims before output, skips concurrent claims
       expect(execute(live.directory, ...args).status).toBe(1);
     }
     expect(readFileSync(join(live.directory, 'results.jsonl'), 'utf8')).toBe(before);
-    const second = decision(source(), { action: 'defer' });
+    expect((await http(live, '/decisions', { body: decision(source(), { action: 'defer' }) })).status).toBe(409);
+    const second = decision(source(), { ids: ['ses_alias'], action: 'defer' });
     expect((await http(live, '/decisions', { body: second })).status).toBe(200);
     const workers = [0, 1].map(() => {
       const child = spawn(process.execPath, [join(sourceDirectory, 'executor.mjs'), 'next', '--dir', live.directory], { stdio: ['ignore', 'pipe', 'pipe'] });

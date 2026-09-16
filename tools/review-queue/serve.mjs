@@ -1,10 +1,10 @@
 import { createServer } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateFeed, applyDecision, isLocked, recommendationVerb } from './core.mjs';
 import { buildHtml } from './build.mjs';
-import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, readLog, writeServerFile, existingReceipt, enqueue, cliArgs } from './protocol.mjs';
+import { MAX_BODY, MAX_FEED, boundedText, requestId, exactObject, fail, privateDirectory, readBounded, exclusiveFile, withLedger, writeServerFile, existingReceipt, enqueue, cliArgs, readQueue, outstandingInputs, reversalPlan } from './protocol.mjs';
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -52,7 +52,7 @@ async function readBody(request) {
 function routeFor(method, path) {
   if (method === 'GET' && ['/', '/index.html', '/server.json', '/feed'].includes(path)) return path;
   if (method === 'GET' && /^\/results(?:\?since=(?:0|[1-9]\d*))?$/.test(path)) return '/results';
-  if (method === 'POST' && path === '/decisions') return path;
+  if (method === 'POST' && ['/decisions', '/controls'].includes(path)) return path;
   if (method === 'POST' && /^\/threads\/[^/?#]+$/.test(path)) return '/threads';
   fail('Not found', 404);
 }
@@ -97,29 +97,69 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
         const since = path.includes('?') ? Number(path.slice(path.indexOf('=') + 1)) : 0;
         if (!Number.isSafeInteger(since)) fail('Invalid cursor');
         const result = withLedger(directory, () => {
-          const events = readLog(directory, 'results.jsonl');
+          const { inputs, events, entries } = readQueue(directory);
           if (since > events.length) fail('Cursor is beyond the log', 409);
-          return { cursor: events.length, events: events.slice(since), inputs: readLog(directory, 'decisions.jsonl').map((input) => input.event) };
+          return { cursor: events.length, events: events.slice(since), inputs,
+            current_ids: entries.filter((entry) => entry.snapshot === snapshot || (entry.snapshot === undefined && entry.event.items.every((item) => JSON.stringify(item) === JSON.stringify(feed.items.find((current) => current.id === item.id))))).map((entry) => entry.event.id) };
         });
         send(200, result);
         return;
       }
       const body = await readBody(request);
       const receipt = withLedger(directory, () => {
-        const inputs = readLog(directory, 'decisions.jsonl');
-        const events = readLog(directory, 'results.jsonl');
+        const { records, inputs, events, entries } = readQueue(directory);
         const savedRequest = { route: path, body };
-        const existing = existingReceipt(directory, inputs, savedRequest);
+        const existing = existingReceipt(directory, records, savedRequest);
         if (existing) return existing;
         if (events.some((event) => event.id === body?.id)) fail('Request id conflicts with an existing event', 409);
+        if (route === '/controls') {
+          exactObject(body, ['id', 'target_id', 'mode', 'replacement', 'text', 'snapshot']);
+          requestId(body.id); requestId(body.target_id); boundedText(body.text, false);
+          if (!['undo', 'change'].includes(body.mode)) fail('Invalid control mode');
+          if (body.snapshot !== snapshot) fail('Stale snapshot; reload and review again', 409);
+          const target = entries.find((entry) => entry.event.id === body.target_id);
+          if (!target) fail('Unknown target request', 404);
+          if (target.snapshot !== snapshot || target.event.items.some((item) => { const current = feed.items.find((entry) => entry.id === item.id); return !current || isLocked(current); })) fail('Target belongs to stale or locked evidence; reconcile before control', 409);
+          const plan = reversalPlan(target.event, inputs, events, body.mode);
+          if (plan.action === 'cancel_followup') boundedText(body.text);
+          const now = new Date().toISOString();
+          const children = [];
+          let compensation;
+          if (plan.action !== 'withdraw') {
+            const id = randomUUID();
+            compensation = { id, decision_id: id, kind: 'compensation', action: plan.action, status: 'queued',
+              item_ids: plan.items.map((item) => item.id), items: plan.items, decisions: [], text: body.text,
+              at: now, control_id: body.id, target_id: target.event.id };
+            children.push(compensation);
+          }
+          let replacement;
+          if (body.mode === 'change') {
+            exactObject(body.replacement, ['action', 'comment', 'decided_at']);
+            boundedText(body.replacement.comment, false);
+            const previous = [...feed.decisions, ...entries.filter((entry) => entry.event.kind === 'decision' && entry.snapshot === snapshot).flatMap((entry) => entry.event.decisions)];
+            const id = randomUUID();
+            const next = applyDecision({ ...feed, decisions: previous }, target.event.item_ids, body.replacement.action, body.replacement.comment, body.replacement.decided_at, id);
+            if (body.replacement.action === 'approve' && target.event.items.length > 1 && target.event.items.some((item) => recommendationVerb(item) === 'merge')) fail('Bulk merge approval is forbidden');
+            replacement = { id, decision_id: id, item_ids: target.event.item_ids, kind: 'decision', action: body.replacement.action,
+              status: 'queued', text: body.replacement.comment, at: next.decisions.at(-1).decided_at,
+              items: target.event.items, decisions: next.decisions.slice(previous.length), control_id: body.id, target_id: target.event.id,
+              ...(compensation ? { depends_on: compensation.id } : {}) };
+            children.push(replacement);
+          } else if (body.replacement !== null) fail('Undo cannot contain a replacement');
+          return enqueue(directory, savedRequest, { id: body.id, decision_id: body.id, kind: 'control', action: body.mode,
+            status: plan.action === 'withdraw' ? 'withdrawn' : 'queued', target_id: target.event.id,
+            item_ids: target.event.item_ids, items: target.event.items, decisions: [], text: body.text, at: now,
+            compensation_id: compensation?.id ?? null, replacement_id: replacement?.id ?? null }, children);
+        }
         if (route === '/decisions') {
           exactObject(body, ['id', 'ids', 'action', 'comment', 'decided_at', 'snapshot']);
           requestId(body.id);
           boundedText(body.comment, false);
           if (typeof body.snapshot !== 'string') fail('Invalid snapshot');
           if (body.snapshot !== snapshot) fail('Stale snapshot; restart for feed updates and review again', 409);
-          const previous = [...feed.decisions, ...inputs.filter((input) => input.event.kind === 'decision' && input.request.body.snapshot === snapshot).flatMap((input) => input.event.decisions)];
+          const previous = [...feed.decisions, ...entries.filter((entry) => entry.event.kind === 'decision' && entry.snapshot === snapshot).flatMap((entry) => entry.event.decisions)];
           const next = applyDecision({ ...feed, decisions: previous }, body.ids, body.action, body.comment, body.decided_at, body.id);
+          if (outstandingInputs(inputs, events).some((input) => input.item_ids.some((id) => body.ids.includes(id)))) fail('An existing decision or compensation affects this card. Use Undo/change on its exact request', 409);
           const items = body.ids.map((id) => feed.items.find((item) => item.id === id));
           if (body.action === 'approve' && items.length > 1 && items.some((item) => recommendationVerb(item).toLowerCase().trim() === 'merge')) fail('Bulk merge approval is forbidden');
           return enqueue(directory, savedRequest, { id: body.id, decision_id: body.id, item_ids: body.ids,
@@ -137,7 +177,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
         if (isLocked(item)) fail('Locked item cannot have threads');
         return enqueue(directory, savedRequest, { id: body.id, decision_id: body.id, item_ids: [item.id],
           kind: 'thread', action: body.text.trim().toLowerCase() === 'stop' ? 'stop' : 'ask_info', status: 'queued',
-          text: body.text, at: new Date().toISOString(), items: [item], decisions: [], author: 'human' });
+          text: body.text, at: new Date().toISOString(), items: [item], decisions: [], author: 'human' }, undefined, snapshot);
       });
       send(200, receipt);
     } catch (error) {
@@ -151,7 +191,7 @@ export async function startServer({ feed: feedPath, dir = 'reports/review-queue'
   server.maxRequestsPerSocket = 100;
   server.on('close', release);
   try {
-    withLedger(directory, () => { readLog(directory, 'decisions.jsonl'); readLog(directory, 'results.jsonl'); });
+    withLedger(directory, () => { readQueue(directory); writeServerFile(directory, { snapshot, items: feed.items }, 'feed-state.json'); });
     await new Promise((ready, reject) => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); ready(); });
