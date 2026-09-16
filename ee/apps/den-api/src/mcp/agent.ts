@@ -16,6 +16,7 @@ import { z } from "zod"
 import { connectorCatalogSchema } from "@openwork/types/connection-action-app"
 import { connectorSetupList } from "./connector-catalog.js"
 import { registerAgentPluginFlowApp } from "./plugin-flow-app.js"
+import { registerAgentConnectionActionApp } from "./connection-action-app.js"
 import { publicRoute, tokenRoute } from "../middleware/index.js"
 import { db } from "../db.js"
 import { getMcpResourceContext, verifyMcpRequest } from "./auth.js"
@@ -92,6 +93,7 @@ import {
 import { registerAgentSkillTools } from "./skill-created-app.js"
 import {
   connectionActionSearchCard,
+  connectionActionAppMeta,
   connectionActionPayloadSchema,
 } from "./connection-action.js"
 import {
@@ -250,6 +252,7 @@ export function capabilitySearchToolResult<T extends CapabilityMatch>(matches: T
   return {
     content: textContent(JSON.stringify(result, null, 2)),
     structuredContent: result,
+    ...(card ? { _meta: connectionActionAppMeta(card.connectionId) } : {}),
   }
 }
 
@@ -496,6 +499,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
     }
     const server = createAgentMcpServer()
     registerAgentPluginFlowApp(server)
+    registerAgentConnectionActionApp(server, { organizationId: principal.organizationId, member: memberIdentity })
     if (method === "server/discover" || method === "initialize" || method === "resources/list" || method === "resources/read") {
       if (memberIdentity) {
         // Select before the per-member readiness probes so an ordinary client

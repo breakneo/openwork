@@ -7,15 +7,14 @@ import type { McpUiStyles, McpUiStyleVariableKey } from "@modelcontextprotocol/e
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
 import { legacyConnectionActionAppResourceUri } from "@openwork/types/connection-action-app"
-import { ConnectionCard } from "./connection-card"
-import { connectionCardPayloadFromChatToolResult, connectionResultFromChatToolPart, isConnectionDiscoveryTool, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution"
+import { isConnectionDiscoveryTool } from "@/components/tools/error-attribution"
+import { createConnectionActionController, hasHostConnectionActions, standardMcpToolResult } from "./mcp-connection-action"
 import { openDesktopUrl } from "@/app/lib/desktop"
 import { mcpAppResolutionRetryDelayMs } from "@/app/lib/mcp-app-resolution"
 import {
   OpenworkServerError,
   type OpenworkMcpAppLaunchReference,
   type OpenworkMcpAppResource,
-  type OpenworkMcpAppToolResult,
 } from "@/app/lib/openwork-server"
 import { useMessageList } from "./message-list-provider"
 import { createMcpAppActions, type McpAppOrigin } from "./mcp-app-origin"
@@ -133,7 +132,6 @@ function preservedResult(part: DynamicToolUIPart): PreservedMcpAppResult | null 
 
 export function hasPreservedMcpAppResult(part: DynamicToolUIPart): boolean {
   return preservedResult(part) !== null
-    || connectionCardPayloadFromChatToolResult(part.toolName, connectionResultFromChatToolPart(part), part.input) !== null
 }
 
 export function gatewayMcpAppLaunch(meta: unknown): OpenworkMcpAppLaunchReference | null {
@@ -198,10 +196,6 @@ export function secureMcpAppHtml(app: OpenworkMcpAppResource): string {
     return `${app.html.slice(0, htmlEnd)}<head>${meta}</head>${app.html.slice(htmlEnd)}`
   }
   return `<!doctype html><html><head>${meta}</head><body>${app.html}</body></html>`
-}
-
-function mcpToolResult(result: OpenworkMcpAppToolResult): CallToolResult {
-  return result as CallToolResult
 }
 
 /**
@@ -307,6 +301,7 @@ export type McpAppSandboxViewProps = {
   inputArguments: Record<string, unknown>
   /** Tool result delivered to the app once it initializes. */
   result: PreservedMcpAppResult
+  connectionController?: ReturnType<typeof createConnectionActionController> | null
   updateMode?: "replace" | "notify"
   onReady?: () => void
   /** Notice prefix shown when the sandboxed view cannot render. */
@@ -327,7 +322,7 @@ export type McpAppSandboxViewProps = {
  * bridges it to the workspace MCP App host. Chat messages and dashboard tiles
  * share this exact pipeline so rendering and diagnostics stay identical.
  */
-export function McpAppSandboxView({ origin, app, toolName, inputArguments, result, updateMode = "replace", onReady, unavailableNotice, onRequestTeardown, initialHeight, onHeightChange, presentation = "inline", onError }: McpAppSandboxViewProps) {
+export function McpAppSandboxView({ origin, app, toolName, inputArguments, result, connectionController, updateMode = "replace", onReady, unavailableNotice, onRequestTeardown, initialHeight, onHeightChange, presentation = "inline", onError }: McpAppSandboxViewProps) {
   const openworkServerClient = origin.client
   const workspaceId = origin.workspaceId
   const readOnly = origin.readOnly
@@ -431,6 +426,8 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
           displayMode: "inline",
           availableDisplayModes: ["inline"],
           styles: { variables: hostStyleVariables() },
+          ...(!readOnly && connectionController && hasHostConnectionActions(app)
+            ? { experimental: { "openwork/connection-actions": true } } : {}),
         },
       },
     )
@@ -496,9 +493,9 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
     }
     if (!readOnly) bridge.oncalltool = async ({ name, arguments: args, _meta }) => {
       try {
-        // The proxy overwrites this field on every request. App-supplied metadata
-        // cannot authorize a call or reuse another view's interaction proof.
-        return mcpToolResult(await actions.callTool(name, args, _meta?.["openwork/userInteraction"] === true))
+        const userInteraction = _meta?.["openwork/userInteraction"] === true
+        if (connectionController) return await connectionController.callTool(actions, app, name, args, userInteraction)
+        return standardMcpToolResult(await actions.callTool(name, args, userInteraction))
       } catch (cause) {
         if (cause instanceof OpenworkServerError && ["missing_launch_context", "stale_launch_context", "inactive_session"].includes(cause.code)) {
           fail("MCP_APP_LAUNCH_CONTEXT_STALE", "resource-resolution", cause, "Reopen the App in its original conversation before trying again.")
@@ -723,7 +720,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       disposed = true
       stopSandbox?.()
     }
-  }, [app, replacementInput, openworkServerClient, replacementResult, toolName, workspaceId, readOnly, origin, origin.sessionId, origin.engine, presentation, updateMode])
+  }, [app, replacementInput, openworkServerClient, replacementResult, toolName, workspaceId, readOnly, origin, origin.sessionId, origin.engine, presentation, updateMode, connectionController])
 
   if (error) return <McpAppDiagnosticNotice error={error} notice={unavailableNotice} />
   return (
@@ -748,21 +745,16 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
 
 export function McpAppFrame({ part }: { part: DynamicToolUIPart }) {
   const result = preservedResult(part)
-  const connectionResult = connectionResultFromChatToolPart(part)
-  const action = reconnectActionFromChatToolResult(part.toolName, connectionResult, part.input)
-  const connection = connectionCardPayloadFromChatToolResult(part.toolName, connectionResult, part.input)
-  if (action || connection) return <ConnectionCard part={part} action={action} connection={connection} />
   if (isRetiredFirstPartyConfirmation(part.toolName, result)) return null
-  // First-party connection UI is native, including historical app launches.
-  // Never route an unsupported connection response back into the old iframe.
   const launch = gatewayMcpAppLaunch(result?._meta)
-  if (part.toolName === "openwork-cloud_connection_action"
-    || (part.toolName.startsWith("openwork-cloud_") && !launch?.connectionId && launch?.resourceUri === legacyConnectionActionAppResourceUri)) return null
+  if ((!launch && /^(?:openwork_|openwork-cloud_)connection_action$/.test(part.toolName))
+    || (/^(?:openwork_|openwork-cloud_)/.test(part.toolName) && !launch?.connectionId
+      && launch?.resourceUri === legacyConnectionActionAppResourceUri)) return null
   return <EmbeddedMcpAppFrame part={part} />
 }
 
 function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
-  const { mcpAppOrigin: origin } = useMessageList()
+  const { mcpAppOrigin: origin, uiStateOwner, readOnly, getConnectionDecision, onMcpReconnect } = useMessageList()
   const openworkServerClient = origin?.client
   const workspaceId = origin?.workspaceId
   const nextResult = preservedResult(part)
@@ -776,6 +768,23 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
   }
   const result = resultCache.current.value
   const launch = useMemo(() => gatewayMcpAppLaunch(result?._meta), [result])
+  const scope = uiStateOwner ?? JSON.stringify([origin?.workspaceId, origin?.sessionId])
+  const sourceConnectionId = launch?.resourceUri === "ui://openwork/connection-action/v2/view.html"
+    && launch.toolName === "connection_action" && !launch.connectionId
+    && typeof launch.arguments.connectionId === "string" ? launch.arguments.connectionId : null
+  const source = useMemo<{ connectionId: string | null; sessionId: string | null }>(
+    () => ({ connectionId: null, sessionId: origin?.sessionId ?? null }),
+    [scope, origin?.client, origin?.workspaceId, origin?.sessionId, origin?.engine, part.toolCallId])
+  source.connectionId ??= sourceConnectionId
+  const initialConnectionId = source.connectionId
+  const hostRef = useRef({ scope, blocked: readOnly === true, decision: getConnectionDecision?.(part.toolCallId) ?? null, onReconnect: onMcpReconnect })
+  hostRef.current = { scope, blocked: readOnly === true || origin?.readOnly === true || initialConnectionId !== sourceConnectionId,
+    decision: getConnectionDecision?.(part.toolCallId) ?? null, onReconnect: onMcpReconnect }
+  const connectionController = useMemo(() => initialConnectionId
+    ? createConnectionActionController({ scope, sessionId: source.sessionId, toolCallId: part.toolCallId,
+      connectionId: initialConnectionId, current: () => hostRef.current }) : null,
+  [scope, source, part.toolCallId, initialConnectionId])
+  connectionController?.observeBinding()
   const [app, setApp] = useState<OpenworkMcpAppResource | null>(null)
   const [error, setError] = useState<McpAppDiagnostic | null>(null)
   const [resolveToken, setResolveToken] = useState(0)
@@ -862,6 +871,7 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
       toolName={part.toolName}
       inputArguments={inputArguments}
       result={result}
+      connectionController={connectionController}
       unavailableNotice={CHAT_MCP_APP_UNAVAILABLE_NOTICE}
       onRequestTeardown={() => {
         if (app.launchId) void origin.client.releaseMcpApp(origin.workspaceId, app.launchId).catch(() => undefined)

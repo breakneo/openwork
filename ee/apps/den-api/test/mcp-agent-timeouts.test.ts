@@ -333,7 +333,9 @@ test("capability search results include structured output alongside text compati
   const actionable = agentModule.capabilitySearchToolResult(blocked, undefined, true)
   expect(actionable.structuredContent.matches).toEqual(blocked)
   expect(actionable.structuredContent.connectionAction?.connectionId).toBe("emc_notes")
-  expect(actionable).not.toHaveProperty("_meta")
+  expect(actionable).toHaveProperty("_meta.openwork/mcpApp", {
+    toolName: "connection_action", resourceUri: "ui://openwork/connection-action/v2/view.html", arguments: { connectionId: "emc_notes" },
+  })
   expect(agentModule.SEARCH_CAPABILITIES_OUTPUT_SCHEMA.safeParse(actionable.structuredContent).success).toBe(true)
   expect(result).not.toHaveProperty("_meta")
 })
@@ -409,7 +411,9 @@ test("external capability failures preserve the slim agent-facing MCP error enve
     state: "reauth_required",
     action: { type: "reconnect" },
   })
-  expect(result).not.toHaveProperty("_meta")
+  expect(result).toHaveProperty("_meta.openwork/mcpApp", {
+    toolName: "connection_action", resourceUri: "ui://openwork/connection-action/v2/view.html", arguments: { connectionId: "emc_test" },
+  })
 })
 
 test("invalid capability arguments preserve corrective retry instructions", () => {

@@ -1,5 +1,7 @@
 import { beforeAll, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
+import { McpServer } from "@modelcontextprotocol/server"
 
 const API_ORIGIN = "http://127.0.0.1:8790"
 
@@ -19,6 +21,39 @@ beforeAll(async () => {
 // Dashboard elements must carry the exact reference names desktop entries use,
 // mirroring `connectMcpAppHostName` in apps/server/src/connect-mcp-server-catalog.ts
 // and `projectedMcpToolName` in apps/server/src/mcp-app-host.ts.
+test("connection requests expose a standard App and deny unauthenticated intents", async () => {
+  const { registerAgentConnectionActionApp } = await import("../src/mcp/connection-action-app.js")
+  const server = new McpServer({ name: "connection-app-test", version: "1" })
+  registerAgentConnectionActionApp(server, { organizationId: "org_fixture", member: null })
+  const client = new Client({ name: "test-host", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  try {
+    const tools = await client.listTools()
+    for (const name of ["connection_action", "connection_action_intent"]) {
+      expect(tools.tools.find(tool => tool.name === name)?._meta).toMatchObject({ ui: {
+        resourceUri: "ui://openwork/connection-action/v2/view.html", visibility: ["app"],
+      } })
+    }
+    const resource = await client.readResource({ uri: "ui://openwork/connection-action/v2/view.html" })
+    expect(resource.contents[0]).toMatchObject({ mimeType: "text/html;profile=mcp-app" })
+    const html = resource.contents[0] && "text" in resource.contents[0] ? resource.contents[0].text : ""
+    expect(html).toContain("ui/initialize")
+    expect(html).toContain("tools/call")
+    expect(html).toContain("Authenticate")
+    expect(html).toContain("Skip")
+    for (const action of ["authenticate", "skip"]) {
+      const result = await client.callTool({ name: "connection_action_intent", arguments: { connectionId: "emc_fixture", action } })
+      expect(result.isError).toBe(true)
+      expect(result.structuredContent).toBeUndefined()
+    }
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
 test("connect app-host server names mirror the desktop naming convention", () => {
   const connectionId = "emc_01dashboardfixture0000000000"
   const digest = createHash("sha256").update(connectionId).digest("hex").slice(0, 12)

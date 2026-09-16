@@ -3613,6 +3613,7 @@ function createRoutes(
               launch: {
                 toolName: typeof launch.toolName === "string" ? launch.toolName : "",
                 resourceUri: typeof launch.resourceUri === "string" ? launch.resourceUri : "",
+                arguments: isRecord(launch.arguments) ? launch.arguments : undefined,
               },
             })
         : await resolveMcpAppResource({
