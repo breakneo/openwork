@@ -6,11 +6,9 @@ import { AppBridge, PostMessageTransport } from "@modelcontextprotocol/ext-apps/
 import type { McpUiStyles, McpUiStyleVariableKey } from "@modelcontextprotocol/ext-apps"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
-import { legacyConnectionActionAppResourceUri, connectorCatalogSchema } from "@openwork/types/connection-action-app"
-import { ConnectorCatalogCard } from "./connector-catalog"
+import { legacyConnectionActionAppResourceUri } from "@openwork/types/connection-action-app"
 import { ConnectionCard } from "./connection-card"
-import { connectionCardPayloadFromChatToolResult, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution"
-import { AppChatArtifact } from "@/react-app/domains/apps/app-chat-artifact"
+import { connectionCardPayloadFromChatToolResult, connectionResultFromChatToolPart, isConnectionDiscoveryTool, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution"
 import { openDesktopUrl } from "@/app/lib/desktop"
 import { mcpAppResolutionRetryDelayMs } from "@/app/lib/mcp-app-resolution"
 import {
@@ -115,7 +113,7 @@ function normalizeMcpAppHeight(height: number, minimum: number): number {
 }
 
 function preservedResult(part: DynamicToolUIPart): PreservedMcpAppResult | null {
-  if (part.toolName === "openwork-cloud_search_capabilities" && (!isRecord(part.input) || (part.input.intent !== "connect" && part.input.type !== "connectors"))) return null
+  if (isConnectionDiscoveryTool(part.toolName) && (!isRecord(part.input) || (part.input.intent !== "connect" && part.input.type !== "connectors"))) return null
   const openwork = isRecord(part.callProviderMetadata?.openwork) ? part.callProviderMetadata.openwork : null
   const result = openwork && isRecord(openwork.mcpResult)
     ? openwork.mcpResult
@@ -134,21 +132,8 @@ function preservedResult(part: DynamicToolUIPart): PreservedMcpAppResult | null 
 }
 
 export function hasPreservedMcpAppResult(part: DynamicToolUIPart): boolean {
-  return preservedResult(part) !== null || connectorCatalogFromPart(part) !== null
-    || connectionCardPayloadFromChatToolResult(part.toolName, part.output, part.input) !== null
-}
-
-export function connectorCatalogFromPart(part: DynamicToolUIPart) {
-  if (part.toolName !== "openwork-cloud_search_capabilities" || part.state !== "output-available") return null
-  if (!isRecord(part.input) || (part.input.intent !== "connect" && part.input.type !== "connectors")) return null
-  let value: unknown = preservedResult(part)?.structuredContent ?? part.output
-  if (typeof value === "string") {
-    if (value.length > 128 * 1024) return null
-    try { value = JSON.parse(value) } catch { return null }
-  }
-  if (!isRecord(value)) return null
-  const parsed = connectorCatalogSchema.safeParse(value.connectorCatalog)
-  return parsed.success ? parsed.data : null
+  return preservedResult(part) !== null
+    || connectionCardPayloadFromChatToolResult(part.toolName, connectionResultFromChatToolPart(part), part.input) !== null
 }
 
 export function gatewayMcpAppLaunch(meta: unknown): OpenworkMcpAppLaunchReference | null {
@@ -266,6 +251,16 @@ function hostStyleVariables(): McpUiStyles {
 
 export function isActionableMcpAppResolutionError(cause: unknown): boolean {
   return cause instanceof OpenworkServerError && ACTIONABLE_MCP_APP_RESOLUTION_CODES.has(cause.code)
+}
+
+function isUnavailableHistoricalFirstPartyApp(toolName: string, launch: OpenworkMcpAppLaunchReference | null, cause: unknown): boolean {
+  if ((!toolName.startsWith("openwork-cloud_") && !toolName.startsWith("openwork_"))
+    || !launch || launch.connectionId !== undefined
+    || !(cause instanceof OpenworkServerError)) return false
+  if (launch.resourceUri !== "ui://openwork/skill-created/v1/view.html"
+    && launch.resourceUri !== "ui://openwork/plugin-flow/v1/view.html") return false
+  return ["tool_not_found", "tool_not_visible", "tool_resource_mismatch"].includes(cause.code)
+    || (cause.code === "resource_read_failed" && cause.status === 404)
 }
 
 const CHAT_MCP_APP_UNAVAILABLE_NOTICE = "Interactive view unavailable. The normal tool result is still available."
@@ -753,11 +748,10 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
 
 export function McpAppFrame({ part }: { part: DynamicToolUIPart }) {
   const result = preservedResult(part)
-  const action = reconnectActionFromChatToolResult(part.toolName, result?.structuredContent ?? part.output, part.input)
-  const connection = connectionCardPayloadFromChatToolResult(part.toolName, result?.structuredContent ?? part.output, part.input)
+  const connectionResult = connectionResultFromChatToolPart(part)
+  const action = reconnectActionFromChatToolResult(part.toolName, connectionResult, part.input)
+  const connection = connectionCardPayloadFromChatToolResult(part.toolName, connectionResult, part.input)
   if (action || connection) return <ConnectionCard part={part} action={action} connection={connection} />
-  const catalog = connectorCatalogFromPart(part)
-  if (catalog) return <ConnectorCatalogCard catalog={catalog} />
   // First-party connection UI is native, including historical app launches.
   // Never route an unsupported connection response back into the old iframe.
   const launch = gatewayMcpAppLaunch(result?._meta)
@@ -780,13 +774,6 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
     resultCache.current = { signature: nextResultSignature, value: nextResult }
   }
   const result = resultCache.current.value
-  const draft = useMemo(() => {
-    if (part.toolName !== "save_artifact_view" && !part.toolName.endsWith("_save_artifact_view")) return null
-    const reference = result?._meta?.["openwork/appDraft"]
-    if (!isRecord(reference) || typeof reference.appId !== "string" || typeof reference.revisionId !== "string"
-      || typeof reference.title !== "string" || (reference.receiptId !== undefined && typeof reference.receiptId !== "string")) return null
-    return { appId: reference.appId, revisionId: reference.revisionId, title: reference.title, receiptId: reference.receiptId }
-  }, [part.toolName, result])
   const launch = useMemo(() => gatewayMcpAppLaunch(result?._meta), [result])
   const [app, setApp] = useState<OpenworkMcpAppResource | null>(null)
   const [error, setError] = useState<McpAppDiagnostic | null>(null)
@@ -816,7 +803,7 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
     let retryTimer: number | undefined
     setApp(null)
     setError(null)
-    if (draft || !result || !openworkServerClient || !workspaceId) return () => { cancelled = true }
+    if (!result || !openworkServerClient || !workspaceId) return () => { cancelled = true }
     const startedAt = performance.now()
     const checkpoints = ["resolve-started"]
     const attempt = (attemptIndex: number) => {
@@ -833,7 +820,7 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
           setApp(resolved)
         })
         .catch((cause) => {
-          if (cancelled) return
+          if (cancelled || isUnavailableHistoricalFirstPartyApp(part.toolName, launch, cause)) return
           checkpoints.push(`resolve-failed-${attemptIndex + 1}+${Math.round(performance.now() - startedAt)}ms`)
           const retryDelayMs = mcpAppResolutionRetryDelayMs(cause, attemptIndex)
           if (retryDelayMs !== null) {
@@ -861,19 +848,8 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
       release()
     }
-  }, [draft, launch, openworkServerClient, part.toolName, result, workspaceId, origin, resolution])
+  }, [launch, openworkServerClient, part.toolName, result, workspaceId, origin, resolution])
 
-  // A completed build opens a native artifact tab. Rendering still goes
-  // through the authorized Apps API and the shared sandbox inside that tab.
-  if (draft) return <AppChatArtifact key={`${draft.appId}:${draft.revisionId}:${draft.receiptId}`} {...draft} />
-  const viewId = result?._meta?.artifactViewId
-  const revisionId = result?._meta?.viewRevisionId
-  if (app && typeof viewId === "string" && typeof revisionId === "string" && app.resourceUri === `ui://openwork/artifacts/${viewId}/views/${revisionId}/index.html`) {
-    const artifact = result?.structuredContent?.artifact
-    const title = typeof result?._meta?.appTitle === "string" ? result._meta.appTitle : isRecord(artifact) && typeof artifact.title === "string" ? artifact.title : "App preview"
-    const receiptId = isRecord(artifact) && typeof artifact.receiptId === "string" ? artifact.receiptId : undefined
-    return <AppChatArtifact key={`${viewId}:${revisionId}:${receiptId}`} appId={viewId} revisionId={revisionId} title={title} receiptId={receiptId} />
-  }
   if (!result) return null
   if (!origin) return <p role="status">This App is missing its conversation origin. Reopen the conversation to use it.</p>
   if (error) return <McpAppDiagnosticNotice error={error} notice={CHAT_MCP_APP_UNAVAILABLE_NOTICE} onRetry={() => setResolveToken((token) => token + 1)} />

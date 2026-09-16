@@ -46,7 +46,6 @@ import {
   type ExternalCapabilityExecuteResult,
   type McpMemberIdentity,
 } from "./external-capabilities.js"
-import { attachPluginFlowCard } from "./plugin-flow-app.js"
 import { invokeMcpOperation, normalizeToolBody, normalizeToolRecord } from "./invoke.js"
 import {
   executeMarketplaceCapability,
@@ -463,7 +462,7 @@ const catalogSource: CapabilitySource = {
         body,
       },
     })
-    return attachPluginFlowCard({ name: parsed.name, path, body, result })
+    return result
   },
 }
 

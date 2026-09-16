@@ -29,8 +29,6 @@ mock.module("../src/auth.js", () => ({
   DEN_MCP_RESOURCES: ["http://127.0.0.1:8790/mcp"],
   DEN_MCP_TOKEN_USE_CLAIM: "https://openworklabs.com/token_use",
 }))
-mock.module("@openwork/mcp-apps/plugin-flow", () => ({ pluginFlowAppHtml: "<html></html>" }))
-mock.module("@openwork/mcp-apps/skill-created", () => ({ skillCreatedAppHtml: "<html></html>" }))
 afterAll(() => mock.restore())
 
 function seedRequiredEnv() {
@@ -71,6 +69,11 @@ function createMemoryTransportPair() {
   return { client, server }
 }
 
+function toolText(result: ExecuteCapabilityToolResult, index = 0): string {
+  const part = result.content[index]
+  return part?.type === "text" ? part.text : ""
+}
+
 let agentModule: typeof import("../src/mcp/agent.js")
 
 beforeAll(async () => {
@@ -89,7 +92,7 @@ test("executeCapabilityWithBudget returns a structured timeout result", async ()
   })
 
   expect(result.isError).toBe(true)
-  expect(result.content[0]?.text).toBe(JSON.stringify({
+  expect(toolText(result)).toBe(JSON.stringify({
     error: "capability_timeout",
     capability: "gmail_search",
     message: "The capability call exceeded 180s. Retry once; if it times out again, narrow the request (fewer results, tighter query) and tell the user the service is slow — do NOT tell them to reconfigure or reconnect.",
@@ -113,7 +116,7 @@ test("executeCapabilityWithBudget swallows late rejections after timeout", async
     })
 
     expect(result.isError).toBe(true)
-    expect(result.content[0]?.text).toBe(JSON.stringify({
+    expect(toolText(result)).toBe(JSON.stringify({
       error: "capability_timeout",
       capability: "slow_google_workspace",
       message: "The capability call exceeded 180s. Retry once; if it times out again, narrow the request (fewer results, tighter query) and tell the user the service is slow — do NOT tell them to reconfigure or reconnect.",
@@ -314,7 +317,7 @@ test("capability search results include structured output alongside text compati
   const result = agentModule.capabilitySearchToolResult(matches)
 
   expect(result.structuredContent).toEqual({ matches })
-  expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({ matches })
+  expect(JSON.parse(toolText(result) || "{}")).toEqual({ matches })
   const connectionStatus = {
     version: 1, kind: "connection_action", source: "openwork-cloud",
     layer: "mcp_connection", errorCode: "not_connected", authType: "oauth", credentialMode: "per_member",
@@ -327,7 +330,7 @@ test("capability search results include structured output alongside text compati
   expect(quiet.structuredContent.matches).toEqual(blocked)
   expect(quiet.structuredContent.connectionAction).toBeUndefined()
   expect(quiet).not.toHaveProperty("_meta")
-  const actionable = agentModule.capabilitySearchToolResult(blocked, undefined, null, true)
+  const actionable = agentModule.capabilitySearchToolResult(blocked, undefined, true)
   expect(actionable.structuredContent.matches).toEqual(blocked)
   expect(actionable.structuredContent.connectionAction?.connectionId).toBe("emc_notes")
   expect(actionable).not.toHaveProperty("_meta")
@@ -343,7 +346,7 @@ test("capability search preserves the bounded-fanout coverage warning", () => {
     matches: [],
     hint: "No matches. Try broader or different keywords. External MCP search inspected 16 of 17 eligible connections. Results may be incomplete.",
   })
-  expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual(structured)
+  expect(JSON.parse(toolText(result) || "{}")).toEqual(structured)
 })
 
 test("external capability failures preserve the slim agent-facing MCP error envelope", () => {
@@ -380,7 +383,7 @@ test("external capability failures preserve the slim agent-facing MCP error enve
     },
   })
   expect(result.isError).toBe(true)
-  const payload = JSON.parse(result.content[0]?.text ?? "{}")
+  const payload = JSON.parse(toolText(result) || "{}")
   expect(payload).toMatchObject({
     error: "connection_failed",
     referenceId: "req_test",
@@ -426,7 +429,7 @@ test("invalid capability arguments preserve corrective retry instructions", () =
   })
 
   expect(result.isError).toBe(true)
-  expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({
+  expect(JSON.parse(toolText(result) || "{}")).toEqual({
     error: "invalid_capability_arguments",
     message: "The capability arguments do not match its advertised schema.",
     capability: "mcp:emc_test:lookup_incident",
@@ -442,7 +445,7 @@ test("invalid capability arguments preserve corrective retry instructions", () =
 })
 
 test.each([true, false, undefined])("provider output preserves schema guidance without overwriting provider data (isError=%s)", (isError) => {
-  const provider = {
+  const provider: ExecuteCapabilityToolResult = {
     content: [{ type: "text", text: "Provider result." }],
     structuredContent: { serverTools: ["provider-tool"], schemaGuidance: { provider: true } },
     _meta: { privateFixture: "view-only" },
@@ -479,7 +482,7 @@ test.each([true, false, undefined])("provider output preserves schema guidance w
   })
   expect(JSON.stringify(result.content)).not.toContain("view-only")
   expect(JSON.stringify(result.content)).not.toContain("openwork/serverTools")
-  expect(JSON.parse(result.content[1]?.text ?? "{}")).toMatchObject({
+  expect(JSON.parse(toolText(result, 1) || "{}")).toMatchObject({
     "openwork/schemaGuidance": {
       advisory: true,
       providerCallAttempted: true,
@@ -506,6 +509,20 @@ test("structured search output remains compatible with marketplace match kinds a
   })
 
   expect(result.success).toBe(true)
+})
+
+test("agent steering requires explicit standard previews and plain skill and sharing results", () => {
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("explicitly call the standard preview tool")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("without an App resource binding")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("return ordinary operation results")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("without a setup card")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("chooses Save")
+  for (const capability of [BUILTIN_CREATE_SKILL_CAPABILITY, BUILTIN_SHARE_PLUGIN_CAPABILITY, BUILTIN_ADD_TO_MARKETPLACE_CAPABILITY, BUILTIN_ADD_USER_TO_MARKETPLACE_CAPABILITY]) {
+    const source = executeBuiltinSkillCapability(capability)?.content
+    expect(source).toBeDefined()
+    expect(source).not.toContain("automatically")
+    expect(source).not.toContain("renders the same skill App")
+  }
 })
 
 test("capability discovery is marked read-only while generic execution remains guarded", () => {
@@ -558,19 +575,24 @@ test("connection status only outranks equally relevant callable tools", () => {
 })
 
 
-test("connector discovery includes every preset and separates setup suggestions from tools", async () => {
-  const { connectorCatalogForQuery } = await import("../src/mcp/connector-catalog.js");
-  const { EXTERNAL_MCP_PRESETS } = await import("../src/capability-sources/external-mcp-presets.js");
-  const catalog = connectorCatalogForQuery("Please connect Slack");
-  expect(catalog?.selectedIds).toEqual(["slack"]);
-  expect(catalog?.entries.map(entry => entry.id)).toEqual(["google-workspace", "microsoft-365", ...EXTERNAL_MCP_PRESETS.map(preset => preset.presetId)]);
-  expect(catalog?.entries.find(entry => entry.id === "slack")?.setup).toBe("oauth_client");
-  expect(connectorCatalogForQuery("slacker")).toBeNull();
-  expect(connectorCatalogForQuery("write a report")).toBeNull();
-  expect(connectorCatalogForQuery("all quick adds")?.selectedIds).toEqual([]);
-  expect(connectorCatalogForQuery("Slack", true)?.selectedIds).toEqual([]);
-  const result = agentModule.capabilitySearchToolResult([], undefined, catalog);
-  expect(result.structuredContent.connectorCatalog).toEqual(catalog);
-  expect(result.structuredContent.hint).toContain("not connected tools");
-  for (const entry of catalog?.entries ?? []) expect(new URL(entry.setupUrl).searchParams.get("quickAdd")).toBe(entry.id);
-});
+test("connector discovery returns every preset as plain setup metadata without a card", async () => {
+  const { EXTERNAL_MCP_PRESETS } = await import("../src/capability-sources/external-mcp-presets.js")
+  const result = agentModule.connectorSetupToolResult()
+  const { connectors } = result.structuredContent
+  expect(connectors.map(entry => entry.id)).toEqual(["google-workspace", "microsoft-365", ...EXTERNAL_MCP_PRESETS.map(preset => preset.presetId)])
+  expect(connectors.find(entry => entry.id === "slack")?.setup).toBe("oauth_client")
+  expect(result.structuredContent.matches).toEqual([])
+  expect(result.structuredContent.hint).toContain("not connected tools")
+  expect(result.structuredContent).not.toHaveProperty("connectorCatalog")
+  expect(result.structuredContent).not.toHaveProperty("connectionAction")
+  expect(result).not.toHaveProperty("_meta")
+  expect(JSON.parse(toolText(result) || "{}")).toEqual(result.structuredContent)
+  expect(agentModule.SEARCH_CAPABILITIES_OUTPUT_SCHEMA.parse(result.structuredContent)).toEqual(result.structuredContent)
+  for (const entry of connectors) expect(new URL(entry.setupUrl).searchParams.get("quickAdd")).toBe(entry.id)
+})
+
+test.each([false, true])("empty capability search never suggests a connector catalog (connect intent: %s)", (connectionIntent) => {
+  const result = agentModule.capabilitySearchToolResult([], undefined, connectionIntent)
+  expect(result.structuredContent).toEqual({ matches: [], hint: "No matches. Try broader or different keywords." })
+  expect(result).not.toHaveProperty("_meta")
+})

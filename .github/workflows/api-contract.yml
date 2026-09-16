@@ -21,7 +21,6 @@ on:
       - "packages/enterprise-mcp-client/**"
       - "packages/headless-threads/**"
       - "packages/install-config/**"
-      - "packages/mcp-apps/**"
       - "packages/types/**"
   push:
     branches:

@@ -23,9 +23,11 @@ afterAll(() => GlobalRegistrator.unregister())
 const { ConnectionCard } = await import("../src/components/chat/connection-card")
 const { MessageListProvider } = await import("../src/components/chat/message-list-provider")
 const { WorkspaceProvider } = await import("../src/react-app/shell/workspace-provider")
+const { useUiStateStore } = await import("../src/react-app/shell/ui-state-store")
+const { usePanelTabStore } = await import("../src/react-app/domains/session/panel/panel-tab-store")
+const { useSessionActivityStore } = await import("../src/react-app/domains/session/status/session-activity-store")
 const {
   buildMcpAppCsp,
-  connectorCatalogFromPart,
   hasPreservedMcpAppResult,
   gatewayMcpAppLaunch,
   isActionableMcpAppResolutionError,
@@ -894,17 +896,17 @@ describe("MCP App resolution", () => {
         } } } : {}),
       } } },
     }
-    const render = async () => { await act(async () => root.render(createElement(MessageListProvider, {
+    const render = async (nextPart = part) => { await act(async () => root.render(createElement(MessageListProvider, {
       client, workspaceId: "fixture", sessionId: "session_fixture", mcpAppEngine: "v2",
       showThinking: false, developerMode: false, displaySuggestions: false, providerConnectedCount: 0,
       dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {},
       onForkAtMessage: () => {}, onEditUserMessage: () => {},
       onMcpReconnect: async () => { throw new Error("Unexpected reconnect") },
       onMcpReopenAuthorization: async () => {}, onMcpRetry: providerRetry,
-      children: createElement(McpAppFrame, { part }),
+      children: createElement(McpAppFrame, { part: nextPart }),
     }))) }
     return {
-      container, resolveSpy, callSpy, releaseSpy, errorSpy, providerRetry, render,
+      part, container, resolveSpy, callSpy, releaseSpy, errorSpy, providerRetry, render,
       async unmountFrame() { await act(async () => root.render(null)) },
       async dispose() {
         try { await act(async () => root.unmount()) } finally {
@@ -961,6 +963,142 @@ describe("MCP App resolution", () => {
       expect(host.errorSpy).not.toHaveBeenCalled()
       expect(host.callSpy).not.toHaveBeenCalled()
       expect(host.providerRetry).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each([false, true])("catalog-shaped preserved data uses only standard resource resolution (advertised: %s)", async advertised => {
+    const host = resolutionFixture(false)
+    if (advertised) host.resolveSpy.mockResolvedValue({ app: fixture() })
+    try {
+      const part: DynamicToolUIPart = {
+        ...host.part, toolName: "openwork-cloud_search_capabilities", input: { type: "connectors", query: "Slack" },
+        callProviderMetadata: { openwork: { mcpResult: {
+          content: [{ type: "text", text: "Catalog history" }],
+          structuredContent: { connectorCatalog: { version: 1, selectedIds: ["slack"], entries: [{ id: "slack", name: "Slack", description: "Work chat", setup: "oauth_client", serviceUrl: "https://slack.com", setupUrl: "https://example.com/dashboard/mcp-connections?quickAdd=slack" }] } },
+        } } },
+      }
+      await host.render(part)
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(Boolean(host.container.querySelector("iframe"))).toBe(advertised)
+      expect(host.container.querySelector('[data-testid="connector-catalog"]')).toBeNull()
+      for (const text of ["Suggested connector", "Quick-add connectors", "Added to your organization", "Set up"]) {
+        expect(host.container.textContent).not.toContain(text)
+      }
+      expect(host.callSpy).not.toHaveBeenCalled()
+      expect(host.errorSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each(["draft", "snapshot", "both"])("resolves %s metadata inline without opening or redirecting the side panel", async mode => {
+    const host = resolutionFixture(true)
+    const resourceUri = "ui://openwork/artifacts/arv_fixture/views/avr_fixture/index.html"
+    const toolName = mode === "snapshot" ? "openwork-cloud_render_artifact_fixture" : "openwork-cloud_save_artifact_view"
+    const launch = { toolName, resourceUri, arguments: {} }
+    const part: DynamicToolUIPart = {
+      ...host.part, toolName,
+      callProviderMetadata: { openwork: { mcpResult: {
+        content: [{ type: "text", text: "App result retained" }],
+        structuredContent: { artifact: { title: "Fixture preview", receiptId: "receipt_fixture" } },
+        _meta: {
+          "openwork/mcpApp": launch,
+          ...(mode !== "snapshot" ? { "openwork/appDraft": { appId: "arv_fixture", revisionId: "avr_fixture", title: "Fixture preview", receiptId: "receipt_fixture" } } : {}),
+          ...(mode !== "draft" ? { artifactViewId: "arv_fixture", viewRevisionId: "avr_fixture", appTitle: "Fixture preview" } : {}),
+        },
+      } } },
+    }
+    const openTab = spyOn(usePanelTabStore.getState(), "openTab").mockImplementation(() => {})
+    const openPanel = spyOn(useUiStateStore.getState(), "setSidePanelState").mockImplementation(() => {})
+    const activity = spyOn(useSessionActivityStore.getState(), "getStatus").mockReturnValue("responding")
+    host.resolveSpy.mockResolvedValue({ app: fixture({ resourceUri }) })
+    try {
+      expect(hasPreservedMcpAppResult(part)).toBe(true)
+      await host.render(part)
+      expect(host.resolveSpy).toHaveBeenCalledWith("fixture", toolName, launch, expect.objectContaining({ sessionId: "session_fixture" }))
+      expect(host.container.querySelector("iframe")).not.toBeNull()
+      expect(host.container.querySelector("[data-mcp-app-resource]")?.getAttribute("data-mcp-app-resource")).toBe(resourceUri)
+      expect(host.container.textContent).not.toContain("Open preview")
+      expect(openTab).not.toHaveBeenCalled()
+      expect(openPanel).not.toHaveBeenCalled()
+      expect(host.callSpy).not.toHaveBeenCalled()
+      expect(host.errorSpy).not.toHaveBeenCalled()
+    } finally {
+      await host.dispose()
+      openTab.mockRestore()
+      openPanel.mockRestore()
+      activity.mockRestore()
+    }
+  })
+
+  test.each(["mcpResult", "mcpApp"])("keeps draft-only %s metadata on the ordinary resolution path", async alias => {
+    const host = resolutionFixture(false)
+    try {
+      await host.render({
+        ...host.part, toolName: "openwork-cloud_save_artifact_view",
+        callProviderMetadata: { openwork: { [alias]: {
+          content: [], _meta: { "openwork/appDraft": { appId: "arv_fixture", revisionId: "avr_fixture", title: "Draft" } },
+        } } },
+      })
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.container.textContent).toBe("")
+      expect(host.container.querySelector("iframe")).toBeNull()
+      expect(host.callSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each(["skill-created", "plugin-flow"].flatMap(resource =>
+    ["tool_not_found", "tool_not_visible", "tool_resource_mismatch", "resource_read_failed"].map(code => ({ resource, code }))
+  ))("silently retains the tool result when historical $resource is no longer offered ($code)", async ({ resource, code }) => {
+    const host = resolutionFixture(true)
+    host.resolveSpy.mockRejectedValue(new OpenworkServerError(404, code, "No longer offered"))
+    try {
+      await host.render({
+        ...host.part, toolName: "openwork-cloud_execute_capability",
+        callProviderMetadata: { openwork: { mcpApp: {
+          content: [{ type: "text", text: "Historical result" }],
+          _meta: { "openwork/mcpApp": { toolName: "historical", resourceUri: `ui://openwork/${resource}/v1/view.html`, arguments: {} } },
+        } } },
+      })
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.container.textContent).toBe("")
+      expect(host.errorSpy).not.toHaveBeenCalled()
+      expect(host.callSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each([
+    { toolName: "provider_render", connectionId: undefined, resourceUri: "ui://openwork/skill-created/v1/view.html", code: "tool_not_found" },
+    { toolName: "openwork-cloud_execute_capability", connectionId: "emc_fixture", resourceUri: "ui://openwork/plugin-flow/v1/view.html", code: "tool_not_found" },
+    { toolName: "openwork-cloud_execute_capability", connectionId: undefined, resourceUri: "ui://provider/view.html", code: "tool_not_found" },
+    { toolName: "openwork-cloud_execute_capability", connectionId: undefined, resourceUri: "ui://openwork/skill-created/v1/view.html", code: "invalid_resource_csp" },
+  ])("preserves provider and security diagnostics for $toolName $resourceUri $code", async ({ toolName, connectionId, resourceUri, code }) => {
+    const host = resolutionFixture(true)
+    host.resolveSpy.mockRejectedValue(new OpenworkServerError(404, code, "Resolution failed"))
+    try {
+      await host.render({
+        ...host.part, toolName,
+        callProviderMetadata: { openwork: { mcpResult: {
+          content: [], _meta: { "openwork/mcpApp": { toolName: "render", resourceUri, arguments: {}, ...(connectionId ? { connectionId } : {}) } },
+        } } },
+      })
+      expect(host.container.textContent).toContain("MCP_APP_RESOURCE_RESOLUTION_FAILED")
+      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
+      expect(host.callSpy).not.toHaveBeenCalled()
+    } finally { await host.dispose() }
+  })
+
+  test.each(["skill-created", "plugin-flow"])("still renders an advertised %s resource through the standard sandbox", async resource => {
+    const host = resolutionFixture(true)
+    const resourceUri = `ui://openwork/${resource}/v1/view.html`
+    host.resolveSpy.mockResolvedValue({ app: fixture({ resourceUri }) })
+    try {
+      await host.render({
+        ...host.part, toolName: "openwork-cloud_execute_capability",
+        callProviderMetadata: { openwork: { mcpResult: {
+          content: [], _meta: { "openwork/mcpApp": { toolName: "render", resourceUri, arguments: {} } },
+        } } },
+      })
+      expect(host.container.querySelector("iframe")).not.toBeNull()
+      expect(host.errorSpy).not.toHaveBeenCalled()
     } finally { await host.dispose() }
   })
 
@@ -1449,13 +1587,24 @@ describe("MCP App iframe policy", () => {
 })
 
 
-test("only canonical completed gateway search results render connector setup suggestions", () => {
+test.each([
+  { query: "Slack", intent: "connect" },
+  { query: "connectors", type: "connectors" },
+  { query: "Slack" },
+])("catalog output alone never qualifies as an MCP App (%j)", input => {
   const catalog = { version: 1, selectedIds: ["slack"], entries: [{ id: "slack", name: "Slack", description: "Work chat", setup: "oauth_client", setupUrl: "https://example.com/dashboard/mcp-connections?quickAdd=slack" }] };
-  const part = { type: "dynamic-tool", toolName: "openwork-cloud_search_capabilities", toolCallId: "catalog", state: "output-available", input: { query: "Slack", intent: "connect" }, output: JSON.stringify({ connectorCatalog: catalog }) } satisfies import("ai").DynamicToolUIPart;
-  expect(connectorCatalogFromPart(part)).toEqual(catalog);
+  for (const output of [{ connectorCatalog: catalog }, JSON.stringify({ connectorCatalog: catalog }), "invalid json"]) {
+    const part: DynamicToolUIPart = { type: "dynamic-tool", toolName: "openwork-cloud_search_capabilities", toolCallId: "catalog", state: "output-available", input, output };
+    expect(hasPreservedMcpAppResult(part)).toBe(false);
+    expect(hasPreservedMcpAppResult({ ...part, toolName: "other_search_capabilities" })).toBe(false);
+  }
+});
+
+test.each(["mcpResult", "mcpApp"])("preserves the generic %s metadata alias without interpreting its payload", alias => {
+  const part: DynamicToolUIPart = {
+    type: "dynamic-tool", toolName: "provider_render", toolCallId: "alias", state: "output-available", input: {}, output: "fallback",
+    callProviderMetadata: { openwork: { [alias]: { content: [{ type: "text", text: "fallback" }], structuredContent: { provider: true } } } },
+  };
   expect(hasPreservedMcpAppResult(part)).toBe(true);
-  expect(hasPreservedMcpAppResult({ ...part, input: { query: "Slack" } })).toBe(false);
-  expect(connectorCatalogFromPart({ ...part, toolName: "other_search_capabilities" })).toBeNull();
-  expect(connectorCatalogFromPart({ ...part, output: "invalid json" })).toBeNull();
-  expect(connectorCatalogFromPart({ ...part, output: { connectorCatalog: { ...catalog, version: 2 } } })).toBeNull();
+  expect(hasPreservedMcpAppResult({ ...part, callProviderMetadata: { openwork: { [alias]: { content: [null] } } } })).toBe(false);
 });

@@ -18,6 +18,9 @@ interface MessageListContextValue {
   sessionId: string
   /** Verified principal/org, endpoint, workspace and session; absent means no retention. */
   uiStateOwner?: string | null
+  connectionDecisionToolCallId?: string | null
+  connectionDecisionConnectionId?: string | null
+  connectionReconnectBlocked?: boolean
   showThinking: boolean
   highlightQuery?: string
   developerMode: boolean
@@ -57,6 +60,9 @@ interface MessageListProviderProps {
   workspaceId: string
   sessionId: string
   uiStateOwner?: string | null
+  connectionDecisionToolCallId?: string | null
+  connectionDecisionConnectionId?: string | null
+  connectionReconnectBlocked?: boolean
   showThinking: boolean
   highlightQuery?: string
   developerMode: boolean
@@ -94,6 +100,9 @@ export function MessageListProvider({
   workspaceId,
   sessionId,
   uiStateOwner,
+  connectionDecisionToolCallId,
+  connectionDecisionConnectionId,
+  connectionReconnectBlocked = false,
   showThinking,
   highlightQuery,
   developerMode,
@@ -180,6 +189,9 @@ export function MessageListProvider({
       workspaceId,
       sessionId,
       uiStateOwner,
+      connectionDecisionToolCallId,
+      connectionDecisionConnectionId,
+      connectionReconnectBlocked,
       showThinking,
       highlightQuery,
       forkingMessageId,
@@ -202,6 +214,9 @@ export function MessageListProvider({
       workspaceId,
       sessionId,
       uiStateOwner,
+      connectionDecisionToolCallId,
+      connectionDecisionConnectionId,
+      connectionReconnectBlocked,
       showThinking,
       highlightQuery,
       forkingMessageId,

@@ -15,7 +15,6 @@ import {
   parseDynamicToolUIPart,
   parseStructuredOutputUIPart,
 } from "../src/react-app/domains/session/sync/parse-tool-parts";
-import { parseOpenWorkSessionCreateResult } from "../src/components/tools/openwork-session-create";
 import { codeModeToolCalls } from "../src/lib/code-mode-tools";
 import { useSessionActivityStore } from "../src/react-app/domains/session/status/session-activity-store";
 
@@ -284,7 +283,7 @@ describe("tool part mapper", () => {
     expect(parsed.errorText.toLowerCase()).not.toContain("<!doctype");
   });
 
-  test("maps env var request tools for rich chat rendering", () => {
+  test("preserves historical env var request input for generic tool rendering", () => {
     const part = writeToolPart("running", { key: "NOTION_TOKEN" }, { tool: "request_env_var" });
     expect(parseDynamicToolUIPart(part)).toMatchObject({
       type: "dynamic-tool",
@@ -293,29 +292,19 @@ describe("tool part mapper", () => {
     });
   });
 
-  test("parses session creation output for rich chat rendering", () => {
-    expect(parseOpenWorkSessionCreateResult(JSON.stringify({
+  test("preserves session creation output without a UI-specific parser", () => {
+    const output = JSON.stringify({
       ok: true,
       workspaceId: "workspace-a",
       workspace: "Research",
-      created: [{
-        sessionId: "session-dolphins",
-        title: "Dolphin research",
-        started: true,
-        route: "/workspace/workspace-a/session/session-dolphins",
-      }],
+      created: [{ sessionId: "session-research", title: "Research", started: true }],
       failures: [],
-    }))).toEqual({
-      ok: true,
-      workspaceId: "workspace-a",
-      workspace: "Research",
-      created: [{
-        sessionId: "session-dolphins",
-        title: "Dolphin research",
-        started: true,
-        route: "/workspace/workspace-a/session/session-dolphins",
-      }],
-      failures: [],
+    });
+    const part = writeToolPart("completed", {}, { tool: "openwork_session_create" });
+    if (part.state.status !== "completed") throw new Error("Expected completed fixture");
+    part.state.output = output;
+    expect(parseDynamicToolUIPart(part)).toMatchObject({
+      type: "dynamic-tool", toolName: "openwork_session_create", state: "output-available", output,
     });
   });
 

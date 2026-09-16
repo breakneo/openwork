@@ -5,6 +5,7 @@ import { useOptionalMessageList } from "@/components/chat/message-list-provider"
 import type { DynamicToolUIPart, ToolUIPart } from "ai"
 
 import {
+  connectionResultFromChatToolPart,
   reconnectActionFromChatToolResult,
   type ChatToolReconnectAction,
   type ChatToolReconnectProgress,
@@ -17,6 +18,7 @@ import {
 } from "@/components/tools/mcp-reconnect-state"
 
 export type ChatToolReconnectCallbacks = {
+  blocked?: boolean
   onReconnect?: (
     action: ChatToolReconnectAction,
     onProgress: (progress: ChatToolReconnectProgress) => void,
@@ -32,21 +34,19 @@ export type ChatToolReconnectCallbacks = {
  */
 export function useChatToolReconnect(
   toolPart: ToolUIPart | DynamicToolUIPart,
-  { onReconnect, onReopenAuthorization, onRetry }: ChatToolReconnectCallbacks,
-  actionOverride?: ChatToolReconnectAction,
+  { onReconnect, onReopenAuthorization, onRetry, blocked = false }: ChatToolReconnectCallbacks,
+  actionOverride?: ChatToolReconnectAction | null,
+  scopeOverride?: string,
 ) {
   const messageList = useOptionalMessageList()
   const instanceId = useId()
-  const scope = messageList ? JSON.stringify([messageList.workspaceId, messageList.sessionId]) : instanceId
-  const isError = toolPart.state === "output-error"
-  const reconnectResult = isError && toolPart.errorText
-    ? toolPart.errorText
-    : toolPart.state === "output-available" && "output" in toolPart
-      ? toolPart.output
-      : undefined
-  const reconnectAction = actionOverride ?? (toolPart.type === "dynamic-tool" && reconnectResult !== undefined
-    ? reconnectActionFromChatToolResult(toolPart.toolName, reconnectResult, toolPart.input)
-    : null)
+  const scope = scopeOverride ?? messageList?.uiStateOwner ?? (messageList ? JSON.stringify([messageList.workspaceId, messageList.sessionId]) : instanceId)
+  const reconnectBlocked = blocked || messageList?.connectionReconnectBlocked === true
+  const candidateAction = actionOverride !== undefined ? actionOverride : toolPart.type === "dynamic-tool"
+    ? reconnectActionFromChatToolResult(toolPart.toolName, connectionResultFromChatToolPart(toolPart), toolPart.input)
+    : null
+  const reconnectAction = reconnectBlocked || messageList?.connectionDecisionToolCallId === toolPart.toolCallId
+    || (candidateAction && messageList?.connectionDecisionConnectionId === candidateAction.connectionId) ? null : candidateAction
   const reconnectKey = reconnectAction
     ? chatMcpReconnectKey(toolPart.toolCallId, reconnectAction.connectionId, scope)
     : null
@@ -56,22 +56,22 @@ export function useChatToolReconnect(
   const reconnectError = useChatMcpReconnectStore((store) => (
     reconnectKey ? store.records[reconnectKey]?.error ?? null : null
   ))
-  const reconnectAuthorizeUrl = useChatMcpReconnectStore((store) => (
-    reconnectKey ? store.records[reconnectKey]?.authorizeUrl ?? null : null
-  ))
   const setReconnectRecord = useChatMcpReconnectStore((store) => store.setRecord)
   const reconnectPresentation = reconnectAction
     ? chatMcpReconnectPresentation(reconnectAction, reconnectState)
     : null
 
   const handleReconnect = async () => {
-    if (!reconnectAction || !reconnectKey || !onReconnect) return
-    if (reconnectState === "connected") {
+    if (!reconnectAction || !reconnectKey || !onReconnect || reconnectBlocked || messageList?.readOnly) return
+    const currentRecord = useChatMcpReconnectStore.getState().records[reconnectKey]
+    const currentPhase = currentRecord?.phase ?? "ready"
+    if (currentPhase === "connected") {
       await onRetry?.(reconnectAction)
       return
     }
-    if (reconnectState === "authorization_opened") {
+    if (currentPhase === "authorization_opened") {
       if (!onReopenAuthorization) return
+      const reconnectAuthorizeUrl = currentRecord?.authorizeUrl
       if (!reconnectAuthorizeUrl) {
         setReconnectRecord(reconnectKey, {
           phase: "failed",
@@ -96,7 +96,7 @@ export function useChatToolReconnect(
       }
       return
     }
-    if (reconnectState === "opening") return
+    if (currentPhase === "opening") return
     setReconnectRecord(reconnectKey, { phase: "opening", error: null, authorizeUrl: null })
     try {
       const result = await onReconnect(reconnectAction, (progress) => {
@@ -116,5 +116,5 @@ export function useChatToolReconnect(
     }
   }
 
-  return { reconnectAction, reconnectState, reconnectError, reconnectPresentation, handleReconnect }
+  return { reconnectAction, reconnectState, reconnectError, reconnectPresentation, reconnectBlocked, handleReconnect }
 }

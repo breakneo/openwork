@@ -1,6 +1,5 @@
 "use memo";
 
-import { VisualizationTool } from "@/components/tools/visualization-tool"
 import * as React from "react"
 import {
   AlertTriangle,
@@ -37,7 +36,6 @@ import { openModelPickerEvent } from "@/react-app/shell/new-providers-listener"
 import { ApplyPatchTool } from "@/components/tools/apply-patch"
 import { BashTool } from "@/components/tools/bash"
 import { EditTool } from "@/components/tools/edit"
-import { EnvVarRequestTool } from "@/components/tools/env-var-request"
 import { ReadFileTool, WriteFileTool } from "@/components/tools/file"
 import { GlobTool } from "@/components/tools/glob"
 import { GrepTool } from "@/components/tools/grep"
@@ -46,7 +44,6 @@ import {
   isAutomationProposalToolPart,
   OpenWorkAutomationProposalTool,
 } from "@/components/tools/openwork-automation-proposal"
-import { OpenWorkSessionCreateTool } from "@/components/tools/openwork-session-create"
 import { QuestionTool } from "@/components/tools/question"
 import { SkillTool } from "@/components/tools/skill"
 import { TodoWriteTool } from "@/components/tools/todowrite"
@@ -99,7 +96,6 @@ import {
   isApplyPatchToolPart,
   isBashToolPart,
   isEditToolPart,
-  isEnvVarRequestToolPart,
   isGlobToolPart,
   isGrepToolPart,
   isLspToolPart,
@@ -231,10 +227,6 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
     )
   }
 
-  if (part.type === "dynamic-tool" && part.toolName === "openwork_visualization") {
-    return <VisualizationTool part={part} />
-  }
-
   if (isBashToolPart(part)) {
     return <BashTool part={part} />
   }
@@ -285,14 +277,6 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
 
   if (isQuestionToolPart(part)) {
     return <QuestionTool part={part} />
-  }
-
-  if (isEnvVarRequestToolPart(part)) {
-    return <EnvVarRequestTool part={part} />
-  }
-
-  if (part.type === "dynamic-tool" && part.toolName === "openwork_session_create") {
-    return <OpenWorkSessionCreateTool part={part} />
   }
 
   if (part.type === "dynamic-tool" && isAutomationProposalToolPart(part)) {

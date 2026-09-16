@@ -176,21 +176,6 @@ build_key() {
 echo "==> Pushing Den DB schema..."
 pnpm --filter @openwork-ee/den-db db:push > /tmp/den-db-push.log 2>&1
 
-den_api_assets_marker=.openwork-daytona/den-api-assets.tree
-den_api_assets_key="$(build_key HEAD:packages/mcp-apps)"
-if [ -n "$den_api_assets_key" ] && [ -d packages/mcp-apps/dist ] && [ -f "$den_api_assets_marker" ] \
-  && [ "$(cat "$den_api_assets_marker")" = "$den_api_assets_key" ]; then
-  echo "==> Skipping Den API runtime asset build (baked assets match this ref)."
-else
-  echo "==> Building Den API runtime assets..."
-  pnpm --filter @openwork-ee/den-api run build:mcp-apps
-  if [ -n "$den_api_assets_key" ]; then
-    printf "%s" "$den_api_assets_key" > "$den_api_assets_marker"
-  else
-    rm -f "$den_api_assets_marker"
-  fi
-fi
-
 echo "==> Starting Den API on :$DEN_API_PORT..."
 # The den-api process cmdline is "tsx watch src/main.ts" (cwd-relative), so a
 # pattern anchored on the repo path never matches and restarts silently keep
