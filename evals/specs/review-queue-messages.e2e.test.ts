@@ -16,6 +16,7 @@ test('page incident counts link current outcomes without replay or history overc
   const browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
   page.on('dialog', (dialog) => dialog.accept());
   try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(live.url); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     await page.getByRole('button', { name: 'Review archive batch', exact: true }).click(); await page.getByTestId('confirm-bulk').click();
     await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(1);
@@ -31,6 +32,11 @@ test('page incident counts link current outcomes without replay or history overc
     await page.locator('#show-all-actions').click();
     expect(await page.getByTestId('action-log').textContent()).toContain('Historical blocked');
     expect(await page.getByTestId('latest-verification').textContent()).toContain('archived');
+    const actionLog = page.locator('section[aria-label="Action log"]');
+    expect(await actionLog.evaluate((node) => node.clientWidth > 1000 && node.clientHeight > 200 && node.scrollWidth <= node.clientWidth)).toBe(true);
+    const logPng = await actionLog.screenshot({ path: join(evidence.dir, 'action-log.png') });
+    expect(logPng.byteLength).toBeGreaterThan(5000);
+    evidence.recordJsonArtifact('Synthetic action log PNG', { file: 'action-log.png', viewport: { width: 1440, height: 1000 }, state: 'Verified synthetic archive with historical blocked receipts; supplemental image for manual visual inspection.' });
     await page.locator('#status').selectOption('decided'); await page.locator('#comment').fill('Please confirm the retained deliverable.'); await page.getByTestId('thread-send').click();
     await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(2);
     const message = next(live.directory); result(message.id, 'waiting', 'owner=synthetic; outstanding=confirmation; next_check_at=2026-01-01T12:05:00Z', live.directory); result(message.id, 'reply', 'Owner reply is not a completion receipt', live.directory);

@@ -126,6 +126,7 @@ test('undo and change are accessible from log and card, show non-interruptible w
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(live.url);
     await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     await page.getByTestId('archive-batch').getByRole('button', { name: 'Review archive batch' }).click();
@@ -136,6 +137,11 @@ test('undo and change are accessible from log and card, show non-interruptible w
     await row.getByRole('button', { name: 'Undo decision', exact: true }).click();
     expect(await page.locator('#control-items li').count()).toBe(2);
     expect(await page.locator('#control-effect').textContent()).toContain('whole batch only');
+    const undoDialog = page.locator('#control-dialog');
+    expect(await undoDialog.evaluate((node) => node.clientWidth > 400 && node.clientHeight > 200 && node.scrollWidth <= node.clientWidth)).toBe(true);
+    const undoPng = await undoDialog.screenshot({ path: join(evidence.dir, 'undo-dialog.png') });
+    expect(undoPng.byteLength).toBeGreaterThan(5000);
+    evidence.recordJsonArtifact('Synthetic undo dialog PNG', { file: 'undo-dialog.png', viewport: { width: 1440, height: 1000 }, state: 'Queued two-session decision, whole-batch undo confirmation, before any withdrawal; supplemental image for manual visual inspection.' });
     await page.locator('#cancel-control').click();
     expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(1);
     await row.getByRole('button', { name: 'Undo decision', exact: true }).click();

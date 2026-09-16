@@ -33,12 +33,18 @@ test('recommendation-aware actions expose only safe archive and explicitly autho
   page.on('dialog', (dialog) => dialog.accept());
   const open = async (title: string) => { await page.locator('#status').selectOption(''); await page.getByRole('button', { name: `Review ${title}`, exact: true }).click(); };
   try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(live.url); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
     await open('Synthetic safe proposal');
     expect(await page.getByRole('button', { name: 'Approve: review this proposal', exact: true }).count()).toBe(1);
     expect(await page.getByRole('button', { name: 'Archive', exact: true }).isDisabled()).toBe(true);
     await page.getByTestId('delivery-answers').locator('summary').click(); await page.getByTestId('mark-read').click();
     await expect.poll(() => page.getByRole('button', { name: 'Archive', exact: true }).isDisabled()).toBe(false);
+    const actionCard = page.locator('#detail [data-field="decision"]');
+    expect(await actionCard.evaluate((node) => node.clientWidth > 600 && node.clientHeight > 200 && node.scrollWidth <= node.clientWidth)).toBe(true);
+    const cardPng = await actionCard.screenshot({ path: join(evidence.dir, 'card-actions.png') });
+    expect(cardPng.byteLength).toBeGreaterThan(5000);
+    evidence.recordJsonArtifact('Synthetic card actions PNG', { file: 'card-actions.png', viewport: { width: 1440, height: 1000 }, state: 'Complete synthetic delivery marked read; Archive enabled; supplemental image for manual visual inspection.' });
     await page.locator('#detail').focus(); await page.keyboard.press('x');
     await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(2);
     expect(readLog(live.directory, 'decisions.jsonl').at(-1).event.action).toBe('archive');
