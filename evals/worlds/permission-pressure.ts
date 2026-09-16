@@ -7,7 +7,7 @@ import { configureProvider } from "./chat.ts";
 import { installSsePressure } from "./session-archive-pressure.ts";
 
 export function permissionPressureMode(): "baseline" | "fixed" {
-  const mode = process.env.OPENWORK_PERMISSION_PRESSURE_MODE ?? "baseline";
+  const mode = process.env.OPENWORK_PERMISSION_PRESSURE_MODE ?? "fixed";
   if (mode !== "baseline" && mode !== "fixed") throw new Error("OPENWORK_PERMISSION_PRESSURE_MODE must be baseline or fixed");
   return mode;
 }

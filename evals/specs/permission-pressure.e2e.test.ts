@@ -42,7 +42,7 @@ test(`${mode}: external-directory Allow once under real SSE pressure preserves u
     mode, engine: "v1", placement: "local", sourceElectron: true,
     permissions: "Two real read tools request external_directory on a disposable fixture file; no synthetic approvals",
     pressure: "Archive witness mechanism: eight real SSE fetches on the exact local-server origin, drain bodies, abort only for cleanup",
-    inference: "Mock final response gated at zero content chunks after the real tool result",
+    inference: "Mock final response held by agent-hold after the real tool result; no final text rendered",
     scope: "Controlled transport investigation only; no installed incident attribution, no engine database access",
   });
   try {
@@ -190,7 +190,7 @@ test(`${mode}: external-directory Allow once under real SSE pressure preserves u
       expect(renderer.requests.filter(item => item.method === "POST" && item.path.includes("/permission/")).every(item => item.path === replyPath)).toBe(true);
       evidence.recordJsonArtifact("Acknowledgement independent of final inference", { state, main, renderer,
         acceptedReplies: accepted.length, readbackWaitMs: performance.now() - started });
-      evidence.recordAssertionEvidence("Permission acknowledgement does not need final inference", "The real pending request disappeared, exactly one reply succeeded and the read output contains the fixture marker while zero final response chunks were released; the unrelated request and transcript are unchanged.", true);
+      evidence.recordAssertionEvidence("Permission acknowledgement does not need final inference", "The real pending request disappeared, exactly one reply succeeded and the read output contains the fixture marker while the mock final response remains held and final text is absent; the unrelated request and transcript are unchanged.", true);
       await user.screenshot();
     });
     await world.releasePressure();
