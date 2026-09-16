@@ -12,7 +12,7 @@ import {
   AGENT_CONTEXT_DIAGNOSTICS_REQUEST_TIMEOUT_MS,
   requestAgentContextDiagnosticsPayload,
 } from "./agent-context-diagnostics-transport";
-import { desktopFetch, desktopFetchAgentContextDiagnostics, desktopUploadMultipart, electronLocalPathForFile } from "./desktop";
+import { desktopFetch, desktopFetchViaMain, desktopFetchAgentContextDiagnostics, desktopUploadMultipart, electronLocalPathForFile } from "./desktop";
 import { isOpenworkGatewayRuntime } from "./gateway-runtime";
 import { isDesktopRuntime } from "./runtime-env";
 import type { ExecResult, OpencodeConfigFile, WorkspaceInfo, WorkspaceList } from "./desktop";
@@ -1437,10 +1437,10 @@ async function fetchWithTimeout(
 async function requestJson<T>(
   baseUrl: string,
   path: string,
-  options: { method?: string; token?: string; hostToken?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal } = {},
+  options: { method?: string; token?: string; hostToken?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal; desktopTransport?: "main" } = {},
 ): Promise<T> {
   const url = `${baseUrl}${path}`;
-  const fetchImpl = resolveFetch(url);
+  const fetchImpl = options.desktopTransport === "main" && isDesktopRuntime() ? desktopFetchViaMain : resolveFetch(url);
   const response = await fetchWithTimeout(
     fetchImpl,
     url,
@@ -2476,11 +2476,11 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
 
     // User-level env vars (host-auth only — desktop shell is the sole caller).
     // See apps/server/src/env-file.ts and apps/app/pr/environment-variables.md.
-    listUserEnvKeys: () =>
+    listUserEnvKeys: (options?: { desktopTransport?: "main" }) =>
       requestJson<{ keys: string[] }>(
         baseUrl,
         "/env/keys",
-        { token, hostToken, timeoutMs: timeouts.config },
+        { token, hostToken, timeoutMs: timeouts.config, desktopTransport: options?.desktopTransport },
       ),
 
     getUserEnvStatus: (runtimeKey?: string | null) => {

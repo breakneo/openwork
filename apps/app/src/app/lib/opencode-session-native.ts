@@ -6,7 +6,7 @@ import { createClientV2, isOpencodeV2BaseUrl } from "./opencode-v2-adapter";
 import type { OpenworkSessionHistory, OpenworkSessionSnapshot } from "./openwork-server";
 import type { ResolvedWorkspaceEndpoint } from "./workspace-endpoint";
 
-type NativeSessionEndpoint = Pick<ResolvedWorkspaceEndpoint, "opencodeBaseUrl" | "token">;
+type NativeSessionEndpoint = Pick<ResolvedWorkspaceEndpoint, "opencodeBaseUrl" | "token"> & { desktopTransport?: "main" };
 type RequestOptions = { signal?: AbortSignal };
 
 export type NativeSessionSnapshotTarget = {
@@ -60,7 +60,8 @@ function readOwnedSnapshotTarget(
 function createNativeOperations(endpoint: NativeSessionEndpoint): NativeSessionOperations {
   const client = isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl)
     ? createClientV2(endpoint.opencodeBaseUrl, undefined, { token: endpoint.token })
-    : createClient(endpoint.opencodeBaseUrl, undefined, { mode: "openwork", token: endpoint.token });
+    : createClient(endpoint.opencodeBaseUrl, undefined, { mode: "openwork", token: endpoint.token },
+      endpoint.desktopTransport ? { desktopTransport: endpoint.desktopTransport } : undefined);
   return {
     get: (sessionId, options) => client.session.get({ sessionID: sessionId }, options),
     messages: (sessionId, limit, options) => client.session.messages({ sessionID: sessionId, limit }, options),

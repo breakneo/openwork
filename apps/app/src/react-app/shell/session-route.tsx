@@ -1504,7 +1504,11 @@ export function SessionRoute() {
           skipGate: true,
           send: async () => {
             assertCurrent();
-            if (unwrap(await opencodeClient.session.get({ sessionID: targetSessionId })).time.archived) {
+            const promptClient = draft.mode === "shell" || draft.command || isOpencodeV2BaseUrl(opencodeBaseUrl)
+              ? opencodeClient
+              : createClient(opencodeBaseUrl, selectedWorkspaceRoot || undefined,
+                { token: selectedWorkspaceServerToken, mode: "openwork" }, { desktopTransport: "main" });
+            if (unwrap(await promptClient.session.get({ sessionID: targetSessionId })).time.archived) {
               throw new Error("This session is archived. Restore it before sending.");
             }
             assertCurrent();
@@ -1582,10 +1586,11 @@ export function SessionRoute() {
                   workspaceId: selectedWorkspaceId,
                   cacheKey: targetSessionId,
                   runtimeKey: environmentRuntimeKey,
+                  desktopTransport: isOpencodeV2BaseUrl(opencodeBaseUrl) ? undefined : "main",
                 });
                 assertCurrent();
                 onPrepared?.(v2PromptText(parts));
-                const result = await opencodeClient.session.promptAsync({
+                const result = await promptClient.session.promptAsync({
                   sessionID: targetSessionId,
                   messageID: draft.messageId,
                   parts,
@@ -1758,6 +1763,7 @@ export function SessionRoute() {
     selectedWorkspace,
     selectedWorkspaceId,
     selectedWorkspaceRoot,
+    selectedWorkspaceServerToken,
     sessionsByWorkspaceId,
     submitWithCloudMcpReadiness,
     token,
@@ -1865,7 +1871,11 @@ export function SessionRoute() {
           skipGate: true,
           send: async () => {
             assertCurrent();
-            if (unwrap(await workspaceOpencodeClient.session.get({ sessionID: targetSessionId })).time.archived) {
+            const promptClient = draft.mode === "shell" || draft.command || isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl)
+              ? workspaceOpencodeClient
+              : createClient(endpoint.opencodeBaseUrl, workspaceRoot || undefined,
+                { token: endpoint.token, mode: "openwork" }, { desktopTransport: "main" });
+            if (unwrap(await promptClient.session.get({ sessionID: targetSessionId })).time.archived) {
               throw new Error("This session is archived. Restore it before sending.");
             }
             assertCurrent();
@@ -1928,10 +1938,11 @@ export function SessionRoute() {
                   workspaceId: workspace.id,
                   cacheKey: targetSessionId,
                   runtimeKey: workspace.workspaceType === "remote" ? null : environmentRuntimeKey,
+                  desktopTransport: isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl) ? undefined : "main",
                 });
                 assertCurrent();
                 onPrepared?.(v2PromptText(parts));
-                const result = await workspaceOpencodeClient.session.promptAsync({
+                const result = await promptClient.session.promptAsync({
                   sessionID: targetSessionId,
                   messageID: draft.messageId,
                   parts,

@@ -1303,8 +1303,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
       markSessionSnapshotFetchStart(item, startedAt);
       return item;
   }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner, useDesktopLoopbackSnapshotRetry]);
-  const readLatest = useCallback(async (signal: AbortSignal) => {
-    const endpoint = { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken };
+  const readLatest = useCallback(async (signal: AbortSignal, options?: { desktopTransport: "main" }) => {
+    const endpoint = { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, ...options };
     const [session, messages] = await Promise.all([
       opencodeSessionNative.getNativeSession(endpoint, props.sessionId, { signal }),
       opencodeSessionNative.getNativeSessionMessages(endpoint, props.sessionId, { signal, limit: 24 }),
@@ -2395,7 +2395,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
       // passes the workspace root), so the abort must target the same scope —
       // without it the server resolves the default project, finds no live run,
       // and answers `200: false` while the stream keeps going (#2014).
-      await interruptSessionTurn(props.opencodeBaseUrl, opencodeClient, props.sessionId,
+      const stopClient = isOpencodeV2BaseUrl(props.opencodeBaseUrl) ? opencodeClient
+        : createClient(props.opencodeBaseUrl, props.workspaceRoot.trim() || undefined,
+          { token: props.openworkToken, mode: "openwork" }, { desktopTransport: "main" });
+      await interruptSessionTurn(props.opencodeBaseUrl, stopClient, props.sessionId,
         props.workspaceRoot.trim() || undefined, {
           admissionUnknown: phase.kind === "admission_unknown",
           admissionMessageID: phase.kind === "admission_unknown" ? phase.messageID : undefined,
@@ -2404,7 +2407,17 @@ export function SessionSurface(props: SessionSurfaceProps) {
       captureAnalyticsEvent("task_run_stopped", {});
       // The surface survives navigation; refresh the stopped conversation, not
       // whichever query the observer is showing when cancellation finishes.
-      await queryClient.refetchQueries({ queryKey: snapshotQueryKey, exact: true });
+      if (isDesktopRuntime() && !isOpencodeV2BaseUrl(props.opencodeBaseUrl)) {
+        await queryClient.cancelQueries({ queryKey: snapshotQueryKey, exact: true });
+        const snapshotStartedAt = Date.now();
+        const snapshot = await opencodeSessionNative.composeNativeSessionHistory({
+          opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, desktopTransport: "main",
+        }, props.sessionId);
+        markSessionSnapshotFetchStart(snapshot, snapshotStartedAt);
+        queryClient.setQueryData(snapshotQueryKey, snapshot);
+      } else {
+        await queryClient.refetchQueries({ queryKey: snapshotQueryKey, exact: true });
+      }
       return true;
     } catch (error) {
       setError({ message: error instanceof Error ? error.message : t("session.stop_failed") });
@@ -2413,7 +2426,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       pendingStopsRef.current.delete(sessionOwner);
       setPendingStopSessions([...pendingStopsRef.current]);
     }
-  }, [chatStreaming, clearQueuedDrafts, opencodeClient, props.opencodeBaseUrl, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
+  }, [chatStreaming, clearQueuedDrafts, opencodeClient, props.opencodeBaseUrl, props.openworkToken, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
 
   const checkUnknownAdmission = useCallback(async (notify = false) => {
     const phase = getQueuedDrainState(props.sessionId).phase;

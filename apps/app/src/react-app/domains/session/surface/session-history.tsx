@@ -138,7 +138,7 @@ export function useSessionPrefetchIntent(intent: boolean, prefetch: () => void |
 
 export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   transcriptQueryKey?: readonly unknown[];
-  readLatest?: (signal: AbortSignal) => Promise<Pick<OpenworkSessionHistory, "session" | "messages">>;
+  readLatest?: (signal: AbortSignal, options?: { desktopTransport: "main" }) => Promise<Pick<OpenworkSessionHistory, "session" | "messages">>;
 }) {
   const client = useQueryClient();
   const hasLegacyPosition = useSessionScrollStore((state) => Boolean(state.sessions[input.sessionId]));
@@ -274,7 +274,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     const cached = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
     if (cached?.session.id === input.sessionId) return cached.messages;
     if (!input.readLatest) return (await ensureFullSnapshot()).messages;
-    const latest = await input.readLatest(new AbortController().signal);
+    const latest = await input.readLatest(new AbortController().signal, { desktopTransport: "main" });
     if (latest.session.id !== input.sessionId) throw new Error("Conversation history belongs to another session.");
     return latest.messages;
   }, [client, ensureFullSnapshot, input.readLatest, input.sessionId, input.snapshotQueryKey]);
