@@ -94,6 +94,7 @@ import {
   connectionActionPayloadSchema,
 } from "./connection-action.js"
 import { registerAgentPluginFlowApp } from "./plugin-flow-app.js"
+import { needsGeneratedArtifactCatalog } from "./generated-artifact-catalog-request.js"
 import {
   createConfigObjectVersion,
   createPluginBundle,
@@ -190,8 +191,8 @@ export const AGENT_MCP_INSTRUCTIONS = [
   "Successful postMarketplacesPlugins, postPluginsAccess, and postMarketplacesAccess calls render a confirmation card automatically in compatible hosts; report the outcome in text as well.",
 ].join("\n")
 
-async function mcpRequestInfo(request: Request): Promise<{ method: string | null; resourceUri: string | null }> {
-  if (request.method.toUpperCase() !== "POST") return { method: null, resourceUri: null }
+async function mcpRequestInfo(request: Request): Promise<{ method: string | null; resourceUri: string | null; generatedCatalog: boolean }> {
+  if (request.method.toUpperCase() !== "POST") return { method: null, resourceUri: null, generatedCatalog: false }
   const body: unknown = await request.clone().json().catch(() => null)
   const method = typeof body === "object"
     && body !== null
@@ -203,7 +204,7 @@ async function mcpRequestInfo(request: Request): Promise<{ method: string | null
     ? body.params
     : null
   const resourceUri = params && "uri" in params && typeof params.uri === "string" ? params.uri : null
-  return { method, resourceUri }
+  return { method, resourceUri, generatedCatalog: needsGeneratedArtifactCatalog(method, params) }
 }
 
 export const AGENT_SKILL_INDEX_URI = "skill://index.json"
@@ -900,7 +901,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
         }
         return { html: revision.compiled_html, resourceDigest: revision.resource_digest, csp: revision.csp }
       }
-      const generatedViews = await listArtifactViews({ context: artifactContext })
+      const generatedViews = requestInfo.generatedCatalog ? await listArtifactViews({ context: artifactContext }) : []
       registerAgentGeneratedArtifactViews({
         server,
         views: generatedViews,
