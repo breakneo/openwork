@@ -77,12 +77,18 @@ if (process.isMainFrame) {
   });
 }
 
-// Own native middle-clicks before Markdown/citation/React handlers or Chromium
-// can open a built-in tab. Web clients have no preload and retain their defaults.
+// Own middle-clicks and Cmd/Ctrl-clicks before Markdown/citation/React handlers
+// or Chromium can open a built-in tab. Web clients retain their defaults.
 // Keep this in the isolated main frame; never expose a page-callable launch API.
 if (process.isMainFrame) {
-  window.addEventListener("auxclick", (event) => {
-    if (!event.isTrusted || event.button !== 1 || event.defaultPrevented) return;
+  /** @param {MouseEvent} event */
+  const handleExternalLinkClick = (event) => {
+    const middleClick = event.type === "auxclick" && event.button === 1;
+    // Use the platform accelerator: Control-click on macOS is a context menu.
+    // Keyboard activation has detail=0 and must keep its existing behavior.
+    const modifiedClick = event.type === "click" && event.button === 0 && event.detail > 0
+      && (process.platform === "darwin" ? event.metaKey : event.ctrlKey);
+    if (!event.isTrusted || event.defaultPrevented || (!middleClick && !modifiedClick)) return;
     const eventPath = event.composedPath();
     if (eventPath.some((node) => node instanceof HTMLElement && (
       node.isContentEditable || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
@@ -99,7 +105,9 @@ if (process.isMainFrame) {
     event.preventDefault();
     event.stopImmediatePropagation();
     ipcRenderer.send("openwork:browser:middleClickLink", url.href);
-  }, { capture: true });
+  };
+  window.addEventListener("auxclick", handleExternalLinkClick, { capture: true });
+  window.addEventListener("click", handleExternalLinkClick, { capture: true });
 }
 
 // Selected text and ordinary editors use Chromium's native context-menu event.

@@ -82,24 +82,24 @@ async function run() {
     stage = "load app fixture";
     await mainWindow.loadURL(source);
     async function settle() { await new Promise(resolve => setTimeout(resolve, 200)); }
-    async function click(contents, button) {
+    async function click(contents, button, modifiers = []) {
       const point = await contents.executeJavaScript(`(() => {
         globalThis.fixtureInputs = [];
-        for (const type of ["mousedown", "mouseup", "auxclick"]) document.addEventListener(type,
+        for (const type of ["mousedown", "mouseup", "auxclick", "click"]) document.addEventListener(type,
           event => fixtureInputs.push({ type, button: event.button, trusted: event.isTrusted }), { capture: true, once: true });
         const r = document.getElementById("link").getBoundingClientRect();
         return { x: Math.round(r.x + 30), y: Math.round(r.y + 20) };
       })()`);
-      contents.sendInputEvent({ type: "mouseDown", button, clickCount: 1, ...point });
-      contents.sendInputEvent({ type: "mouseUp", button, clickCount: 1, ...point });
+      contents.sendInputEvent({ type: "mouseDown", button, modifiers, clickCount: 1, ...point });
+      contents.sendInputEvent({ type: "mouseUp", button, modifiers, clickCount: 1, ...point });
       await settle();
     }
-    async function verifyMiddle(contents) {
+    async function verifyExternalClick(contents, button = "middle", modifiers = []) {
       launches.length = 0;
       policies.length = 0;
       const before = invoke("openwork:browser:state").tabs.length;
       const currentUrl = contents.getURL();
-      await click(contents, "middle");
+      await click(contents, button, modifiers);
       assert.deepEqual(preloadErrors, []);
       assert.deepEqual(launches, [destination], `${stage}; input events: ${JSON.stringify(await contents.executeJavaScript("fixtureInputs"))}`);
       assert.deepEqual(policies.filter(item => item.external), [{ url: destination, external: true }]);
@@ -108,19 +108,29 @@ async function run() {
       assert.deepEqual(mainPopups, []);
       denied = true;
       launches.length = 0;
-      await click(contents, "middle");
+      await click(contents, button, modifiers);
       assert.deepEqual(launches, []);
       assert.equal(invoke("openwork:browser:state").tabs.length, before);
       assert.equal(contents.getURL(), currentUrl);
       assert.deepEqual(mainPopups, []);
       denied = false;
       // A synthetic main-world event must not grant native external browsing.
-      await contents.executeJavaScript('document.getElementById("link").dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }))');
+      const eventType = button === "middle" ? "auxclick" : "click";
+      const eventInit = { button: button === "middle" ? 1 : 0, detail: 1, metaKey: modifiers.includes("meta"), ctrlKey: modifiers.includes("control"), bubbles: true, cancelable: true };
+      await contents.executeJavaScript(`(() => {
+        const link = document.getElementById("link");
+        // Cancel only the synthetic event's ordinary DOM default, after the
+        // isolated capture handler. An erroneous native launch is still visible.
+        link.addEventListener(${JSON.stringify(eventType)}, event => event.preventDefault(), { once: true });
+        link.dispatchEvent(new MouseEvent(${JSON.stringify(eventType)}, ${JSON.stringify(eventInit)}));
+      })()`);
       await settle();
       assert.deepEqual(launches, []);
     }
     stage = "dispatch app input";
-    await verifyMiddle(mainWindow.webContents);
+    const accelerator = process.platform === "darwin" ? "meta" : "control";
+    await verifyExternalClick(mainWindow.webContents);
+    await verifyExternalClick(mainWindow.webContents, "left", [accelerator]);
     policies.length = 0;
     await click(mainWindow.webContents, "left");
     assert.deepEqual(mainPopups, [destination], "ordinary primary-click popup behavior is unchanged");
@@ -140,9 +150,10 @@ async function run() {
     // Show only this isolated fixture without activating or focusing it.
     mainWindow.showInactive();
     await settle();
-    await verifyMiddle(view.webContents);
-    assert.equal(dialogs, 2);
-    console.log("PASS: Chromium middle-click in app and embedded main frame opens exactly once; no built-in popup/navigation; denial and synthetic events do not launch; app left click unchanged. OS launch stubbed.");
+    await verifyExternalClick(view.webContents);
+    await verifyExternalClick(view.webContents, "left", [accelerator]);
+    assert.equal(dialogs, 4);
+    console.log("PASS: Chromium middle and Cmd/Ctrl-click in app and embedded main frame open exactly once; no built-in popup/navigation; denial and synthetic events do not launch; unmodified app left click unchanged. OS launch stubbed.");
   } catch (error) {
     console.error(error);
     exitCode = 1;
