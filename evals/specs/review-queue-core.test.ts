@@ -808,13 +808,15 @@ test('builder escapes script payloads and Unicode while preserving dollar and ma
 
 test('real template and core compile as one offline classic script without module leftovers', async ({ evidence }) => {
   const output = buildHtml(feed(), readFileSync(join(sourceDirectory, 'template.html'), 'utf8'), readFileSync(join(sourceDirectory, 'core.mjs'), 'utf8'), readFileSync(join(sourceDirectory, 'ui.js'), 'utf8'));
-  const scripts = [...output.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
+  const scriptPattern = /<script(?: [^>]*)?>([\s\S]*?)<\/script>/gi;
+  const scripts = [...output.matchAll(scriptPattern)];
   expect(scripts).toHaveLength(2);
+  for (const tag of ['SCRIPT', 'ScRiPt']) expect([...`<${tag} type="application/json">{}</${tag}><${tag}>void 0;</${tag}>`.matchAll(scriptPattern)].map((match) => match[1])).toEqual(['{}', 'void 0;']);
   expect(() => new Script(scripts[1][1])).not.toThrow();
   expect(JSON.parse(scripts[0][1]).items).toEqual(feed().items);
   expect(output).toContain("connect-src 'none'");
   expect(output).not.toMatch(/<script[^>]+src=/);
-  evidence.recordAssertionEvidence('Actual template and core build into a self-contained classic script', `Found ${scripts.length} inline scripts: embedded feed matched normalized source and combined core/UI compiled with node:vm Script. CSP retained connect-src none and no external script src appeared. This proves compilation/offline structure, not browser interaction.`, true);
+  evidence.recordAssertionEvidence('Actual template and core build into a self-contained classic script', `Found ${scripts.length} inline scripts: embedded feed matched normalized source and combined core/UI compiled with node:vm Script. Uppercase and mixed-case script tags retained both JSON and JavaScript bodies. CSP retained connect-src none and no external script src appeared. This proves compilation/offline structure, not browser interaction.`, true);
 });
 
 test('converter and builder CLI produce private exclusive files, reject repository paths and never overwrite inputs', async ({ evidence }) => {
