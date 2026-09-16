@@ -491,6 +491,8 @@ export function SessionRoute() {
     setWorkspaceOrderIds,
     workspaceOrderIdsRef,
     sessionsByWorkspaceId,
+    sessionReferenceInventories,
+    isSessionReferenceCurrent,
     setSessionsByWorkspaceId,
     sessionsByWorkspaceIdRef,
     errorsByWorkspaceId,
@@ -514,9 +516,11 @@ export function SessionRoute() {
     selectedWorkspaceError,
     routeNotFoundMessage,
     endpointForWorkspace,
+    endpointForSessionWorkspace,
     refreshRouteState,
     reloadWorkspaceSessions,
     rememberPendingCreatedSession,
+    createWorkspaceSessionMetadataCallbacks,
     handleRuntimeSessionCreated,
     handleRuntimeSessionUpdated,
     handleRuntimeSessionDeleted,
@@ -1500,7 +1504,11 @@ export function SessionRoute() {
           skipGate: true,
           send: async () => {
             assertCurrent();
-            if (unwrap(await opencodeClient.session.get({ sessionID: targetSessionId })).time.archived) {
+            const promptClient = draft.mode === "shell" || draft.command || isOpencodeV2BaseUrl(opencodeBaseUrl)
+              ? opencodeClient
+              : createClient(opencodeBaseUrl, selectedWorkspaceRoot || undefined,
+                { token: selectedWorkspaceServerToken, mode: "openwork" }, { desktopTransport: "main" });
+            if (unwrap(await promptClient.session.get({ sessionID: targetSessionId })).time.archived) {
               throw new Error("This session is archived. Restore it before sending.");
             }
             assertCurrent();
@@ -1578,10 +1586,11 @@ export function SessionRoute() {
                   workspaceId: selectedWorkspaceId,
                   cacheKey: targetSessionId,
                   runtimeKey: environmentRuntimeKey,
+                  desktopTransport: isOpencodeV2BaseUrl(opencodeBaseUrl) ? undefined : "main",
                 });
                 assertCurrent();
                 onPrepared?.(v2PromptText(parts));
-                const result = await opencodeClient.session.promptAsync({
+                const result = await promptClient.session.promptAsync({
                   sessionID: targetSessionId,
                   messageID: draft.messageId,
                   parts,
@@ -1698,6 +1707,7 @@ export function SessionRoute() {
           ...current,
           [selectedWorkspaceId]: mergeWorkspaceRouteSession(current[selectedWorkspaceId] ?? [], forked),
         }));
+        void reloadWorkspaceSessions(selectedWorkspaceId);
         navigateToWorkspaceSession(selectedWorkspaceId, forked.id);
         void refreshRouteState();
       },
@@ -1741,6 +1751,7 @@ export function SessionRoute() {
     refreshCloudProviderSync,
     refreshOrganizationModelAccess,
     resolveModelAvailability,
+    reloadWorkspaceSessions,
     opencodeBaseUrl,
     opencodeClient,
     providerConnectedIds,
@@ -1752,6 +1763,7 @@ export function SessionRoute() {
     selectedWorkspace,
     selectedWorkspaceId,
     selectedWorkspaceRoot,
+    selectedWorkspaceServerToken,
     sessionsByWorkspaceId,
     submitWithCloudMcpReadiness,
     token,
@@ -1766,7 +1778,7 @@ export function SessionRoute() {
       workspaceId: session.workspaceId,
       workspaceTitle,
       workspace: candidateWorkspace,
-      endpoint: endpointForWorkspace(candidateWorkspace),
+      endpoint: endpointForSessionWorkspace(candidateWorkspace),
       connectionError: connection?.status === "error" ? connection.message : workspaceError,
     });
     if (paneEndpoint.status === "unavailable") return paneEndpoint;
@@ -1859,7 +1871,11 @@ export function SessionRoute() {
           skipGate: true,
           send: async () => {
             assertCurrent();
-            if (unwrap(await workspaceOpencodeClient.session.get({ sessionID: targetSessionId })).time.archived) {
+            const promptClient = draft.mode === "shell" || draft.command || isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl)
+              ? workspaceOpencodeClient
+              : createClient(endpoint.opencodeBaseUrl, workspaceRoot || undefined,
+                { token: endpoint.token, mode: "openwork" }, { desktopTransport: "main" });
+            if (unwrap(await promptClient.session.get({ sessionID: targetSessionId })).time.archived) {
               throw new Error("This session is archived. Restore it before sending.");
             }
             assertCurrent();
@@ -1922,10 +1938,11 @@ export function SessionRoute() {
                   workspaceId: workspace.id,
                   cacheKey: targetSessionId,
                   runtimeKey: workspace.workspaceType === "remote" ? null : environmentRuntimeKey,
+                  desktopTransport: isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl) ? undefined : "main",
                 });
                 assertCurrent();
                 onPrepared?.(v2PromptText(parts));
-                const result = await workspaceOpencodeClient.session.promptAsync({
+                const result = await promptClient.session.promptAsync({
                   sessionID: targetSessionId,
                   messageID: draft.messageId,
                   parts,
@@ -2000,6 +2017,7 @@ export function SessionRoute() {
           ...current,
           [workspace.id]: mergeWorkspaceRouteSession(current[workspace.id] ?? [], forked),
         }));
+        void reloadWorkspaceSessions(workspace.id);
         navigateToWorkspaceSession(workspace.id, forked.id);
         void refreshRouteState();
       },
@@ -2019,7 +2037,7 @@ export function SessionRoute() {
     };
   }, [
     client,
-    endpointForWorkspace,
+    endpointForSessionWorkspace,
     engineReloadVersion,
     environmentRuntimeKey,
     errorsByWorkspaceId,
@@ -2029,6 +2047,7 @@ export function SessionRoute() {
     modelVariantValue,
     navigateToWorkspaceSession,
     refreshRouteState,
+    reloadWorkspaceSessions,
     rememberPendingCreatedSession,
     newTaskAgent,
     selectedWorkspaceId,
@@ -2366,6 +2385,7 @@ export function SessionRoute() {
         sessionsByWorkspaceIdRef.current = next;
         return next;
       });
+      void reloadWorkspaceSessions(workspaceId);
       if (openAs === "primary") {
         navigateToWorkspaceSession(workspaceId, session.id);
       } else {
@@ -2421,7 +2441,7 @@ export function SessionRoute() {
       }
       return null;
     }
-  }, [applyLastUsedModelToSession, developerMode, endpointForWorkspace, loading, navigateToWorkspaceSession, newTaskAgent, refreshCloudProviderSync, refreshRouteState, rememberPendingCreatedSession, retryingWorkspaceIds, selectedWorkspaceId, workspaces]);
+  }, [applyLastUsedModelToSession, developerMode, endpointForWorkspace, loading, navigateToWorkspaceSession, newTaskAgent, refreshCloudProviderSync, refreshRouteState, reloadWorkspaceSessions, rememberPendingCreatedSession, retryingWorkspaceIds, selectedWorkspaceId, workspaces]);
 
   const handleCreateTaskInWorkspace = useCallback((workspaceId: string): Promise<string | null> => {
     const { focusedPane, secondary } = useWorkbenchStore.getState();
@@ -3250,6 +3270,7 @@ export function SessionRoute() {
             sessionsByWorkspaceIdRef.current = next;
             return next;
           });
+          void reloadWorkspaceSessions(targetWorkspaceId);
         }
         navigateToWorkspaceSession(targetWorkspaceId, session?.id ?? null, { replace: true });
         if (session?.id) focusPromptSoon();
@@ -3260,7 +3281,7 @@ export function SessionRoute() {
     } finally {
       setCreateWorkspaceBusy(false);
     }
-  }, [baseUrl, client, local, navigateToWorkspaceSession, newTaskAgent, refreshRouteState, rememberPendingCreatedSession, token]);
+  }, [baseUrl, client, local, navigateToWorkspaceSession, newTaskAgent, refreshRouteState, reloadWorkspaceSessions, rememberPendingCreatedSession, token]);
 
   /**
    * Chat-first onboarding: the empty-state composer creates a default chat
@@ -3413,6 +3434,9 @@ export function SessionRoute() {
       />
     ) : null}
     <SessionPage
+      sessionReferenceInventories={sessionReferenceInventories}
+      createWorkspaceSessionMetadataCallbacks={createWorkspaceSessionMetadataCallbacks}
+      isSessionReferenceCurrent={isSessionReferenceCurrent}
       sessionNumberShortcuts={sessionNumberShortcuts}
       selectedSessionId={selectedSessionId}
       selectedWorkspaceId={selectedWorkspaceId}
@@ -3678,6 +3702,7 @@ export function SessionRoute() {
             ...current,
             [workspaceId]: mergeWorkspaceRouteSession(current[workspaceId] ?? [], session),
           }));
+          void reloadWorkspaceSessions(workspaceId);
           const stillOwnsNavigation = navigationOwner.workspaceId === workspaceId
             && selectedConversationRef.current.workspaceId === navigationOwner.workspaceId
             && selectedConversationRef.current.sessionId === navigationOwner.sessionId
