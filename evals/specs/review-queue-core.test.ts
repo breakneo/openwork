@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Script } from 'node:vm';
-import { validateFeed, applyDecision, undoLast, latestDecisions, exportDecisions, safeUrl, isLocked, recommendationVerb, canApprove, hasConcreteQuestion } from '../../tools/review-queue/core.mjs';
+import { validateFeed, applyDecision, undoLast, latestDecisions, exportDecisions, safeUrl, isLocked, recommendationVerb, canApprove, canArchive, hasConcreteQuestion } from '../../tools/review-queue/core.mjs';
 import { convertReport, supplementReport, privateOutputPath, writePrivateOutput, parseQueueArgs, tableCells } from '../../tools/review-queue/convert.mjs';
 import { buildHtml } from '../../tools/review-queue/build.mjs';
 
@@ -60,6 +60,29 @@ function instructions(candidate: object, action = 'approve', comment = '') {
   const historical = validateFeed({ ...source, decisions: [{ id: source.items[0].id, action, comment, decided_at: time, batch_id: 'batch-1' }] });
   return exportDecisions(historical, later).instructions;
 }
+test('historical archive exports share Busy Working and active-root safety without weakening offline scope', async ({ evidence }) => {
+  const decision = { id: 'ses_exampleA', action: 'approve', comment: '', decided_at: time, batch_id: 'historical' };
+  for (const label of ['Busy', 'Working', 'Active user root']) {
+    for (const values of [['yes'], ['no', 'yes']]) {
+      const candidate = { ...item(), evidence: [...item().evidence, ...values.map((value) => ({ label, value }))] };
+      const imported = validateFeed({ items: [candidate], decisions: [decision] });
+      expect(imported.decisions).toEqual([decision]);
+      expect(canArchive(imported.items[0])).toBe(false);
+      expect(() => applyDecision(imported, [decision.id], 'approve', '', later, 'new-request')).toThrow(/Archive/);
+      const exported = exportDecisions(imported, later);
+      expect(exported.instructions).toContain('BLOCKED');
+      expect(exported.instructions).not.toContain('session.archive ');
+      expect(validateFeed(JSON.parse(exported.json))).toEqual(imported);
+    }
+  }
+  const clear = { ...item(), evidence: [...item().evidence, ...['Busy', 'Working', 'Active user root'].map((label) => ({ label, value: 'no' }))] };
+  expect(instructions(clear)).toContain('session.archive {"sessionId":"ses_exampleA","workspaceId":"ws_example"}');
+  expect(canArchive({ ...clear, group: 'OpenWork Chat' })).toBe(true);
+  expect(instructions({ ...clear, group: 'OpenWork Chat' })).toContain('BLOCKED');
+  expect(instructions({ ...clear, group: 'OpenWork Chat' })).not.toContain('session.archive ');
+  evidence.recordAssertionEvidence('Historical readability is not unsafe archive authority', 'Imported legacy approve events remain readable and round-trip. Each positive/conflicting Busy, Working or Active user root observation rejects a new archive approval and blocks the historical export call. All-clear evidence still produces the exact plan, while the stricter offline workspace scope remains enforced.', true);
+});
+
 const report = `# Synthetic report
 
 **Early delivery; collection window: a fictional earlier time.** Not a live snapshot. Inventory is multi-call, not atomic.

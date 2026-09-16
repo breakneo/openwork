@@ -541,8 +541,7 @@ function instruction(item, decision, byId) {
   }
   if (item.kind === 'session' && recommendationVerb(item) === 'archive') {
     // Names are not identity proof: require the exact workspace ID AND explicit snapshot evidence.
-    if (!SESSION_ID.test(item.id) || !item.workspace_id || item.group !== 'openwork' || item.protected !== false || item.archived === true ||
-        evidenceValue(item, 'Workspace') !== 'openwork' || evidenceValue(item, 'Pinned') !== 'no' || evidenceValue(item, 'Status') !== 'idle') {
+    if (!canArchive(item) || item.group !== 'openwork' || item.protected !== false || evidenceValue(item, 'Workspace') !== 'openwork') {
       return prefix + 'BLOCKED: archive requires an exact openwork workspace/session identity, explicit nonprotected/unpinned/idle evidence. Never archive pinned, running, user-owned, or OpenWork Chat sessions. Unknown state is not permission.';
     }
     return prefix + 'CONDITIONAL, not executed. Re-read current workspace identity, pin, running/working/descendant state and user ownership. Confirm purpose achieved, learnings captured, no pending decision, PR merged/closed or no remaining work, and task worktree clean. If any check is unknown or false, STOP. Never archive OpenWork Chat. Only after those checks and current authorization, call:\n' +

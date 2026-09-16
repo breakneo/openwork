@@ -347,19 +347,21 @@
     const withdrawn = withdrawnIds();
     return new Map(reviewHistory().filter((decision) => !withdrawn.has(decision.batch_id) && !isMessage(decision.action)).map((decision) => [decision.id, decision]));
   }
+  function messageActivity(event) {
+    return isMessage(event.action) || event.action === 'cancel_followup' || (event.kind === 'control' && isMessage(events.get(event.target_id)?.action));
+  }
+  function resultForItem(event, id) {
+    const outcome = event.outcomes?.find((entry) => entry.item_id === id);
+    return outcome ? { ...event, status: outcome.status, text: outcome.text } : event;
+  }
   function resultById() {
     const result = new Map();
     const withdrawn = withdrawnIds();
     for (const event of events.values()) {
-      if (!currentInputIds.has(event.decision_id) || withdrawn.has(event.decision_id) || isMessage(event.action)) continue;
+      if (!currentInputIds.has(event.decision_id) || withdrawn.has(event.decision_id) || messageActivity(event)) continue;
       if (['thread', 'read'].includes(event.kind) || (event.status === 'rechecking' && events.get(event.decision_id)?.kind === 'thread')) continue;
-      for (const id of event.item_ids) result.set(id, event);
+      for (const id of event.item_ids) result.set(id, resultForItem(event, id));
     }
-    const messages = new Map();
-    for (const event of events.values()) {
-      if (isMessage(event.action) && currentInputIds.has(event.decision_id) && event.kind === 'status' && event.status !== 'rechecking') for (const id of event.item_ids) messages.set(id, event);
-    }
-    for (const [id, event] of messages) if (!result.has(id)) result.set(id, event);
     return result;
   }
   function needsHuman(item, decision, result) {
@@ -371,16 +373,16 @@
       if (result.kind === 'compensation') return false;
       if (terminalStatuses.includes(result.status)) return false;
     }
-    if ([...localRequests.values()].some((local) => local.item_ids.includes(item.id))) return true;
+    if ([...localRequests.values()].some((local) => !messageActivity(local) && local.item_ids.includes(item.id))) return true;
     if (item.archived || decision) return false;
     return (chatOnly(item) && recommendationVerb(item) === 'archive' && !readAllowed(item)) || ['merge', 'review', 'relaunch', 'blockers'].includes(recommendationVerb(item));
   }
   function archiveEligible(item, decisions = decisionsById(), results = resultById()) {
     return !laterIds.has(item.id) && item.kind === 'session' && recommendationVerb(item) === 'archive' && canArchive(item) && readAllowed(item) && !item.protected && !item.archived && !isLocked(item)
-      && !decisions.has(item.id) && ![...localRequests.values()].some((local) => local.item_ids.includes(item.id))
+      && !decisions.has(item.id) && ![...localRequests.values()].some((local) => !messageActivity(local) && local.item_ids.includes(item.id))
       && !['blocked', 'waiting', ...terminalStatuses].includes(results.get(item.id)?.status)
-      && ![...events.values()].some((event) => event.kind === 'compensation' && event.item_ids.includes(item.id) && !['unarchived', 'cancelled'].includes([...events.values()].filter((entry) => entry.decision_id === event.id).at(-1)?.status))
-      && ![...events.values()].some((event) => event.item_ids.includes(item.id) && terminalStatuses.includes(event.status) && !withdrawnIds().has(event.decision_id));
+      && ![...events.values()].some((event) => !messageActivity(event) && event.kind === 'compensation' && event.item_ids.includes(item.id) && !['unarchived', 'cancelled'].includes([...events.values()].filter((entry) => entry.decision_id === event.id).at(-1)?.status))
+      && ![...events.values()].some((event) => !messageActivity(event) && event.item_ids.includes(item.id) && terminalStatuses.includes(resultForItem(event, item.id).status) && !withdrawnIds().has(event.decision_id));
   }
   function listState() {
     return JSON.stringify([reviewHistory(), [...resultById()].map(([id, event]) => [id, event.id]), [...localRequests.values()].map((local) => [local.id, local.item_ids])]);

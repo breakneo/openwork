@@ -388,7 +388,7 @@ test('file mode ignores connection fragments, keeps the human default and render
   }
 });
 
-test('human filtering follows terminal dispositions and surfaces blocked archive and keep results', async ({ evidence }) => {
+test('human filtering follows dispositions while message incidents stay in the action log', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-live-dispositions-'));
   const feedPath = join(directory, 'feed.json');
   const base = { kind: 'session', group: 'openwork', workspace_id: 'ws_fixture', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }], recommended_action: 'archive', if_approved: 'Ask owner to recheck.' };
@@ -433,11 +433,14 @@ test('human filtering follows terminal dispositions and surfaces blocked archive
     const keep = next(live.directory);
     await page.locator('#status').selectOption('human');
     result(keep.id, 'blocked', 'Owner decision needed', live.directory);
-    await expect.poll(() => page.locator('[data-id="ses_keep"] .row-meta').textContent(), { timeout: 8000 }).toContain('blocked: Owner decision needed');
+    await expect.poll(() => page.locator('#show-blocked').textContent(), { timeout: 8000 }).toBe('Blocked (1)');
+    expect(await page.locator('[data-id="ses_keep"]').count()).toBe(0);
     result(keep.id, 'waiting', 'Waiting for reviewer', live.directory);
-    await expect.poll(() => page.locator('[data-id="ses_keep"] .row-meta').textContent(), { timeout: 8000 }).toContain('waiting: Waiting for reviewer');
+    await expect.poll(() => page.locator('#show-waiting').textContent(), { timeout: 8000 }).toBe('Waiting (1)');
+    expect(await page.locator('[data-id="ses_keep"]').count()).toBe(0);
     result(keep.id, 'done', 'Reference resolved', live.directory);
-    await expect.poll(() => page.locator('[data-id="ses_keep"]').count(), { timeout: 8000 }).toBe(0);
+    await expect.poll(() => page.locator('#show-waiting').textContent(), { timeout: 8000 }).toBe('Waiting (0)');
+    expect(await page.locator('[data-id="ses_keep"]').count()).toBe(0);
     for (const action of ['decline', 'defer']) {
       await page.locator(`[data-id="ses_review${action}"] .row-open`).click();
       await page.locator(action === 'decline' ? '[data-action="decline"]' : '[data-local-action="later"]').click();
@@ -450,7 +453,7 @@ test('human filtering follows terminal dispositions and surfaces blocked archive
     await page.waitForTimeout(3500);
     expect(await list?.evaluate((node) => node.isConnected)).toBe(true);
     expect(await child?.evaluate((node) => node.isConnected)).toBe(true);
-    evidence.recordAssertionEvidence('Effective dispositions govern archive and human views', 'Prior declined, deferred and approved sessions never enter archive batching. An approved archive becomes a human row when blocked, then disappears when archived without replacing its focused draft editor. A keep recommendation appears for blocked/waiting results and disappears on done; Keep and local Later hide their rows after the appropriate acceptance/local step. Unchanged polling preserves list nodes.', true);
+    evidence.recordAssertionEvidence('Effective dispositions govern archive and human views', 'Prior declined, deferred and approved sessions never enter archive batching. An approved archive becomes a human row when blocked, then disappears when archived without replacing its focused draft editor. Message blocked/waiting/done outcomes update log incident counts without surfacing or disposing the keep recommendation; Keep and local Later hide their rows after the appropriate acceptance/local step. Unchanged polling preserves list nodes.', true);
   } finally {
     await browser.close();
     await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); });

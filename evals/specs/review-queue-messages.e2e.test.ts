@@ -49,6 +49,78 @@ test('page incident counts link current outcomes without replay or history overc
   } finally { await browser.close(); await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); }); await rm(directory, { recursive: true, force: true }); }
 });
 
+for (const recommendation of ['review', 'archive']) {
+  test(`message-first done leaves ${recommendation} disposition and archive eligibility unchanged`, async ({ evidence }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'review-message-disposition-'));
+    const feed = join(directory, 'feed.json');
+    await writeFile(feed, JSON.stringify({ items: [{ id: 'ses_messageFirst', workspace_id: 'ws_fixture', title: 'Synthetic message-first session', kind: 'session', recommended_action: recommendation,
+      question: 'Review this synthetic session?', if_approved: 'Review the proposed action.', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }] }], decisions: [] }));
+    const live = await startServer({ feed, dir: join(directory, 'queue') });
+    const browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+    page.on('dialog', (dialog) => dialog.accept());
+    try {
+      await page.goto(live.url); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+      if (recommendation === 'archive') {
+        await page.getByTestId('archive-batch').locator('summary').click();
+        await page.getByTestId('archive-batch').getByRole('button', { name: 'Synthetic message-first session', exact: true }).click();
+      }
+      await page.locator('#comment').fill('Please explain the synthetic evidence.'); await page.getByTestId('thread-send').click();
+      await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(1);
+      const message = next(live.directory); expect(message.action).toBe('message');
+      result(message.id, 'done', 'Synthetic message completed, not a disposition', live.directory);
+      await expect.poll(() => page.getByTestId('action-log').textContent(), { timeout: 8000 }).toContain('Synthetic message completed, not a disposition');
+      expect(await page.getByTestId('queue-row').count()).toBe(recommendation === 'review' ? 1 : 0);
+      expect(await page.getByTestId('archive-batch').count()).toBe(recommendation === 'archive' ? 1 : 0);
+      expect(await page.locator('#metrics').textContent()).toContain('1 pending');
+      await page.locator('#status').selectOption('pending');
+      expect(await page.getByTestId('queue-row').count()).toBe(1);
+      expect(await page.locator('[data-id="ses_messageFirst"] .row-meta').textContent()).toContain('Pending');
+      await page.locator('#status').selectOption('decided'); expect(await page.getByTestId('queue-row').count()).toBe(0);
+      await page.reload(); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+      expect(await page.getByTestId('queue-row').count()).toBe(recommendation === 'review' ? 1 : 0);
+      expect(await page.getByTestId('archive-batch').count()).toBe(recommendation === 'archive' ? 1 : 0);
+      expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(1);
+      evidence.recordAssertionEvidence(`Message-first ${recommendation} stays undecided`, 'A completed message remains in the action log but does not change Pending/Decided membership, Needs human visibility or archive-batch eligibility, including after reload. No disposition or additional request is created.', true);
+    } finally { await browser.close(); await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); }); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
+test('mixed homogeneous results project each target onto its card and replies preserve that projection', async ({ evidence }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-target-projection-'));
+  const feed = join(directory, 'feed.json');
+  await writeFile(feed, JSON.stringify({ items: ['A', 'B'].map((suffix) => ({ id: `ses_target${suffix}`, workspace_id: 'ws_fixture', title: `Synthetic target ${suffix}`, kind: 'session', group: 'synthetic', recommended_action: 'archive', if_approved: 'Archive after live checks.', evidence: [{ label: 'Pinned', value: 'no' }, { label: 'Status', value: 'idle' }] })), decisions: [] }));
+  const live = await startServer({ feed, dir: join(directory, 'queue') });
+  const browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+  page.on('dialog', (dialog) => dialog.accept());
+  try {
+    await page.goto(live.url); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+    await page.getByRole('button', { name: 'Review archive batch', exact: true }).click(); await page.getByTestId('confirm-bulk').click();
+    await expect.poll(() => readLog(live.directory, 'decisions.jsonl').length).toBe(1);
+    const work = next(live.directory);
+    result(work.id, 'done', 'Synthetic aggregate report', live.directory, [
+      { item_id: 'ses_targetA', status: 'archived', text: 'Target A archive confirmed' },
+      { item_id: 'ses_targetB', status: 'blocked', text: 'Target B needs descendant verification' },
+    ]);
+    await expect.poll(() => page.locator('#show-blocked').textContent(), { timeout: 8000 }).toBe('Blocked (1)');
+    expect(await page.locator('[data-id="ses_targetA"]').count()).toBe(0);
+    expect(await page.locator('[data-id="ses_targetB"]').count()).toBe(1);
+    expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
+    expect(await page.getByTestId('archive-batch').count()).toBe(0);
+    result(work.id, 'reply', 'Synthetic reply is not verification', live.directory);
+    await expect.poll(() => page.getByTestId('action-log').textContent(), { timeout: 8000 }).toContain('Synthetic reply is not verification');
+    expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
+    await page.locator('#status').selectOption('');
+    expect(await page.locator('[data-id="ses_targetA"] .row-meta').textContent()).toContain('archived');
+    expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
+    await page.reload(); await expect.poll(() => page.locator('#mode-badge').textContent()).toBe('LIVE');
+    expect(await page.locator('[data-id="ses_targetA"]').count()).toBe(0);
+    expect(await page.locator('[data-id="ses_targetB"]').count()).toBe(1);
+    expect(await page.locator('[data-id="ses_targetB"] .row-meta').textContent()).toContain('blocked: Target B needs descendant verification');
+    expect(readLog(live.directory, 'decisions.jsonl')).toHaveLength(1);
+    evidence.recordAssertionEvidence('Card state matches its own structured outcome', 'One homogeneous batch reports aggregate done with A archived and B blocked. Only B remains in Needs human with its exact blocker; All items shows distinct statuses. A reply and reload preserve the projection, with no re-enqueue or archive-batch revival.', true);
+  } finally { await browser.close(); await new Promise<void>((resolve) => { live.server.close(() => resolve()); live.server.closeAllConnections(); }); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('Later is browser-local and messages do not replace approval', async ({ evidence }) => {
   const directory = await mkdtemp(join(tmpdir(), 'review-message-browser-'));
   const feed = join(directory, 'feed.json');
