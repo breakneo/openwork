@@ -12,7 +12,7 @@ import { markDesktopSignInInitiated } from "../../../../app/lib/den-sign-in-inte
 import { type OpenworkServerClient, type OpenworkServerStatus } from "../../../../app/lib/openwork-server";
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import type { BootPhase } from "../../../../app/lib/startup-boot";
-import { openDesktopPath, revealDesktopItemInDir, type WorkspaceInfo } from "../../../../app/lib/desktop";
+import { openDesktopWorkspaceFile, revealDesktopItemInDir, type WorkspaceInfo } from "../../../../app/lib/desktop";
 import type {
   ComposerAttachment,
   PendingPermission,
@@ -694,12 +694,21 @@ export function SessionPage(props: SessionPageProps) {
     const canOpenLocally = runtime.workspaceType !== "remote" && isElectronRuntime() && !options?.auto;
     const openLocalFile = (fileTarget: OpenTarget) => {
       // Files outside the workspace are revealed, never launched; see nativeFileAction.
+      // The desktop re-checks the resolved file on disk before launching anything.
       const native = nativeFileAction(runtime.workspaceRoot, fileTarget.value, options);
       if (!native) {
         reportOpenError(new Error("This is not a local file path."));
         return;
       }
-      void (native.action === "reveal" ? revealDesktopItemInDir(native.path) : openDesktopPath(native.path)).catch(reportOpenError);
+      if (native.action === "reveal") {
+        void revealDesktopItemInDir(native.path).catch(reportOpenError);
+        return;
+      }
+      void openDesktopWorkspaceFile(runtime.workspaceRoot, native.path)
+        .then((action) => {
+          if (action === "revealed") toast.info("This file points outside the workspace, so it was shown in its folder instead.");
+        })
+        .catch(reportOpenError);
     };
 
     // A person's explicit native open is not a workspace preview request.

@@ -88,6 +88,11 @@ export type NativeFileAction = { path: string; action: "open" | "reveal" };
  * Decide what an explicit native action may do with a referenced path. Only files inside
  * the workspace are handed to their default application. Anything else is shown in the
  * file manager and never launched, so a referenced path cannot start a program.
+ *
+ * This is a string-level pre-check for menu affordances. The desktop process makes the
+ * final decision on disk (`__openWorkspaceFile` / `__openWithApp`): it resolves symlinks
+ * for both the workspace root and the file and launches only a real file that stays inside
+ * the real workspace, revealing anything else instead.
  */
 export function nativeFileAction(
   root: string | null | undefined,

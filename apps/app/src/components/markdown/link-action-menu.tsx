@@ -103,9 +103,9 @@ export function LinkActionMenu({ target, anchorRect, onOpenTarget, onClose }: Li
   };
 
   const handleOpenWithApp = async (app: DesktopApplication) => {
-    if (!canLaunch || !nativePath) return;
+    if (!canLaunch || !nativePath || !workspaceRoot) return;
     try {
-      await openDesktopWithApp(nativePath, app.appPath);
+      await openDesktopWithApp(nativePath, app.appPath, workspaceRoot);
       onClose();
     } catch {
       toast.error("Could not open this file. Try another app or reveal it in the file manager.");

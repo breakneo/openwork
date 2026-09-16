@@ -112,3 +112,27 @@ test("copy errors keep the menu available for retry", async () => {
     navigator.clipboard.writeText = original;
   }
 });
+
+test("opening with a chosen application hands the desktop the workspace root for on-disk containment", async () => {
+  const calls: unknown[][] = [];
+  const bridge = window.__OPENWORK_ELECTRON__;
+  window.__OPENWORK_ELECTRON__ = {
+    invokeDesktop: async (command: string, ...args: unknown[]) => {
+      calls.push([command, ...args]);
+      if (command === "__getApplicationsForFile") return [{ name: "Preview", appPath: "/Applications/Preview.app", icon: null }];
+      return undefined;
+    },
+  } as unknown as typeof bridge;
+  try {
+    const view = await render(true, "/secondary", "./reports/Report.pdf");
+    await context(view.element("a"));
+    for (let attempt = 0; attempt < 10 && !view.host.textContent?.includes("Preview"); attempt += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+    }
+    await act(async () => view.button("Preview").click());
+    expect(calls).toContainEqual(["__getApplicationsForFile", "/secondary/reports/Report.pdf"]);
+    expect(calls).toContainEqual(["__openWithApp", "/secondary/reports/Report.pdf", "/Applications/Preview.app", "/secondary"]);
+  } finally {
+    window.__OPENWORK_ELECTRON__ = bridge;
+  }
+});
