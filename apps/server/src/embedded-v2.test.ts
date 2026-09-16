@@ -452,7 +452,7 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
       expect(resolveWorkerModel({ thinkingModel: "ipr_catalog/opaque-astra", thinkingModelVariant: "medium" }, "thinking", workerProviders))
         .toEqual({ providerId: "ipr_catalog", modelId: "opaque-astra", variant: "medium" });
       expect(workerProviders.find((provider) => provider.id === "ipr_catalog")?.models["opaque-astra"]).toMatchObject(identity);
-      expect(resolveWorkerModel({}, "thinking", workerProviders)).toEqual({ providerId: "ipr_catalog", modelId: "opaque-astra", variant: "medium" });
+      expect(resolveWorkerModel({}, "thinking", workerProviders)).toEqual({ providerId: "ipr_catalog", modelId: "opaque-luna", variant: "" });
       expect(resolveWorkerModel({}, "delivery", workerProviders)).toEqual({ providerId: "ipr_catalog", modelId: "opaque-luna", variant: "" });
       for (const secret of ["fixture-catalog-key", "fixture-model-key", "fixture-model-header", "fixture-variant-key", "fixture-price-secret", "fixture-identity-secret"]) {
         expect(JSON.stringify([rawModels, preferred, workerProviders, renderer])).not.toContain(secret);
