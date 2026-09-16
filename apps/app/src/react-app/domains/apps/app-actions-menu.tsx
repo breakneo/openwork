@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Ellipsis, Play, Sparkles, Trash2, Minus, ExternalLink, RefreshCw, LockKeyhole } from "lucide-react";
+import { Ellipsis, Play, Sparkles, Trash2, Minus, ExternalLink, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -49,25 +49,27 @@ export function AppActionsMenu({ appId, title, canManage: appCanManage, canDelet
       ]);
     },
   });
+  const hasActions = Boolean(onOpen || onRefresh || onRun || (canManage && (onEdit || onUpdate || onRemove)));
+  const showDelete = canManage && canDelete;
+  if (!hasActions && !showDelete) return null;
   return <>
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className={cn("shrink-0 text-muted-foreground", onOpen && "bg-background/90")} aria-label={`App options for ${title}`} disabled={busy}><Ellipsis className="size-4" /></Button>} />
       <DropdownMenuContent align="end" className="w-64 min-w-0 max-w-[calc(100vw-2rem)]">
-        <DropdownMenuGroup>
+        {hasActions ? <DropdownMenuGroup>
           {badge ? <DropdownMenuLabel><span className="block">{title}</span>{badge}</DropdownMenuLabel> : null}
           {onOpen ? <DropdownMenuItem onClick={onOpen} aria-label={`Open ${title}`}><ExternalLink />Open app</DropdownMenuItem> : null}
           {onRefresh ? <DropdownMenuItem onClick={onRefresh} disabled={refreshing} aria-label={`Refresh ${title}`}><RefreshCw />Refresh</DropdownMenuItem> : null}
           {onRun ? <DropdownMenuItem onClick={onRun}><Play />Run again</DropdownMenuItem> : null}
-          {!canManage ? <DropdownMenuLabel className="whitespace-normal"><LockKeyhole className="mr-1 inline size-3.5" />{dashboardManagementReason}</DropdownMenuLabel> : null}
-          {onEdit ? <DropdownMenuItem onClick={onEdit} disabled={!canManage}><Sparkles />Ask for changes</DropdownMenuItem> : null}
-          {onUpdate || !canManage ? <DropdownMenuItem onClick={onUpdate} disabled={busy || !canManage}><Sparkles />Update app</DropdownMenuItem> : null}
-          {onRemove ? <DropdownMenuItem onClick={onRemove} disabled={!canManage} aria-label={`Remove ${title} from dashboard`}><Minus />Remove from dashboard</DropdownMenuItem> : null}
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup><DropdownMenuItem variant={canManage && canDelete ? "destructive" : "default"} disabled={!canManage || !canDelete} aria-label={`Delete ${title}`} onClick={() => { deletion.reset(); setOpen(true); }}><Trash2 />Delete app</DropdownMenuItem></DropdownMenuGroup>
+          {canManage && onEdit ? <DropdownMenuItem onClick={onEdit}><Sparkles />Ask for changes</DropdownMenuItem> : null}
+          {canManage && onUpdate ? <DropdownMenuItem onClick={onUpdate} disabled={busy}><Sparkles />Update app</DropdownMenuItem> : null}
+          {canManage && onRemove ? <DropdownMenuItem onClick={onRemove} aria-label={`Remove ${title} from dashboard`}><Minus />Remove from dashboard</DropdownMenuItem> : null}
+        </DropdownMenuGroup> : null}
+        {hasActions && showDelete ? <DropdownMenuSeparator /> : null}
+        {showDelete ? <DropdownMenuGroup><DropdownMenuItem variant="destructive" aria-label={`Delete ${title}`} onClick={() => { deletion.reset(); setOpen(true); }}><Trash2 />Delete app</DropdownMenuItem></DropdownMenuGroup> : null}
       </DropdownMenuContent>
     </DropdownMenu>
-    <Dialog open={open} onOpenChange={(next) => { if (!deletion.isPending) setOpen(next); }}>
+    <Dialog open={showDelete && open} onOpenChange={(next) => { if (!deletion.isPending) setOpen(next); }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete “{title}”?</DialogTitle>

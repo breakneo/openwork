@@ -9,7 +9,6 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useAppsClient, dashboardManagementReason } from "./use-apps";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { DashboardLaunchEndpoint } from "../dashboard/mcp-app-tile";
 import { loadSavedAppForDisplay, viewerLocalDate } from "./live-generated-app-model";
 import { LiveGeneratedApp, isLiveGeneratedApp, useViewerDay } from "./live-generated-app";
@@ -82,9 +81,9 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk, fall
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        {!saved ? <Tooltip><TooltipTrigger render={<span tabIndex={canManage && app.canManage ? undefined : 0} />}><Button size="sm" disabled={!canManage || !app.canManage || !revision || revision.buildStatus !== "ready"} onClick={() => {
+        {canManage && app.canManage && !saved ? <Button size="sm" disabled={!revision || revision.buildStatus !== "ready"} onClick={() => {
           setName(app.view.title); setUseInWorkflow(app.view.activeRevisionId ? app.view.useInWorkflow !== false : true); setSaveOpen(true); save.reset();
-        }}>{app.view.activeRevisionId ? "Save changes" : "Save"}</Button></TooltipTrigger>{!canManage || !app.canManage ? <TooltipContent>{dashboardManagementReason}</TooltipContent> : null}</Tooltip> : null}
+        }}>{app.view.activeRevisionId ? "Save changes" : "Save"}</Button> : null}
         <AppActionsMenu appId={appId} title={app.view.title} canManage={app.canManage} canDelete={app.canManage && app.view.status !== "retired"}
           busy={asking} onUpdate={onUpdate} onDeleted={onClose ?? (() => navigate("/dashboard"))}
           onRun={onAsk && saved ? () => void ask(`Run my saved app “${app.view.title}” with fresh data and show the new results in the saved app.`) : undefined}
@@ -101,7 +100,7 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk, fall
         <p role="status" className="text-sm text-muted-foreground">{app.previewNotice}</p>
         {onUpdate ? <Button variant="outline" size="sm" disabled={asking} onClick={onUpdate}>{asking ? "Opening conversation…" : "Update app"}</Button> : null}
       </div>}
-      {!saved ? <p className="text-xs text-muted-foreground">Your draft is kept. Ask for changes in the conversation, then save the app to use it again.</p> : null}
+      {canManage && app.canManage && !saved ? <p className="text-xs text-muted-foreground">Your draft is kept. Ask for changes in the conversation, then save the app to use it again.</p> : null}
     </div>
     <Dialog open={canManage && app.canManage && saveOpen} onOpenChange={(open) => { if (!save.isPending) setSaveOpen(open); }}>
       <DialogContent>

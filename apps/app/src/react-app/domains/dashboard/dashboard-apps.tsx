@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useSavedApps, useAppsClient, dashboardManagementReason } from "../apps/use-apps";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AppActionsMenu, getAppUpdatePrompt } from "../apps/app-actions-menu";
 import { GeneratedAppPreview, type GeneratedAppPreviewGeometry } from "../apps/generated-app-preview";
 import { useWorkspace } from "@/react-app/shell/workspace-provider";
@@ -56,7 +55,7 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
   return <>
     <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
       <div><h1 className="text-xl font-medium">Dashboard</h1><p className="mt-1 text-sm text-muted-foreground">Your apps and the tools your team shares with you.</p></div>
-      {available ? <div className="flex items-center gap-2">{query.data?.sharingEnabled ? <ShareDashboardButton key={JSON.stringify(scope)} apps={personal} /> : null}<Tooltip><TooltipTrigger render={<span tabIndex={canManage ? undefined : 0} />}><Button disabled={!canManage} onClick={() => { setChooser("add"); setError(null); placement.reset(); }}><Plus className="size-4" />Add</Button></TooltipTrigger>{!canManage ? <TooltipContent>{dashboardManagementReason}</TooltipContent> : null}</Tooltip></div> : null}
+      {available && canManage ? <div className="flex items-center gap-2">{query.data?.sharingEnabled ? <ShareDashboardButton key={JSON.stringify(scope)} apps={personal} /> : null}<Button onClick={() => { setChooser("add"); setError(null); placement.reset(); }}><Plus className="size-4" />Add</Button></div> : null}
     </header>
     {query.isError ? <div className="mb-5 flex items-center gap-3"><p role="alert" className="text-sm">Your apps could not be loaded.</p><Button variant="outline" onClick={() => void query.refetch()}>Try again</Button></div> : null}
     {placement.error && !chooser ? <p role="alert" className="mb-4 text-sm text-destructive">{placement.error.message}</p> : null}
@@ -65,13 +64,13 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
       <DashboardMasonry>{personal.map((app) => <SavedDashboardApp key={JSON.stringify([...scope, app.view.id])} app={app} fallbackEndpoints={fallbackEndpoints} onCreateApp={onCreateApp}
         removing={placement.isPending && placement.variables?.appId === app.view.id}
         onRemove={(geometry) => placement.mutate({ appId: app.view.id, added: false, geometry })} />)}</DashboardMasonry>
-    </section> : available ? <section className="mb-8 rounded-xl border border-dashed p-6">
+    </section> : available && canManage ? <section className="mb-8 rounded-xl border border-dashed p-6">
       <div className="flex items-start gap-3"><Sparkles className="mt-0.5 size-5 text-muted-foreground" /><div>
         <h2 className="text-sm font-medium">Make this dashboard yours</h2>
         <p className="mt-1 max-w-lg text-sm text-muted-foreground">Create a meeting briefing, a project tracker, or a view of your weekly work. Describe what you need, try the preview, then save it here.</p>
-        <Tooltip><TooltipTrigger render={<span tabIndex={canManage ? undefined : 0} />}><Button className="mt-4" variant="outline" disabled={!canManage} onClick={() => setChooser("add")}>Add your first app</Button></TooltipTrigger>{!canManage ? <TooltipContent>{dashboardManagementReason}</TooltipContent> : null}</Tooltip>
+        <Button className="mt-4" variant="outline" onClick={() => setChooser("add")}>Add your first app</Button>
       </div></div>
-    </section> : null}
+    </section> : available ? <p className="mb-8 text-xs text-muted-foreground">This dashboard has no apps yet.</p> : null}
     <Dialog open={canManage && chooser !== null} onOpenChange={(open) => { if (!open && !creating && !placement.isPending) setChooser(null); }}>
       <DialogContent>
         <DialogHeader><DialogTitle>{chooser === "existing" ? "Choose an existing app" : "Add to your dashboard"}</DialogTitle>

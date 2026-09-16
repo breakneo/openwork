@@ -267,26 +267,23 @@ test.each(["dashboard", "artifact"])("%s disables update while opening and suppo
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
 
-test.each(["dashboard", "artifact"])("%s members see locked management controls without losing app access", async (surface) => {
+test.each(["dashboard", "artifact"])("%s members see no management controls or permission notice", async (surface) => {
   organizationRole = "member";
   detail.canManage = false;
   await render(surface);
   expect(container.textContent).toContain(detail.previewNotice);
   expect(findButton("Update app")).toBeUndefined();
+  expect(findButton("Add")).toBeUndefined();
+  expect(findButton("Share")).toBeUndefined();
   if (surface === "dashboard") {
-    expect(button("Add").disabled).toBe(true);
-    await act(async () => button("Add").click());
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await openMenu();
+    expect(Array.from(document.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent)).toEqual(["Open app"]);
+  } else {
+    expect(container.querySelector('[aria-label^="App options"]')).toBeNull();
   }
-  await openMenu();
-  expect(document.body.textContent).toContain("Only organization owners and admins can manage dashboards and apps.");
-  for (const item of document.querySelectorAll<HTMLElement>('[role="menuitem"]')) {
-    if (["Update app", "Ask for changes", "Remove from dashboard", "Delete app"].includes(item.textContent ?? "")) {
-      expect(item.getAttribute("aria-disabled")).toBe("true");
-      await act(async () => item.click());
-    }
-  }
-  expect(updateMenuItem()).toBeDefined();
+  expect(document.querySelector('[role="separator"]')).toBeNull();
+  expect(document.body.textContent).not.toContain("Only organization owners and admins");
+  expect(updateMenuItem()).toBeUndefined();
   expect(client.setAppOnDashboard).not.toHaveBeenCalled();
   expect(launch).not.toHaveBeenCalled();
 });
@@ -316,6 +313,8 @@ test("artifact without a conversation launcher leaves the warning read-only", as
   expect(findButton("Update app")).toBeUndefined();
   await openMenu();
   expect(updateMenuItem()).toBeUndefined();
+  expect(Array.from(document.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent)).toEqual(["Delete app"]);
+  expect(document.querySelector('[role="separator"]')).toBeNull();
   expect(launch).not.toHaveBeenCalled();
 });
 
@@ -420,7 +419,7 @@ test("yesterday's successful live payload cannot be loaded after midnight", () =
   window.localStorage.removeItem(cacheScope);
 });
 
-test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member"].map((role) => [mode, role])))("%s saved tiles retain open and refresh with role %s", async (mode, role) => {
+test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member", "unknown"].map((role) => [mode, role])))("%s saved tiles retain open and refresh with role %s", async (mode, role) => {
   organizationRole = role;
   workingDetail();
   detail.canManage = role !== "member";
@@ -446,10 +445,11 @@ test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member"].ma
   await openMenu();
   const removal = document.querySelector(`[aria-label="Remove ${detail.view.title} from dashboard"]`);
   const deletion = document.querySelector(`[aria-label="Delete ${detail.view.title}"]`);
-  expect(removal).not.toBeNull();
-  expect(deletion).not.toBeNull();
-  expect(removal?.getAttribute("aria-disabled") === "true").toBe(role === "member");
-  expect(deletion?.getAttribute("aria-disabled") === "true").toBe(role === "member");
+  const isAdmin = role === "admin" || role === "owner";
+  expect(removal !== null).toBe(isAdmin);
+  expect(deletion !== null).toBe(isAdmin);
+  if (!isAdmin) expect(document.querySelector('[role="separator"]')).toBeNull();
+  expect(document.body.textContent).not.toContain("Only organization owners and admins");
   const menu = document.querySelector('[data-slot="dropdown-menu-content"]');
   expect(menu?.className).toContain("w-64");
   expect(menu?.className).toContain("max-w-[calc(100vw-2rem)]");
@@ -467,33 +467,63 @@ test.each(["live", "snapshot"].flatMap((mode) => ["admin", "owner", "member"].ma
   }
 });
 
-test.each(["admin", "owner", "member"])("%s can only open dashboard add, sharing and draft save controls with admin authority", async (role) => {
+test.each(["admin", "owner", "member", "unknown"])("%s only sees dashboard add, sharing and draft save controls with admin authority", async (role) => {
   organizationRole = role;
+  const isAdmin = role === "admin" || role === "owner";
   workingDetail();
   await render("dashboard");
   await act(async () => cache.setQueryData(["saved-apps", ...scope], { enabled: true, sharingEnabled: true, items: [detail] }));
-  expect(button("Add").disabled).toBe(role === "member");
-  expect(button("Share").disabled).toBe(role === "member");
-  if (role === "member") {
-    await act(async () => { button("Add").click(); button("Share").click(); });
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-  }
+  expect(findButton("Add") !== undefined).toBe(isAdmin);
+  expect(findButton("Share") !== undefined).toBe(isAdmin);
   detail.view.activeRevisionId = null;
   await render("artifact");
-  expect(button("Save").disabled).toBe(role === "member");
-  await act(async () => button("Save").click());
-  expect(document.querySelector('[role="dialog"]') !== null).toBe(role !== "member");
+  expect(findButton("Save") !== undefined).toBe(isAdmin);
+  if (isAdmin) {
+    expect(button("Save").disabled).toBe(false);
+    await act(async () => button("Save").click());
+  } else {
+    expect(container.querySelector('[aria-label^="App options"]')).toBeNull();
+    expect(container.textContent).not.toContain("Ask for changes in the conversation");
+  }
+  expect(document.querySelector('[role="dialog"]') !== null).toBe(isAdmin);
+  expect(document.body.textContent).not.toContain("Only organization owners and admins");
   expect(launch).not.toHaveBeenCalled();
 });
 
-test("unverified organization authority keeps management blocked without blocking previews", async () => {
+test("unverified organization authority hides management without blocking previews", async () => {
   client.listOrgs.mockImplementation(async () => { throw new Error("Role unavailable"); });
   workingDetail();
   await render("dashboard");
-  expect(button("Add").disabled).toBe(true);
+  expect(findButton("Add")).toBeUndefined();
   expect(container.querySelector("[data-preview]")).not.toBeNull();
   await openMenu();
-  expect(document.querySelector(`[aria-label="Delete ${detail.view.title}"]`)?.getAttribute("aria-disabled")).toBe("true");
+  expect(document.querySelector(`[aria-label="Delete ${detail.view.title}"]`)).toBeNull();
+  expect(document.querySelector('[role="separator"]')).toBeNull();
+  expect(document.body.textContent).not.toContain("Only organization owners and admins");
+});
+
+test.each(["member", "unknown"])("%s retains Run without an empty management section", async (role) => {
+  organizationRole = role;
+  workingDetail();
+  await render("artifact");
+  await openMenu();
+  const items = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+  expect(items.map((item) => item.textContent)).toEqual(["Run again"]);
+  expect(document.querySelector('[role="separator"]')).toBeNull();
+  expect(document.body.textContent).not.toContain("Only organization owners and admins");
+  await act(async () => items[0]?.click());
+  expect(launch).toHaveBeenCalledTimes(1);
+  expect(launch.mock.calls[0]?.[0]).toContain("Run my saved app");
+});
+
+test.each(["admin", "member", "unknown"])("%s empty dashboard only invites app creation with admin authority", async (role) => {
+  organizationRole = role;
+  detail.onDashboard = false;
+  await render("dashboard");
+  expect(findButton("Add your first app") !== undefined).toBe(role === "admin");
+  expect(container.textContent?.includes("Make this dashboard yours")).toBe(role === "admin");
+  expect(container.textContent?.includes("This dashboard has no apps yet.")).toBe(role !== "admin");
+  expect(document.body.textContent).not.toContain("Only organization owners and admins");
 });
 
 test.each(["admin", "member"])("external managed MCP tiles remain refresh-only for %s", async (role) => {
