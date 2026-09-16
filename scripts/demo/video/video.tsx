@@ -12,7 +12,7 @@ function Film({ scenes, progress }: VideoProps) {
       return <Sequence key={`${from}-${scene.asset}`} from={from} durationInFrames={scene.frames}>
         <AbsoluteFill style={{ padding: 24 }}>
           <div style={{ height: 54, fontSize: 28, fontWeight: 700 }}>
-            ENG-105 · {progressHeading(progress)} · Member {scene.member} · {scene.variant === 'D' ? 'D: actual PNG + Remotion' : 'C: actual screencast / frame'}
+            dashboard-demo · {progressHeading(progress)} · Member {scene.member} · {scene.variant === 'D' ? 'D: actual PNG + Remotion' : 'C: actual screencast / frame'}
           </div>
           <div style={{ height: 56, fontSize: 18, lineHeight: 1.3, overflowWrap: 'anywhere', color: '#fcd34d' }}>
             <div>{buildLabel(scene.release.buildKind)} · Desktop {scene.release.desktopVersion} · tag {scene.release.desktopTag} · SHA {scene.release.releaseSha}</div>
@@ -41,7 +41,7 @@ function Film({ scenes, progress }: VideoProps) {
 const defaultProps: VideoProps = { scenes: [], progress: 'partial' };
 
 function Root() {
-  return <Composition id="ENG105" component={Film} width={videoFormat.width} height={videoFormat.height} fps={videoFormat.fps}
+  return <Composition id="dashboard-demo" component={Film} width={videoFormat.width} height={videoFormat.height} fps={videoFormat.fps}
     durationInFrames={30} defaultProps={defaultProps}
     calculateMetadata={({ props }) => ({ durationInFrames: Math.max(1, props.scenes.reduce((sum, scene) => sum + scene.frames, 0)) })} />;
 }

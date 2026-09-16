@@ -1,6 +1,6 @@
 # Per-user Home — hosted identity, synthetic content
 
-**Incomplete.** Main executed the coded spec once; the independent attempt could not establish hosted member access. See the current receipts below. The following operator script remains the handoff for completing the missing proof. No member OAuth grants were available at handoff; opening the hosted sign-in browser timed out and the operator was asked to sign in manually. No hosted connection change, consent, capture, or assembly has been completed; the local world and single red coded run are documented below. Preserve the inherited `eng-105-dashboard-demo.md` at `f906529b9` and all existing Blob captures/films byte-for-byte. Their older synthetic Calendar identities do not prove this journey.
+**Incomplete.** Main executed the coded spec once; the independent attempt could not establish hosted member access. See the current receipts below. The following operator script remains the handoff for completing the missing proof. No member OAuth grants were available at handoff; opening the hosted sign-in browser timed out and the operator was asked to sign in manually. No hosted connection change, consent, capture, or assembly has been completed; the local world and single red coded run are documented below. Preserve the inherited dashboard demo documentation at `f906529b9` and all existing Blob captures/films byte-for-byte. Their older synthetic Calendar identities do not prove this journey.
 
 ## Two distinct topologies
 
@@ -11,7 +11,7 @@
 
 The hosted provider cannot reach the operator's `127.0.0.1`. Local-world accounts, cookies, registration receipts, and prior synthetic-name demos do not establish hosted sign-in or member consent. The dashboard host organization and upstream hosted identity organization are separate fields in the private receipt; do not assume they are the same. If using hosted Den to own the dashboard, both desktops must be signed into that host organization. Hosted Den's running build is not thereby v0.18.46; the release label applies to the owned desktops only.
 
-Private world inventory: `evals/results/.worlds/scripts/acme-demo-eng105.json`. The main owner may inspect required fields privately; **never dump the file**, credentials, organization names/IDs, email addresses, OAuth URLs, or customer names into logs, this document, or public media.
+Private world inventory: `evals/results/.worlds/scripts/acme-demo-dashboard.json`. The main owner may inspect required fields privately; **never dump the file**, credentials, organization names/IDs, email addresses, OAuth URLs, or customer names into logs, this document, or public media.
 
 ## Operator run (12 steps maximum)
 
@@ -65,7 +65,7 @@ Private world inventory: `evals/results/.worlds/scripts/acme-demo-eng105.json`. 
 }
 ```
 
-From the owned `/Users/guillaume/Dev/openwork-eng105-release` checkout, after main has set `PERUSER_MEMBERS_RECEIPT` to that private path and verified the endpoint ownership:
+From the owned release-based checkout supplied by the operator, after main has set `PERUSER_MEMBERS_RECEIPT` to that private path and verified the endpoint ownership:
 
 ```sh
 OPENWORK_EVAL_E2E_TESTS=1 \
@@ -78,7 +78,7 @@ PERUSER_CONSENT_WAIT_MS=300000 \
 pnpm evals:e2e per-user-home-demo --local
 ```
 
-This imports `test` from `@openwork/testkit`, attaches through `@openwork/cdp`, and reuses the released nested-srcdoc/isolated-context pattern in `eng-105-dashboard-demo.e2e.test.ts`. It deliberately does **not** call that older spec's cold-boot world helper, create browsers, navigate to authentication, fabricate data, or use mocks/skips. Disposing attached surfaces only closes their CDP sockets, not the desktops. Missing configuration still records failed assertion evidence. The testkit owns the canonical run directory under `evals/results`; sanitized phase artifacts bind to its exact `test-run.json` path/run ID. No names, subjects, organization identifiers, raw response bodies, or credentials are emitted by the spec.
+This imports `test` from `@openwork/testkit`, attaches through `@openwork/cdp`, and reuses the released nested-srcdoc/isolated-context pattern in `dashboard-demo.e2e.test.ts`. It deliberately does **not** call that older spec's cold-boot world helper, create browsers, navigate to authentication, fabricate data, or use mocks/skips. Disposing attached surfaces only closes their CDP sockets, not the desktops. Missing configuration still records failed assertion evidence. The testkit owns the canonical run directory under `evals/results`; sanitized phase artifacts bind to its exact `test-run.json` path/run ID. No names, subjects, organization identifiers, raw response bodies, or credentials are emitted by the spec.
 
 The selectors match the Home UI contract: full real name from `[data-testid="today-identity"]` (the `h1` contains only the first name), `.widget-{today,attention,goals}`, `.detail summary`, row content test IDs, `.receipt strong`, and `.receipt span[title]`. The preview's uncommitted deployment source has **not** been verified here; if its DOM differs, report the exact contract mismatch and review it rather than weakening assertions. The spec compares visible item-title sets, not every detail field, and checks observed isolation/refresh, not exhaustive authorization security. Hosted sign-in, `org_id|sub` derivation, connection configuration, UI sharing, and release provenance remain owner-attested prerequisites, not independently automated assertions. Counter instance changes cannot establish durable monotonic generation.
 
@@ -94,7 +94,7 @@ Reuse the timestamp-preserving `scripts/demo/video/prepare-cdp.ts` only after ma
 node scripts/demo/video/prepare-cdp.ts "$PERUSER_FINALIZED_FILM_DIR" "$PERUSER_NEW_INTERMEDIATE_MP4"
 ```
 
-That command is conversion only, **not** the final captioned A/B movies. The existing C/D assembler's completion schema requires the older ten-claim ENG-105 journey; do not feed it these new receipts, rename its output to imply this journey, or alter its inherited captures. A new per-user final-assembly adapter is deferred until actual owner frames and finalized run receipts exist. No capture/assembler script or placeholder media is needed to run the requested spec; video delivery remains **PARTIAL / unavailable** at this handoff.
+That command is conversion only, **not** the final captioned A/B movies. The existing C/D assembler's completion schema requires the older ten-claim dashboard-demo journey; do not feed it these new receipts, rename its output to imply this journey, or alter its inherited captures. A new per-user final-assembly adapter is deferred until actual owner frames and finalized run receipts exist. No capture/assembler script or placeholder media is needed to run the requested spec; video delivery remains **PARTIAL / unavailable** at this handoff.
 
 Optional local-upstream alternative: only if main independently estimates a sub-hour isolated run, outline a separately reachable local identity-provider topology and two local test members. It would prove local integration, **not** the required hosted real-member identity target. No tunnel, provider redeployment, world change, or implementation of that alternative is authorized here; hosted consent comes first.
 

@@ -4,11 +4,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { needs, test } from "@openwork/testkit";
-import { sanitizedLiveProofEnvironment } from "./eng105-live-environment.ts";
+import { sanitizedLiveProofEnvironment } from "./dashboard-demo-live-environment.ts";
 
 // Explicitly authorized, opt-in boundary proof. No UI, DB, seed, or duplicate PUTs.
 // Credentials stay in the child environment; only the setup script emits receipts.
-const script = fileURLToPath(new URL("../../scripts/demo/setup-eng105-den.sh", import.meta.url));
+const script = fileURLToPath(new URL("../../scripts/demo/setup-dashboard-demo-den.sh", import.meta.url));
 
 function object(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));
@@ -19,9 +19,9 @@ function rows(value: unknown): Record<string, unknown>[] {
   return value.map(object);
 }
 
-test("ENG105 authorized live setup verifies API configuration and removes only owned resources", async ({ evidence }) => {
-  needs({ placement: "local", commands: ["bash", "curl", "jq"], optIn: ["ENG105_LIVE_PROOF"], env: ["DEN_API_URL", "DEN_API_KEY", "DEMO_EXPECTED_ORG_ID", "DEMO_KEY_PREFIX", "DEMO_STATE_DIR", "ENG105_RECEIPT_DIR"] });
-  const output = process.env.ENG105_RECEIPT_DIR;
+test("dashboard-demo authorized live setup verifies API configuration and removes only owned resources", async ({ evidence }) => {
+  needs({ placement: "local", commands: ["bash", "curl", "jq"], optIn: ["DASHBOARD_DEMO_LIVE_PROOF"], env: ["DEN_API_URL", "DEN_API_KEY", "DEMO_EXPECTED_ORG_ID", "DEMO_KEY_PREFIX", "DEMO_STATE_DIR", "DASHBOARD_DEMO_RECEIPT_DIR"] });
+  const output = process.env.DASHBOARD_DEMO_RECEIPT_DIR;
   const state = process.env.DEMO_STATE_DIR;
   const prefix = process.env.DEMO_KEY_PREFIX;
   assert.ok(output && state && prefix);
@@ -47,13 +47,13 @@ test("ENG105 authorized live setup verifies API configuration and removes only o
     await writeFile(join(output, `${phase}.txt`), result.stderr, { mode: 0o600 });
     return { exitCode: result.exitCode, receipts };
   };
-  const connectionsOnly = process.env.ENG105_LIVE_CONNECTIONS_ONLY === "1";
+  const connectionsOnly = process.env.DASHBOARD_DEMO_LIVE_CONNECTIONS_ONLY === "1";
   const configArgs = connectionsOnly ? ["--connections-only"] : [];
   const results: Record<string, Awaited<ReturnType<typeof run>>> = {};
   try {
     results.apply = await run("apply", configArgs);
     results.verify = await run("verify", ["--verify", ...configArgs]);
-    if (results.apply.exitCode === 0 && process.env.ENG105_LIVE_REAPPLY === "1") results.reapply = await run("reapply", configArgs);
+    if (results.apply.exitCode === 0 && process.env.DASHBOARD_DEMO_LIVE_REAPPLY === "1") results.reapply = await run("reapply", configArgs);
   } finally {
     results.teardown = await run("teardown", ["--teardown"]);
     results.afterTeardown = await run("after-teardown", ["--verify", "--connections-only"]);

@@ -18,7 +18,7 @@ for arg in "$@"; do
     --teardown) MODE=teardown ;;
     --connections-only) CONNECTIONS_ONLY=true ;;
     --after-connect) AFTER_CONNECT=true ;;
-    --help) printf '%s\n' 'Usage: setup-eng105-den.sh [--apply|--verify|--teardown] [--connections-only|--after-connect]' 'Credentials: environment DEN_API_URL + DEN_API_KEY only. Keep DEMO_STATE_DIR for safe teardown.'; exit 0 ;;
+    --help) printf '%s\n' 'Usage: setup-dashboard-demo-den.sh [--apply|--verify|--teardown] [--connections-only|--after-connect]' 'Credentials: environment DEN_API_URL + DEN_API_KEY only. Keep DEMO_STATE_DIR for safe teardown.'; exit 0 ;;
     *) printf '%s\n' 'Unknown argument; credentials are accepted only through environment.' >&2; exit 2 ;;
   esac
 done
@@ -35,7 +35,7 @@ PREFIX=${DEMO_KEY_PREFIX:-}
 [[ ${#PREFIX} -le 100 ]] || exit 2
 # Experiments set this explicitly; the script supports any authorized Den org.
 EXPECTED_ORG=${DEMO_EXPECTED_ORG_ID:-}
-STATE=${DEMO_STATE_DIR:-.eng105-den-state}
+STATE=${DEMO_STATE_DIR:-.dashboard-demo-den-state}
 [[ ! -L "$STATE" ]] || exit 2
 mkdir -p "$STATE"
 [[ -d "$STATE" && -O "$STATE" ]] || exit 2
@@ -243,8 +243,8 @@ if [[ -n "${DEMO_TEAMMATE_EMAIL:-}" && "$MODE" == apply ]]; then
 fi
 printf 'MANUAL_STEP: Each member opens Your Connections > Personal Calendar > Connect. Registration is not OAuth readiness.\n' >&2
 if [[ "$CONNECTIONS_ONLY" == true ]]; then exit "$FAILED"; fi
-DASHBOARD_NAME="${PREFIX}ENG105 API Demo"
-DASHBOARD_MANUAL='Den Web > Manage > Dashboards > New dashboard > Name: ENG105 API Demo > Create dashboard. Add app > choose MCP > choose App > Add, once each for Acme Home, World Clocks, Personal Calendar. In Access leave Everyone in the organization off; add the named member as Viewer. Each member: Your Connections > Personal Calendar > Connect.'
+DASHBOARD_NAME="${PREFIX}dashboard-demo API Demo"
+DASHBOARD_MANUAL='Den Web > Manage > Dashboards > New dashboard > Name: dashboard-demo API Demo > Create dashboard. Add app > choose MCP > choose App > Add, once each for Acme Home, World Clocks, Personal Calendar. In Access leave Everyone in the organization off; add the named member as Viewer. Each member: Your Connections > Personal Calendar > Connect.'
 if ! jq -e '.paths["/v1/dashboards"].get and .paths["/v1/dashboards"].post and .paths["/v1/dashboards/{dashboardId}"].get and .paths["/v1/dashboards/{dashboardId}"].delete and .paths["/v1/dashboards/{dashboardId}/access"].get and .paths["/v1/dashboards/{dashboardId}/access"].post' <<< "$OPENAPI" >/dev/null; then
   manual "Public dashboard API absent. $DASHBOARD_MANUAL"
   exit "$FAILED"

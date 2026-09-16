@@ -6,13 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { needs, test } from "@openwork/testkit";
-import { sanitizedLiveProofEnvironment } from "./eng105-live-environment.ts";
+import { sanitizedLiveProofEnvironment } from "./dashboard-demo-live-environment.ts";
 
-const script = fileURLToPath(new URL("../../scripts/demo/setup-eng105-den.sh", import.meta.url));
-const prefix = "exp-eng105-test-";
-const org = "org_eng105_witness";
-const apiKey = "eng105-synthetic-admin-canary";
-const credential = "eng105-synthetic-provider-canary";
+const script = fileURLToPath(new URL("../../scripts/demo/setup-dashboard-demo-den.sh", import.meta.url));
+const prefix = "exp-dashboard-demo-test-";
+const org = "org_dashboard-demo_witness";
+const apiKey = "dashboard-demo-synthetic-admin-canary";
+const credential = "dashboard-demo-synthetic-provider-canary";
 const home = `${prefix}acme-home-demo`;
 const clocks = `${prefix}world-clocks-demo`;
 const calendar = `${prefix}personal-calendar-demo`;
@@ -20,7 +20,7 @@ const keys = [home, clocks, calendar];
 const byKey = "/v1/mcp-connections/by-key/";
 const listPath = "/v1/mcp-connections?scope=manageable";
 
-test("ENG105 live child environment excludes inherited shell startup hooks", async ({ evidence }) => {
+test("dashboard-demo live child environment excludes inherited shell startup hooks", async ({ evidence }) => {
   const source = {
     PATH: process.env.PATH,
     DEN_API_KEY: apiKey,
@@ -103,7 +103,7 @@ function seed(key: string, id: string): Connection {
 
 async function witness(options: { advertisedGet?: boolean; routeStatus?: number; calendarScopes?: string[]; full?: boolean; dashboardApi?: boolean; teammateEmail?: string; afterConnect?: boolean } = {}) {
   needs({ commands: ["bash", "curl", "jq"], placement: "local" });
-  const root = await mkdtemp(join(tmpdir(), "eng105-setup-script-"));
+  const root = await mkdtemp(join(tmpdir(), "dashboard-demo-setup-script-"));
   const state = join(root, "state");
   const manifestPath = join(state, "owner.json");
   const connections = new Map<string, Connection>();
@@ -336,7 +336,7 @@ function populate(connections: Map<string, Connection>) {
   for (const [index, key] of keys.entries()) connections.set(key, seed(key, `mcp_existing_${index}`));
 }
 
-test("ENG105 connections-only apply is idempotent and persists ownership without credentials", async ({ evidence }) => {
+test("dashboard-demo connections-only apply is idempotent and persists ownership without credentials", async ({ evidence }) => {
   await using api = await witness();
   const first = await api.run("--apply");
   assert.equal(first.code, 0, first.stderr);
@@ -369,7 +369,7 @@ test("ENG105 connections-only apply is idempotent and persists ownership without
 });
 
 for (const conflict of ["issuer", "scopes"]) {
-  test(`ENG105 OAuth ${conflict} conflict preserves credentials and grants without replacement`, async ({ evidence }) => {
+  test(`dashboard-demo OAuth ${conflict} conflict preserves credentials and grants without replacement`, async ({ evidence }) => {
     await using api = await witness();
     populate(api.connections);
     const existing = api.connections.get(calendar);
@@ -397,7 +397,7 @@ for (const conflict of ["issuer", "scopes"]) {
   });
 }
 
-test("ENG105 equivalent reordered OAuth scopes allow PUT without credential or grant rotation", async ({ evidence }) => {
+test("dashboard-demo equivalent reordered OAuth scopes allow PUT without credential or grant rotation", async ({ evidence }) => {
   const requestedScopes = ["calendar.read", "calendar.write"];
   await using api = await witness({ calendarScopes: requestedScopes });
   populate(api.connections);
@@ -431,7 +431,7 @@ test("ENG105 equivalent reordered OAuth scopes allow PUT without credential or g
 });
 
 for (const missing of ["access", "null access", "memberIds", "teamIds"]) {
-  test(`ENG105 missing ${missing} refuses replacement and preserves existing credentials and grants`, async ({ evidence }) => {
+  test(`dashboard-demo missing ${missing} refuses replacement and preserves existing credentials and grants`, async ({ evidence }) => {
     await using api = await witness();
     populate(api.connections);
     const existing = api.connections.get(home);
@@ -466,7 +466,7 @@ for (const missing of ["access", "null access", "memberIds", "teamIds"]) {
   });
 }
 
-test("ENG105 exact 404 fallback uses externalKey equality and detail, not names or neighboring keys", async ({ evidence }) => {
+test("dashboard-demo exact 404 fallback uses externalKey equality and detail, not names or neighboring keys", async ({ evidence }) => {
   await using api = await witness({ advertisedGet: false, routeStatus: 404 });
   const neighbor = seed(`${home}-neighbor`, "mcp_unrelated");
   neighbor.name = `${prefix}Acme Home`;
@@ -486,7 +486,7 @@ test("ENG105 exact 404 fallback uses externalKey equality and detail, not names 
 });
 
 for (const status of [401, 403, 500]) {
-  test(`ENG105 HTTP ${status} must not authorize list fallback when by-key GET is unadvertised`, async ({ evidence }) => {
+  test(`dashboard-demo HTTP ${status} must not authorize list fallback when by-key GET is unadvertised`, async ({ evidence }) => {
     await using api = await witness({ advertisedGet: false, routeStatus: status });
     populate(api.connections);
     const before = structuredClone([...api.connections]);
@@ -507,7 +507,7 @@ for (const status of [401, 403, 500]) {
   });
 }
 
-test("ENG105 advertised by-key 404 means missing, not list fallback", async ({ evidence }) => {
+test("dashboard-demo advertised by-key 404 means missing, not list fallback", async ({ evidence }) => {
   await using api = await witness();
   const result = await api.run("--verify");
   assert.equal(result.code, 1);
@@ -518,7 +518,7 @@ test("ENG105 advertised by-key 404 means missing, not list fallback", async ({ e
   evidence.recordAssertionEvidence("Advertised missing-key reads are not success", "Three advertised by-key 404s remained diagnostics, produced no verified rows, and caused neither fallback nor mutation.", true);
 });
 
-test("ENG105 verify is read-only and distinguishes connected false from unknown", async ({ evidence }) => {
+test("dashboard-demo verify is read-only and distinguishes connected false from unknown", async ({ evidence }) => {
   await using api = await witness();
   populate(api.connections);
   const homeConnection = api.connections.get(home);
@@ -539,7 +539,7 @@ test("ENG105 verify is read-only and distinguishes connected false from unknown"
   evidence.recordAssertionEvidence("Read-only readiness preserves false and unknown", "Verify made only GETs, kept all connection state unchanged, and reported false, unknown, and true distinctly without claiming registration completes OAuth.", true);
 });
 
-test("ENG105 teardown removes only created IDs and preserves preexisting and replacement identities", async ({ evidence }) => {
+test("dashboard-demo teardown removes only created IDs and preserves preexisting and replacement identities", async ({ evidence }) => {
   await using api = await witness();
   const preexisting = seed(home, "mcp_preexisting");
   const unrelated = seed(`${prefix}unrelated`, "mcp_unrelated");
@@ -572,7 +572,7 @@ test("ENG105 teardown removes only created IDs and preserves preexisting and rep
   evidence.recordAssertionEvidence("Teardown is limited to proven script ownership", "Only the created clock ID was deleted. A preexisting connection, unrelated connection, and replacement calendar ID survived; retry performed no writes and retained unresolved ownership.", true);
 });
 
-test("ENG105 wrong-org guard rejects a fresh target before discovery or mutation", async ({ evidence }) => {
+test("dashboard-demo wrong-org guard rejects a fresh target before discovery or mutation", async ({ evidence }) => {
   await using api = await witness();
   populate(api.connections);
   const before = structuredClone([...api.connections]);
@@ -586,7 +586,7 @@ test("ENG105 wrong-org guard rejects a fresh target before discovery or mutation
   evidence.recordAssertionEvidence("Wrong organization fails closed", "A mismatched expected org stopped after the identity GET, without discovery, server mutations, or a persisted owner manifest.", true);
 });
 
-test("ENG105 owner manifest refuses reuse for a different organization", async ({ evidence }) => {
+test("dashboard-demo owner manifest refuses reuse for a different organization", async ({ evidence }) => {
   await using api = await witness();
   const applied = await api.run("--apply");
   assert.equal(applied.code, 0, applied.stderr);
@@ -602,7 +602,7 @@ test("ENG105 owner manifest refuses reuse for a different organization", async (
   evidence.recordAssertionEvidence("Manifest ownership is organization-bound", "Even when the expected org matched the new identity, an old-org manifest prevented deletion and remained byte-for-byte unchanged.", true);
 });
 
-test("ENG105 sanitized HTTP errors remain failures while other MCP applies continue", async ({ evidence }) => {
+test("dashboard-demo sanitized HTTP errors remain failures while other MCP applies continue", async ({ evidence }) => {
   await using api = await witness();
   const message = `Denied ${apiKey}; token=${credential}; https://oauth.example.test/callback?code=${credential}`;
   api.faults.push({
@@ -645,7 +645,7 @@ test("ENG105 sanitized HTTP errors remain failures while other MCP applies conti
   evidence.recordAssertionEvidence("Sanitized failure does not block independent MCPs", "The first PUT retained HTTP500 and a useful error code but redacted credentials and OAuth URLs; both remaining MCPs were created and verified, with no failure body or credentials persisted.", true);
 });
 
-test("ENG105 full API setup creates three discovered Apps with named access once and cleans up only owned resources", async ({ evidence }) => {
+test("dashboard-demo full API setup creates three discovered Apps with named access once and cleans up only owned resources", async ({ evidence }) => {
   await using api = await witness({ full: true, dashboardApi: true, teammateEmail: "teammate@example.test", afterConnect: true });
   api.members.push({ id: "member_teammate", user: { email: "teammate@example.test" } });
   api.dashboards.set("dsb_unrelated", { id: "dsb_unrelated", name: "Existing human dashboard", elements: [] });
@@ -654,7 +654,7 @@ test("ENG105 full API setup creates three discovered Apps with named access once
   assert.equal(rows(first.receipts, "dashboard-create").length, 1);
   const ownedDashboard = [...api.dashboards.values()].find((item) => item.id !== "dsb_unrelated");
   assert.ok(ownedDashboard);
-  assert.equal(ownedDashboard.name, `${prefix}ENG105 API Demo`);
+  assert.equal(ownedDashboard.name, `${prefix}dashboard-demo API Demo`);
   assert.equal(ownedDashboard.elements.length, 3);
   assert.deepEqual(ownedDashboard.elements.map(object).map((item) => item.projectedToolName), keys.map((key) => {
     const id = api.connections.get(key)?.id;
@@ -683,7 +683,7 @@ test("ENG105 full API setup creates three discovered Apps with named access once
   evidence.recordAssertionEvidence("Full API setup is separate, idempotent and owner-scoped", "Three live-discovered bindings and two named viewer grants were created once; second apply wrote only unchanged MCP PUTs. Verify was read-only; teardown preserved the unrelated dashboard.", true);
 });
 
-test("ENG105 absent dashboard API exits with explicit manual steps and never allocates a substitute", async ({ evidence }) => {
+test("dashboard-demo absent dashboard API exits with explicit manual steps and never allocates a substitute", async ({ evidence }) => {
   await using api = await witness({ full: true });
   const applied = await api.run("--apply");
   assert.equal(applied.code, 0, applied.stderr);
@@ -694,9 +694,9 @@ test("ENG105 absent dashboard API exits with explicit manual steps and never all
   evidence.recordAssertionEvidence("Missing API remains an explicit manual gap", "Connection configuration succeeded, but receipts and stderr identify manual dashboard work without claiming readiness or creating a substitute.", true);
 });
 
-test("ENG105 full API setup preserves a same-name preexisting dashboard and never claims its ownership", async ({ evidence }) => {
+test("dashboard-demo full API setup preserves a same-name preexisting dashboard and never claims its ownership", async ({ evidence }) => {
   await using api = await witness({ full: true, dashboardApi: true });
-  const original = { id: "dsb_preexisting", name: `${prefix}ENG105 API Demo`, elements: [] };
+  const original = { id: "dsb_preexisting", name: `${prefix}dashboard-demo API Demo`, elements: [] };
   api.dashboards.set(original.id, original);
   const applied = await api.run("--apply");
   assert.equal(applied.code, 1);
@@ -709,7 +709,7 @@ test("ENG105 full API setup preserves a same-name preexisting dashboard and neve
   evidence.recordAssertionEvidence("Same name is not ownership", "The preexisting named dashboard was neither updated, granted, adopted nor deleted; only script-created MCPs were cleaned up.", true);
 });
 
-test("ENG105 optional invitation is created once, redacts its token and cancels only its pending owned ID", async ({ evidence }) => {
+test("dashboard-demo optional invitation is created once, redacts its token and cancels only its pending owned ID", async ({ evidence }) => {
   await using api = await witness({ teammateEmail: "teammate@example.test" });
   api.invitations.push({ id: "inv_unrelated", email: "other@example.test", status: "pending", inviteToken: credential });
   const first = await api.run("--apply");
@@ -730,7 +730,7 @@ test("ENG105 optional invitation is created once, redacts its token and cancels 
   evidence.recordAssertionEvidence("Invitation idempotence and ownership", "Only an explicitly configured absent teammate was invited; the token stayed out of receipts/state, second apply did not refresh it, and teardown canceled only the newly created pending invitation.", true);
 });
 
-test("ENG105 an existing teammate invitation is never refreshed, adopted or canceled", async ({ evidence }) => {
+test("dashboard-demo an existing teammate invitation is never refreshed, adopted or canceled", async ({ evidence }) => {
   await using api = await witness({ teammateEmail: "teammate@example.test" });
   api.invitations.push({ id: "inv_preexisting", email: "teammate@example.test", status: "pending", inviteToken: credential });
   const applied = await api.run("--apply");
@@ -743,7 +743,7 @@ test("ENG105 an existing teammate invitation is never refreshed, adopted or canc
   evidence.recordAssertionEvidence("Preexisting invitations are preserved", "An existing pending invitation prevented any invite refresh and never entered ownership or cleanup.", true);
 });
 
-test("ENG105 expected Calendar consent creates only shared tiles, then after-connect appends the granted third tile", async ({ evidence }) => {
+test("dashboard-demo expected Calendar consent creates only shared tiles, then after-connect appends the granted third tile", async ({ evidence }) => {
   await using api = await witness({ full: true, dashboardApi: true });
   populate(api.connections);
   const calendarId = api.connections.get(calendar)?.id;
@@ -783,7 +783,7 @@ test("ENG105 expected Calendar consent creates only shared tiles, then after-con
 });
 
 for (const change of ["human-edit", "replaced-id"]) {
-  test(`ENG105 after-connect preserves ${change} instead of blindly replacing a dashboard`, async ({ evidence }) => {
+  test(`dashboard-demo after-connect preserves ${change} instead of blindly replacing a dashboard`, async ({ evidence }) => {
     await using api = await witness({ full: true, dashboardApi: true });
     const first = await api.run("--apply");
     assert.equal(first.code, 0, first.stderr);

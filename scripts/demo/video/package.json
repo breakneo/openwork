@@ -1,11 +1,11 @@
 {
-  "name": "eng105-e-assembler",
+  "name": "dashboard-demo-e-assembler",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.4.0",
   "scripts": {
     "assemble": "node assemble.ts",
-    "build": "node --input-type=module -e \"import {bundle} from '@remotion/bundler'; import {resolve} from 'node:path'; await bundle({entryPoint:resolve('video.tsx'),outDir:resolve('../../../reports/demo/eng-105-2026-09-15/bundle-check')});\"",
+    "build": "node --input-type=module -e \"import {bundle} from '@remotion/bundler'; import {resolve} from 'node:path'; await bundle({entryPoint:resolve('video.tsx'),outDir:resolve('../../../reports/demo/dashboard-demo-2026-09-15/bundle-check')});\"",
     "test": "node --test manifest.test.ts completion.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint ."

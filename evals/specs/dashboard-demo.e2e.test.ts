@@ -7,14 +7,14 @@ import { browserScript, captureBrowserFilm, clickAt, connect, debuggerUrlFor, ev
 import { chrome } from "@openwork/hosts";
 import { screenshot } from "@openwork/test-evidence";
 import { eventually, test } from "@openwork/testkit";
-import { assertReleaseSource, bootAcmeDemoEng105 } from "../../worlds/acme-demo-eng105.ts";
+import { assertReleaseSource, bootAcmeDemoDashboardDemo } from "../../worlds/acme-demo-dashboard.ts";
 
 // Den Web authors references; the two real desktops execute the referenced Apps.
 // No Workflow snapshot, shared calendar credential, API-authored dashboard, or
 // synthetic app HTML may stand in for this journey. Prerequisite failures fail
 // this test (zero skip branches), and screenshots are supplementary to assertions.
 const runName = new Date().toISOString().replaceAll(":", "-");
-const reportDirectory = fileURLToPath(new URL(`../../reports/demo/eng105-proof/${runName}/`, import.meta.url));
+const reportDirectory = fileURLToPath(new URL(`../../reports/demo/dashboard-demo-proof/${runName}/`, import.meta.url));
 const captures: { name: string; at: string; actor: string; status: string }[] = [];
 const provenance = {
   lane: "local-release-source", buildKind: "release-source", desktopVersion: "0.18.46", desktopTag: "v0.18.46",
@@ -126,7 +126,7 @@ async function frame(surface: Surface, title: string): Promise<Surface & AsyncDi
         };
         visit(tree.frameTree);
         for (const frameId of frames) {
-          const context = object(await raw.send("Page.createIsolatedWorld", { frameId, worldName: "eng105-visible-app" }));
+          const context = object(await raw.send("Page.createIsolatedWorld", { frameId, worldName: "dashboard-demo-visible-app" }));
           const contextId = context.executionContextId;
           if (typeof contextId !== "number") throw new Error("Missing App execution context");
           const client = { ...raw, send: (method: string, params: Record<string, unknown> = {}, options?: { timeoutMs?: number }) => raw.send(method,
@@ -142,12 +142,12 @@ async function frame(surface: Surface, title: string): Promise<Surface & AsyncDi
 }
 async function checkpoint(surface: Surface, name: string) {
   const artifact = await screenshot(surface);
-  console.log(`[ENG105] captured ${name}`);
+  console.log(`[dashboard-demo] captured ${name}`);
   await writeFile(`${reportDirectory}${name}.png`, artifact.png);
   captures.push({ name: `${name}.png`, at: artifact.at,
     actor: name.includes("jordan") ? "Jordan" : "Alex", status: "supplementary observation; see test-run verdict" });
   await writeFile(`${reportDirectory}captures.json`, JSON.stringify(captures, null, 2));
-  const exportRoot = process.env.ENG105_EXPORT_DIR;
+  const exportRoot = process.env.DASHBOARD_DEMO_EXPORT_DIR;
   if (exportRoot) {
     const directory = `${exportRoot}/${runName}`;
     await mkdir(directory, { recursive: true });
@@ -197,11 +197,11 @@ async function calendarView(surface: Surface): Promise<CalendarView> {
 }
 
 // Explicitly opt in when running. Missing opt-in is an error, not a green skip.
-test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh independently and clock edits survive relaunch", { timeout: 1_800_000 }, async ({ place, evidence }) => {
+test("dashboard-demo Den Web shares real MCP Apps; separate member calendars refresh independently and clock edits survive relaunch", { timeout: 1_800_000 }, async ({ place, evidence }) => {
   expect(process.env.OPENWORK_EVAL_E2E_TESTS, "Set OPENWORK_EVAL_E2E_TESTS=1").toBe("1");
   await mkdir(reportDirectory, { recursive: true });
   await using stack = new AsyncDisposableStack();
-  const world = await bootAcmeDemoEng105(stack, place);
+  const world = await bootAcmeDemoDashboardDemo(stack, place);
   const { den, alex, jordan, jordanSession, orgId } = world;
   expect(alex.handle.cdpUrl).not.toBe(jordan.handle.cdpUrl);
   expect(den.admin.email).not.toBe(jordanSession.email);
@@ -245,15 +245,15 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
     authType: calendarConfiguration.authType, credentialMode: calendarConfiguration.credentialMode,
     requestedScopes: calendarConfiguration.requestedScopes,
   }, null, 2));
-  const alexBrowser = stack.use(await chrome({ name: "eng105-alex-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
-  const jordanBrowser = stack.use(await chrome({ name: "eng105-jordan-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
+  const alexBrowser = stack.use(await chrome({ name: "dashboard-demo-alex-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
+  const jordanBrowser = stack.use(await chrome({ name: "dashboard-demo-jordan-den-web", host: place.host(), startUrl: den.ref.webUrl, headless: true }));
   expect(alexBrowser.handle.cdpUrl).not.toBe(jordanBrowser.handle.cdpUrl);
 
   const claimResults: { claim: string; status: "Passed" | "Failed" | "Blocked"; detail: string }[] = [];
   const writeClaims = async () => {
     await writeFile(`${reportDirectory}claims.json`, JSON.stringify({ ...provenance, claims: claimResults }, null, 2));
-    if (process.env.ENG105_EXPORT_DIR) {
-      const directory = `${process.env.ENG105_EXPORT_DIR}/${runName}`;
+    if (process.env.DASHBOARD_DEMO_EXPORT_DIR) {
+      const directory = `${process.env.DASHBOARD_DEMO_EXPORT_DIR}/${runName}`;
       await mkdir(directory, { recursive: true });
       await writeFile(`${directory}/claims.json`, JSON.stringify({ ...provenance, claims: claimResults }, null, 2));
     }
@@ -371,8 +371,8 @@ test("ENG-105 Den Web shares real MCP Apps; separate member calendars refresh in
 
   await signIn(jordanBrowser, jordanSession);
   for (const [surface, label] of [[alex, "alex"], [jordan, "jordan"]] satisfies [Surface, string][]) {
-    if (process.env.ENG105_CAPTURE_FILM === "1") {
-      const directory = process.env.ENG105_EXPORT_DIR ? `${process.env.ENG105_EXPORT_DIR}/${runName}` : reportDirectory;
+    if (process.env.DASHBOARD_DEMO_CAPTURE_FILM === "1") {
+      const directory = process.env.DASHBOARD_DEMO_EXPORT_DIR ? `${process.env.DASHBOARD_DEMO_EXPORT_DIR}/${runName}` : reportDirectory;
       stack.use(await captureBrowserFilm(surface, `${directory}/film-${label}`));
     }
     await evalIn(surface, () => performance.setResourceTimingBufferSize(5000));

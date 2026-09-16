@@ -11,9 +11,9 @@ import { validateCompletion, verifyCompletedMedia } from './completion.ts';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const reports = resolve(root, '../../../reports/demo');
-const outputRoot = join(reports, 'eng-105-2026-09-15');
+const outputRoot = join(reports, 'dashboard-demo-2026-09-15');
 const args = process.argv.slice(2);
-const captureRoot = resolve(process.env.ENG105_CAPTURE_ROOT ?? join(reports, 'eng105-proof'));
+const captureRoot = resolve(process.env.DASHBOARD_DEMO_CAPTURE_ROOT ?? join(reports, 'dashboard-demo-proof'));
 const probeSchema = z.object({
   streams: z.array(z.object({
     codec_name: z.string(),
@@ -50,7 +50,7 @@ async function localFile(base: string, path: string) {
 
 async function main() {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('pnpm assemble --manifest <sanitized.json> [--validate-only]\nSet progress explicitly to partial or complete. Complete requires completion {runId, runName, runnerReceiptPath, claimsReceiptPath, bindingReceiptPath}: finalized C test-run.json, all canonical ten Passed claims, and owner binding with exit0/1 passed/0 failed/0 skipped, matching run/gitSHA/file hashes and approved media hashes. No complete mode from subset scenes. Each present C/D lane must contain A and B. C accepts clip/png; D accepts png only. Media must be under reports/demo/eng105-proof, or the explicitly authorized ENG105_CAPTURE_ROOT. Every scene requires release {buildKind, desktopVersion, desktopTag, releaseSha, lane, denBuildIdentity, evidencePath}. The local JSON receipt must contain those identity fields plus member (no evidencePath), matching exactly. buildKind is release-source, packaged-release, or development. release-source pins v0.18.46/a0d6bd1de8debf4f09d22b8538e124b2ff45b339 and is explicitly not a packaged binary. Outputs stay in ignored reports/demo/eng-105-2026-09-15/runs/. No export. See manifest.template.json; replace placeholders and attest actualCapture/sanitized only after review. Requires ffmpeg and ffprobe on PATH.');
+    console.log('pnpm assemble --manifest <sanitized.json> [--validate-only]\nSet progress explicitly to partial or complete. Complete requires completion {runId, runName, runnerReceiptPath, claimsReceiptPath, bindingReceiptPath}: finalized C test-run.json, all canonical ten Passed claims, and owner binding with exit0/1 passed/0 failed/0 skipped, matching run/gitSHA/file hashes and approved media hashes. No complete mode from subset scenes. Each present C/D lane must contain A and B. C accepts clip/png; D accepts png only. Media must be under reports/demo/dashboard-demo-proof, or the explicitly authorized DASHBOARD_DEMO_CAPTURE_ROOT. Every scene requires release {buildKind, desktopVersion, desktopTag, releaseSha, lane, denBuildIdentity, evidencePath}. The local JSON receipt must contain those identity fields plus member (no evidencePath), matching exactly. buildKind is release-source, packaged-release, or development. release-source pins v0.18.46/a0d6bd1de8debf4f09d22b8538e124b2ff45b339 and is explicitly not a packaged binary. Outputs stay in ignored reports/demo/dashboard-demo-2026-09-15/runs/. No export. See manifest.template.json; replace placeholders and attest actualCapture/sanitized only after review. Requires ffmpeg and ffprobe on PATH.');
     return;
   }
   if (args[0] !== '--manifest' || !args[1] || args.length > 3 || (args[2] && args[2] !== '--validate-only')) {
@@ -190,9 +190,9 @@ async function main() {
     const selected = scenes.filter((scene) => scene.variant === variant);
     if (!selected.length) continue;
     const inputProps = { scenes: selected, progress: manifest.progress };
-    const composition = await selectComposition({ serveUrl, id: 'ENG105', inputProps });
+    const composition = await selectComposition({ serveUrl, id: 'dashboard-demo', inputProps });
     const journey = journeyBuildKind(selected.map((scene) => scene.release));
-    const file = `ENG105-${variant}-${journey}-${manifest.progress.toUpperCase()}.mp4`;
+    const file = `dashboard-demo-${variant}-${journey}-${manifest.progress.toUpperCase()}.mp4`;
     const output = join(work, file);
     await renderMedia({ serveUrl, composition, inputProps, codec: 'h264', outputLocation: output,
       pixelFormat: 'yuv420p', crf: 18, concurrency: 1, muted: true, overwrite: false });
