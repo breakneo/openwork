@@ -421,8 +421,21 @@ export async function getRequestSession(headers: Headers, context?: Context): Pr
 }
 
 export function shouldSkipRequestSession(request: Request) {
-  return request.method.toUpperCase() === "POST"
-    && new URL(request.url).pathname === "/api/auth/sign-out"
+  const method = request.method.toUpperCase()
+  const path = new URL(request.url).pathname
+  if (method === "POST" && path === "/api/auth/sign-out") return true
+
+  // These exact runner-protocol routes authenticate their own signed bearer
+  // credential and recheck active ownership. Resolving it as a user session
+  // first causes cache/database misses even for malformed or expired tokens.
+  // Token minting, presence, and Automation management still require sessions.
+  if (method === "GET" || method === "HEAD") {
+    return path === "/v1/automation-runner/work" || path === "/v1/automation-runners/events"
+  }
+  return method === "POST" && (
+    /^\/v1\/automation-runs\/[^/]+\/(claim|heartbeat|events|complete)$/.test(path)
+    || /^\/v1\/remote-session-commands\/[^/]+\/(claim|complete)$/.test(path)
+  )
 }
 
 export const sessionMiddleware: MiddlewareHandler<{ Variables: AuthContextVariables }> = async (c, next) => {

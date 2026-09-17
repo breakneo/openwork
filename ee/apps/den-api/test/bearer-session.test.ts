@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, mock, setSystemTime, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, expect, mock, setSystemTime, spyOn, test } from "bun:test"
 import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import { Hono } from "hono"
 import { generateSignedCookie } from "hono/cookie"
@@ -784,7 +784,7 @@ test("desktop bearer sign-out deletes the exact server session", async () => {
   expect(cacheDeletes).toEqual([token, sessionId])
 })
 
-test("only the Better Auth POST sign-out bypasses session resolution", () => {
+test("only the exact Better Auth POST sign-out bypasses session resolution among sign-out routes", () => {
   expect(sessionModule.shouldSkipRequestSession(new Request("http://den.local/api/auth/sign-out", {
     method: "POST",
   }))).toBe(true)
@@ -794,4 +794,125 @@ test("only the Better Auth POST sign-out bypasses session resolution", () => {
   expect(sessionModule.shouldSkipRequestSession(new Request("http://den.local/v1/auth/sign-out", {
     method: "POST",
   }))).toBe(false)
+})
+
+const runnerRequests = [
+  { method: "GET", path: "/v1/automation-runner/work" },
+  { method: "GET", path: "/v1/automation-runners/events" },
+  { method: "POST", path: "/v1/automation-runs/run-fixture/claim" },
+  { method: "POST", path: "/v1/automation-runs/run-fixture/heartbeat" },
+  { method: "POST", path: "/v1/automation-runs/run-fixture/events" },
+  { method: "POST", path: "/v1/automation-runs/run-fixture/complete" },
+  { method: "POST", path: "/v1/remote-session-commands/command-fixture/claim" },
+  { method: "POST", path: "/v1/remote-session-commands/command-fixture/complete" },
+]
+
+test("only exact runner-protocol methods and paths bypass ordinary sessions", () => {
+  for (const { method, path } of runnerRequests) {
+    expect(sessionModule.shouldSkipRequestSession(new Request(`http://den.local${path}?cursor=1`, { method }))).toBe(true)
+    for (const suffix of ["/", "/extra", "-other"]) {
+      expect(sessionModule.shouldSkipRequestSession(new Request(`http://den.local${path}${suffix}`, { method }))).toBe(false)
+    }
+    expect(sessionModule.shouldSkipRequestSession(new Request(`http://den.local${path}`, {
+      method: method === "GET" ? "POST" : "GET",
+    }))).toBe(false)
+    if (method === "GET") {
+      expect(sessionModule.shouldSkipRequestSession(new Request(`http://den.local${path}`, { method: "HEAD" }))).toBe(true)
+    }
+  }
+  for (const path of [
+    "/v1/automation-runners/token",
+    "/v1/automation-runners/presence",
+    "/v1/automations",
+    "/v1/cloud-automations",
+    "/v1/automations/automation-fixture/run",
+    "/v1/automation-runs/run-fixture/cancel",
+    "/v1/automation-runs/run-fixture/nested/claim",
+    "/v1/remote-session-commands/command-fixture/cancel",
+  ]) {
+    for (const method of ["GET", "POST", "HEAD", "DELETE", "PATCH", "OPTIONS"]) {
+      expect(sessionModule.shouldSkipRequestSession(new Request(`http://den.local${path}`, { method }))).toBe(false)
+    }
+  }
+})
+
+test("runner routes ignore user cookies and API keys without session-cache or database work", async () => {
+  const now = new Date("2026-07-09T12:00:00.000Z")
+  enableApiKeySession(now)
+  const { env } = await import("../src/env.js")
+  const cookie = await generateSignedCookie("better-auth.session_token", token, env.betterAuthSecret)
+  const { cache } = await import("../src/cache.js")
+  const { auth } = await import("../src/auth.js")
+  const sessionLookup = spyOn(cache.auth, "sessionResult")
+  const apiKeyLookup = spyOn(auth.api, "verifyApiKey")
+  try {
+    const app = new Hono<{ Variables: AuthContextVariables }>()
+    app.use("*", sessionModule.sessionMiddleware)
+    app.all("*", (c) => c.json({ user: c.get("user"), session: c.get("session"), apiKey: c.get("apiKey") }))
+    for (const { method, path } of runnerRequests) {
+      const response = await app.request(path, {
+        method,
+        headers: { cookie, authorization: "Bearer invalid-runner-token", "x-api-key": apiKeySecret },
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ user: null, session: null, apiKey: null })
+    }
+    expect(sessionLookup).not.toHaveBeenCalled()
+    expect(apiKeyLookup).not.toHaveBeenCalled()
+    expect(selects).toBe(0)
+    expect(updates).toHaveLength(0)
+  } finally {
+    sessionLookup.mockRestore()
+    apiKeyLookup.mockRestore()
+  }
+})
+
+test("invalid runner polling is rejected without session lookups while valid tokens still require active ownership", async () => {
+  const { registerAutomationRoutes } = await import("../src/routes/automations/index.js")
+  const { automationRunnerAuth } = await import("../src/automations/runner-auth.js")
+  const { automationService } = await import("../src/automations/service.js")
+  const { cache } = await import("../src/cache.js")
+  const sessionLookup = spyOn(cache.auth, "sessionResult")
+  const ownerCheck = spyOn(automationService, "isActiveRunnerOwner").mockResolvedValue(true)
+  const discover = spyOn(automationService, "discoverDesktopRunnerWork").mockResolvedValue([])
+  try {
+    const app = new Hono<{ Variables: AuthContextVariables & Partial<OrganizationContextVariables> }>()
+    app.use("*", sessionModule.sessionMiddleware)
+    registerAutomationRoutes(app)
+    const scope = { organizationId, ownerMemberId: memberId, runnerId: "runner-fixture", capabilities: [] }
+    setSystemTime(new Date("2026-07-09T12:00:00.000Z"))
+    const expired = automationRunnerAuth.issue(scope, "http://localhost")
+    setSystemTime(new Date(expired.expiresAt + 1))
+    const valid = automationRunnerAuth.issue(scope, "http://localhost")
+    for (const path of ["/v1/automation-runner/work", "/v1/automation-runners/events"]) {
+      for (const authorization of [undefined, "Basic invalid", "Bearer malformed", `Bearer ${valid.token}x`, `Bearer ${expired.token}`]) {
+        const response = await app.request(path, { headers: authorization ? { authorization } : {} })
+        expect(response.status).toBe(401)
+        expect(await response.json()).toEqual({ error: "runner_unauthorized" })
+      }
+    }
+    expect(sessionLookup).not.toHaveBeenCalled()
+    expect(ownerCheck).not.toHaveBeenCalled()
+    expect(discover).not.toHaveBeenCalled()
+    expect(selects).toBe(0)
+
+    const accepted = await app.request("/v1/automation-runner/work", { headers: { authorization: `Bearer ${valid.token}` } })
+    expect(accepted.status).toBe(200)
+    expect(await accepted.json()).toEqual({ items: [] })
+    expect(ownerCheck).toHaveBeenCalledTimes(1)
+    expect(discover).toHaveBeenCalledTimes(1)
+
+    ownerCheck.mockResolvedValue(false)
+    const removedOwner = await app.request("/v1/automation-runner/work", { headers: { authorization: `Bearer ${valid.token}` } })
+    expect(removedOwner.status).toBe(401)
+    expect(await removedOwner.json()).toEqual({ error: "runner_unauthorized" })
+    expect(ownerCheck).toHaveBeenCalledTimes(2)
+    expect(discover).toHaveBeenCalledTimes(1)
+    expect(sessionLookup).not.toHaveBeenCalled()
+    expect(selects).toBe(0)
+  } finally {
+    sessionLookup.mockRestore()
+    ownerCheck.mockRestore()
+    discover.mockRestore()
+  }
 })
