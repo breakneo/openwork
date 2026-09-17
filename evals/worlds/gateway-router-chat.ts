@@ -1,5 +1,6 @@
 import { browserScript } from "@openwork/cdp";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { resolveEvalEngine, type Place, type Seed } from "@openwork/env";
 import { localMysqlIsRunning, needs, server, SkipError } from "@openwork/testkit";
@@ -17,11 +18,14 @@ async function engines() {
 
 // Deliberately synthetic Jev classification, not live Jev quality verification.
 export async function gatewayRouterChat(seed: Seed, { place }: { place: Place }) {
-  needs({ placement: "local", commands: ["pnpm", "bun"] });
+  needs({ placement: "local", commands: ["pnpm", "bun", "ps", "opencode"] });
   if (place.kind !== "local" || resolveEvalEngine() !== "v1" || process.env.OPENWORK_EVAL_DEN_API_URL) {
     throw new SkipError("Co-located source appWeb, managed OpenCode v1, scratch MySQL, Den and Gateway required");
   }
   if (!await localMysqlIsRunning()) throw new SkipError("MySQL on 127.0.0.1:3306");
+  const expectedEngineVersion = text(record(JSON.parse(await readFile(new URL("../../constants.json", import.meta.url), "utf8"))).opencodeVersion).replace(/^v/, "");
+  const availableEngineVersion = (await exec("opencode", ["--version"], { timeout: 15_000 })).stdout.trim();
+  if (availableEngineVersion !== expectedEngineVersion) throw new Error(`Install the pinned OpenCode ${expectedEngineVersion} in this executor; found ${availableEngineVersion}`);
   await using resources = new AsyncDisposableStack();
   const nonce = `${Date.now()}-${process.pid}`;
   const cases = [
@@ -96,9 +100,9 @@ export async function gatewayRouterChat(seed: Seed, { place }: { place: Place })
       if (managed.length !== 1 || !managed[0]) throw new Error("Expected exactly one new real managed OpenCode serve process");
       const binary = managed[0];
       const version = (await exec(binary.binary, ["--version"], { timeout: 15_000 })).stdout.trim();
-      return { actualSourceSha: app.actualSourceSha, hostKind: app.handle.hostKind, engine: "v1",
+      return { actualSourceSha: app.actualSourceSha, hostKind: app.handle.hostKind, engine: "v1", expectedEngineVersion,
         binary: { ...binary, version },
-        classifier: "injected deterministic Jev seam (not live Jev)", server: await read("/status"),
+        classifier: "injected deterministic Jev seam (not live Jev)",
         nativeHealth: await read(`${nativeBase}/global/health`) };
     },
     async native(sessionId: string) {

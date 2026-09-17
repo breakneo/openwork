@@ -1,7 +1,7 @@
 import { expect } from "vitest";
 import { compileVerification, createJevVerificationEvaluator, runVerification, spec, type VerificationEvaluator, type VerificationPlan } from "@openwork/testkit";
 import { memberRoutingWeb } from "../worlds/gateway-routing.ts";
-import { offlineRoutingEvaluator, routingCheckIds, routingDictionary, routingIntent, unsupportedRoutingIntent } from "../worlds/gateway-routing-verification.ts";
+import { normalizeRouterEditorValues, normalizeSavedRouterSnapshot, offlineRoutingEvaluator, routingAnswerMetadata, routingCheckIds, routingDictionary, routingIntent, unsupportedRoutingIntent } from "../worlds/gateway-routing-verification.ts";
 
 const liveJev = process.env.OPENWORK_EVAL_JEV_ROUTING_VERIFY === "1";
 const test = spec.world(memberRoutingWeb, {
@@ -57,9 +57,16 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     const mode = liveJev ? "live Jev" : "deterministic offline selection fixture (not live Jev)";
     let evaluatorCalls = 0;
     const evaluator = liveJev ? createJevVerificationEvaluator({ onMetrics: metrics => {
-      evidence.recordAssertionEvidence("Jev routing selection metrics", JSON.stringify(metrics), metrics.status === "completed");
+      evidence.recordJsonArtifact("Jev routing selection model metrics", metrics);
     } }) : offlineRoutingEvaluator;
-    const evaluate: VerificationEvaluator = async request => { evaluatorCalls++; return evaluator(request); };
+    const evaluate: VerificationEvaluator = async request => {
+      evaluatorCalls++;
+      const response = await evaluator(request);
+      evidence.recordJsonArtifact(`Routing selection model metadata ${evaluatorCalls}: ${mode}`, {
+        state: request.state, ...routingAnswerMetadata(response),
+      });
+      return response;
+    };
     const compiled = await compileVerification({ intent: routingIntent, dictionary: routingDictionary, evaluate });
     evidence.recordAssertionEvidence(`Router verification compilation: ${mode}`, JSON.stringify(compiled), compiled.status === "ready");
     if (compiled.status !== "ready") throw new Error(`${mode} routing verification incomplete: ${compiled.reason}`);
@@ -69,7 +76,8 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     const callsAfterCompile = evaluatorCalls;
     for (let replay = 0; replay < 2; replay++) {
       const result = await runVerification({ plan, dictionary: routingDictionary, channels: { user, probe, step }, observations: {
-        "saved-router": { version: "1", read: () => world.savedRouters() },
+        "router-editor-values": { version: "1", read: async () => normalizeRouterEditorValues(await probe.eval(() => Array.from(document.querySelectorAll<HTMLInputElement>('form[aria-label="Router editor"] input')).map(input => input.value))) },
+        "saved-router-snapshot": { version: "1", read: async () => normalizeSavedRouterSnapshot(await world.savedRouters()) },
       } });
       evidence.recordAssertionEvidence(`Router verification replay ${replay + 1}: ${mode}`, JSON.stringify(result), result.status === "passed");
       expect(result).toMatchObject({ status: "passed", checkIds: routingCheckIds, modelCalls: 0 });
