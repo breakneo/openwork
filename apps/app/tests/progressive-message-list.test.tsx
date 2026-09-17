@@ -10,7 +10,7 @@ if (ownedDom) GlobalRegistrator.register({ url: "http://localhost/" })
 const tanstack = await import("@tanstack/react-virtual")
 const { ProgressiveMessageList } = await import("../src/components/chat/progressive-message-list")
 const { useSessionScrollController } = await import("../src/react-app/domains/session/surface/scroll-controller")
-const { useSessionScrollStore, flushSessionScrollState } = await import("../src/react-app/domains/session/surface/scroll-store")
+const { useSessionScrollStore, flushSessionScrollState, getSessionScrollState } = await import("../src/react-app/domains/session/surface/scroll-store")
 const originalObserver = globalThis.ResizeObserver
 const originalRect = HTMLElement.prototype.getBoundingClientRect
 const actEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT")
@@ -96,7 +96,7 @@ function trackHeightReads(data: readonly Group[]) {
   return () => reads.mock.calls.filter(([key]) => keys.has(key)).length
 }
 
-function fixture(initial = groups(), options: Partial<MessageListViewport> = {}, strict = false, fixedGeometry = false, viewportHeight = 200, listOffset = 0, controller?: "immediate" | "delayed", geometry: { heightAtWidth?: (height: number, width: number) => number; headerHeight?: number } = {}) {
+function fixture(initial = groups(), options: Partial<MessageListViewport> = {}, strict = false, fixedGeometry = false, viewportHeight = 200, listOffset = 0, controller?: "immediate" | "delayed", geometry: { heightAtWidth?: (height: number, width: number) => number; headerHeight?: number; bottomPadding?: number; scrollOptions?: Pick<Parameters<typeof useSessionScrollController>[0], "geometryOwner" | "historyPages" | "windowReady" | "pageForAnchor"> } = {}) {
   const container = document.createElement("div")
   document.body.append(container)
   const root = createRoot(container)
@@ -128,7 +128,7 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
     if (node.hasAttribute("data-message-id")) return messageHeight(node)
     if (node.hasAttribute("data-thread-group")) return [...node.children].reduce((sum, child) => sum + height(child), 0)
     const children = [...node.children].filter((child) => !hidden(child))
-    return children.reduce((sum, child) => sum + height(child), 0) + Math.max(0, children.length - 1) * 8 + (node === container ? listOffset : 0)
+    return children.reduce((sum, child) => sum + height(child), 0) + Math.max(0, children.length - 1) * 8 + (node === container ? listOffset + (geometry.bottomPadding ?? 0) : 0)
   }
   const contentTop = (node: Element): number => {
     if (node === container) return 0
@@ -192,11 +192,23 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
       renderedMessages: data,
       containerRef: viewport.scrollRef,
       contentRef,
+      ...geometry.scrollOptions,
     })
+    useLayoutEffect(() => {
+      if (!geometry.scrollOptions) return
+      const onScroll = () => Reflect.apply(scroll.handleScroll, undefined, [])
+      const onWheel = (event: WheelEvent) => scroll.markScrollGesture(event.target)
+      container.addEventListener("scroll", onScroll)
+      container.addEventListener("wheel", onWheel)
+      return () => {
+        container.removeEventListener("scroll", onScroll)
+        container.removeEventListener("wheel", onWheel)
+      }
+    }, [scroll.handleScroll, scroll.markScrollGesture])
     return <div ref={contentRef}>
       {loading ? <div data-thread-loading style={{ height: viewport.scrollHeight ?? 40_000 }} />
         : renderList({ ...viewport, onReady: scroll.refresh,
-          stickyBottom: () => useSessionScrollStore.getState().sessions[viewport.sessionKey]?.mode !== "manual" })}
+          stickyBottom: () => getSessionScrollState(useSessionScrollStore.getState().sessions, viewport.sessionKey, geometry.scrollOptions?.geometryOwner).mode === "stickyBottom" })}
     </div>
   }
   return {
@@ -250,6 +262,62 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
 }
 
 describe("progressive whole-group rendering", () => {
+  test("Home paging preserves the padded newest-page boundary through measured prepend and the next PageUp selects older history", async () => {
+    const data = Array.from({ length: 150 }, (_, index) => ({ id: `g${index + 1}`, messages: [{ id: `m${index + 1}`, height: 84 }] }))
+    const newest = { before: null, limit: 24, lineage: [null] }
+    const older = { before: "older-page", limit: 24, lineage: [null, "older-page"] }
+    let finish = () => {}
+    const load = mock(() => new Promise<void>((resolve) => { finish = resolve }))
+    const pages = { version: {}, hasOlder: true, hasNewer: false, loading: false, failed: false, load }
+    const sessionKey = `padded-page-${++sessionId}`
+    const owner = "padded-page-owner"
+    const view = fixture(data.slice(-24), { sessionKey, historyComplete: false, leadingHeight: 0, trailingHeight: 0 }, false, false, 612, 16, "immediate", {
+      bottomPadding: 16,
+      scrollOptions: { geometryOwner: owner, historyPages: pages, windowReady: true,
+        pageForAnchor: (id) => Number(id.slice(1)) >= 127 ? newest : older },
+    })
+    const saved = () => getSessionScrollState(useSessionScrollStore.getState().sessions, sessionKey, owner)
+    await view.render()
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    expect(load).not.toHaveBeenCalled()
+    await act(async () => {
+      view.container.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }))
+      view.scroll(0)
+    })
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    expect(load.mock.calls).toEqual([["older"]])
+    expect(saved()).toMatchObject({ anchor: { messageId: "m127", offset: 16 }, geometry: { page: newest } })
+    pages.version = {}
+    await view.render(data.slice(-48))
+    await batch()
+    await act(async () => finish())
+    pages.version = {}
+    await view.render(data.slice(-48))
+    for (let index = 0; index < 20 && frames.size; index++) await batch()
+    expect(view.position("m127")).toBe(16)
+    expect(view.position("m126")).toBe(-76)
+    expect(saved()).toMatchObject({ mode: "manual", anchor: { messageId: "m127", offset: 16 }, geometry: { page: newest } })
+    expect(view.mounted.length).toBeLessThan(48)
+    const bounds = view.container.getBoundingClientRect()
+    expect(view.placeholders.some((node) => {
+      const rect = node.getBoundingClientRect()
+      return rect.bottom > bounds.top && rect.top < bounds.bottom
+    })).toBe(false)
+    await act(async () => {
+      view.container.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }))
+      view.scroll(view.container.scrollTop - 276)
+    })
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    const firstVisible = [...view.container.querySelectorAll<HTMLElement>("[data-message-id]")].find((node) => {
+      const rect = node.getBoundingClientRect()
+      return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom
+    })
+    expect(firstVisible?.dataset.messageId).toBeDefined()
+    expect(firstVisible?.dataset.messageId).not.toBe("m127")
+    expect(saved()).toMatchObject({ anchor: { messageId: firstVisible?.dataset.messageId }, geometry: { page: older } })
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
   test("ignores a queued TanStack scroll reset after the viewport disconnects", async () => {
     const observe = tanstack.observeElementOffset
     let notify: (() => void) | undefined
