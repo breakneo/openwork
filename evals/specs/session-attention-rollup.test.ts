@@ -5,15 +5,16 @@ import { useSessionActivityStore } from "../../apps/app/src/react-app/domains/se
 import { selectSessionAttention, sessionAttentionLabel } from "../../apps/app/src/react-app/domains/session/status/session-attention";
 import { listControlSessions } from "../../apps/app/src/react-app/domains/session/control/list-control-sessions";
 
-// The sidebar, session.list_sessions and the transcript all read the same
-// roll-up: a delegated child's unanswered permission or question makes its
-// parent "waiting" (orange, needs you) instead of "thinking" (spinner).
+// Helper-level regressions for the shared attention roll-up and control-session
+// serializer. These tests call the store, selector and serializer directly;
+// they do not exercise the registered session.list_sessions action, its runtime
+// selection, or its wiring into the sidebar and transcript.
 
 const workspaceId = "ws_rollup";
-const parent = { id: "ses_parent", title: "Slop audit (Astra high)", time: { updated: 300 } };
-const child = { id: "ses_child", title: "Audit four open PRs", parentID: parent.id, time: { updated: 310 } };
-const grandchild = { id: "ses_grandchild", title: "Read den-web", parentID: child.id, time: { updated: 320 } };
-const unrelated = { id: "ses_other", title: "Unrelated root", time: { updated: 200 } };
+const parent = { id: "ses_parent", title: "Slop audit (Astra high)", time: { updated: 300, archived: undefined } };
+const child = { id: "ses_child", title: "Audit four open PRs", parentID: parent.id, time: { updated: 310, archived: undefined } };
+const grandchild = { id: "ses_grandchild", title: "Read den-web", parentID: child.id, time: { updated: 320, archived: undefined } };
+const unrelated = { id: "ses_other", title: "Unrelated root", time: { updated: 200, archived: undefined } };
 const sessions = [parent, child, grandchild, unrelated];
 
 function reset() {
@@ -37,6 +38,7 @@ function listed() {
     sessionsByWorkspaceId: { [workspaceId]: sessions },
     pinnedIds: [],
     statusFor: (_workspace, sessionId) => rolled.get(sessionId)?.status ?? "idle",
+    attentionFor: (_workspace, sessionId) => rolled.get(sessionId),
   }).map((entry) => [entry.sessionId, entry]));
 }
 
@@ -50,12 +52,12 @@ test("the activity store keeps a delegating parent at thinking while its child's
   const rolled = attention();
   expect(own).toBe("thinking");
   expect(store.getStatus(workspaceId, child.id)).toBe("waiting");
-  expect(rolled.get(parent.id)).toEqual({
+  expect(rolled.get(parent.id)).toMatchObject({
     status: "waiting",
     blockedBy: { sessionId: child.id, title: child.title, kind: "permission" },
   });
-  expect(rolled.get(child.id)).toEqual({ status: "waiting", blockedBy: null });
-  expect(rolled.get(unrelated.id)).toEqual({ status: "idle", blockedBy: null });
+  expect(rolled.get(child.id)).toMatchObject({ status: "waiting", blockedBy: null });
+  expect(rolled.get(unrelated.id)).toMatchObject({ status: "idle", blockedBy: null });
   expect(sessionAttentionLabel({ sessionId: child.id, title: child.title, kind: "permission" }))
     .toBe(`Needs permission: ${child.title}`);
   evidence.recordAssertionEvidence(
@@ -65,7 +67,7 @@ test("the activity store keeps a delegating parent at thinking while its child's
   );
 });
 
-test("session.list_sessions reports a blocked parent as waiting and returns it to working once the child is answered", async ({ evidence }) => {
+test("the control-session serializer maps rolled-up waiting and resumed working states", async ({ evidence }) => {
   const store = reset();
   store.setRunStatus(workspaceId, parent.id, "running");
   store.setWaitingRequest(workspaceId, grandchild.id, "question", "que_1", true);
@@ -82,7 +84,7 @@ test("session.list_sessions reports a blocked parent as waiting and returns it t
   expect(answered.get(child.id)).toMatchObject({ status: "idle", working: false });
   expect(answered.get(grandchild.id)).toMatchObject({ status: "idle", working: false });
   evidence.recordAssertionEvidence(
-    "Agents see the parent as waiting only while a descendant's request is unanswered",
+    "The control-session serializer marks the parent waiting only while a descendant request is unanswered",
     `Blocked: parent ${blocked.get(parent.id)?.status}; answered: parent ${answered.get(parent.id)?.status}, unrelated ${answered.get(unrelated.id)?.status}.`,
     blocked.get(parent.id)?.status === "waiting" && answered.get(parent.id)?.status === "thinking",
   );
@@ -93,13 +95,13 @@ test("the parent's own error or own request outranks a descendant's request", as
   store.setWaitingRequest(workspaceId, child.id, "permission", "per_1", true);
   store.setError(workspaceId, parent.id, "Provider failed");
   const errored = attention().get(parent.id);
-  expect(errored).toEqual({ status: "error", blockedBy: null });
+  expect(errored).toMatchObject({ status: "error", blockedBy: null });
 
   store.clearError(workspaceId, parent.id);
   store.setRunStatus(workspaceId, parent.id, "running");
   store.setWaitingRequest(workspaceId, parent.id, "question", "que_own", true);
   const own = attention().get(parent.id);
-  expect(own).toEqual({ status: "waiting", blockedBy: null });
+  expect(own).toMatchObject({ status: "waiting", blockedBy: null });
   evidence.recordAssertionEvidence(
     "Precedence is error > own waiting > descendant waiting",
     `With a child permission pending, an errored parent reports ${errored?.status}; a parent with its own question reports ${own?.status} with blockedBy ${String(own?.blockedBy)}.`,

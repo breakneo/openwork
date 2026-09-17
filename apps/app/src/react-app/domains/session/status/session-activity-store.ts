@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { create } from "zustand";
-import type { UIMessage } from "ai";
+import { isToolUIPart, type UIMessage } from "ai";
+import { isTaskToolPart, taskChildSessionId } from "../../../../lib/build-in-tools";
 import { transcriptProgress } from "./session-progress";
 
 import { t } from "../../../../i18n";
@@ -12,12 +13,23 @@ export type SessionWaitingKind = "permission" | "question";
 
 type SessionMessageRole = "assistant" | "system" | "user";
 
+type TranscriptActivity = {
+  startedAt: number;
+  latestUserId: string | null;
+  assistantOutput: boolean;
+  activeStartedAt: number;
+};
+
 type SessionActivityRecord = {
   status: SessionActivityStatus;
   runActive: boolean;
   retrying: boolean;
   runStatusAt: number;
   runStartedAt: number;
+  // Only an active run first discovered by a read may inherit persisted age.
+  // Live status/admission writes cancel this pending hydration, even on ties.
+  runHydrationAfter: number | null;
+  transcriptActivity: TranscriptActivity | null;
   lastProgressAt: number;
   progressRevision: string | null;
   progressParts: Record<string, string>;
@@ -29,6 +41,7 @@ type SessionActivityRecord = {
   waitingPermissionIds: string[];
   waitingQuestionIds: string[];
   messageRoles: Record<string, SessionMessageRole>;
+  childSessionIds: string[];
   updatedAt: number;
 };
 
@@ -59,7 +72,13 @@ type SessionActivityStore = {
     options?: { snapshotStartedAt?: number },
   ) => void;
   setRunStatus: (workspaceId: string, sessionId: string, status: unknown) => void;
-  observeTranscript: (workspaceId: string, sessionId: string, messages: UIMessage[], snapshot?: boolean) => void;
+  observeTranscript: (
+    workspaceId: string,
+    sessionId: string,
+    messages: UIMessage[],
+    snapshot?: boolean,
+    options?: { snapshotStartedAt?: number },
+  ) => void;
   markMessageRole: (workspaceId: string, sessionId: string, messageId: string, role: SessionMessageRole) => void;
   markAssistantOutput: (workspaceId: string, sessionId: string, messageId?: string, options?: { allowUnknownMessageRole?: boolean }) => void;
   setWaitingRequest: (workspaceId: string, sessionId: string, kind: "permission" | "question", requestId: string, waiting: boolean) => void;
@@ -76,6 +95,8 @@ const createRecord = (): SessionActivityRecord => ({
   retrying: false,
   runStatusAt: 0,
   runStartedAt: 0,
+  runHydrationAfter: null,
+  transcriptActivity: null,
   lastProgressAt: 0,
   progressRevision: null,
   progressParts: {},
@@ -87,6 +108,7 @@ const createRecord = (): SessionActivityRecord => ({
   waitingPermissionIds: [],
   waitingQuestionIds: [],
   messageRoles: {},
+  childSessionIds: [],
   updatedAt: 0,
 });
 
@@ -153,7 +175,7 @@ function updateWorkspaceWaiting(
   return { ...waitingByWorkspaceId, [workspaceId]: next };
 }
 
-function sameStrings(left: string[], right: string[]): boolean {
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
@@ -176,6 +198,11 @@ function sameActivityRecord(
     && current.retrying === next.retrying
     && current.runStatusAt === next.runStatusAt
     && current.runStartedAt === next.runStartedAt
+    && current.runHydrationAfter === next.runHydrationAfter
+    && current.transcriptActivity?.startedAt === next.transcriptActivity?.startedAt
+    && current.transcriptActivity?.latestUserId === next.transcriptActivity?.latestUserId
+    && current.transcriptActivity?.assistantOutput === next.transcriptActivity?.assistantOutput
+    && current.transcriptActivity?.activeStartedAt === next.transcriptActivity?.activeStartedAt
     && current.lastProgressAt === next.lastProgressAt
     && current.progressRevision === next.progressRevision
     && current.latestActivity === next.latestActivity
@@ -185,7 +212,8 @@ function sameActivityRecord(
     && current.compacting === next.compacting
     && sameStrings(current.waitingPermissionIds, next.waitingPermissionIds)
     && sameStrings(current.waitingQuestionIds, next.waitingQuestionIds)
-    && sameMessageRoles(current.messageRoles, next.messageRoles);
+    && sameMessageRoles(current.messageRoles, next.messageRoles)
+    && sameStrings(current.childSessionIds, next.childSessionIds);
 }
 
 type SessionActivityDerivedState = Pick<SessionActivityStore, "recordsByWorkspaceId" | "statusesByWorkspaceId" | "waitingByWorkspaceId">;
@@ -243,6 +271,25 @@ function removeValue(values: string[], value: string) {
 
 function addValue(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
+}
+
+function reconcileTranscriptActivity(record: SessionActivityRecord): SessionActivityRecord {
+  const snapshot = record.transcriptActivity;
+  if (!record.runActive || !snapshot) return record;
+  const hydrateRun = typeof record.runHydrationAfter === "number" && snapshot.startedAt > record.runHydrationAfter;
+  // Fresh history can reveal output for an already observed live run, but only
+  // a run first discovered by a read may inherit its persisted execution age.
+  const assistantOutput = record.assistantOutput
+    || ((hydrateRun || snapshot.startedAt > record.runStatusAt) && snapshot.assistantOutput);
+  if (!hydrateRun && assistantOutput === record.assistantOutput) return record;
+  return {
+    ...record,
+    assistantOutput,
+    runStartedAt: hydrateRun && snapshot.activeStartedAt > 0
+      ? Math.min(record.runStartedAt || snapshot.activeStartedAt, snapshot.activeStartedAt)
+      : record.runStartedAt,
+    runHydrationAfter: hydrateRun ? null : record.runHydrationAfter,
+  };
 }
 
 export const useSessionActivityStore = create<SessionActivityStore>((set, get) => ({
@@ -312,19 +359,23 @@ export const useSessionActivityStore = create<SessionActivityStore>((set, get) =
       // live spinner and stale busy cannot resurrect a run that already ended.
       if (typeof snapshotStartedAt === "number" && snapshotStartedAt < record.runStatusAt) return record;
       if (typeof snapshotStartedAt !== "number" && !runActive && record.status !== "idle") return record;
-      return {
+      return reconcileTranscriptActivity({
         ...record,
         runActive,
         runStatusAt: snapshotStartedAt ?? record.runStatusAt,
         retrying: normalized === "retry",
         runStartedAt: runActive && !record.runActive ? Date.now() : record.runStartedAt,
+        runHydrationAfter: !runActive ? null
+          : typeof snapshotStartedAt === "number" && (!record.runActive || record.runStatusAt === 0)
+            ? record.runStatusAt
+            : record.runHydrationAfter,
         assistantOutput: runActive && (assistantOutput ?? record.assistantOutput),
         errorActive: runActive ? false : record.errorActive,
         errorMessage: runActive ? null : record.errorMessage,
         compacting: runActive ? record.compacting : false,
         waitingPermissionIds: runActive ? record.waitingPermissionIds : [],
         waitingQuestionIds: runActive ? record.waitingQuestionIds : [],
-      };
+      });
     }));
   },
   setRunStatus: (workspaceId, sessionId, status) => {
@@ -338,6 +389,7 @@ export const useSessionActivityStore = create<SessionActivityStore>((set, get) =
         ...record,
         runActive,
         runStatusAt: Date.now(),
+        runHydrationAfter: null,
         retrying: normalized === "retry",
         runStartedAt: runActive && !record.runActive ? Date.now() : record.runStartedAt,
         assistantOutput: runActive && record.runActive ? record.assistantOutput : false,
@@ -349,24 +401,60 @@ export const useSessionActivityStore = create<SessionActivityStore>((set, get) =
       };
     }));
   },
-  observeTranscript: (workspaceId, sessionId, messages, snapshot = false) => {
+  observeTranscript: (workspaceId, sessionId, messages, snapshot = false, options = {}) => {
     set((state) => updateRecord(state, workspaceId, sessionId, (record) => {
       const progress = transcriptProgress(messages, record.progressParts);
-      if (record.progressRevision === progress.revision) return record;
-      const hydratedActiveStartedAt = snapshot && record.progressRevision === null && record.runActive
+      const childSessionIds = new Set(record.childSessionIds);
+      for (const message of messages) {
+        if (message.role !== "assistant") continue;
+        for (const part of message.parts) {
+          if (!isToolUIPart(part) || !isTaskToolPart(part)) continue;
+          const childId = taskChildSessionId(part);
+          if (childId) childSessionIds.add(childId);
+        }
+      }
+      const snapshotStartedAt = options.snapshotStartedAt;
+      const turnChanged = record.transcriptActivity !== null
+        && record.transcriptActivity.latestUserId !== progress.latestUserId;
+      const progressChanged = record.progressRevision !== progress.revision;
+      const observedAt = snapshot ? snapshotStartedAt ?? 0 : turnChanged || progressChanged ? Date.now() : 0;
+      const next = reconcileTranscriptActivity({
+        ...record,
+        childSessionIds: childSessionIds.size === record.childSessionIds.length ? record.childSessionIds : [...childSessionIds],
+        ...(turnChanged ? {
+          assistantOutput: false,
+          runStartedAt: record.runActive
+            ? Math.max(record.runStartedAt, progress.latestUserCreated ?? (snapshot ? 0 : Date.now()))
+            : record.runStartedAt,
+          runHydrationAfter: null,
+          latestActivity: null,
+        } : {}),
+        transcriptActivity: {
+          startedAt: Math.max(turnChanged ? 0 : record.transcriptActivity?.startedAt ?? 0, observedAt),
+          latestUserId: progress.latestUserId,
+          assistantOutput: progress.assistantOutput,
+          activeStartedAt: progress.activeStartedAt,
+        },
+      });
+      // History may have established progress before status arrived. Activity
+      // enrichment must still run when its fingerprint is already known.
+      if (!progressChanged) return next;
+      const hydratedActiveStartedAt = snapshot && snapshotStartedAt === undefined
+        && record.progressRevision === null && next.runActive && next.runHydrationAfter !== null
         ? progress.activeStartedAt
         : 0;
       return {
-        ...record,
+        ...next,
         // Snapshot fetch time establishes ordering, not execution age. Only a
         // persisted in-flight part can move the first hydrated run anchor back;
         // old terminal transcript rows must not age a newer accepted run.
         runStartedAt: hydratedActiveStartedAt > 0
           ? Math.min(record.runStartedAt || hydratedActiveStartedAt, hydratedActiveStartedAt)
-          : record.runStartedAt,
+          : next.runStartedAt,
+        runHydrationAfter: hydratedActiveStartedAt > 0 ? null : next.runHydrationAfter,
         progressRevision: progress.revision,
         progressParts: progress.parts,
-        latestActivity: progress.label ?? record.latestActivity,
+        latestActivity: turnChanged && !progress.assistantOutput ? null : progress.label ?? next.latestActivity,
         lastProgressAt: progress.label
           ? Math.max(record.lastProgressAt, snapshot && record.progressRevision === null ? progress.timestamp : Date.now())
           : record.lastProgressAt,
@@ -429,6 +517,7 @@ export const useSessionActivityStore = create<SessionActivityStore>((set, get) =
       runActive: false,
       retrying: false,
       runStatusAt: Date.now(),
+      runHydrationAfter: null,
       assistantOutput: false,
       compacting: false,
     })));
@@ -481,6 +570,49 @@ export const useSessionActivityStore = create<SessionActivityStore>((set, get) =
     });
   },
 }));
+
+export type SessionChildIds = Readonly<Record<string, readonly string[]>>;
+
+export function createSessionChildIdsSelector() {
+  let previousRecords: SessionActivityStore["recordsByWorkspaceId"] = {};
+  let childrenByWorkspaceId: Readonly<Record<string, SessionChildIds>> = {};
+
+  return (state: Pick<SessionActivityStore, "recordsByWorkspaceId">) => {
+    if (state.recordsByWorkspaceId === previousRecords) return childrenByWorkspaceId;
+    let next = childrenByWorkspaceId;
+    for (const [workspaceId, records] of Object.entries(state.recordsByWorkspaceId)) {
+      if (records === previousRecords[workspaceId]) continue;
+      const previous = childrenByWorkspaceId[workspaceId];
+      const children: Record<string, readonly string[]> = {};
+      let changed = false;
+      for (const [sessionId, record] of Object.entries(records)) {
+        if (record.childSessionIds.length === 0) continue;
+        const prior = previous?.[sessionId];
+        if (prior && sameStrings(prior, record.childSessionIds)) {
+          children[sessionId] = prior;
+        } else {
+          children[sessionId] = record.childSessionIds;
+          changed = true;
+        }
+      }
+      const count = Object.keys(children).length;
+      if (!changed && count === Object.keys(previous ?? {}).length) continue;
+      const updated = { ...next };
+      if (count > 0) updated[workspaceId] = children;
+      else delete updated[workspaceId];
+      next = updated;
+    }
+    for (const workspaceId of Object.keys(childrenByWorkspaceId)) {
+      if (state.recordsByWorkspaceId[workspaceId]) continue;
+      const updated = { ...next };
+      delete updated[workspaceId];
+      next = updated;
+    }
+    previousRecords = state.recordsByWorkspaceId;
+    childrenByWorkspaceId = next;
+    return next;
+  };
+}
 
 export function getSessionActivityStatusLabel(status: SessionActivityStatus) {
   if (status === "thinking") return t("session.assistant_thinking");

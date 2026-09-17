@@ -41,6 +41,7 @@ export type ComposerStateStore = {
     /** The composer as submitted, so a send whose hold is released later can still be saved as unsent. */
     composer: ComposerSessionState;
     previousMessageIds: string[];
+    submissionMessageIds: readonly string[];
     serverMessageId?: string;
     preparedText?: string;
     settled: boolean;
@@ -84,14 +85,26 @@ export function persistableComposerDraftText(text: string) {
   return text.replace(/\[attachment [^\]]+\]/g, "");
 }
 
+/**
+ * Decide whether the persisted draft snapshot should replace the in-memory
+ * composer. Crossing an account or organization boundary always rehydrates so
+ * the previous scope's text and attachments never survive into the next one.
+ * Inside one claimed scope the person's live composer is the newest source of
+ * truth: a snapshot that moved underneath it (another window, a queue mirror,
+ * a refused compare-and-swap) may only fill an empty composer, never replace
+ * text or attachments that are being edited here.
+ */
 export function composerDraftNeedsHydration(input: {
   claimedScopeKey: string | null;
   nextScopeKey: string;
   currentText: string;
   storedText: string;
+  currentHasAttachments?: boolean;
 }) {
-  return input.claimedScopeKey !== input.nextScopeKey
-    || persistableComposerDraftText(input.currentText) !== input.storedText;
+  if (input.claimedScopeKey !== input.nextScopeKey) return true;
+  const currentText = persistableComposerDraftText(input.currentText);
+  if (currentText.length > 0 || input.currentHasAttachments) return false;
+  return currentText !== input.storedText;
 }
 
 function createEmptyComposerSession(): ComposerSessionState {
@@ -255,9 +268,12 @@ export function getComposerQueuedDrafts(state: ComposerStateStore, sessionId: st
   return state.queuedDrafts[sessionId] ?? EMPTY_QUEUED_DRAFTS;
 }
 
-/** Follow-ups waiting behind running tasks across every conversation. */
+/** Text follow-ups waiting behind running tasks that restart recovery can preserve. */
 export function countComposerQueuedDrafts(state: ComposerStateStore): number {
-  return Object.values(state.queuedDrafts).reduce((count, items) => count + items.length, 0);
+  return Object.values(state.queuedDrafts).reduce(
+    (count, items) => count + items.filter((item) => persistableComposerDraftText(item.draft.text).trim().length > 0).length,
+    0,
+  );
 }
 
 export function getComposerRevertMessageId(state: ComposerStateStore, sessionId: string): string | null {

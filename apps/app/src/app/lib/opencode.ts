@@ -1,6 +1,6 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 
-import { desktopFetch } from "./desktop";
+import { desktopFetch, desktopFetchViaMain, isPermissionReplyRequest } from "./desktop";
 import { isDesktopRuntime } from "./runtime-env";
 
 export type FieldsResult<T> =
@@ -64,6 +64,37 @@ export class PromptAdmissionUnknownError extends Error {
 
 export function isPromptAdmissionUnknown(error: unknown): error is PromptAdmissionUnknownError {
   return error instanceof PromptAdmissionUnknownError;
+}
+
+export type ServerPromptAdmission = "queued" | "forwarding" | "accepted" | "cancelled" | "rejected" | "unknown";
+type AdmissionReply = { state: ServerPromptAdmission; ticket?: string };
+const admissionReaders = new WeakMap<object, (sessionID: string, messageID: string, cancel: boolean) => Promise<ServerPromptAdmission>>();
+// Survive SDK client recreation/reconnects. Do not evict admission identities
+// and accidentally prepare a new ticket for an uncertain prior submission.
+// Keep only digests, never raw credentials. There is no lifetime send quota:
+// these small replay guards live until this application runtime is released.
+const preparedPromptMessages = new Set<string>();
+
+async function promptPreparationKey(baseUrl: string, token: string | undefined, sessionID: string, messageID: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([baseUrl, token, sessionID, messageID])));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function parseAdmissionReply(value: unknown): AdmissionReply | undefined {
+  if (!value || typeof value !== "object" || !("protocol" in value) || value.protocol !== "openwork-prompt-admission-v1"
+    || !("state" in value)) return undefined;
+  const state = value.state;
+  if (state !== "queued" && state !== "forwarding" && state !== "accepted" && state !== "cancelled"
+    && state !== "rejected" && state !== "unknown") return undefined;
+  return { state, ...("ticket" in value && typeof value.ticket === "string" ? { ticket: value.ticket } : {}) };
+}
+
+export async function cancelPromptAdmission(client: object, sessionID: string, messageID: string): Promise<ServerPromptAdmission> {
+  return admissionReaders.get(client)?.(sessionID, messageID, true).catch((): ServerPromptAdmission => "unknown") ?? "unknown";
+}
+
+async function serverPromptAdmission(client: object, sessionID: string, messageID: string): Promise<ServerPromptAdmission> {
+  return admissionReaders.get(client)?.(sessionID, messageID, false).catch((): ServerPromptAdmission => "unknown") ?? "unknown";
 }
 
 /** The settled server failure behind an uncertain admission: the parsed
@@ -196,21 +227,29 @@ async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   timeoutMs: number,
+  cancelPermissionReply = false,
 ) {
-  const effectiveTimeoutMs = resolveRequestTimeoutMs(input, timeoutMs);
+  const effectiveTimeoutMs = cancelPermissionReply ? timeoutMs : resolveRequestTimeoutMs(input, timeoutMs);
   if (!Number.isFinite(effectiveTimeoutMs) || effectiveTimeoutMs <= 0) {
     return fetchImpl(input, init);
   }
 
+  const cancellable = cancelPermissionReply || ["GET", "PATCH"].includes((init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase());
+  const callerSignal = cancellable
+    ? init?.signal === undefined ? (input instanceof Request ? input.signal : undefined) : init.signal
+    : undefined;
+  callerSignal?.throwIfAborted();
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const signal = controller?.signal;
-  const initWithSignal = signal && !init?.signal ? { ...(init ?? {}), signal } : init;
+  const signal = cancellable && callerSignal && controller
+    ? AbortSignal.any([callerSignal, controller.signal])
+    : controller?.signal;
+  const initWithSignal = signal && (cancellable || !init?.signal) ? { ...(init ?? {}), signal } : init;
 
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
       try {
-        controller?.abort();
+        controller?.abort(cancellable ? new Error("Request timed out.") : undefined);
       } catch {
         // ignore
       }
@@ -227,11 +266,14 @@ async function fetchWithTimeout(
     }
     return response;
   } catch (error) {
+    if (cancellable) {
+      signal?.throwIfAborted();
+      throw error;
+    }
     if (SESSION_PROMPT_ASYNC_URL_RE.test(getRequestUrl(input))) {
       throw isPromptAdmissionUnknown(error) ? error : new PromptAdmissionUnknownError({ cause: error });
     }
-    const name = (error && typeof error === "object" && "name" in error ? (error as any).name : "") as string;
-    if (name === "AbortError") {
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
       throw new Error("Request timed out.");
     }
     throw error;
@@ -271,10 +313,7 @@ const STREAM_URL_RE = /\/(event|stream)(\b|\/|$|\?)/;
 function requestIsStreaming(input: RequestInfo | URL, init?: RequestInit): boolean {
   const url = getRequestUrl(input);
   if (STREAM_URL_RE.test(url)) return true;
-  const accept =
-    input instanceof Request
-      ? input.headers.get("accept") ?? input.headers.get("Accept")
-      : new Headers(init?.headers).get("accept") ?? new Headers(init?.headers).get("Accept");
+  const accept = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get("accept");
   return typeof accept === "string" && accept.toLowerCase().includes("text/event-stream");
 }
 
@@ -283,7 +322,7 @@ function nativeFetchRef(): typeof globalThis.fetch {
   return globalThis.fetch as typeof globalThis.fetch;
 }
 
-export const createDesktopFetch = (auth?: OpencodeAuth) => {
+export const createDesktopFetch = (auth?: OpencodeAuth, finiteFetch: typeof globalThis.fetch = desktopFetch) => {
   const authHeader = resolveAuthHeader(auth);
   const addAuth = (headers: Headers) => {
     if (!authHeader || headers.has("Authorization")) return;
@@ -294,18 +333,23 @@ export const createDesktopFetch = (auth?: OpencodeAuth) => {
     // Streams must go through the webview's native fetch to avoid the
     // Tauri HTTP plugin's `fetch_read_body` hang on never-closing bodies.
     const shouldStream = requestIsStreaming(input, init);
+    const permissionReply = isPermissionReplyRequest(input, init);
     const underlyingFetch = shouldStream
       ? nativeFetchRef()
-      : desktopFetch;
+      : permissionReply && finiteFetch === desktopFetch ? desktopFetchViaMain : finiteFetch;
     // Streams should never be timed out at the transport layer; the caller
     // aborts via AbortSignal when the subscription unmounts.
     const timeoutMs = shouldStream ? 0 : DEFAULT_OPENCODE_REQUEST_TIMEOUT_MS;
 
+    if (permissionReply && !(input instanceof Request)) input = new Request(input, init);
     if (input instanceof Request) {
-      const headers = new Headers(input.headers);
+      const requestInit = permissionReply || isPermissionReplyRequest(input) || ["GET", "PATCH"].includes((init?.method ?? input.method).toUpperCase()) ? init : undefined;
+      const headers = new Headers(requestInit?.headers ?? input.headers);
       addAuth(headers);
-      const request = new Request(input, { headers });
-      return fetchWithTimeout(underlyingFetch, request, undefined, timeoutMs);
+      const request = new Request(input, { ...requestInit, headers });
+      // Keep an explicit null override even in runtimes whose Request clone
+      // retains the original signal when constructed with signal: null.
+      return fetchWithTimeout(underlyingFetch, request, { signal: requestInit?.signal }, timeoutMs, permissionReply);
     }
 
     const headers = new Headers(init?.headers);
@@ -318,6 +362,7 @@ export const createDesktopFetch = (auth?: OpencodeAuth) => {
         headers,
       },
       timeoutMs,
+      permissionReply,
     );
   };
 };
@@ -336,7 +381,7 @@ export function unwrap<T>(result: FieldsResult<T>): NonNullable<T> {
   throw new Error(message || "Unknown error");
 }
 
-export function createClient(baseUrl: string, directory?: string, auth?: OpencodeAuth) {
+export function createClient(baseUrl: string, directory?: string, auth?: OpencodeAuth, options?: { desktopTransport: "main" }) {
   const headers: Record<string, string> = {};
   if (!isDesktopRuntime()) {
     const authHeader = resolveAuthHeader(auth);
@@ -346,7 +391,7 @@ export function createClient(baseUrl: string, directory?: string, auth?: Opencod
   }
 
   const fetchImpl = isDesktopRuntime()
-    ? createDesktopFetch(auth)
+    ? createDesktopFetch(auth, options?.desktopTransport === "main" ? desktopFetchViaMain : desktopFetch)
     : (input: RequestInfo | URL, init?: RequestInit) => {
         const timeoutMs = requestIsStreaming(input, init) ? 0 : DEFAULT_OPENCODE_REQUEST_TIMEOUT_MS;
         return fetchWithTimeout(globalThis.fetch, input, init, timeoutMs);
@@ -360,6 +405,15 @@ export function createClient(baseUrl: string, directory?: string, auth?: Opencod
 
   const session = client.session as typeof client.session;
   const openworkMount = auth?.mode === "openwork" ? resolveOpenworkWorkspaceMount(baseUrl) : null;
+  if (openworkMount) {
+    admissionReaders.set(client, (sessionID, messageID, cancel) => withAdmissionDeadline<ServerPromptAdmission>(DEFAULT_OPENCODE_REQUEST_TIMEOUT_MS, async (signal) => {
+      const response = await fetchImpl(`${baseUrl}/session/${encodeURIComponent(sessionID)}/prompt-admission/${encodeURIComponent(messageID)}`, {
+        method: cancel ? "DELETE" : "GET", headers, signal, cache: "no-store",
+      });
+      if (!response.ok) return "unknown";
+      return parseAdmissionReply(await response.json())?.state ?? "unknown";
+    }, () => new Error("Admission check timed out.")));
+  }
   const sessionOverrides = session as any as {
     promptAsync: (parameters: PromptAsyncParameters, options?: { throwOnError?: boolean }) => Promise<FieldsResult<{}>>;
     command: (parameters: CommandParameters, options?: { throwOnError?: boolean }) => Promise<FieldsResult<{}>>;
@@ -367,16 +421,80 @@ export function createClient(baseUrl: string, directory?: string, auth?: Opencod
 
   sessionOverrides.promptAsync = async (parameters: PromptAsyncParameters, options?: { throwOnError?: boolean }) => {
     const { sessionID, directory: requestDirectory, ...body } = parameters;
+    let tracked = false;
+    let canReconcile = false;
+    let preparationRejected = false;
     try {
       // Keep the tagged transport failure intact instead of serializing it
       // through the SDK's error result. Native still receives prompt_async.
-      return await withAdmissionDeadline(PROMPT_ASYNC_REQUEST_TIMEOUT_MS, (signal) => postSessionRequest(fetchImpl, baseUrl, `/session/${encodeURIComponent(sessionID)}/prompt_async`, body, {
-        headers: Object.keys(headers).length ? headers : undefined,
-        directory: requestDirectory ?? directory,
-        throwOnError: options?.throwOnError,
-        signal,
-      }), () => new PromptAdmissionUnknownError({ messageID: parameters.messageID }));
+      return await withAdmissionDeadline(PROMPT_ASYNC_REQUEST_TIMEOUT_MS, async (signal) => {
+        const promptHeaders: Record<string, string> = { ...headers };
+        if (openworkMount && parameters.messageID) {
+          // Preparing never dispatches, but repeating preparation after losing
+          // a ticket could authorize a second submission on a restarted server.
+          const key = await promptPreparationKey(baseUrl, auth?.token, sessionID, parameters.messageID);
+          signal.throwIfAborted();
+          if (preparedPromptMessages.has(key)) throw new PromptAdmissionUnknownError({ messageID: parameters.messageID });
+          preparedPromptMessages.add(key);
+          tracked = true;
+          const prepared = await fetchImpl(`${baseUrl}/session/${encodeURIComponent(sessionID)}/prompt-admission`, {
+            method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body), signal,
+          });
+          if ([400, 401, 403].includes(prepared.status)) {
+            // Preparation cannot dispatch. A definite validation/auth/policy
+            // refusal is an ordinary error, not an ambiguous native send.
+            preparedPromptMessages.delete(key);
+            tracked = false;
+            preparationRejected = true;
+            const error = await readSettledFailure(prepared) ?? { message: "Message preparation was rejected." };
+            if (options?.throwOnError) throw error;
+            return { error, request: new Request(`${baseUrl}/session/${encodeURIComponent(sessionID)}/prompt-admission`, {
+              method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body),
+            }), response: prepared };
+          }
+          // Only an unsupported prepare route permits legacy forwarding. Never
+          // fall back after a ticketed dispatch or any ambiguous prepare error.
+          if (prepared.status !== 404) {
+            const preparedValue: unknown = await prepared.json();
+            const admission = parseAdmissionReply(preparedValue);
+            canReconcile = prepared.ok && Boolean(admission?.ticket);
+            if (!prepared.ok || !admission?.ticket || admission.state !== "queued") {
+              throw new PromptAdmissionUnknownError({ cause: preparedValue, messageID: parameters.messageID });
+            }
+            promptHeaders["x-openwork-prompt-ticket"] = admission.ticket;
+          } else tracked = false;
+          // Some desktop transports ignore abort. A late prepare must never
+          // continue into dispatch after the client's admission deadline.
+          signal.throwIfAborted();
+        }
+        const result = await postSessionRequest<{}>(fetchImpl, baseUrl, `/session/${encodeURIComponent(sessionID)}/prompt_async`, body, {
+          headers: promptHeaders,
+          directory: requestDirectory ?? directory,
+          throwOnError: options?.throwOnError,
+          signal,
+        });
+        if (tracked && result.error !== undefined && parameters.messageID) {
+          const state = await serverPromptAdmission(client, sessionID, parameters.messageID);
+          if (state !== "cancelled" && state !== "rejected") throw new PromptAdmissionUnknownError({ cause: result.error, messageID: parameters.messageID });
+        }
+        return result;
+      }, () => new PromptAdmissionUnknownError({ messageID: parameters.messageID }));
     } catch (error) {
+      if (preparationRejected && isPromptAdmissionUnknown(error)) {
+        throw new Error("Message preparation was rejected before dispatch.", { cause: error });
+      }
+      if (tracked && parameters.messageID) {
+        const state = canReconcile ? await serverPromptAdmission(client, sessionID, parameters.messageID) : "unknown";
+        if (state === "accepted") {
+          // This is a recorded engine 2xx, never a queued/forwarding ack.
+          return { data: {}, request: new Request(`${baseUrl}/session/${encodeURIComponent(sessionID)}/prompt_async`, { method: "POST", headers, body: JSON.stringify(body) }), response: new Response(null, { status: 204 }) };
+        }
+        if (state === "cancelled" || state === "rejected") {
+          if (!isPromptAdmissionUnknown(error)) throw error;
+          throw new Error(`Message ${state} before acceptance.`, { cause: error });
+        }
+        throw new PromptAdmissionUnknownError({ cause: error, messageID: parameters.messageID });
+      }
       if (isPromptAdmissionUnknown(error)) {
         throw new PromptAdmissionUnknownError({ cause: error, messageID: parameters.messageID });
       }
@@ -428,20 +546,14 @@ export async function hasAcceptedPromptMessage(client: ReturnType<typeof createC
 
 export type PromptAdmission = "accepted" | "absent" | "unknown";
 
-/** Reconcile an uncertain prompt against native. Only the exact user message
- * proves acceptance. `absent` is authoritative the other way: native listed
- * the idle conversation without the message, so the settled POST is not going
- * to admit it later. A failed or partial read stays unknown and keeps the hold. */
+/** `absent` means authoritative cancellation/rejection, NEVER missing history.
+ * A legacy POST can still be behind the server fence despite an idle snapshot. */
 export async function readPromptAdmission(client: ReturnType<typeof createClient>, sessionID: string, messageID: string): Promise<PromptAdmission> {
-  if (await hasAcceptedPromptMessage(client, sessionID, messageID)) return "accepted";
-  const [messages, statuses] = await Promise.all([
-    client.session.messages({ sessionID }),
-    client.session.status(),
-  ]);
-  if (!Array.isArray(messages.data) || !statuses.data) return "unknown";
-  const status = statuses.data[sessionID];
-  if (status && status.type !== "idle") return "unknown";
-  return messages.data.some(({ info }) => info.id === messageID) ? "unknown" : "absent";
+  const state = await serverPromptAdmission(client, sessionID, messageID);
+  if (state === "accepted") return "accepted";
+  if (state === "cancelled" || state === "rejected") return "absent";
+  if (await hasAcceptedPromptMessage(client, sessionID, messageID).catch(() => false)) return "accepted";
+  return "unknown";
 }
 
 export async function waitForHealthy(

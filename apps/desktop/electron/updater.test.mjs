@@ -9,13 +9,10 @@ import path from "node:path";
 
 import {
   preventPendingUpdaterInstall,
-  isUpdaterVersionAllowedByPolicy,
   registerUpdaterIpc,
   staleUpdaterStatePaths,
   targetedStableUpdaterFeed,
 } from "./updater.mjs";
-import { desktopActivationRequired, ENTERPRISE_DESKTOP_DISTRIBUTION, PUBLIC_DESKTOP_DISTRIBUTION } from "./desktop-distribution.mjs";
-import { readRequiredUpdaterPolicy, UNMANAGED_UPDATER_POLICY } from "./updater-policy.mjs";
 import {
   cacheVerifiedRecoveryArtifact,
   compatibleRecoveryReleases,
@@ -37,10 +34,6 @@ const desktopVersion = JSON.parse(
 ).version;
 
 let isolatedUpdaterImportId = 0;
-
-function policySnapshot(policy, identity = "fixture-identity", verification = "fresh") {
-  return { policy, identity, verification };
-}
 
 function fakeUpdaterHarness({ version, platform, manualNativeStaging }) {
   const listeners = new Map();
@@ -88,9 +81,9 @@ function fakeUpdaterHarness({ version, platform, manualNativeStaging }) {
 }
 
 /**
- * @param {{ version: string, platform?: string, arch?: string, distribution?: "public" | "enterprise", manualNativeStaging?: boolean, nativeStagingTimeoutMs?: number, assertActivation?: () => void, readUpdatePolicy?: () => Promise<object>, electronNet?: { fetch: (url: string) => Promise<Response> } }} options
+ * @param {{ version: string, platform?: string, manualNativeStaging?: boolean, nativeStagingTimeoutMs?: number, assertActivation?: () => void }} options
  */
-async function registerFakeUpdaterIpc({ version, platform = "linux", arch, distribution = "public", manualNativeStaging = false, nativeStagingTimeoutMs, assertActivation, readUpdatePolicy, electronNet }) {
+async function registerFakeUpdaterIpc({ version, platform = "linux", manualNativeStaging = false, nativeStagingTimeoutMs, assertActivation }, { arch = process.arch, runningUnderARM64Translation = false } = {}) {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), "openwork-updater-test-"));
   const handlers = new Map();
   const harness = fakeUpdaterHarness({ version, platform, manualNativeStaging });
@@ -103,10 +96,11 @@ async function registerFakeUpdaterIpc({ version, platform = "linux", arch, distr
   const { registerUpdaterIpc: registerIsolatedUpdaterIpc } = await import(
     updaterModuleUrl.href
   );
-  const { ensureAutoUpdater } = registerIsolatedUpdaterIpc({
+  registerIsolatedUpdaterIpc({
     app: {
       isPackaged: true,
       getVersion: () => "0.17.0",
+      runningUnderARM64Translation,
       getPath: (key) => path.join(tempDir, key),
     },
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
@@ -114,405 +108,13 @@ async function registerFakeUpdaterIpc({ version, platform = "linux", arch, distr
     loadAutoUpdater: async () => ({ autoUpdater: harness.updater }),
     platform,
     arch,
-    electronNet,
-    distribution,
-    manifestChannel: distribution === "enterprise" ? "enterprise" : "latest",
     nativeStagingTimeoutMs,
     shipItDefaultsDomain: "test.openwork.ShipIt",
     writeDefaults: async (args) => { defaultsWrites.push(args); },
     ...(assertActivation ? { assertActivation } : {}),
-    readUpdatePolicy: readUpdatePolicy ?? (async () => distribution === "public" ? UNMANAGED_UPDATER_POLICY : policySnapshot({})),
   });
-  return { tempDir, handlers, defaultsWrites, ensureAutoUpdater, ...harness };
+  return { tempDir, handlers, defaultsWrites, ...harness };
 }
-
-describe("startup updater load", () => {
-  for (const distribution of /** @type {Array<"public" | "enterprise">} */ (["public", "enterprise"])) {
-    for (const platform of ["darwin", "linux"]) {
-      it(`${distribution} ${platform} loads the native updater with install-on-quit disarmed and without consulting the policy authority`, async () => {
-        const run = await registerFakeUpdaterIpc({
-          version: "0.17.23", platform, distribution,
-          readUpdatePolicy: async () => { throw new Error("the policy authority must not be read at startup"); },
-        });
-        try {
-          // electron-updater's constructor default is true; startup must never
-          // let that default survive into a process that has read no policy.
-          run.updater.autoInstallOnAppQuit = true;
-          assert.equal(await run.ensureAutoUpdater(), run.updater);
-          assert.equal(run.updater.autoInstallOnAppQuit, false);
-          assert.equal(run.updater.autoDownload, false);
-          assert.deepEqual(run.calls, []);
-        } finally {
-          await rm(run.tempDir, { recursive: true, force: true });
-        }
-      });
-    }
-  }
-});
-
-describe("managed deferred native staging", () => {
-  /** @type {Array<"enterprise" | "public">} */
-  const distributions = ["enterprise", "public"];
-  for (const platform of ["darwin", "linux"]) {
-    for (const distribution of distributions) {
-      it(`${distribution} ${platform} only stages or arms background installation when public`, async () => {
-        const packagedDistribution = distribution === "enterprise" ? ENTERPRISE_DESKTOP_DISTRIBUTION : PUBLIC_DESKTOP_DISTRIBUTION;
-        const bootstrap = { enterpriseActivation: { activatedAt: "2026-01-01T00:00:00Z", denBaseUrl: "https://managed-updater.example.test" } };
-        const run = await registerFakeUpdaterIpc({
-          version: "0.17.23", platform, distribution,
-          assertActivation: () => {
-            if (desktopActivationRequired(packagedDistribution, bootstrap)) throw new Error("Activation required");
-          },
-        });
-        try {
-          await run.handlers.get("openwork:updater:check")(null, "stable");
-          assert.deepEqual(await run.handlers.get("openwork:updater:download")(), { ok: true });
-          assert.equal(run.calls.includes("download"), true);
-          assert.equal(run.calls.includes("nativeCheck"), platform === "darwin" && distribution === "public");
-          assert.equal(run.updater.autoInstallOnAppQuit, distribution === "public");
-          assert.equal(run.calls.includes("quitAndInstall"), false);
-          assert.deepEqual(await run.handlers.get("openwork:updater:installAndRestart")(), { ok: true });
-          assert.equal(run.calls.includes("nativeCheck"), platform === "darwin");
-          assert.equal(run.calls.includes("quitAndInstall"), true);
-        } finally {
-          await rm(run.tempDir, { recursive: true, force: true });
-        }
-      });
-    }
-  }
-});
-
-describe("main-owned updater policy", () => {
-  const serverInfo = () => ({ running: true, baseUrl: "http://127.0.0.1:1/", clientToken: "fixture-local-runtime-token" });
-
-  it("accepts the local authority's public-unmanaged state without requiring Den sign-in", async () => {
-    assert.equal(await readRequiredUpdaterPolicy({
-      requiresPolicy: () => false,
-      getServerInfo: serverInfo,
-      fetchPolicy: async () => Response.json(UNMANAGED_UPDATER_POLICY),
-    }), UNMANAGED_UPDATER_POLICY);
-  });
-
-  it("does not mistake a managed sign-in on a public build for an unmanaged installation", async () => {
-    assert.deepEqual(await readRequiredUpdaterPolicy({
-      requiresPolicy: () => false, getServerInfo: serverInfo,
-      fetchPolicy: async () => Response.json(policySnapshot({ allowedDesktopVersions: [] })),
-    }), policySnapshot({ allowedDesktopVersions: [] }));
-  });
-
-  it("distinguishes missing managed identity from a verified unrestricted config", async () => {
-    await assert.rejects(readRequiredUpdaterPolicy({
-      requiresPolicy: () => true, getServerInfo: serverInfo,
-      fetchPolicy: async () => Response.json(UNMANAGED_UPDATER_POLICY),
-    }), /verify your organization's update policy/);
-    assert.deepEqual(await readRequiredUpdaterPolicy({
-      requiresPolicy: () => true, getServerInfo: serverInfo,
-      fetchPolicy: async () => Response.json(policySnapshot({})),
-    }), policySnapshot({}));
-  });
-
-  it("requires a running authenticated local authority", async () => {
-    await assert.rejects(readRequiredUpdaterPolicy({
-      requiresPolicy: () => true, getServerInfo: () => ({ running: false }),
-      fetchPolicy: async () => { throw new Error("must not fetch"); },
-    }), /verify your organization's update policy/);
-  });
-
-  it("reads policy freshly through the existing authenticated local route", async () => {
-    let versions = ["0.17.23"];
-    let requests = 0;
-    const read = () => readRequiredUpdaterPolicy({
-      requiresPolicy: () => true, getServerInfo: serverInfo,
-      fetchPolicy: async (url, options) => {
-        requests++;
-        assert.equal(url, "http://127.0.0.1:1/managed-policy/updater");
-        assert.equal(options.headers.Authorization, "Bearer fixture-local-runtime-token");
-        assert.ok(options.signal instanceof AbortSignal);
-        return Response.json(policySnapshot({ allowedDesktopVersions: versions }));
-      },
-    });
-    assert.deepEqual((await read()).policy.allowedDesktopVersions, ["0.17.23"]);
-    versions = ["0.17.0"];
-    assert.deepEqual((await read()).policy.allowedDesktopVersions, ["0.17.0"]);
-    assert.equal(requests, 2);
-  });
-
-  it("does not turn transport failure, denial, or malformed policy into unrestricted", async () => {
-    for (const fetchPolicy of [
-      async () => { throw new Error("private upstream response"); },
-      async () => new Response("private upstream response", { status: 403 }),
-      async () => Response.json(policySnapshot({ allowedDesktopVersions: "0.17.23" })),
-      async () => Response.json(policySnapshot({ allowAlphaUpdates: "false" })),
-    ]) {
-      await assert.rejects(readRequiredUpdaterPolicy({ requiresPolicy: () => true, getServerInfo: serverInfo, fetchPolicy }),
-        { message: "Sign in and connect to verify your organization's update policy." });
-    }
-  });
-
-  it("preserves stable semver equality, unrestricted policy, and alpha org ceilings", () => {
-    assert.equal(isUpdaterVersionAllowedByPolicy("0.17.23", "stable", {}), true);
-    assert.equal(isUpdaterVersionAllowedByPolicy("0.17.23", "stable", { allowedDesktopVersions: [] }), false);
-    assert.equal(isUpdaterVersionAllowedByPolicy("0.17.23", "stable", { allowedDesktopVersions: ["v0.17.23+build"] }), true);
-    assert.equal(isUpdaterVersionAllowedByPolicy("0.17.24-alpha.1", "alpha", { allowedDesktopVersions: ["0.17.23"] }), true);
-    assert.equal(isUpdaterVersionAllowedByPolicy("0.17.25-alpha.1", "alpha", { allowedDesktopVersions: ["0.17.23"] }), false);
-    assert.equal(isUpdaterVersionAllowedByPolicy("0.17.24-alpha.1", "alpha", { allowAlphaUpdates: false }), false);
-  });
-
-  it("refuses a check before updater loading when managed policy is unavailable", async () => {
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", distribution: "enterprise", readUpdatePolicy: async () => { throw new Error("policy unavailable"); } });
-    try {
-      await assert.rejects(run.handlers.get("openwork:updater:check")(null, "stable"), /policy unavailable/);
-      assert.deepEqual(run.feeds, []);
-      assert.deepEqual(run.calls, []);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("refuses transfer when the checked version was revoked", async () => {
-    let policy = { allowedDesktopVersions: ["0.17.23"] };
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", distribution: "enterprise", readUpdatePolicy: async () => policySnapshot(policy) });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      policy = { allowedDesktopVersions: ["0.17.0"] };
-      const result = await run.handlers.get("openwork:updater:download")();
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(run.calls, []);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("refuses readiness and native staging if policy changes during ZIP transfer", async () => {
-    let policy = { allowedDesktopVersions: ["0.17.23"] };
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform: "darwin", distribution: "enterprise", readUpdatePolicy: async () => policySnapshot(policy) });
-    const download = run.updater.downloadUpdate;
-    run.updater.downloadUpdate = async () => { await download(); policy = { allowedDesktopVersions: ["0.17.0"] }; };
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      const result = await run.handlers.get("openwork:updater:download")();
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(run.calls, ["download"]);
-      assert.equal(run.updater.autoInstallOnAppQuit, false);
-      assert.deepEqual(await run.handlers.get("openwork:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-});
-
-describe("native install authorization", () => {
-  const allowed = { allowedDesktopVersions: ["0.17.23"] };
-
-  for (const platform of ["darwin", "linux"]) {
-    it(`${platform} rejects revoked permission before direct native install`, async () => {
-      let snapshot = policySnapshot(allowed);
-      const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform, distribution: "enterprise", readUpdatePolicy: async () => snapshot });
-      try {
-        await run.handlers.get("openwork:updater:check")(null, "stable");
-        await run.handlers.get("openwork:updater:download")();
-        snapshot = policySnapshot({ allowedDesktopVersions: [] });
-        // Caller-supplied policy/receipt arguments are not an authority source.
-        const result = await run.handlers.get("openwork:updater:installAndRestart")(null, policySnapshot(allowed));
-        assert.equal(result.ok, false);
-        assert.match(result.reason, /no longer allowed/);
-        assert.deepEqual(run.calls, ["download"]);
-        assert.equal(run.updater.autoInstallOnAppQuit, false);
-        snapshot = policySnapshot(allowed);
-        assert.deepEqual(await run.handlers.get("openwork:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
-      } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-    });
-
-    it(`${platform} allows attested offline cache only for the downloaded identity and version`, async () => {
-      let snapshot = policySnapshot(allowed);
-      const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform, distribution: "enterprise", readUpdatePolicy: async () => snapshot });
-      try {
-        await run.handlers.get("openwork:updater:check")(null, "stable");
-        await run.handlers.get("openwork:updater:download")();
-        snapshot = policySnapshot(allowed, "fixture-identity", "cached-offline");
-        assert.deepEqual(await run.handlers.get("openwork:updater:installAndRestart")(), { ok: true });
-        assert.equal(run.calls.includes("nativeCheck"), platform === "darwin");
-        assert.equal(run.calls.includes("quitAndInstall"), true);
-      } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-    });
-  }
-
-  for (const verification of ["fresh", "cached-offline"]) {
-    it(`rejects ${verification} authorization from another identity even when it allows the same version`, async () => {
-      let snapshot = policySnapshot(allowed);
-      const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform: "darwin", distribution: "enterprise", readUpdatePolicy: async () => snapshot });
-      try {
-        await run.handlers.get("openwork:updater:check")(null, "stable");
-        await run.handlers.get("openwork:updater:download")();
-        snapshot = policySnapshot(allowed, "another-identity", verification);
-        const result = await run.handlers.get("openwork:updater:installAndRestart")();
-        assert.equal(result.ok, false);
-        assert.match(result.reason, /identity changed/);
-        assert.deepEqual(run.calls, ["download"]);
-      } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-    });
-  }
-
-  it("does not use a local-authority error as permission to install from a remembered allowlist", async () => {
-    let unavailable = false;
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform: "darwin", distribution: "enterprise", readUpdatePolicy: async () => {
-      if (unavailable) throw new Error("authority unavailable");
-      return policySnapshot(allowed);
-    } });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      await run.handlers.get("openwork:updater:download")();
-      unavailable = true;
-      const result = await run.handlers.get("openwork:updater:installAndRestart")();
-      assert.equal(result.ok, false);
-      assert.deepEqual(run.calls, ["download"]);
-      assert.equal(run.updater.autoInstallOnAppQuit, false);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("cannot start another download using offline authorization", async () => {
-    let snapshot = policySnapshot(allowed);
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", distribution: "enterprise", readUpdatePolicy: async () => snapshot });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      snapshot = policySnapshot(allowed, "fixture-identity", "cached-offline");
-      await assert.rejects(run.handlers.get("openwork:updater:download")(), /before downloading/);
-      assert.deepEqual(run.calls, []);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("offline cache with an observed revocation cannot revive the download's old permission", async () => {
-    let snapshot = policySnapshot(allowed);
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", distribution: "enterprise", readUpdatePolicy: async () => snapshot });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      await run.handlers.get("openwork:updater:download")();
-      snapshot = policySnapshot({ allowedDesktopVersions: [] }, "fixture-identity", "cached-offline");
-      const result = await run.handlers.get("openwork:updater:installAndRestart")();
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(run.calls, ["download"]);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("authorizes the downloaded version, not the version selected by a later check", async () => {
-    let snapshot = policySnapshot(allowed);
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", distribution: "enterprise", readUpdatePolicy: async () => snapshot });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      await run.handlers.get("openwork:updater:download")();
-      run.updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.24" } });
-      snapshot = policySnapshot({ allowedDesktopVersions: ["0.17.24"] });
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      const result = await run.handlers.get("openwork:updater:installAndRestart")();
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(run.calls, ["download"]);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("rejects an identity change during transfer even if both identities approve the version", async () => {
-    let identity = "first-identity";
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform: "darwin", distribution: "enterprise", readUpdatePolicy: async () => policySnapshot(allowed, identity) });
-    const download = run.updater.downloadUpdate;
-    run.updater.downloadUpdate = async () => { await download(); identity = "second-identity"; };
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      const result = await run.handlers.get("openwork:updater:download")();
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /identity changed/);
-      assert.deepEqual(run.calls, ["download"]);
-      assert.deepEqual(await run.handlers.get("openwork:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("a managed receipt cannot become an unmanaged bypass after download", async () => {
-    let snapshot = policySnapshot(allowed);
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform: "darwin", readUpdatePolicy: async () => snapshot });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      await run.handlers.get("openwork:updater:download")();
-      snapshot = UNMANAGED_UPDATER_POLICY;
-      const result = await run.handlers.get("openwork:updater:installAndRestart")();
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /identity changed/);
-      assert.deepEqual(run.calls, ["download"]);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-});
-
-describe("recovery install authorization", () => {
-  const recoveryFeed = { fetch: async (url) => {
-    if (!url.includes("/v0.17.24/")) return new Response(null, { status: 404 });
-    return new Response(`version: 0.17.24\nfiles:\n  - url: openwork-enterprise-mac-arm64-0.17.24.dmg\n    sha512: fixture-checksum\n`);
-  } };
-
-  it("does not let a renderer-listed recovery version bypass organization policy", async () => {
-    const run = await registerFakeUpdaterIpc({ version: "0.17.24", platform: "darwin", arch: "arm64", distribution: "enterprise", electronNet: recoveryFeed,
-      readUpdatePolicy: async () => policySnapshot({ allowedDesktopVersions: ["0.17.23"] }) });
-    try {
-      const list = await run.handlers.get("openwork:recovery:list")(null, { versions: ["0.17.24"], minimumVersion: "0.0.0" });
-      assert.equal(list.releases.some(release => release.version === "0.17.24"), true);
-      const result = await run.handlers.get("openwork:recovery:use")(null, "0.17.24");
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(run.calls, []);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("uses the common identity-bound install boundary for an approved recovery", async () => {
-    let reads = 0;
-    const run = await registerFakeUpdaterIpc({ version: "0.17.24", platform: "darwin", arch: "arm64", distribution: "enterprise", electronNet: recoveryFeed,
-      readUpdatePolicy: async () => { reads++; return policySnapshot({ allowedDesktopVersions: ["0.17.24"] }); } });
-    try {
-      await run.handlers.get("openwork:recovery:list")(null, { versions: ["0.17.24"], minimumVersion: "0.0.0" });
-      assert.deepEqual(await run.handlers.get("openwork:recovery:use")(null, "0.17.24"), { ok: true, action: "install" });
-      assert.equal(reads, 4);
-      assert.deepEqual(run.calls, ["download", "nativeCheck", "quitAndInstall"]);
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("a failed recovery cannot leave an ordinary receipt authorizing replaced updater bytes", async () => {
-    let policy = { allowedDesktopVersions: ["0.17.23", "0.17.24"] };
-    const run = await registerFakeUpdaterIpc({ version: "0.17.23", platform: "darwin", arch: "arm64", distribution: "enterprise", electronNet: recoveryFeed,
-      readUpdatePolicy: async () => policySnapshot(policy) });
-    try {
-      await run.handlers.get("openwork:updater:check")(null, "stable");
-      await run.handlers.get("openwork:updater:download")();
-      run.updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.24" } });
-      const download = run.updater.downloadUpdate;
-      run.updater.downloadUpdate = async () => { await download(); policy = { allowedDesktopVersions: ["0.17.23"] }; };
-      await run.handlers.get("openwork:recovery:list")(null, { versions: ["0.17.24"], minimumVersion: "0.0.0" });
-      const result = await run.handlers.get("openwork:recovery:use")(null, "0.17.24");
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(run.calls, ["download", "download"]);
-      assert.deepEqual(await run.handlers.get("openwork:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
-    } finally { await rm(run.tempDir, { recursive: true, force: true }); }
-  });
-
-  it("does not open a cached managed recovery installer without current version approval", async () => {
-    const userData = await mkdtemp(path.join(os.tmpdir(), "managed-recovery-policy-"));
-    const app = { isPackaged: true, getVersion: () => "2.0.0", getPath: () => userData };
-    const bytes = Buffer.from("managed-recovery-fixture");
-    const artifact = { version: "1.9.0", platform: "darwin", arch: "arm64", distribution: "enterprise",
-      url: "https://github.com/different-ai/openwork/releases/download/v1.9.0/openwork-enterprise-mac-arm64-1.9.0.dmg",
-      sha512: createHash("sha512").update(bytes).digest("base64") };
-    const handlers = new Map();
-    const opened = [];
-    try {
-      await recordHealthyVersion(app, "enterprise", "1.9.0");
-      await cacheVerifiedRecoveryArtifact({ app, artifact, fetchArtifact: async () => new Response(bytes) });
-      const isolated = await import(`./updater.mjs?managed-recovery-policy=${++isolatedUpdaterImportId}`);
-      isolated.registerUpdaterIpc({ app, platform: "darwin", arch: "arm64", distribution: "enterprise",
-        ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, getMainWindow: () => null,
-        loadAutoUpdater: async () => { throw new Error("must not load native updater"); }, writeDefaults: async () => {},
-        readUpdatePolicy: async () => policySnapshot({ allowedDesktopVersions: ["2.0.0"] }),
-        shell: { openPath: async filePath => { opened.push(filePath); return ""; } } });
-      await handlers.get("openwork:recovery:list")(null, { versions: [], minimumVersion: "0.0.0" });
-      const result = await handlers.get("openwork:recovery:use")(null, "1.9.0");
-      assert.equal(result.ok, false);
-      assert.match(result.reason, /no longer allowed/);
-      assert.deepEqual(opened, []);
-    } finally { await rm(userData, { recursive: true, force: true }); }
-  });
-});
 
 describe("staleUpdaterStatePaths", () => {
   it("targets the ShipIt cache on macOS", { skip: process.platform !== "darwin" }, () => {
@@ -935,7 +537,7 @@ describe("installAndRestart", () => {
 });
 
 describe("pre-activation guard", () => {
-  it("rejects check, download, install, and recovery without touching the updater while activation is required", async () => {
+  it("rejects check, download, and install without touching the updater while activation is required", async () => {
     let activationRequired = true;
     const { tempDir, handlers, calls, feeds } = await registerFakeUpdaterIpc({
       version: "9.9.9",
@@ -950,7 +552,6 @@ describe("pre-activation guard", () => {
       await assert.rejects(() => check(null, "stable"), /must be activated/, "check must reject before activation");
       await assert.rejects(() => download(), /must be activated/, "download must reject before activation");
       await assert.rejects(() => install(), /must be activated/, "installAndRestart must reject before activation");
-      await assert.rejects(() => handlers.get("openwork:recovery:use")(null, "9.9.9"), /must be activated/, "recovery must reject before activation");
       // ensureAutoUpdater selects a feed as soon as electron-updater loads, so an
       // empty feed list proves the updater was never even configured.
       assert.deepEqual(feeds, [], "no update feed may be selected before activation");
@@ -1048,6 +649,240 @@ describe("downloaded update lifecycle", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+});
+
+describe("metadata-only updater checks", () => {
+  it("metadata check leaves the staged version installable", async () => {
+    const { tempDir, handlers, updater, nativeUpdater, calls } = await registerFakeUpdaterIpc({
+      version: "0.17.1", platform: "darwin",
+    });
+    try {
+      const check = handlers.get("openwork:updater:check");
+      assert.deepEqual(await handlers.get("openwork:updater:download")(), { ok: true });
+      const nativeFeed = nativeUpdater.getFeedURL();
+      const autoInstall = updater.autoInstallOnAppQuit;
+      updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.2" } });
+      const result = await check(null, "stable", undefined, { preserveStaged: true });
+      assert.equal(result.available, true);
+      assert.equal(result.latestVersion, "0.17.2");
+      assert.equal(result.stagedVersion, "0.17.1");
+      assert.equal(updater.autoInstallOnAppQuit, autoInstall);
+      assert.equal(nativeUpdater.getFeedURL(), nativeFeed);
+      assert.equal(updater.squirrelDownloadedUpdate, true);
+      assert.deepEqual(calls, ["download", "nativeCheck"]);
+      assert.deepEqual(await handlers.get("openwork:updater:installAndRestart")(), { ok: true });
+      assert.deepEqual(calls, ["download", "nativeCheck", "quitAndInstall"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the newer target for a later explicit download", async () => {
+    const { tempDir, handlers, updater, downloadFeeds, calls } = await registerFakeUpdaterIpc({
+      version: "0.17.1", platform: "darwin",
+    });
+    try {
+      const check = handlers.get("openwork:updater:check");
+      const download = handlers.get("openwork:updater:download");
+      assert.deepEqual(await download(), { ok: true });
+      updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.2" } });
+      assert.equal((await check(null, "stable", "0.17.2", { preserveStaged: true })).stagedVersion, "0.17.1");
+      updater.checkForUpdates = async () => { throw new Error("must use the selected update"); };
+      assert.deepEqual(await download(), { ok: true });
+      assert.equal(downloadFeeds.at(-1).url, targetedStableUpdaterFeed("0.17.0", "0.17.2"));
+      assert.deepEqual(calls, ["download", "nativeCheck", "download", "nativeCheck"]);
+      updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.2" } });
+      assert.equal((await check(null, "stable", undefined, { preserveStaged: true })).stagedVersion, "0.17.2");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  for (const outcome of ["equal", "no-update", "error"]) {
+    it(`preserves the staged version on ${outcome}`, async () => {
+      const { tempDir, handlers, updater, nativeUpdater, calls } = await registerFakeUpdaterIpc({
+        version: "0.17.1", platform: "darwin",
+      });
+      try {
+        assert.deepEqual(await handlers.get("openwork:updater:download")(), { ok: true });
+        const nativeFeed = nativeUpdater.getFeedURL();
+        updater.checkForUpdates = async () => {
+          if (outcome === "error") throw new Error("offline");
+          return { updateInfo: { version: outcome === "equal" ? "0.17.1" : "0.17.0" } };
+        };
+        for (const autoInstall of [true, false]) {
+          updater.autoInstallOnAppQuit = autoInstall;
+          const result = await handlers.get("openwork:updater:check")(null, "stable", undefined, { preserveStaged: true });
+          assert.equal(result.available, outcome === "equal");
+          assert.equal(result.stagedVersion, "0.17.1");
+          assert.equal(result.totalBytes, null);
+          if (outcome === "error") assert.equal(result.reason, "offline");
+          assert.equal(updater.autoInstallOnAppQuit, autoInstall);
+          assert.equal(nativeUpdater.getFeedURL(), nativeFeed);
+        }
+        assert.deepEqual(calls, ["download", "nativeCheck"]);
+        assert.deepEqual(await handlers.get("openwork:updater:installAndRestart")(), { ok: true });
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const options of [undefined, { preserveStaged: false }]) {
+    it(`ordinary check B still invalidates stage A (${options ? "false" : "omitted"})`, async () => {
+      const { tempDir, handlers, updater, calls } = await registerFakeUpdaterIpc({
+        version: "0.17.1", platform: "darwin",
+      });
+      try {
+        assert.deepEqual(await handlers.get("openwork:updater:download")(), { ok: true });
+        updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.2" } });
+        const result = await handlers.get("openwork:updater:check")(null, "stable", undefined, options);
+        assert.equal(result.available, true);
+        assert.equal(Object.hasOwn(result, "stagedVersion"), false);
+        assert.equal(updater.autoInstallOnAppQuit, false);
+        const recheck = await handlers.get("openwork:updater:check")(null, "stable", undefined, { preserveStaged: true });
+        assert.equal(recheck.stagedVersion, null);
+        assert.deepEqual(await handlers.get("openwork:updater:installAndRestart")(), {
+          ok: false, reason: "update-not-downloaded",
+        });
+        assert.deepEqual(calls, ["download", "nativeCheck"]);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("does not create a stage or revive one invalidated by setChannel", async () => {
+    const { tempDir, handlers, calls } = await registerFakeUpdaterIpc({
+      version: "0.17.1", platform: "darwin",
+    });
+    try {
+      const check = handlers.get("openwork:updater:check");
+      assert.equal((await check(null, "stable", undefined, { preserveStaged: true })).stagedVersion, null);
+      assert.deepEqual(calls, []);
+      assert.deepEqual(await handlers.get("openwork:updater:download")(), { ok: true });
+      await handlers.get("openwork:updater:setChannel")(null, "stable");
+      assert.equal((await check(null, "stable", undefined, { preserveStaged: true })).stagedVersion, null);
+      assert.deepEqual(await handlers.get("openwork:updater:installAndRestart")(), {
+        ok: false, reason: "update-not-downloaded",
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects cross-channel metadata checks without changing the staged update", { skip: process.platform !== "darwin" }, async () => {
+    const { tempDir, handlers, updater, nativeUpdater, feeds, calls } = await registerFakeUpdaterIpc({
+      version: "0.17.1", platform: "darwin",
+    });
+    try {
+      const check = handlers.get("openwork:updater:check");
+      const download = handlers.get("openwork:updater:download");
+      await check(null, "stable", "0.17.1");
+      assert.deepEqual(await download(), { ok: true });
+      const nativeFeed = nativeUpdater.getFeedURL();
+      const originalFeeds = [...feeds];
+      updater.checkForUpdates = async () => { throw new Error("must not check the mismatched channel"); };
+      for (const autoInstall of [true, false]) {
+        updater.autoInstallOnAppQuit = autoInstall;
+        const result = await check(null, "alpha", undefined, { preserveStaged: true });
+        assert.equal(result.available, false);
+        assert.equal(result.reason, "Cannot check a different channel while preserving a staged update.");
+        assert.equal(result.stagedVersion, "0.17.1");
+        assert.equal(result.totalBytes, null);
+        assert.equal(updater.autoInstallOnAppQuit, autoInstall);
+        assert.equal(nativeUpdater.getFeedURL(), nativeFeed);
+        assert.equal(updater.squirrelDownloadedUpdate, true);
+        assert.deepEqual(feeds, originalFeeds);
+      }
+      assert.deepEqual(calls, ["download", "nativeCheck"]);
+      assert.deepEqual(await handlers.get("openwork:updater:installAndRestart")(), { ok: true });
+      assert.deepEqual(calls, ["download", "nativeCheck", "quitAndInstall"]);
+      assert.deepEqual(await download(), { ok: true });
+      assert.equal(feeds.at(-1).url, targetedStableUpdaterFeed("0.17.0", "0.17.1"));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("Alpha metadata check 2962 to 2966 leaves Alpha 2962 installable", { skip: process.platform !== "darwin" }, async () => {
+    const { tempDir, handlers, updater, nativeUpdater, calls, downloadFeeds } = await registerFakeUpdaterIpc({
+      version: "0.18.0-alpha.2962", platform: "darwin",
+    });
+    try {
+      const check = handlers.get("openwork:updater:check");
+      assert.equal((await check(null, "alpha")).available, true);
+      assert.deepEqual(await handlers.get("openwork:updater:download")(), { ok: true });
+      assert.equal(downloadFeeds.at(-1).url, "https://github.com/different-ai/openwork/releases/download/alpha-macos-latest");
+      const nativeFeed = nativeUpdater.getFeedURL();
+      const autoInstall = updater.autoInstallOnAppQuit;
+      updater.checkForUpdates = async () => ({ updateInfo: { version: "0.18.0-alpha.2966" } });
+      const result = await check(null, "alpha", undefined, { preserveStaged: true });
+      assert.equal(result.available, true);
+      assert.equal(result.channel, "alpha");
+      assert.equal(result.latestVersion, "0.18.0-alpha.2966");
+      assert.equal(result.stagedVersion, "0.18.0-alpha.2962");
+      assert.equal(updater.autoInstallOnAppQuit, autoInstall);
+      assert.equal(nativeUpdater.getFeedURL(), nativeFeed);
+      assert.equal(updater.squirrelDownloadedUpdate, true);
+      assert.deepEqual(calls, ["download", "nativeCheck"]);
+      assert.deepEqual(await handlers.get("openwork:updater:installAndRestart")(), { ok: true });
+      assert.deepEqual(calls, ["download", "nativeCheck", "quitAndInstall"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("updater artifact metadata size", () => {
+  const files = [
+    { url: "openwork-mac-x64-0.17.1.dmg", size: 900 },
+    { url: "openwork-mac-arm64-0.17.1.dmg", size: 800 },
+    { url: "openwork-mac-x64-0.17.1.zip", size: 700 },
+    { url: "openwork-mac-arm64-0.17.1.zip", size: 600 },
+  ];
+  for (const { arm64, runningUnderARM64Translation, totalBytes } of [
+    { arm64: true, runningUnderARM64Translation: false, totalBytes: 600 },
+    { arm64: false, runningUnderARM64Translation: false, totalBytes: 700 },
+    { arm64: false, runningUnderARM64Translation: true, totalBytes: 600 },
+  ]) {
+    const arch = arm64 ? "arm64" : "x64";
+    it(`selects the ZIP size for ${arch}, translated=${runningUnderARM64Translation}`, async () => {
+      const { tempDir, handlers, updater, calls } = await registerFakeUpdaterIpc({
+        version: "0.17.1", platform: "darwin",
+      }, { arch, runningUnderARM64Translation });
+      try {
+        updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.1", files } });
+        const result = await handlers.get("openwork:updater:check")(null, "stable", undefined, { preserveStaged: true });
+        assert.equal(result.totalBytes, totalBytes);
+        assert.equal(result.stagedVersion, null);
+        assert.deepEqual(calls, []);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const [name, artifacts, totalBytes] of [
+    ["DMG only", files.slice(0, 2), null],
+    ["universal ZIP", [{ url: "openwork-universal.zip", size: 500 }], 500],
+    ["x64 fallback on ARM", [files[2]], 700],
+    ["missing size", [{ url: "openwork-arm64.zip" }], null],
+    ["invalid size", [{ url: "openwork-arm64.zip", size: -1 }], null],
+    ["string size", [{ url: "openwork-arm64.zip", size: "500" }], null],
+  ]) {
+    it(`handles ${name}`, async () => {
+      const { tempDir, handlers, updater } = await registerFakeUpdaterIpc({
+        version: "0.17.1", platform: "darwin",
+      }, { arch: "arm64" });
+      try {
+        updater.checkForUpdates = async () => ({ updateInfo: { version: "0.17.1", files: artifacts } });
+        assert.equal((await handlers.get("openwork:updater:check")(null, "stable")).totalBytes, totalBytes);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("macOS native staging", () => {

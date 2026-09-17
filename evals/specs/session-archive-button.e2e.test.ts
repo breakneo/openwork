@@ -68,7 +68,7 @@ async function archiveActions({ world, user, agent, probe }: Pick<SpecBodyContex
   return { route, start, aborts, open, send, archive, archived };
 }
 
-test("archiving exits only the viewed conversation, and working sessions require a confirmed stop without replay", async ({ world, user, agent, probe, step }) => {
+test("archiving exits only the viewed conversation, and working sessions require a confirmed stop without replay", async ({ world, user, agent, probe, step, evidence }) => {
   const { a1, a2, b1, faultCandidate } = world;
   const { route, start, aborts, open, send, archive, archived } = await archiveActions({ world, user, agent, probe });
   const unsentDraft = "Keep this unsent draft when I cancel archiving.";
@@ -135,7 +135,8 @@ test("archiving exits only the viewed conversation, and working sessions require
       }
       await archive(faultCandidate);
       await user.see({ text: "This session is still working" });
-      await user.see({ text: "Stop the current task and all its subtasks, cancel queued messages, and archive this conversation? Changes already made won't be undone. Actions already submitted to external services may still complete." });
+      await user.see({ text: "Stop the current task and archive?" });
+      expect(await world.archiveAccessibleDescription()).toBe("Stop the current task and archive?");
       await user.click({ role: "button", label: "Keep session open" });
       await world.networkFault("none", faultCandidate.sessionId);
       for (const observation of await world.faultObservation()) expect(observation.observed).toEqual(observation.actual);
@@ -345,32 +346,45 @@ test("archiving exits only the viewed conversation, and working sessions require
     await open(a2);
   });
 
-  await step("an archive completing after route unmount cannot redirect away from Settings", async () => {
+  await step("route unmount cancels a held archive transport without late mutation or navigation away from Settings", async () => {
+    const before = (await world.facts()).requests.filter(request => request.action === "metadata").length;
     await world.networkFault("hold_archive", a2.sessionId);
     await archive(a2);
     await probe.eventually(() => world.facts(), {
-      within: 15_000, label: "archive metadata write held",
+      within: 15_000, label: "archive metadata write held before upstream dispatch",
       until: facts => facts.requests.some(request => request.action === "metadata" && request.sessionId === a2.sessionId && request.result === null),
     });
     await agent.run("settings.panel.open", { panel: "general" });
     const settingsHash = await probe.hash();
     expect(settingsHash).toContain("/settings/");
-    await world.releaseAbort();
-    await world.networkFault("none", a2.sessionId);
-    await user.see({ text: "Session archived" });
-    expect(await probe.hash()).toBe(settingsHash);
-    const facts = await world.facts();
-    expect(facts.sessions.find(session => session.sessionId === a2.sessionId)?.archived).toBe(true);
-    expect(facts.tabs).not.toContain(a2.sessionId);
-    await user.click({ role: "button", label: "Undo" });
-    await probe.eventually(() => world.facts(), {
-      within: 15_000, label: "late archive Undo is metadata-only",
-      until: facts => facts.sessions.find(session => session.sessionId === a2.sessionId)?.archived === false,
+    // #5014 explicitly cancels an in-flight archive on unmount and reports an
+    // unknown write rather than promising completion. The native witness honors
+    // cancellation, unlike the old renderer promise that awaited manual release.
+    const cancelled = await probe.eventually(() => world.facts(), {
+      within: 5_000, label: "unmount cancellation reaches the held native PATCH",
+      until: facts => facts.requests.filter(request => request.action === "metadata").slice(before)
+        .some(request => request.sessionId === a2.sessionId && request.result === "cancelled"),
     });
-    expect(await probe.hash()).toBe(settingsHash);
+    expect(cancelled.requests.filter(request => request.action === "metadata").slice(before)).toEqual([
+      expect.objectContaining({ sessionId: a2.sessionId, result: "cancelled", transport: "main" }),
+    ]);
+    await world.networkFault("none", a2.sessionId);
+    const deadline = Date.now() + 2_000;
+    await probe.eventually(async () => {
+      const facts = await world.facts();
+      expect(facts.sessions.find(session => session.sessionId === a2.sessionId)?.archived).toBe(false);
+      expect(facts.requests.filter(request => request.action === "metadata").slice(before)).toEqual(
+        cancelled.requests.filter(request => request.action === "metadata").slice(before));
+      expect(await probe.hash()).toBe(settingsHash);
+      return Date.now() >= deadline;
+    }, { within: 5_000, label: "cancelled pre-dispatch PATCH never resumes or retries" });
+    await user.notSee({ text: "Session archived" });
     await user.click({ role: "button", label: "Back to app" });
     await open(a2);
+    await archived(a2, false);
     expect(await world.requests()).toHaveLength(3);
+    evidence.recordAssertionEvidence("Unmount preserves Settings and cancels held transport without replay",
+      "Exactly one native PATCH attempt was canceled before upstream dispatch; no late mutation or retry over two seconds, no successful-archive toast, same Settings route, and returning to the app retained the unarchived session.", true);
   });
 
   await step("a global queued admission cannot archive before settling or requeue its late failure after Undo", async () => {
@@ -537,8 +551,8 @@ test("archiving exits only the viewed conversation, and working sessions require
   });
 });
 
-test("accepted commands require exact engine admission before archive and never replay after Undo", async ({ world, user, agent, probe, step }) => {
-  const { a2, b1 } = world;
+test("accepted commands require exact engine admission before archive and never replay after Undo", async ({ world, user, agent, probe, step, evidence }) => {
+  const { a1, a2, b1 } = world;
   const { aborts, open, send, archive, archived } = await archiveActions({ world, user, agent, probe });
   expect(await world.requests()).toHaveLength(0);
   expect(await aborts()).toHaveLength(0);
@@ -552,6 +566,73 @@ test("accepted commands require exact engine admission before archive and never 
       status: 200,
       body: { model: "session-archive-mock/mock-agent-workload-model", small_model: "session-archive-mock/mock-agent-workload-model" },
     });
+  });
+
+  await step("an accepted response keeps Starting visible until native busy, then Working clears at completion without another send", async () => {
+    const prompt = "Suggest a simple plan for organizing a desk.";
+    await open(a1);
+    await world.holdRun();
+    await world.networkFault("accepted_prompt", a1.sessionId);
+    await agent.run("composer.set_text", { text: prompt });
+    await user.see("composer", { text: prompt });
+    await agent.run("composer.send");
+    const loading = `[data-session-surface-id="${a1.sessionId}"] [data-loading-message]`;
+    const startingUntil = Date.now() + 200;
+    try {
+      do {
+        const rows = (await probe.dom(loading)).elements;
+        expect(rows).toHaveLength(1);
+        expect(rows[0].text).toBe("Starting…");
+        expect(rows[0].rect.width).toBeGreaterThan(0);
+        expect(rows[0].rect.height).toBeGreaterThan(0);
+      } while (Date.now() < startingUntil);
+    } catch (error) {
+      const [diagnostics, facts, transcript, allLoading, statuses] = await Promise.all([
+        world.diagnostics(), world.facts(), world.transcript(a1),
+        probe.dom("[data-loading-message]"),
+        probe.dom(`[data-session-surface-id="${a1.sessionId}"] [role="status"]`),
+      ]);
+      evidence.recordJsonArtifact("Accepted prompt feedback failure", { sessionId: a1.sessionId, diagnostics, facts, transcript, allLoading, statuses });
+      await user.screenshot();
+      throw error;
+    }
+    const accepted = await world.facts();
+    const sends = accepted.requests.filter(request => ["command", "prompt_async"].includes(request.action));
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({ sessionId: a1.sessionId, action: "prompt_async", result: "accepted, not dispatched" });
+    expect(accepted.sessions.find(session => session.sessionId === a1.sessionId)?.status).toBe("idle");
+    expect(await world.requests()).toHaveLength(0);
+    expect((await probe.dom(`${loading}[data-loading-message="starting"]`)).elements).toHaveLength(1);
+    await world.releaseAbort();
+    await world.networkFault("none", a1.sessionId);
+    await probe.eventually(() => world.facts(), {
+      within: 30_000, label: "the single accepted prompt reaches native busy",
+      until: facts => facts.sessions.some(session => session.sessionId === a1.sessionId && session.status === "busy"),
+    });
+    await user.see({ text: "Working" });
+    expect((await probe.dom(`${loading}[data-loading-message="working"]`)).elements).toHaveLength(1);
+    expect((await probe.dom(`${loading}[data-loading-message="starting"]`)).elements).toHaveLength(0);
+    await world.releaseRun();
+    await user.see({ text: "Archive fixture reply." }, { timeoutMs: 60_000 });
+    await probe.eventually(() => world.facts(), {
+      within: 30_000, label: "the accepted prompt completes in the owning engine",
+      until: facts => facts.sessions.find(session => session.sessionId === a1.sessionId)?.status === "idle",
+    });
+    await user.notSee({ text: "Working" });
+    expect((await probe.dom(loading)).elements).toHaveLength(0);
+    const transcript = await world.transcript(a1);
+    expect(transcript.filter(message => message.role === "user")).toEqual([
+      expect.objectContaining({ id: sends[0].messageID, sessionId: a1.sessionId, text: prompt }),
+    ]);
+    expect(transcript).toEqual(expect.arrayContaining([
+      expect.objectContaining({ parentID: sends[0].messageID, role: "assistant", completed: expect.any(Number), pendingTools: false }),
+    ]));
+    const noReplayUntil = Date.now() + 1_500;
+    await probe.eventually(async () => {
+      expect((await world.facts()).requests.filter(request => ["command", "prompt_async"].includes(request.action))).toHaveLength(1);
+      expect(await world.requests()).toHaveLength(1);
+      return Date.now() >= noReplayUntil;
+    }, { within: 10_000, label: "completion never resubmits the accepted prompt" });
   });
 
   for (const queued of [false, true]) {
