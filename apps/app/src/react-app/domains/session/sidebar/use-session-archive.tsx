@@ -59,7 +59,7 @@ export type StopSessionOutcome =
 
 type ArchiveRun = ArchiveSessionOptions & { stopOnly?: (outcome: StopSessionOutcome) => void };
 
-type TargetResolution = ArchiveTarget | { code: "not_found" | "failed"; error: string };
+type StopTargetResolution = ArchiveTarget | { code: "not_found" | "failed"; error: string };
 
 function requesterLabel(requestedBy: ArchiveRequester, sessionId: string): string {
   if (requestedBy.sessionId === sessionId) return t("session_management.archive_requested_by_self");
@@ -407,6 +407,28 @@ export function useSessionArchive(input: {
     }
   }
 
+  function sessionTitle(sessionId: string): string | null {
+    for (const workspace of input.workspaces) {
+      const session = input.sessionsByWorkspaceId[workspace.id]?.find(session => session.id === sessionId);
+      if (session) return session.title?.trim() || t("session.default_title");
+    }
+    return null;
+  }
+
+  // Keep archive target resolution on its existing route behavior. Stop uses
+  // a separate live resolver for its security gates.
+  function resolveTarget(sessionId: string, options?: ArchiveSessionOptions): ArchiveTarget | { error: string } {
+    const workspace = input.workspaces.find(workspace => input.sessionsByWorkspaceId[workspace.id]?.some(session => session.id === sessionId));
+    if (!workspace) return { error: "Session was not found in the current session list" };
+    const endpoint = input.endpointForWorkspace(workspace);
+    if (!endpoint) return { error: "The session's workspace is not connected." };
+    if (isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl)) return { error: V2_SESSION_ARCHIVE_UNAVAILABLE };
+    const title = sessionTitle(sessionId) ?? t("session.default_title");
+    const requester = options?.requester?.sessionId.trim();
+    const requestedBy = requester ? { sessionId: requester, title: sessionTitle(requester) } : null;
+    return { workspace, endpoint, sessionId, title, draftScope: input.draftScope, requestedBy };
+  }
+
   function loadedSession(sessionId: string, workspaceId?: string): { workspace: RouteWorkspace; session: RouteSession } | null {
     const now = current.current.input;
     for (const workspace of now.workspaces) {
@@ -417,12 +439,7 @@ export function useSessionArchive(input: {
     return null;
   }
 
-  function sessionTitle(sessionId: string): string | null {
-    const loaded = loadedSession(sessionId);
-    return loaded ? loaded.session.title?.trim() || t("session.default_title") : null;
-  }
-
-  function resolveTarget(sessionId: string, options?: ArchiveSessionOptions): TargetResolution {
+  function resolveStopTarget(sessionId: string, options?: ArchiveSessionOptions): StopTargetResolution {
     const loaded = loadedSession(sessionId);
     if (!loaded) return { code: "not_found", error: "Session was not found in the current session list" };
     const endpoint = current.current.input.endpointForWorkspace(loaded.workspace);
@@ -430,7 +447,11 @@ export function useSessionArchive(input: {
     if (isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl)) return { code: "failed", error: V2_SESSION_ARCHIVE_UNAVAILABLE };
     const title = loaded.session.title?.trim() || t("session.default_title");
     const requester = options?.requester?.sessionId.trim();
-    const requestedBy = requester ? { sessionId: requester, title: sessionTitle(requester) } : null;
+    const requesterSession = requester ? loadedSession(requester) : null;
+    const requestedBy = requester ? {
+      sessionId: requester,
+      title: requesterSession ? requesterSession.session.title?.trim() || t("session.default_title") : null,
+    } : null;
     return { workspace: loaded.workspace, endpoint, sessionId: loaded.session.id, title,
       draftScope: current.current.input.draftScope, requestedBy };
   }
@@ -457,7 +478,7 @@ export function useSessionArchive(input: {
       return Promise.resolve({ ok: false, code: "unattributed", sessionId,
         error: "session.stop requires the requesting agent's session id." });
     }
-    const target = resolveTarget(sessionId, options);
+    const target = resolveStopTarget(sessionId, options);
     if ("error" in target) {
       return Promise.resolve({ ok: false, code: target.code, sessionId, error: target.error });
     }
