@@ -2,7 +2,9 @@
 
 import { useMemo, useState } from "react";
 import { TemporaryAuthNotice } from "../../(den)/_components/temporary-auth-notice";
-import { denApiCredentials, denApiEndpoint } from "../../(den)/_lib/den-api-origin";
+import { denApiCredentials, denBrowserEndpoint } from "../../(den)/_lib/den-api-origin";
+import { getRuntimeConfig } from "../../(den)/_lib/runtime-config";
+import { McpConsentPermissions } from "../consent-permissions";
 
 function getErrorMessage(payload: unknown, fallback: string) {
   if (payload && typeof payload === "object" && "message" in payload && typeof payload.message === "string") return payload.message;
@@ -11,7 +13,8 @@ function getErrorMessage(payload: unknown, fallback: string) {
 }
 
 async function submitConsent(accept: boolean, oauthQuery: string, scope: string) {
-  const endpoint = denApiEndpoint("/api/auth/oauth2/consent");
+  await getRuntimeConfig();
+  const endpoint = denBrowserEndpoint("/api/auth/oauth2/consent");
   const response = await fetch(endpoint, {
     method: "POST",
     credentials: denApiCredentials(endpoint),
@@ -61,9 +64,8 @@ export default function McpConsentPage() {
         <div className="mt-6">
           <TemporaryAuthNotice />
         </div>
-        <div className="mt-6 rounded-2xl border border-white/10 bg-slate-900/70 p-4">
-          <p className="text-sm font-medium text-slate-200">Requested scopes</p>
-          <p className="mt-2 break-words font-mono text-xs text-cyan-100">{scope}</p>
+        <div className="mt-6">
+          <McpConsentPermissions scope={scope} />
         </div>
         {status ? <p className="mt-4 text-sm text-slate-300">{status}</p> : null}
         <div className="mt-6 grid gap-3 sm:grid-cols-2">

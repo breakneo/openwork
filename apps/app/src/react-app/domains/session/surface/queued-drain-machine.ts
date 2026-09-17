@@ -20,8 +20,10 @@
  *                                      must retry explicitly
  * - `rejected`                       — the send was cancelled (context
  *                                      changed / unmounted); item re-queued
- * - `admission_unknown`              — POST may have been accepted; only exact
- *                                      message observation releases the hold
+ * - `admission_unknown`              — POST may have been accepted; released
+ *                                      only by observing the exact message, or
+ *                                      by native listing the idle conversation
+ *                                      without it (a halt, never a resend)
  * - `terminal_failure`               — definite failure; explicit retry required
  *
  * A missing busy event is never the only signal that allows progress: an
@@ -66,11 +68,12 @@ export type QueuedDrainState = {
 
 export type QueuedDrainEvent =
   | { type: "send_started"; itemId: string; steer?: boolean }
-  | { type: "stop_confirmed" }
+  | { type: "stop_confirmed"; admission?: { itemId: string; messageID: string; state: "accepted" | "cancelled" | "rejected" } }
   | { type: "send_result"; itemId: string; outcome: "sent" | "accepted" | "blocked" | "cancelled"; at: number; deferredMessageID?: string; terminalObserved?: boolean }
   | { type: "send_error"; itemId: string }
   | { type: "send_unknown"; itemId: string; messageID: string; at: number; deferred?: boolean }
   | { type: "admission_observed"; itemId: string; messageID: string; at: number }
+  | { type: "admission_rejected"; itemId: string; messageID: string }
   | { type: "busy_observed" }
   /** An authoritative status level read (SSE-followed idle after a busy
    * observation, or an explicit snapshot/status probe). `observedAt` is when
@@ -104,17 +107,25 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
   const { phase } = state;
   switch (event.type) {
     case "stop_confirmed":
+      // A late confirmation must not clear a successor's claim. The Stop
+      // coordinator certifies the exact old message only after cancellation or
+      // acceptance plus native interruption has been established.
+      if (event.admission && "itemId" in phase && phase.itemId !== event.admission.itemId) return state;
       // A replacement may already hold the send slot while awaiting Stop.
       // Keep that claim, but discard activity belonging to its predecessor.
       if (phase.kind === "sending") return { ...state, phase: { ...phase, busySeen: false } };
-      if (phase.kind === "admission_unknown") return state;
+      if (phase.kind === "admission_unknown") {
+        if (!event.admission || event.admission.messageID !== phase.messageID) return state;
+        return resolved(state, { kind: "ready" }, phase.itemId,
+          event.admission.state === "accepted" ? "completed" : "rejected", dropAttempt(state, phase.itemId));
+      }
       return { ...INITIAL_QUEUED_DRAIN_STATE, lastResolution: state.lastResolution };
     case "send_started": {
       if (phase.kind !== "ready") {
         if (!event.steer) return state;
         if (phase.kind === "running" || phase.kind === "awaiting_observation") {
           if (phase.itemId === event.itemId) return state;
-        } else if (phase.kind !== "halted" || phase.itemId !== event.itemId) return state;
+        } else if (phase.kind !== "halted" || (phase.reason !== "terminal_failure" && phase.itemId !== event.itemId)) return state;
       }
       const attempts = (state.attemptsByItemId[event.itemId] ?? 0) + 1;
       return {
@@ -167,6 +178,12 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
       // This proves admission, not completion. Require a subsequent run/status
       // observation; a busy/idle from the previously running parent is not proof.
       return resolved(state, { kind: "awaiting_observation", itemId: event.itemId, admittedAt: event.at, ...(phase.deferred ? { messageID: phase.messageID } : {}) }, event.itemId, "admitted_awaiting_observation");
+    }
+    case "admission_rejected": {
+      if (phase.kind !== "admission_unknown" || phase.itemId !== event.itemId || phase.messageID !== event.messageID) return state;
+      // Authoritative cancellation/rejection, never missing native history.
+      // Halt like any definite failure: the person retries.
+      return resolved(state, { kind: "halted", itemId: event.itemId, reason: "terminal_failure" }, event.itemId, "terminal_failure");
     }
     case "busy_observed": {
       if (phase.kind === "sending") {

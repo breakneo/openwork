@@ -40,7 +40,7 @@ import { externalMcpAppResourceUri, resolveMcpMemberIdentity } from "./external-
 import { externalMcpToolSchemaDigest } from "./external-mcp-tool-arguments.js"
 import { preflightMcpJsonRpcRequest } from "./json-rpc-preflight.js"
 import { EXECUTE_CAPABILITY_TOOL_NAME, scoreText, SEARCH_CAPABILITIES_TOOL_NAME, tokenize } from "./search.js"
-import { DEN_MCP_APP_HOST_SCOPE } from "./scopes.js"
+import { DEN_MCP_APP_HOST_SCOPE, DEN_MCP_WRITE_SCOPE } from "./scopes.js"
 
 function toolArguments(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -138,16 +138,16 @@ function toolVisibleToApp(tool: ExternalMcpProxyTool): boolean {
 
 function appOnlyProxyTool(tool: ExternalMcpProxyTool): ExternalMcpProxyTool | null {
   const resourceUri = externalMcpAppResourceUri(tool)
-  if (!resourceUri || !toolVisibleToApp(tool)) return null
   const meta = isRecord(tool._meta) ? tool._meta : {}
   const ui = isRecord(meta.ui) ? meta.ui : {}
+  if (!toolVisibleToApp(tool)) return null
   return {
     ...tool,
     _meta: {
       ...meta,
       ui: {
         ...ui,
-        resourceUri,
+        ...(resourceUri ? { resourceUri } : {}),
         visibility: ["app"],
       },
     },
@@ -158,6 +158,7 @@ function appOnlyProxyTool(tool: ExternalMcpProxyTool): ExternalMcpProxyTool | nu
 export function createExternalConnectionProxyServer(input: {
   descriptor: ExternalMcpProxyDescriptor
   operation: ExternalMcpProxyOperation
+  scopes: ReadonlySet<string>
   runtime?: ExternalMcpProxyRuntime
   appHostClient?: boolean
   /**
@@ -169,6 +170,20 @@ export function createExternalConnectionProxyServer(input: {
 }) {
   const { connection } = input.operation
   const runtime = input.runtime ?? externalMcpProxyRuntime
+  const callTool = (tool: ExternalMcpProxyTool, args: Record<string, unknown>) => {
+    const requiredScope = DEN_MCP_WRITE_SCOPE
+    if (!input.scopes.has(requiredScope)) {
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: JSON.stringify({
+          error: "insufficient_mcp_scope",
+          requiredScope,
+          message: `${tool.name} requires the ${requiredScope} scope.`,
+        }) }],
+      }
+    }
+    return runtime.callTool({ ...input.operation, toolName: tool.name, args })
+  }
   // An administrator opted this connection into direct exposure: ordinary MCP
   // clients receive the provider's own catalog instead of the bounded
   // search/execute pair. The App host keeps its private app-only surface.
@@ -196,7 +211,8 @@ export function createExternalConnectionProxyServer(input: {
     return appTool ? [appTool] : []
   })
   const appResourceUris = async () => new Set(
-    (await listAppTools()).map((tool) => externalMcpAppResourceUri(tool)).filter((uri) => uri !== null),
+    (await (input.appHostClient ? listAppTools() : listDirectTools()))
+      .map((tool) => externalMcpAppResourceUri(tool)).filter((uri) => uri !== null),
   )
   const server = new McpServer(input.descriptor.serverInfo ?? {
     name: connection.name,
@@ -208,9 +224,9 @@ export function createExternalConnectionProxyServer(input: {
       ...(downstreamUi ? { extensions: { [EXTENSION_ID]: downstreamUi } } : {}),
     },
     instructions: input.appHostClient
-      ? `This member-authorized OpenWork Connect endpoint exposes only app-visible MCP App tools and their bound resources for ${connection.name}. Ordinary provider capabilities remain available exclusively through search_capabilities and execute_capability.`
+      ? "This member-authorized OpenWork Connect endpoint privately exposes app-visible tools and their bound MCP App resources for this connection. Omitted UI visibility defaults to model and app; tools are projected here as app-only. Ordinary clients retain their configured direct or search_capabilities/execute_capability surface."
       : directClient
-        ? `This member-authorized OpenWork Connect endpoint exposes the tools of ${connection.name} directly, subject to your organization's access grants and tool policy. Resources are not exposed.`
+        ? `This member-authorized OpenWork Connect endpoint exposes the tools of ${connection.name} directly, subject to your organization's access grants and tool policy. Only MCP App resources bound to available model-visible tools are exposed.`
         : `This compatibility endpoint exposes only bounded search_capabilities and execute_capability for ${connection.name}. Direct provider tools, MCP App launch tools, and resources are not exposed.`,
   })
 
@@ -225,15 +241,11 @@ export function createExternalConnectionProxyServer(input: {
     server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const args = toolArguments(request.params.arguments)
       if (directClient) {
-        const allowed = (await listDirectTools()).some((tool) => tool.name === request.params.name)
-        if (!allowed) {
+        const tool = (await listDirectTools()).find((tool) => tool.name === request.params.name)
+        if (!tool) {
           throw new McpError(ErrorCode.InvalidRequest, `Tool ${request.params.name} is not available on ${connection.name}.`)
         }
-        return runtime.callTool({
-          ...input.operation,
-          toolName: request.params.name,
-          args,
-        })
+        return callTool(tool, args)
       }
       if (request.params.name === SEARCH_CAPABILITIES_TOOL_NAME) {
         const query = typeof args.query === "string" ? args.query.trim() : ""
@@ -270,11 +282,7 @@ export function createExternalConnectionProxyServer(input: {
         const toolName = typeof args.name === "string" ? args.name.trim() : ""
         const tool = (await listProviderTools()).find((candidate) => candidate.name === toolName)
         if (!tool) throw new McpError(ErrorCode.InvalidRequest, "The capability is unavailable. Call search_capabilities again.")
-        return runtime.callTool({
-          ...input.operation,
-          toolName,
-          args: toolArguments(args.body),
-        })
+        return callTool(tool, toolArguments(args.body))
       }
       if (!input.appHostClient) {
         throw new McpError(
@@ -282,31 +290,27 @@ export function createExternalConnectionProxyServer(input: {
           `Direct provider tool ${request.params.name} is unavailable. Use search_capabilities and execute_capability.`,
         )
       }
-      const allowed = (await listAppTools()).some((tool) => tool.name === request.params.name)
-      if (!allowed) {
+      const tool = (await listAppTools()).find((tool) => tool.name === request.params.name)
+      if (!tool) {
         throw new McpError(
           ErrorCode.InvalidRequest,
           `Tool ${request.params.name} is not available on the MCP Apps endpoint. Use search_capabilities and execute_capability.`,
         )
       }
-      return runtime.callTool({
-        ...input.operation,
-        toolName: request.params.name,
-        args,
-      })
+      return callTool(tool, args)
     })
   }
 
   if (input.descriptor.capabilities.resources) {
     server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      if (!input.appHostClient) return { resources: [] }
+      if (!input.appHostClient && !directClient) return { resources: [] }
       const allowedUris = await appResourceUris()
       return { resources: (await runtime.listResources(input.operation)).filter((resource) => allowedUris.has(resource.uri)) }
     })
     server.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }))
     server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      if (!input.appHostClient) {
-        throw new McpError(ErrorCode.InvalidRequest, "Provider MCP App resources are available only through the OpenWork App host.")
+      if (!input.appHostClient && !directClient) {
+        throw new McpError(ErrorCode.InvalidRequest, "Provider MCP App resources require direct exposure or the OpenWork App host.")
       }
       if (!(await appResourceUris()).has(request.params.uri)) {
         throw new McpError(ErrorCode.InvalidRequest, "The resource is not bound to an available MCP App tool.")
@@ -384,6 +388,7 @@ const externalMcpProxyRequestDependencies: ExternalMcpProxyRequestDependencies =
 export async function handleExternalConnectionProxyRequest(input: {
   context: Context
   operation: ExternalMcpProxyOperation
+  scopes: ReadonlySet<string>
   appHostClient?: boolean
   directExposureEnabled?: boolean
   runtime?: ExternalMcpProxyRuntime
@@ -398,6 +403,7 @@ export async function handleExternalConnectionProxyRequest(input: {
     const server = createExternalConnectionProxyServer({
       descriptor,
       operation: input.operation,
+      scopes: input.scopes,
       runtime: input.runtime,
       appHostClient: input.appHostClient === true,
       directExposureEnabled: input.directExposureEnabled === true,
@@ -480,6 +486,7 @@ export function registerExternalConnectionProxyRoutes<T extends { Variables: Req
     return handleExternalConnectionProxyRequest({
       context: c,
       operation,
+      scopes: principal.scopes,
       appHostClient: principal.scopes.has(DEN_MCP_APP_HOST_SCOPE),
       directExposureEnabled,
     })

@@ -32,7 +32,8 @@ import { SYNTHETIC_SESSION_ERROR_MESSAGE_PREFIX } from "@/app/types"
 import { t } from "@/i18n"
 import { useOpenTargets } from "@/lib/target-provider"
 import { openTargetFromUrl } from "@/react-app/domains/session/artifacts/open-target"
-import { sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
+import { presentOpencodeSessionError, sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
+import { openModelPickerEvent } from "@/react-app/shell/new-providers-listener"
 import { ApplyPatchTool } from "@/components/tools/apply-patch"
 import { BashTool } from "@/components/tools/bash"
 import { EditTool } from "@/components/tools/edit"
@@ -53,6 +54,9 @@ import { WebfetchTool } from "@/components/tools/webfetch"
 import { WebsearchTool } from "@/components/tools/websearch"
 import { useMessageList, useSessionErrorMessage } from "@/components/chat/message-list-provider"
 import { TaskSuggestions } from "@/components/chat/task-suggestions"
+import { useSessionReferencesMaybe, type SessionReferences } from "@/components/chat/session-reference-context"
+import { SessionReferenceLink } from "@/components/chat/session-reference-link"
+import { ProgressiveMessageList, type MessageListViewport } from "@/components/chat/progressive-message-list"
 import {
   DescriptiveButtonContent,
   DescriptiveButtonDescription,
@@ -519,6 +523,7 @@ const AssistantMessage = React.memo(
                   key={`text-${index}`}
                   className="text-foreground prose w-full min-w-0 flex-1 rounded-lg bg-transparent p-0"
                   markdown
+                  sessionReferences
                   isStreaming={isStreaming}
                   highlightQuery={highlightQuery}
                 >
@@ -531,6 +536,7 @@ const AssistantMessage = React.memo(
               return (
                 <ReasoningBlock
                   key={`reasoning-${index}`}
+                  disclosureKey={JSON.stringify(["reasoning", message.id, index])}
                   text={group.text}
                   isStreaming={group.isStreaming}
                 />
@@ -548,7 +554,7 @@ const AssistantMessage = React.memo(
             if (group.kind === "tool-aggregate") {
               return (
                 <div key={`tool-aggregate-${index}`} className="w-full">
-                  <ToolAggregateGroup parts={group.parts} thoughts={group.thoughts} />
+                  <ToolAggregateGroup messageId={message.id} parts={group.parts} thoughts={group.thoughts} />
                 </div>
               )
             }
@@ -617,11 +623,43 @@ function renderPlainTextWithSearchHighlights(text: string, highlightQuery: strin
   return nodes
 }
 
+function renderPlainTextWithSessionReferences(text: string, highlightQuery: string | undefined, keyPrefix: string, references: SessionReferences | undefined) {
+  if (!references) return renderPlainTextWithSearchHighlights(text, highlightQuery, keyPrefix)
+  const nodes: React.ReactNode[] = []
+  let cursor = 0
+  for (const match of text.matchAll(/[^\s()[\]{}<>"'`]+/g)) {
+    const raw = match[0].replace(/[.,;:!]+$/, "")
+    const reference = references.resolve(raw)
+    if (!reference) continue
+    const start = match.index
+    nodes.push(
+      <React.Fragment key={`${keyPrefix}:pre:${cursor}`}>
+        {renderPlainTextWithSearchHighlights(text.slice(cursor, start), highlightQuery, `${keyPrefix}:pre:${cursor}`)}
+      </React.Fragment>
+    )
+    const needle = highlightQuery?.trim().toLowerCase() ?? ""
+    nodes.push(
+      <SessionReferenceLink key={`${keyPrefix}:session:${start}`} reference={reference} openReference={references.openReference}>
+        {needle.length >= 2 && raw.toLowerCase().includes(needle) ? (
+          <mark data-search-highlight="true" className={SEARCH_HIGHLIGHT_MARK_CLASS}>{reference.title}</mark>
+        ) : renderPlainTextWithSearchHighlights(reference.title, highlightQuery, `${keyPrefix}:title:${start}`)}
+      </SessionReferenceLink>
+    )
+    cursor = start + raw.length
+  }
+  nodes.push(
+    <React.Fragment key={`${keyPrefix}:post:${cursor}`}>
+      {renderPlainTextWithSearchHighlights(text.slice(cursor), highlightQuery, `${keyPrefix}:post:${cursor}`)}
+    </React.Fragment>
+  )
+  return nodes
+}
+
 // Bare URL, excluding trailing punctuation that usually ends a sentence.
 const PLAIN_URL_RE = /https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?]/g
 
 /** User bubbles are plain text, so bare https:// URLs need explicit anchors. */
-function renderPlainTextWithLinks(text: string, highlightQuery: string | undefined, keyPrefix: string) {
+function renderPlainTextWithLinks(text: string, highlightQuery: string | undefined, keyPrefix: string, references: SessionReferences | undefined) {
   const nodes: React.ReactNode[] = []
   let cursor = 0
   for (const match of text.matchAll(PLAIN_URL_RE)) {
@@ -630,7 +668,7 @@ function renderPlainTextWithLinks(text: string, highlightQuery: string | undefin
     if (start > cursor) {
       nodes.push(
         <React.Fragment key={`${keyPrefix}:pre:${cursor}`}>
-          {renderPlainTextWithSearchHighlights(text.slice(cursor, start), highlightQuery, `${keyPrefix}:pre:${cursor}`)}
+          {renderPlainTextWithSessionReferences(text.slice(cursor, start), highlightQuery, `${keyPrefix}:pre:${cursor}`, references)}
         </React.Fragment>
       )
     }
@@ -658,35 +696,98 @@ function renderPlainTextWithLinks(text: string, highlightQuery: string | undefin
     )
     cursor = start + url.length
   }
-  if (nodes.length === 0) return renderPlainTextWithSearchHighlights(text, highlightQuery, keyPrefix)
+  if (nodes.length === 0) return renderPlainTextWithSessionReferences(text, highlightQuery, keyPrefix, references)
   if (cursor < text.length) {
     nodes.push(
       <React.Fragment key={`${keyPrefix}:post:${cursor}`}>
-        {renderPlainTextWithSearchHighlights(text.slice(cursor), highlightQuery, `${keyPrefix}:post:${cursor}`)}
+        {renderPlainTextWithSessionReferences(text.slice(cursor), highlightQuery, `${keyPrefix}:post:${cursor}`, references)}
       </React.Fragment>
     )
   }
   return nodes
 }
 
-function renderUserTextWithSkillChips(text: string, highlightQuery: string | undefined) {
-  if (!USER_SKILL_TOKEN_RE.test(text)) return renderPlainTextWithLinks(text, highlightQuery, "text")
+function renderUserTextWithSkillChips(text: string, highlightQuery: string | undefined, references: SessionReferences | undefined) {
+  if (!USER_SKILL_TOKEN_RE.test(text)) return renderPlainTextWithLinks(text, highlightQuery, "text", references)
   let offset = 0
   return text.split(USER_SKILL_TOKEN_RE).map((segment) => {
     const key = `${offset}:${segment}`
     offset += segment.length
     const skillMatch = segment.match(/^(?:Load )?\[skill ([^\]]+)\](?: and follow its instructions\.)?$/)
     if (skillMatch?.[1]) return <UserSkillChip key={key} name={skillMatch[1]} />
-    return <React.Fragment key={key}>{renderPlainTextWithLinks(segment, highlightQuery, key)}</React.Fragment>
+    return <React.Fragment key={key}>{renderPlainTextWithLinks(segment, highlightQuery, key, references)}</React.Fragment>
   })
+}
+
+function renderUserProse(text: string, highlightQuery: string | undefined, references: SessionReferences | undefined) {
+  const nodes: React.ReactNode[] = []
+  const ticks = /`+/g
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = ticks.exec(text))) {
+    const start = match.index
+    const delimiter = match[0]
+    const bodyStart = ticks.lastIndex
+    let closing: RegExpExecArray | null
+    do {
+      closing = ticks.exec(text)
+    } while (closing && closing[0] !== delimiter)
+    const end = closing ? ticks.lastIndex : text.length
+    const body = text.slice(bodyStart, closing?.index ?? text.length)
+    const exactId = Boolean(closing) && /^ses_[A-Za-z0-9][A-Za-z0-9_-]*$/.test(body)
+    nodes.push(
+      <React.Fragment key={`prose:${cursor}`}>
+        {renderUserTextWithSkillChips(text.slice(cursor, start), highlightQuery, references)}
+      </React.Fragment>,
+      <React.Fragment key={`inline-code:${start}`}>
+        {renderUserTextWithSkillChips(text.slice(start, end), highlightQuery, exactId ? references : undefined)}
+      </React.Fragment>
+    )
+    cursor = end
+    if (!closing) break
+  }
+  nodes.push(<React.Fragment key={`prose:${cursor}`}>{renderUserTextWithSkillChips(text.slice(cursor), highlightQuery, references)}</React.Fragment>)
+  return nodes
+}
+
+function renderUserText(text: string, highlightQuery: string | undefined, references: SessionReferences | undefined) {
+  if (!references) return renderUserTextWithSkillChips(text, highlightQuery, undefined)
+  const nodes: React.ReactNode[] = []
+  const blocks = /^(?:[ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?(`{3,}|~{3,})[^\n]*(?:\n|$)|(?: {4}|\t)[^\n]*(?:\n|$))/gm
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = blocks.exec(text))) {
+    const start = match.index
+    const fence = match[1]
+    let end = blocks.lastIndex
+    if (fence) {
+      const closing = new RegExp(`^[ \\t]*(?:>[ \\t]*)*${fence[0]}{${fence.length},}[ \\t]*\\r?(?:\\n|$)`, "gm")
+      closing.lastIndex = end
+      end = closing.exec(text) ? closing.lastIndex : text.length
+      blocks.lastIndex = end
+    }
+    nodes.push(
+      <React.Fragment key={`prose:${cursor}`}>
+        {renderUserProse(text.slice(cursor, start), highlightQuery, references)}
+      </React.Fragment>,
+      <React.Fragment key={`code-block:${start}`}>
+        {renderUserTextWithSkillChips(text.slice(start, end), highlightQuery, undefined)}
+      </React.Fragment>
+    )
+    cursor = end
+  }
+  nodes.push(<React.Fragment key={`prose:${cursor}`}>{renderUserProse(text.slice(cursor), highlightQuery, references)}</React.Fragment>)
+  return nodes
 }
 
 const UserMessage = React.memo(
   ({ message, isStreaming }: UserMessageProps) => {
-    const { onRevertToUserMessage, onForkAtMessage, onEditUserMessage, highlightQuery, readOnly } = useMessageList()
+    const { onRevertToUserMessage, onForkAtMessage, forkingMessageId, onEditUserMessage, highlightQuery, readOnly } = useMessageList()
+    const references = useSessionReferencesMaybe()
+    const branching = forkingMessageId === message.id
     const { onOpenTarget } = useOpenTargets()
     const openLink = (event: React.MouseEvent) => {
-      if (!onOpenTarget || !(event.target instanceof Element)) return
+      if (event.defaultPrevented || !onOpenTarget || !(event.target instanceof Element)) return
       const link = event.target.closest("a[href]")
       const target = openTargetFromUrl(link?.getAttribute("href") ?? "")
       if (!target) return
@@ -705,7 +806,7 @@ const UserMessage = React.memo(
       { type: "item", id: "copy", label: "Copy", icon: <Copy className="size-4" />, onSelect: () => navigator.clipboard.writeText(messageText) },
     )
     menuActions.push(
-      { type: "item", id: "branch", label: "Branch in new chat", icon: <Split className="size-4 rotate-90" />, onSelect: () => onForkAtMessage(message.id) },
+      { type: "item", id: "branch", label: branching ? "Branching..." : "Branch in new chat", icon: <Split className="size-4 rotate-90" />, disabled: Boolean(forkingMessageId), onSelect: () => onForkAtMessage(message.id) },
       { type: "item", id: "revert", label: "Revert", icon: <Undo2 className="size-4" />, disabled: readOnly, onSelect: () => onRevertToUserMessage(message.id) },
     )
 
@@ -736,14 +837,21 @@ const UserMessage = React.memo(
                       if (part.type === "text") {
                         return (
                           <span key={`text-${index}`} className="whitespace-pre-wrap">
-                            {renderUserTextWithSkillChips(part.text, highlightQuery)}
+                            {renderUserText(part.text, highlightQuery, references)}
                           </span>
                         )
                       }
                       if (isFileUIPart(part)) {
+                        // An attachment is identified by its position among the
+                        // message's files, not by its URL or filename: a sent image
+                        // first shows the composer's blob: preview, then the server's
+                        // recompressed data: copy. Keeping one element lets the
+                        // browser swap the bitmap in place instead of remounting an
+                        // <img> that has to decode before it can paint.
+                        const attachmentIndex = inlineParts.slice(0, index).filter(isFileUIPart).length
                         return (
                           <span
-                            key={`file-${part.url}-${index}`}
+                            key={`file-${attachmentIndex}`}
                             className="mx-1 inline-flex align-middle not-prose"
                           >
                             <FileMessage part={part} tone="user" />
@@ -757,7 +865,8 @@ const UserMessage = React.memo(
                 {!isStreaming && (
                   <MessageActions
                     className={cn(
-                      "flex items-center gap-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100 max-lg:opacity-100 pointer-coarse:opacity-100"
+                      "flex items-center gap-0 transition-opacity duration-150 group-hover:opacity-100 max-lg:opacity-100 pointer-coarse:opacity-100",
+                      branching ? "opacity-100" : "opacity-0"
                     )}
                   >
                     <MessageTimestamp message={message} className="mr-1.5" />
@@ -775,16 +884,19 @@ const UserMessage = React.memo(
                         </Button>
                       </MessageAction>
                     ) : null}
-                    <MessageAction tooltip="Branch in new chat">
+                    <MessageAction tooltip={branching ? "Branching..." : "Branch in new chat"}>
                       <Button
                         variant="ghost"
                         size="icon"
-                        aria-label="Branch in new chat"
+                        aria-label={branching ? "Branching..." : "Branch in new chat"}
+                        aria-busy={branching || undefined}
+                        disabled={Boolean(forkingMessageId)}
                         onClick={() => onForkAtMessage(message.id)}
                       >
-                        <Split className="rotate-90" />
+                        {branching ? <LoaderCircle className="motion-safe:animate-spin" /> : <Split className="rotate-90" />}
                       </Button>
                     </MessageAction>
+                    {branching ? <span role="status" className="sr-only">Branching...</span> : null}
                     <MessageAction tooltip="Revert">
                       <Button
                         variant="ghost"
@@ -827,6 +939,8 @@ const MessageComponent = React.memo(
           showDescriptionOnResume={presentation?.kind === "provider-incomplete"}
           resumePrompt={presentation?.recoveryPrompt}
           technicalDetails={presentation?.technicalDetails}
+          gatewayConnectUrl={presentation?.kind === "gateway-auth-required" ? presentation.connectUrl ?? null : undefined}
+          gatewaySelectionRequired={presentation?.kind === "gateway-selection-required"}
         />
       )
     }
@@ -858,10 +972,10 @@ const MessageComponent = React.memo(
 
 MessageComponent.displayName = "MessageComponent"
 
-const LoadingMessage = React.memo(({ elapsedSeconds }: { elapsedSeconds: number }) => (
+const LoadingMessage = React.memo(({ elapsedSeconds, starting }: { elapsedSeconds: number; starting: boolean }) => (
     <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10">
-      <div data-loading-message="working" className="py-1 text-sm text-muted-foreground">
-        <span className="ow-text-shimmer tabular-nums">Working {formatElapsedSeconds(elapsedSeconds)}</span>
+      <div role={starting ? "status" : undefined} data-loading-message={starting ? "starting" : "working"} className="py-1 text-sm text-muted-foreground">
+        <span className="ow-text-shimmer tabular-nums">{starting ? "Starting…" : `Working ${formatElapsedSeconds(elapsedSeconds)}`}</span>
       </div>
     </Message>
 ))
@@ -924,6 +1038,13 @@ interface ErrorMessageProps {
   resumePrompt?: string | null
   /** Error type, status, provider, code, response body — for bug reports and support. */
   technicalDetails?: string | null
+  /**
+   * Set (possibly null) only when the OpenWork Gateway rejected the request
+   * because the member must sign in: a URL opens the grant in the browser,
+   * null deep-links to Settings > AI providers instead.
+   */
+  gatewayConnectUrl?: string | null
+  gatewaySelectionRequired?: boolean
 }
 
 /**
@@ -988,13 +1109,17 @@ function SessionErrorTechnicalDetails({ details, tone }: { details: string; tone
   )
 }
 
-function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails }: ErrorMessageProps) {
-  const { onResumeInterrupted, developerMode } = useMessageList()
+function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, gatewayConnectUrl, gatewaySelectionRequired }: ErrorMessageProps) {
+  const { onResumeInterrupted, developerMode, dispatchAction, sessionId } = useMessageList()
+  const selection = error?.includes("gateway_selection_required") ? presentOpencodeSessionError(error) : null
+  const displayError = selection?.title ?? error
+  const displayDescription = selection?.description ?? description
+  const displayDetails = selection?.technicalDetails ?? technicalDetails
   // Status codes, provider names, and response bodies are for developers,
   // admins, and support — not the plain-language card end users see. They
   // surface only with Developer mode (Settings → Advanced), like the
   // session debug panel.
-  const details = developerMode && hasExtraTechnicalDetails(error, technicalDetails) ? technicalDetails : null
+  const details = developerMode && hasExtraTechnicalDetails(displayError, displayDetails) ? displayDetails : null
 
   // A resumable interruption is a pause, not a failure: it renders as a
   // quiet status line (like "Working 12s"), with Resume as the emphasis.
@@ -1034,13 +1159,32 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
           <div className="flex flex-row items-start gap-2">
             <AlertTriangle aria-hidden="true" size={16} className="mt-0.5 shrink-0 text-destructive" />
             <div className="flex flex-col gap-1">
-              <p className="whitespace-pre-wrap text-destructive">{error}</p>
-              {description && (!resumePrompt || showDescriptionOnResume) ? (
-                <p className="text-sm text-destructive/80 whitespace-pre-wrap">{description}</p>
+              <p className="whitespace-pre-wrap text-destructive">{displayError}</p>
+              {displayDescription && (!resumePrompt || showDescriptionOnResume) ? (
+                <p className="text-sm text-destructive/80 whitespace-pre-wrap">{displayDescription}</p>
               ) : null}
             </div>
           </div>
           {details ? <SessionErrorTechnicalDetails details={details} tone="card" /> : null}
+          {gatewaySelectionRequired || selection ? (
+            <Button variant="outline" size="sm" className="self-start" data-testid="session-error-gateway-selection"
+              onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>
+              Choose group and credential set
+            </Button>
+          ) : null}
+          {gatewayConnectUrl !== undefined ? (
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="session-error-gateway-connect"
+              className="self-start"
+              onClick={() => {
+                dispatchAction({ target: "settings", action: "open", section: "providers" })
+              }}
+            >
+              Connect
+            </Button>
+          ) : null}
         </div>
       </div>
     </Message>
@@ -1205,7 +1349,7 @@ function MessageGroup({
   isLastGroup,
   isStreaming,
 }: AssistantMessageGroupProps) {
-  const { onRevertToUserMessage, onForkAtMessage, showThinking, readOnly } = useMessageList()
+  const { onRevertToUserMessage, onForkAtMessage, forkingMessageId, showThinking, readOnly } = useMessageList()
   const lastItem = items[items.length - 1]
   // Branch/revert must target a real server-side message id. Synthetic
   // client-side messages (e.g. session errors) don't exist on the server and
@@ -1253,7 +1397,7 @@ function MessageGroup({
     item.message.role === "assistant" && !isSessionErrorMessage(item.message)
       ? getAssistantRenderGroups(item.message.parts, showThinking).flatMap((group, groupIndex) =>
         group.kind === "reasoning"
-          ? [{ key: `${item.message.id}-${groupIndex}`, text: group.text, isStreaming: group.isStreaming }]
+          ? [{ key: JSON.stringify(["reasoning", item.message.id, groupIndex]), text: group.text, isStreaming: group.isStreaming }]
           : []
       )
       : []
@@ -1287,7 +1431,7 @@ function MessageGroup({
         key={`folded-reasoning-${reasoning.key}`}
         className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10"
       >
-        <ReasoningBlock text={reasoning.text} isStreaming={reasoning.isStreaming} />
+        <ReasoningBlock disclosureKey={reasoning.key} text={reasoning.text} isStreaming={reasoning.isStreaming} />
       </Message>
     ))
     : []
@@ -1319,7 +1463,7 @@ function MessageGroup({
       nodes.push(
         <div key={`aggregate-${run.key}`}>
           <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10">
-            <ToolAggregateGroup parts={run.parts} className="w-full" />
+            <ToolAggregateGroup messageId={run.key} parts={run.parts} className="w-full" />
           </Message>
         </div>
       )
@@ -1372,21 +1516,24 @@ function MessageGroup({
       ))}
       {renderItems(proseItems, stepItems.length, collapseSteps)}
       {lastTextMessage && !isStreaming && (
-        <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2 px-2 opacity-0 transition-opacity duration-150 group-hover/message-group:opacity-100 max-lg:opacity-100 pointer-coarse:opacity-100 md:px-8">
+        <div className={cn("mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2 px-2 transition-opacity duration-150 group-hover/message-group:opacity-100 max-lg:opacity-100 pointer-coarse:opacity-100 md:px-8", forkingMessageId && forkingMessageId === lastRealItem?.message.id ? "opacity-100" : "opacity-0")}>
           <MessageActions className="flex gap-0">
             <CopyMessageButton messages={renderableItems.map((item) => item.message)} />
             {lastRealItem ? (
               <>
-                <MessageAction tooltip="Branch in new chat">
+                <MessageAction tooltip={forkingMessageId === lastRealItem.message.id ? "Branching..." : "Branch in new chat"}>
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label="Branch in new chat"
+                    aria-label={forkingMessageId === lastRealItem.message.id ? "Branching..." : "Branch in new chat"}
+                    aria-busy={forkingMessageId === lastRealItem.message.id || undefined}
+                    disabled={Boolean(forkingMessageId)}
                     onClick={() => onForkAtMessage(lastRealItem.message.id)}
                   >
-                    <Split className="rotate-90" />
+                    {forkingMessageId === lastRealItem.message.id ? <LoaderCircle className="motion-safe:animate-spin" /> : <Split className="rotate-90" />}
                   </Button>
                 </MessageAction>
+                {forkingMessageId === lastRealItem.message.id ? <span role="status" className="sr-only">Branching...</span> : null}
                 <MessageAction tooltip="Revert">
                   <Button
                     variant="ghost"
@@ -1445,10 +1592,12 @@ export interface RunSyncHealth {
 
 interface MessageListProps {
   messages: UIMessage[]
+  messageIdReplacements?: ReadonlyMap<string, string>
   status: ThreadStatus
   activityStatus: SessionActivityStatus
   retryStatus?: RetryStatus | null
   syncHealth?: RunSyncHealth
+  viewport?: MessageListViewport
 }
 
 export function shouldShowMessageListLoading(
@@ -1465,7 +1614,7 @@ export function shouldShowRunReconnecting(status: ThreadStatus, syncDegraded: bo
   return status === "submitted" || status === "streaming" || status === "retrying"
 }
 
-export function MessageList({ messages, status, activityStatus, retryStatus, syncHealth }: MessageListProps) {
+export function MessageList({ messages, messageIdReplacements, status, activityStatus, retryStatus, syncHealth, viewport }: MessageListProps) {
   const { workspaceId, sessionId } = useMessageList()
   const workspace = useWorkspaceMaybe()
   const tasks = React.useMemo(() => activeDelegatedTasks(messages), [messages])
@@ -1482,7 +1631,7 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
       || child?.compacting || child?.retrying
   }))
   const isStreaming = status === "streaming" || status === "retrying"
-  const runActive = status === "submitted" || status === "streaming" || status === "retrying"
+  const runActive = status === "streaming" || status === "retrying"
   const syncDegraded = syncHealth?.degraded === true
   const activityActive = runActive || tasks.length > 0
   const runStartedAtRef = React.useRef<number | null>(null)
@@ -1520,6 +1669,7 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
     const interval = window.setInterval(updateElapsed, 1000)
     return () => window.clearInterval(interval)
   }, [activityActive, runStartedAt, syncDegraded])
+  const latestUserMessageId = React.useMemo(() => messages.findLast((message) => message.role === "user")?.id, [messages])
   const items = React.useMemo(() => groupMessages(messages, status), [messages, status]);
   const error = useSessionErrorMessage();
   const hasSessionErrorMessage = React.useMemo(() => messages.some(isSessionErrorMessage), [messages])
@@ -1527,14 +1677,15 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
     () => collectLatestAssistantToolParts(messages),
     [messages],
   )
-  const hasVisibleToolActivity = latestAssistantToolParts.some(isToolPartInFlight)
+  // Delegated task rows may be above newer messages; keep the run footer visible.
+  const hasVisibleToolActivity = latestAssistantToolParts.some((part) => !isTaskToolPart(part) && isToolPartInFlight(part))
   const waiting = activityStatus === "waiting" || activityStatus === "compacting" || childBlocked
   const showReconnecting = !waiting && !retryStatus && shouldShowRunReconnecting(status, syncDegraded)
   const noNewActivity = hasNoNewActivity({
     active: activityActive && activityStatus !== "error", waiting, retrying: status === "retrying" || Boolean(retryStatus),
     disconnected: syncDegraded, lastProgressAt, now: Date.now(),
   })
-  const showLoading = !waiting && !noNewActivity && !showReconnecting && tasks.length === 0
+  const showLoading = !waiting && !noNewActivity && !showReconnecting
     && shouldShowMessageListLoading(status, messages.length, hasVisibleToolActivity)
   const baseUrl = workspace?.opencodeBaseUrl
   React.useEffect(() => {
@@ -1553,10 +1704,16 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
       activityStatus={activityStatus}
       currentToolCallIds={currentToolCallIds}
     >
-      <div className={cn("flex flex-col gap-2 @container/message-list")}>
-        {messages.length === 0 && <TaskSuggestions className="mx-auto w-full max-w-3xl shrink-0 px-3 pb-3 md:px-5 md:pb-5 grow" />}
-
-        {items.map((item) => {
+      <ProgressiveMessageList
+        groups={items}
+        groupKeyReplacements={messageIdReplacements}
+        priorityMessageId={latestUserMessageId}
+        viewport={viewport}
+        className="@container/message-list"
+        getGroupKey={(item) => isMessageGroup(item) ? item.messages[0]?.message.id ?? "empty-assistant-group" : item.message.id}
+        getMessageIds={(item) => isMessageGroup(item) ? item.messages.flatMap(({ message }) => [message.id, `${message.id}:steps`]) : [item.message.id]}
+        header={messages.length === 0 && <TaskSuggestions className="mx-auto w-full max-w-3xl shrink-0 px-3 pb-3 md:px-5 md:pb-5 grow" />}
+        renderGroup={(item) => {
         if (isMessageGroup(item)) {
           return (
             <MemoizedMessageGroup
@@ -1581,13 +1738,13 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
             isLastStep={isLastStep}
           />
         )
-        })}
-
-        {showLoading && <LoadingMessage elapsedSeconds={runElapsedSeconds} />}
+        }}
+      >
+        {showLoading && <LoadingMessage elapsedSeconds={runElapsedSeconds} starting={status === "submitted"} />}
         {showReconnecting && <ReconnectingMessage lastConfirmedAt={syncHealth?.lastConfirmedAt ?? null} />}
         {retryStatus ? <RetryMessage status={retryStatus} /> : null}
         {error && !hasSessionErrorMessage ? <ErrorMessage error={error} /> : null}
-      </div>
+      </ProgressiveMessageList>
     </CurrentToolLifecycleProvider>
     </ParentRunActiveContext.Provider>
   )

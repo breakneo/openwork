@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
+import { installBrowserShortcutFocusTracking } from "./browser-shortcut-focus.mjs";
 
 const NATIVE_DEEP_LINK_EVENT = "openwork:deep-link-native";
 const NATIVE_MENU_OPEN_SETTINGS_EVENT = "openwork:native-menu:open-settings";
@@ -70,6 +71,28 @@ function installMenuOverlayDismissListeners() {
   }
 }
 
+if (process.isMainFrame) {
+  installBrowserShortcutFocusTracking(window, (tabId) => {
+    ipcRenderer.send("openwork:browser:shortcut-focus", tabId);
+  });
+  window.addEventListener("click", (event) => {
+    if (!event.isTrusted || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = event.composedPath().find((node) => node instanceof HTMLAnchorElement);
+    if (!anchor || anchor.isContentEditable || anchor.hasAttribute("download")) return;
+    if (!/^(https?:)?\/\//i.test(anchor.getAttribute("href") ?? "")) return;
+    let url;
+    try { url = new URL(anchor.href); } catch { return; }
+    if (!["http:", "https:"].includes(url.protocol)) return;
+    if (url.origin === location.origin && url.pathname === location.pathname && url.search === location.search) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    ipcRenderer.send("openwork:browser:linkClick", {
+      url: url.href,
+      sessionId: anchor.closest("[data-session-surface-id]")?.getAttribute("data-session-surface-id") ?? null,
+    });
+  }, { capture: true });
+}
+
 // Selected text and ordinary editors use Chromium's native context-menu event.
 // Explicit editor action menus compose their own editing + formatting menu.
 window.addEventListener("contextmenu", (event) => {
@@ -85,6 +108,12 @@ window.addEventListener("contextmenu", (event) => {
     return;
   }
   if (composedEditor) return;
+  // Preserve Chromium's image hit-test and pixel clipboard operation, including
+  // linked images. Do not let surrounding message/link menus swallow it.
+  if (eventPath.some((node) => node instanceof HTMLImageElement)) {
+    event.stopImmediatePropagation();
+    return;
+  }
   const anchor = event.composedPath().find((node) => node instanceof HTMLAnchorElement);
   if (!anchor || anchor.isContentEditable || anchor.hasAttribute("download")) return;
   const href = anchor.getAttribute("href") ?? "";
@@ -183,8 +212,8 @@ contextBridge.exposeInMainWorld("__OPENWORK_ELECTRON__", {
     setChannel(channel) {
       return ipcRenderer.invoke("openwork:updater:setChannel", channel);
     },
-    check(channel, targetVersion) {
-      return ipcRenderer.invoke("openwork:updater:check", channel, targetVersion);
+    check(channel, targetVersion, options) {
+      return ipcRenderer.invoke("openwork:updater:check", channel, targetVersion, options);
     },
     download() {
       return ipcRenderer.invoke("openwork:updater:download");
@@ -217,9 +246,9 @@ contextBridge.exposeInMainWorld("__OPENWORK_ELECTRON__", {
   },
   browser: {
     show(bounds, sessionId) { return sendBrowserGeometry("openwork:browser:show", bounds, sessionId); },
-    hide() {
+    hide(options) {
       lastBrowserGeometry = null;
-      return ipcRenderer.invoke("openwork:browser:hide");
+      return ipcRenderer.invoke("openwork:browser:hide", options);
     },
     openUrl(url, provider, options) { return ipcRenderer.invoke("openwork:browser:openUrl", url, provider, options); },
     setVisibleSession(sessionId) { return ipcRenderer.invoke("openwork:browser:setVisibleSession", sessionId); },
@@ -286,6 +315,14 @@ contextBridge.exposeInMainWorld("__OPENWORK_ELECTRON__", {
       testWitnessUrl() { return ipcRenderer.invoke("openwork:browser-logins:testWitnessUrl"); },
     } : {}),
   },
+  // Development-only observation of native popup menus; main registers no handler otherwise.
+  ...(process.env.OPENWORK_DEV_MODE === "1" ? {
+    contextMenu: {
+      inspect() { return ipcRenderer.invoke("openwork:context-menu:inspect"); },
+      choose(id) { return ipcRenderer.invoke("openwork:context-menu:choose", id); },
+      dismiss() { return ipcRenderer.invoke("openwork:context-menu:dismiss"); },
+    },
+  } : {}),
   terminal: {
     create(options) { return ipcRenderer.invoke("openwork:terminal:create", options); },
     write(terminalId, data) { return ipcRenderer.invoke("openwork:terminal:write", terminalId, data); },

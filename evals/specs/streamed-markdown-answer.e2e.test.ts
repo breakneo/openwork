@@ -39,7 +39,7 @@ function expectSettledDocument(visibleText: string) {
 
 test("sending clears the composer and shows one pending turn in existing and new conversations", async ({ world, user, probe, step }) => {
   for (const scenario of ["existing", "new"]) {
-    if (scenario === "new") await user.click({ role: "button", label: "New task" });
+    if (scenario === "new") await user.click({ role: "button", label: "New session" });
     const text = `Keep this ${scenario} conversation message while submission is delayed.`;
     await user.type("composer", text);
     await world.holdNextSubmission();
@@ -225,8 +225,22 @@ historyTest("v1 keeps long tool-rich history ordered and its detected links avai
     }, { within: 5_000, label: "keyboard browsing settles above the latest turn", until: (value) => value.stable });
   };
   const scrollStorageKey = "openwork:session-scroll:v1";
-  const savedScroll = (sessionId: string): Promise<unknown> => probe.storage(scrollStorageKey, (value): unknown =>
-    value && typeof value === "object" ? Reflect.get(value, sessionId) ?? null : null);
+  const savedScroll = async (sessionId: string): Promise<unknown> => {
+    const organizationId = await probe.storage("openwork.den.activeOrgId");
+    const port = await probe.storage("openwork.server.port");
+    if (typeof organizationId !== "string" || !organizationId.trim()
+      || (typeof port !== "string" && typeof port !== "number") || !/^\d+$/.test(String(port))) {
+      throw new Error("Streamed history fixture is missing its organization or local server port");
+    }
+    // This world signs in as its admin and uses a local v1 workspace. Match
+    // every owner coordinate; a same-ID entry from another owner is not proof.
+    const draftScope = `cloud:${encodeURIComponent(world.principalId)}:${encodeURIComponent(organizationId.trim())}`;
+    const endpoint = `http://127.0.0.1:${port}/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
+    const owner = JSON.stringify([draftScope, endpoint, world.workspace.workspaceId, sessionId]);
+    const key = JSON.stringify(["session-scroll", owner, sessionId]);
+    return probe.storage(scrollStorageKey, (value): unknown =>
+      value && typeof value === "object" ? Reflect.get(value, key) ?? null : null);
+  };
   const readingGeometry = async (messageId: string) => {
     const { elements } = await probe.dom(`${viewportSelector}, ${surface} [data-message-id="${messageId}"]`);
     const [viewport, message] = elements;
@@ -364,17 +378,18 @@ historyTest("v1 keeps long tool-rich history ordered and its detected links avai
     expect(await savedScroll(world.neighbor.sessionId)).toEqual(neighborScroll);
   });
 
-  await step("cold reload keeps the bounded history tail ordered and old and new tool links usable", async () => {
+  await step("cold reload restores the whole ordered transcript, the reading position and old and new tool links", async () => {
+    // A cold open fetches the transcript without a `limit` (#4695): OpenCode
+    // pages `limit` as the NEWEST n messages, so the engine's bounded page still
+    // lacks the oldest turn while the reopened surface must show every message.
     const bounded = await probe.desktopApi(`${world.historyPath}?limit=140`);
     expect(bounded.status).toBe(200);
     expect(bounded.body).toHaveLength(140);
-    const retainedHistory = world.history.filter(text => JSON.stringify(bounded.body).includes(text));
-    expect(retainedHistory.length).toBeGreaterThan(0);
-    expect(retainedHistory.length).toBeLessThan(world.history.length);
+    expect(JSON.stringify(bounded.body)).not.toContain(world.history[0]);
     await agent.run("session.open", { sessionId: world.session.sessionId });
     await user.reload();
     await expectReadingPosition();
-    expect(await orderedHistory()).toEqual(retainedHistory);
+    expect(await orderedHistory()).toEqual(world.history);
     expect(occurrences((await readTranscriptMessages(probe, "user")).join("\n"), world.prompt)).toBe(1);
     expect(occurrences((await readTranscriptMessages(probe, "assistant")).join("\n"), world.closing)).toBe(1);
     await expectTargets([...oldTargets, world.latestTool]);
@@ -410,6 +425,26 @@ continuityTest("CONT-01 restores the exact cumulative prefix while one answer st
       label: `visible conversation ${target.title}`,
       until: (state) => state.sessionId === target.sessionId,
     });
+  };
+  const selectMode = async (current: string, next: string) => {
+    if (current === "Default agent") {
+      await user.notSee({ role: "button", label: /^(Build|Plan)$/ });
+      await user.click({ role: "button", label: "Agents, commands, skills, plugins, and connections" });
+      await user.click({ role: "button", label: "Agents" });
+    } else {
+      await user.click({ role: "button", label: current });
+    }
+    await user.click({ role: "button", label: next });
+    if (next === "Default agent") {
+      await user.notSee({ role: "button", label: /^(Build|Plan)$/ });
+      return;
+    }
+    await probe.eventually(async () => {
+      const picker = await probe.dom('[data-composer-settings] button[title="Agent"][aria-expanded="false"]:not(:disabled)');
+      expect(picker.elements).toHaveLength(1);
+      expect(picker.elements[0]?.text).toBe(next);
+      return true;
+    }, { within: 5_000, label: `inline picker changed from ${current} to ${next}` });
   };
   const waitForEngineHttpPrefix = (prefix: string, forbidden: string) => probe.eventually(
     () => world.engineHttpEvents(),
@@ -497,7 +532,27 @@ continuityTest("CONT-01 restores the exact cumulative prefix while one answer st
     );
   });
 
+  if (world.engine === "v1") await step("Build is selected independently for both conversations and new tasks before sending", async () => {
+    await selectMode("Default agent", "Build");
+    await select(world.neighbor);
+    await selectMode("Default agent", "Build");
+    expect(await probe.storage("openwork.preferences")).toMatchObject({ selectedAgent: null });
+    await user.click({ role: "button", label: "New task" });
+    await user.see("composer", { editable: true });
+    await selectMode("Default agent", "Build");
+    expect(await probe.storage("openwork.preferences")).toMatchObject({ selectedAgent: "build" });
+    await select(world.session);
+    await user.see({ role: "button", label: "Build" });
+    expect(await probe.storage("openwork.sessionAgents.v1")).toMatchObject({
+      [world.session.sessionId]: "build",
+      [world.neighbor.sessionId]: "build",
+    });
+    expect((await world.engineHttpEvents()).promptPosts).toEqual({});
+    expect(await world.providerFinalRequests()).toEqual([]);
+  });
+
   await step("one real send admits once and renders only the initially released first bullet", async () => {
+    await using transcript = await observeTranscript(probe, [{ role: "user", text: streamedContinuityPrompt }]);
     await user.type("composer", streamedContinuityPrompt);
     await user.click("Run task");
     await user.see({ text: streamedContinuityPrompt }, { timeoutMs: 2_000 });
@@ -518,6 +573,26 @@ continuityTest("CONT-01 restores the exact cumulative prefix while one answer st
     await expectOneUserAdmission();
     expect(await promptPosts()).toBe(1);
     expect(await world.providerFinalRequests()).toHaveLength(1);
+    const admission = await transcript.finish();
+    evidence.recordJsonArtifact("CONT-01 submitted user text continuity", admission);
+    expect(admission).toMatchObject({ seen: [true], violations: [], stopped: false });
+  });
+
+  if (world.engine === "v1") await step("the inline Build and Plan picker stays usable without submitting or stopping the held answer", async () => {
+    await user.type("composer", world.planPrompt);
+    let current = "Build";
+    for (const next of ["Plan", "Build", "Plan"]) {
+      await user.see({ role: "button", label: "Stop" });
+      await selectMode(current, next);
+      current = next;
+    }
+    await user.see({ role: "button", label: "Stop" });
+    await user.see("composer", { text: world.planPrompt });
+    await expectOneUserAdmission();
+    expect(await promptPosts()).toBe(1);
+    expect(await world.providerFinalRequests()).toHaveLength(1);
+    expect(await world.replyState()).toMatchObject({ deliveredChunks: 1, complete: false, aborted: false, timedOut: false });
+    await user.type("composer", "", { replace: true });
   });
 
   await step("B remains empty while bullet two and partial bullet three advance only in A", async () => {
@@ -598,6 +673,7 @@ continuityTest("CONT-01 restores the exact cumulative prefix while one answer st
       until: (state) => state.complete,
     });
     expect(gate.prefix).toBe(streamedContinuityChunks.join(""));
+    if (world.engine === "v1") expect(gate).toMatchObject({ aborted: false, timedOut: false });
     const assistant = await assistantText();
     expect(assistant.messages).toHaveLength(1);
     expect(assistant.text).toBe(completeContinuityAnswer);
@@ -617,6 +693,25 @@ continuityTest("CONT-01 restores the exact cumulative prefix while one answer st
     for (const bullet of streamedContinuityBullets) expect(b.text).not.toContain(bullet);
   });
 
+  if (world.engine === "v1") await step("B remembers Build without changing A's Plan choice or sending a message", async () => {
+    await select(world.neighbor);
+    await user.see({ role: "button", label: "Build" });
+    await selectMode("Build", "Plan");
+    await selectMode("Plan", "Build");
+    expect(await readTranscriptMessages(probe, "user")).toEqual([]);
+    expect(await readTranscriptMessages(probe, "assistant")).toEqual([]);
+    const b = await world.readNative(world.neighbor.sessionId);
+    expect(b.status).toBe(200);
+    expect(JSON.parse(b.text)).toEqual([]);
+    expect((await world.engineHttpEvents()).promptPosts).toEqual({ [world.session.sessionId]: 1 });
+    await select(world.session);
+    await user.see({ role: "button", label: "Plan" });
+    expect(await probe.storage("openwork.sessionAgents.v1")).toMatchObject({
+      [world.session.sessionId]: "plan",
+      [world.neighbor.sessionId]: "build",
+    });
+  });
+
   await step("reload recovers the exact completed answer without another admission", async () => {
     await user.reload();
     await user.see({ text: streamedContinuityBullets[9] }, { timeoutMs: 60_000 });
@@ -629,10 +724,158 @@ continuityTest("CONT-01 restores the exact cumulative prefix while one answer st
     expect(await world.providerFinalRequests()).toHaveLength(1);
     const b = await world.readNative(world.neighbor.sessionId);
     expect(b.text).not.toContain(streamedContinuityPrompt);
+    if (world.engine === "v1") {
+      await user.see({ role: "button", label: "Plan" });
+      await select(world.neighbor);
+      await user.see({ role: "button", label: "Build" });
+      await select(world.session);
+      await user.see({ role: "button", label: "Plan" });
+      expect(b.status).toBe(200);
+      expect(JSON.parse(b.text)).toEqual([]);
+      expect((await world.engineHttpEvents()).promptPosts).toEqual({});
+    }
     evidence.recordAssertionEvidence(
       "CONT-01 exact held-prefix continuity",
       `Exact 10-bullet answer once; click-to-prefix ${Math.round(firstReturnMs)}ms/${Math.round(secondReturnMs)}ms; one native prompt POST before reload and zero after; one final provider request; B empty.`,
       true,
     );
+  });
+
+  if (world.engine === "v1") await step("the next ordinary send uses Plan while the completed turn keeps Build", async () => {
+    await user.see({ role: "button", label: "Plan" });
+    await user.type("composer", world.planPrompt);
+    await user.click("Run task");
+    await user.see({ text: world.planReply }, { timeoutMs: 90_000 });
+    await user.see("Run task", { timeoutMs: 30_000 });
+    const users = await readTranscriptMessages(probe, "user");
+    expect(users).toHaveLength(2);
+    for (const text of [streamedContinuityPrompt, world.planPrompt]) expect(occurrences(users.join("\n"), text)).toBe(1);
+    const saved = await world.readNative(world.session.sessionId);
+    expect(saved.status).toBe(200);
+    const messages: unknown = JSON.parse(saved.text);
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        info: expect.objectContaining({ role: "user", agent: "build" }),
+        parts: expect.arrayContaining([expect.objectContaining({ type: "text", text: streamedContinuityPrompt })]),
+      }),
+      expect.objectContaining({
+        info: expect.objectContaining({ role: "user", agent: "plan" }),
+        parts: expect.arrayContaining([expect.objectContaining({ type: "text", text: world.planPrompt })]),
+      }),
+    ]));
+    expect(await promptPosts()).toBe(1);
+    expect(await world.providerFinalRequests()).toHaveLength(1);
+  });
+
+  const newTaskSessionId = world.engine === "v1" ? await step("a new task hands its selected Plan mode to its first send without changing existing conversations", async () => {
+    await user.click({ role: "button", label: "New task" });
+    await user.see("composer", { editable: true });
+    await user.see({ role: "button", label: "Build" });
+    await selectMode("Build", "Plan");
+    await user.type("composer", world.planPrompt);
+    await user.click("Run task");
+    const created = await probe.eventually(() => world.continuity.surfaceState("primary"), {
+      within: 30_000,
+      label: "new task owns a distinct conversation",
+      until: (state) => Boolean(state.sessionId && state.sessionId !== world.session.sessionId && state.sessionId !== world.neighbor.sessionId),
+    });
+    if (!created.sessionId) throw new Error("The new task did not create a conversation");
+    await user.see({ text: world.planReply }, { timeoutMs: 90_000 });
+    await user.see("Run task", { timeoutMs: 30_000 });
+    await user.see({ role: "button", label: "Plan" });
+    expect(await readTranscriptMessages(probe, "user")).toHaveLength(1);
+    const saved = await world.readNative(created.sessionId);
+    expect(saved.status).toBe(200);
+    const messages: unknown = JSON.parse(saved.text);
+    expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({
+      info: expect.objectContaining({ role: "user", agent: "plan" }),
+      parts: expect.arrayContaining([expect.objectContaining({ type: "text", text: world.planPrompt })]),
+    })]));
+    expect(await probe.storage("openwork.sessionAgents.v1")).toMatchObject({
+      [world.session.sessionId]: "plan",
+      [world.neighbor.sessionId]: "build",
+      [created.sessionId]: "plan",
+    });
+    await select(world.neighbor);
+    await user.see({ role: "button", label: "Build" });
+    await select(world.session);
+    await user.see({ role: "button", label: "Plan" });
+    expect((await world.engineHttpEvents()).promptPosts).toEqual({
+      [world.session.sessionId]: 1,
+      [created.sessionId]: 1,
+    });
+    return created.sessionId;
+  }) : null;
+
+  if (world.engine === "v1") await step("explicit Default survives navigation, other mode changes and reload, then applies only to the next request", async () => {
+    if (!newTaskSessionId) throw new Error("The Plan task did not retain its conversation identity");
+    const expectDefaultSelection = async () => {
+      await user.see("Run task", { timeoutMs: 30_000 });
+      await user.notSee({ role: "button", label: /^(Build|Plan)$/ });
+      expect(await probe.storage("openwork.sessionAgents.v1")).toMatchObject({
+        [world.session.sessionId]: null,
+        [world.neighbor.sessionId]: "plan",
+        [newTaskSessionId]: "plan",
+      });
+      expect(await probe.storage("openwork.preferences")).toMatchObject({ selectedAgent: "plan" });
+    };
+
+    await selectMode("Plan", "Default agent");
+    expect(await probe.storage("openwork.sessionAgents.v1")).toMatchObject({ [world.session.sessionId]: null });
+    await select(world.neighbor);
+    await selectMode("Build", "Plan");
+    await user.click({ role: "button", label: "New task" });
+    await user.see("composer", { editable: true });
+    await selectMode("Plan", "Build");
+    expect(await probe.storage("openwork.preferences")).toMatchObject({ selectedAgent: "build" });
+    await selectMode("Build", "Plan");
+    await select(world.session);
+    await expectDefaultSelection();
+    expect((await world.engineHttpEvents()).promptPosts).toEqual({
+      [world.session.sessionId]: 1,
+      [newTaskSessionId]: 1,
+    });
+
+    await user.reload();
+    await user.see({ text: world.planReply }, { timeoutMs: 60_000 });
+    await expectDefaultSelection();
+    await select(world.neighbor);
+    await user.see({ role: "button", label: "Plan" });
+    await select(world.session);
+    await expectDefaultSelection();
+    expect((await world.engineHttpEvents()).promptPosts).toEqual({});
+
+    await user.type("composer", world.defaultPrompt);
+    await user.click("Run task");
+    await user.see({ text: world.defaultReply }, { timeoutMs: 90_000 });
+    await expectDefaultSelection();
+    const users = await readTranscriptMessages(probe, "user");
+    expect(users).toHaveLength(3);
+    for (const text of [streamedContinuityPrompt, world.planPrompt, world.defaultPrompt]) {
+      expect(occurrences(users.join("\n"), text)).toBe(1);
+    }
+    const saved = await world.readNative(world.session.sessionId);
+    expect(saved.status).toBe(200);
+    const messages: unknown = JSON.parse(saved.text);
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        info: expect.objectContaining({ role: "user", agent: "build" }),
+        parts: expect.arrayContaining([expect.objectContaining({ type: "text", text: streamedContinuityPrompt })]),
+      }),
+      expect.objectContaining({
+        info: expect.objectContaining({ role: "user", agent: "plan" }),
+        parts: expect.arrayContaining([expect.objectContaining({ type: "text", text: world.planPrompt })]),
+      }),
+      expect.objectContaining({
+        info: expect.objectContaining({ role: "user", agent: "build" }),
+        parts: expect.arrayContaining([expect.objectContaining({ type: "text", text: world.defaultPrompt })]),
+      }),
+    ]));
+    expect((await world.engineHttpEvents()).promptPosts).toEqual({ [world.session.sessionId]: 1 });
+    expect(await world.providerFinalRequests(world.defaultPrompt)).toHaveLength(1);
+    expect(await world.providerFinalRequests()).toHaveLength(1);
+    const b = await world.readNative(world.neighbor.sessionId);
+    expect(b.status).toBe(200);
+    expect(JSON.parse(b.text)).toEqual([]);
   });
 });

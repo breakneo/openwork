@@ -1,11 +1,13 @@
 import { allocateFreePort, browserScript, clickAt, evaluate, hoverAt, reload, type Point, type Surface, typeText, waitForLocated } from "@openwork/cdp";
 import { createServer, type Server, type ServerResponse } from "node:http";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, realpath, rm, symlink } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { engineSessionProbe, observeSidebarExpansion, readAvailableModels, selectModel, waitFor } from "@openwork/behaviors";
 import { resolveEvalEngine, SkipError } from "@openwork/env";
 import type { Place, Seed } from "@openwork/env";
-import { daytonaSandbox, desktop as launchDesktop, startMockOnSandbox } from "@openwork/hosts";
+import { daytonaSandbox, defaultDaytonaExec, desktop as launchDesktop, execInSandbox, startMockOnSandbox } from "@openwork/hosts";
 import { startMockMcp } from "@openwork/labs";
+import { configureProvider } from "./chat.ts";
 
 const stormProviderId = "active-session-storm-mock";
 const stormModelId = "mock-agent-workload-model";
@@ -30,7 +32,7 @@ export interface StormPlan extends ShellSession, ShellWorkspace {
   finalReply: string;
 }
 
-type InstantMetricKind = "new-task" | "user-row";
+type InstantMetricKind = "new-task" | "hero-preparing" | "user-row";
 type InstantBoundaryKind = "creation" | "prompt";
 type InstantBoundaryStage = "request" | "response";
 
@@ -68,8 +70,9 @@ async function observeInstantRenderer(
   workspaceId: string,
   kind: InstantMetricKind,
   marker = "",
+  requireStarting = false,
 ) {
-  await seed.evalIn(app, browserScript((workspaceId, kind, marker) => {
+  await seed.evalIn(app, browserScript((workspaceId, kind, marker, requireStarting) => {
     if (window.__instantSendMetric) throw new Error("An instant-send renderer observer is already active");
     const state: InstantRendererState = {
       kind, started: false, trusted: false, elapsedMs: null, frames: 0,
@@ -77,6 +80,9 @@ async function observeInstantRenderer(
     };
     let startedAt = 0;
     let frame = 0;
+    let submittedHero: HTMLElement | null = null;
+    let submittedEditor: HTMLElement | null = null;
+    let submittedEditorRect: DOMRect | null = null;
 
     const visibleInViewport = (node: HTMLElement) => {
       const rect = node.getBoundingClientRect();
@@ -127,6 +133,27 @@ async function observeInstantRenderer(
         const hit = document.elementFromPoint(x, y);
         return hit instanceof Node && node.contains(hit);
       }
+      if (kind === "hero-preparing") {
+        const composer = editor();
+        const heading = [...surface.root.querySelectorAll<HTMLElement>("h2")]
+          .find((node) => node.textContent?.trim() === "What do you need done?" && visibleInViewport(node));
+        const hero = heading?.parentElement?.parentElement;
+        if (surface.kind !== "new-task" || !surface.headingVisible || !hero || hero !== submittedHero
+          || !composer || composer !== submittedEditor || !submittedEditorRect
+          || !hero.contains(composer) || !visibleInViewport(composer)
+          || surface.root.querySelector('[data-message-role="user"]')) return false;
+        const rect = composer.getBoundingClientRect();
+        if (rect.x !== submittedEditorRect.x || rect.y !== submittedEditorRect.y
+          || rect.width !== submittedEditorRect.width || rect.height !== submittedEditorRect.height) return false;
+        return !surface.root.querySelector('[data-loading-message="starting"], [data-loading-message="working"]')
+          && [...hero.querySelectorAll<HTMLElement>('button[aria-label="Creating conversation..."][aria-busy="true"]')]
+            .some((node) => visibleInViewport(node) && Boolean(node.querySelector('.animate-spin')));
+      }
+      if (requireStarting) {
+        const starting = [...surface.root.querySelectorAll<HTMLElement>('[data-loading-message="starting"]')].filter(visibleInViewport);
+        if (starting.length !== 1 || starting[0]?.getAttribute("role") !== "status" || starting[0]?.innerText.trim() !== "Starting…"
+          || [...surface.root.querySelectorAll<HTMLElement>('[data-loading-message="working"]')].some(visibleInViewport)) return false;
+      }
       const composer = editor();
       return [...surface.root.querySelectorAll<HTMLElement>('[data-message-role="user"]')]
         .some((row) => visibleInViewport(row) && row.innerText.includes(marker)
@@ -149,6 +176,18 @@ async function observeInstantRenderer(
         if (!(event instanceof KeyboardEvent) || event.key !== "Enter") return;
         const node = editor();
         if (!node || !(event.target instanceof Node) || !(event.target === node || node.contains(event.target))) return;
+        if (kind === "hero-preparing") {
+          if (event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.repeat) return;
+          const surface = surfaceRoot();
+          const heading = [...(surface?.root.querySelectorAll<HTMLElement>("h2") ?? [])]
+            .find((candidate) => candidate.textContent?.trim() === "What do you need done?" && visibleInViewport(candidate));
+          const hero = heading?.parentElement?.parentElement;
+          if (surface?.kind !== "new-task" || !hero || !hero.contains(node) || !visibleInViewport(node)
+            || !node.innerText.includes(marker) || !node.innerText.trim()) return;
+          submittedHero = hero;
+          submittedEditor = node;
+          submittedEditorRect = node.getBoundingClientRect();
+        }
       }
       state.started = true;
       state.trusted = true;
@@ -167,12 +206,12 @@ async function observeInstantRenderer(
       window.removeEventListener(eventName, capture, true);
     }
     window.__instantSendMetric = { state, stop };
-  }, [workspaceId, kind, marker]));
+  }, [workspaceId, kind, marker, requireStarting]));
   let disposed = false;
   return {
     async read(): Promise<InstantRendererState> {
       const value = await seed.evalIn(app, () => window.__instantSendMetric?.state ?? null);
-      if (!isRecord(value) || (value.kind !== "new-task" && value.kind !== "user-row")
+      if (!isRecord(value) || (value.kind !== "new-task" && value.kind !== "hero-preparing" && value.kind !== "user-row")
         || typeof value.started !== "boolean" || typeof value.trusted !== "boolean"
         || !(value.elapsedMs === null || typeof value.elapsedMs === "number")
         || typeof value.frames !== "number" || typeof value.mutations !== "number"
@@ -590,7 +629,8 @@ export async function sidebarOverflow(seed: Seed) {
   const longTitle = "Reading Google Drive documents for the quarterly workspace review";
   const app = await seed.desktop({ name: "sidebar-title-overflow-fade" });
   const workspacePath = "/tmp/Yonder";
-  const workspace = await seed.workspace(app, workspacePath);
+  // The desktop already owns its default first-launch workspace; the title under test is this folder's name.
+  const workspace = await seed.workspace(app, workspacePath, { create: true });
   const sessions = await seed.sessions(app, [longTitle]);
   return { app, workspace, workspacePath, sessions, longTitle };
 }
@@ -1182,6 +1222,15 @@ export async function workspaceNewTask(seed: Seed, { place }: { place: Place }) 
   }, [workspace.workspaceId, point.x, point.y]));
   const prepareWorkspaceNewTask = async (): Promise<Point> => {
     const deadline = Date.now() + 5_000;
+    // A reload can leave the pointer over the replacement header. Leave it
+    // before entering again so the real hover transition is rearmed.
+    await hoverAt(app, { x: 0, y: 0 });
+    let outside = await newTaskGeometry({ x: 0, y: 0 });
+    while (outside.headerHover && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      outside = await newTaskGeometry({ x: 0, y: 0 });
+    }
+    if (outside.headerHover) throw new Error("New task header did not release hover before re-entry");
     const reset = await seed.evalIn(app, browserScript((workspaceId) => {
       const workspace = document.querySelector<HTMLElement>(`[data-sidebar-workspace-id="${workspaceId}"]`);
       const plus = workspace?.querySelector<HTMLElement>("[data-workspace-new-task]") ?? null;
@@ -1340,7 +1389,7 @@ export async function workspaceNewTask(seed: Seed, { place }: { place: Place }) 
     prepareWorkspaceNewTask,
     clickWorkspaceNewTask,
     accessibleRunTaskReady,
-    observeRenderer: (kind: InstantMetricKind, marker = "") => observeInstantRenderer(seed, app, workspace.workspaceId, kind, marker),
+    observeRenderer: (kind: InstantMetricKind, marker = "", requireStarting = false) => observeInstantRenderer(seed, app, workspace.workspaceId, kind, marker, requireStarting),
     [Symbol.asyncDispose]: () => resources.disposeAsync(),
   };
 }
@@ -1395,16 +1444,70 @@ export async function pinnedSessions(seed: Seed) {
 }
 
 export async function commandPaletteSearch(seed: Seed) {
-  return oneWorkspace(seed, `command-palette-search-${Date.now()}`);
+  const name = `command-palette-search-${Date.now()}`;
+  const workspacePath = seed.tmpPath(name);
+  const longModelId = "gwm_01m292tscteantqy79spgyvbcs_01m292tsbxehmvrpjxfn7m4n86_01m292tsbgey6s6q4hbnvd6a8h";
+  const providerId = "palette-model-witness";
+  const app = await seed.appWeb({ name, workspacePath });
+  const workspace = await seed.workspace(app, workspacePath);
+  await configureProvider(seed, app, workspace.workspaceId, providerId, longModelId, {
+    model: `${providerId}/${longModelId}`,
+    provider: {
+      [providerId]: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Palette model witness",
+        options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "palette-model-fixture" },
+        models: { [longModelId]: { name: longModelId } },
+      },
+    },
+  });
+  await waitFor(app, () => Boolean(window.__openworkControl), {
+    timeoutMs: 60_000,
+    label: "reloaded app-web command palette is interactive",
+  });
+  return {
+    app,
+    workspace,
+    workspacePath,
+    longModelId,
+    location: () => seed.evalIn(app, () => window.location.pathname),
+    runtimeFacts: () => seed.evalIn(app, () => ({
+      browser: navigator.userAgent,
+      electronBridge: Boolean(window.__OPENWORK_ELECTRON__),
+    })),
+  };
 }
 
-type ArchiveFault = "none" | "false" | "error" | "timeout" | "unconfirmed" | "hold" | "retry" | "permission" | "question" | "prompt_error" | "hold_prompt" | "accepted_command" | "hold_archive";
+type ArchiveFault = "none" | "false" | "error" | "timeout" | "unconfirmed" | "hold" | "retry" | "permission" | "question" | "prompt_error" | "hold_prompt" | "accepted_command" | "accepted_prompt" | "hold_archive" | "hold_messages";
 type ArchiveRequest = {
   path: string; sessionId: string; action: string; messageID: string | null; result: string | number | null;
+  at: number; sequence: number; transport: "renderer" | "main";
   command?: { name: string; arguments: string; model: string | null; agent: string | null };
   responseBody?: string;
   dispatchError?: string;
+  cancelled?: boolean;
 };
+type ArchiveControl = { action: "state" | "release" }
+  | { action: "configure"; origin: string; workspaceIds: string[] }
+  | { action: "fault"; mode: ArchiveFault; sessionId: string; workspaceId: string };
+type ArchiveMainState = {
+  witness: string; mode: ArchiveFault; sessionId: string; workspaceId: string;
+  requests: ArchiveRequest[]; held: boolean; origin: string; workspaceIds: string[];
+};
+
+async function archiveMainControl(command: ArchiveControl): Promise<ArchiveMainState> {
+  const response = await window.__OPENWORK_ELECTRON__.invokeDesktop("__fetch",
+    "http://127.0.0.1/__openwork_archive_test_control", {
+      method: "POST", body: JSON.stringify(command), timeoutMs: 25_000,
+    });
+  if (response.status !== 200) throw new Error("Archive main-fetch bootstrap is unavailable");
+  const state: ArchiveMainState = JSON.parse(response.body);
+  if (state.witness !== "archive-main-fetch-v1" || !Array.isArray(state.requests)
+    || typeof state.held !== "boolean" || typeof state.origin !== "string" || !Array.isArray(state.workspaceIds)) {
+    throw new Error("Archive main-fetch bootstrap returned malformed state");
+  }
+  return state;
+}
 
 declare global {
   interface Window {
@@ -1425,7 +1528,17 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
   await using resources = new AsyncDisposableStack();
   const providerId = "session-archive-mock";
   const modelId = "mock-agent-workload-model";
-  const app = await seed.desktop({ name: "session-archive-button", model: `${providerId}/${modelId}` });
+  const remoteRoot = place.kind === "daytona" ? place.host()?.workspaceRoot : undefined;
+  if (place.kind === "daytona" && !remoteRoot?.startsWith("/")) throw new Error("Archive main-fetch bootstrap requires the remote source checkout path");
+  const preload = remoteRoot ? `${remoteRoot.replace(/\/+$/, "")}/evals/fixtures/archive-main-fetch.cjs`
+    : fileURLToPath(new URL("../fixtures/archive-main-fetch.cjs", import.meta.url));
+  const app = await seed.desktop({ name: "session-archive-button", model: `${providerId}/${modelId}`,
+    env: { NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require ${JSON.stringify(preload)}`].filter(Boolean).join(" ") },
+  });
+  const mainControl = (command: ArchiveControl) => seed.evalIn(app, browserScript(archiveMainControl, [command]), { timeoutMs: 30_000 });
+  await mainControl({ action: "state" }).catch((error: unknown) => {
+    throw new Error(`Archive main-fetch bootstrap was not installed from ${preload}`, { cause: error });
+  });
   const definition = seed.mock({ agentWorkloads: [{ promptMarker: "session-archive", matchAll: true, finalReply: "Archive fixture reply.", steps: [] }] });
   const sandbox = app.handle.sandboxId;
   const booted = app.handle.hostKind === "daytona"
@@ -1564,20 +1677,31 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
     if (!ready) throw new Error(`Archive workspace ${phase.workspaceId} route and sidebar did not become ready: ${JSON.stringify(lastState)}`);
   }
 
-  // Faults live at the HTTP boundary, not in product stores or archive code.
-  // The local desktop's loopback OpenCode requests use the renderer fetch.
-  await seed.evalIn(app, () => {
+  const upstreamOrigin = await seed.evalIn(app, async () => {
+    const info = await window.__OPENWORK_ELECTRON__.invokeDesktop("openworkServerInfo");
+    if (!info.running || !info.baseUrl) throw new Error("Archive engine is unavailable");
+    return new URL(info.baseUrl).origin;
+  });
+  await mainControl({ action: "configure", origin: upstreamOrigin, workspaceIds: [workspaceA.workspaceId, workspaceB.workspaceId] });
+  await seed.evalIn(app, browserScript((origin, workspaceIds) => {
     const original = window.fetch.bind(window);
     const state: Window["__archiveNetwork"] = { mode: "none", sessionId: "", workspaceId: "", requests: [], release: null, original };
     window.__archiveNetwork = state;
+    let sequence = 0;
     window.fetch = async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
+      const mount = url.pathname.match(/^\/(?:workspace|w)\/([^/]+)\/opencode\//);
+      if (url.origin !== origin || !mount || !workspaceIds.includes(decodeURIComponent(mount[1]))) return original(request);
+      const stamp: Pick<ArchiveRequest, "at" | "sequence" | "transport"> = { at: Date.now(), sequence: sequence++, transport: "renderer" };
       const match = url.pathname.match(/\/session\/([^/]+)\/(abort|prompt_async|command|shell)$/);
       const metadata = request.method === "PATCH" ? url.pathname.match(/\/session\/([^/]+)$/) : null;
+      const messages = request.method === "GET" && state.mode === "hold_messages"
+        ? url.pathname.match(/\/session\/([^/]+)\/message$/) : null;
       const record: ArchiveRequest | null = match && request.method === "POST"
-        ? { path: url.pathname, sessionId: match[1], action: match[2], messageID: null, result: null }
-        : metadata ? { path: url.pathname, sessionId: metadata[1], action: "metadata", messageID: null, result: null } : null;
+        ? { ...stamp, path: url.pathname, sessionId: match[1], action: match[2], messageID: null, result: null }
+        : metadata ? { ...stamp, path: url.pathname, sessionId: metadata[1], action: "metadata", messageID: null, result: null }
+        : messages ? { ...stamp, path: url.pathname, sessionId: messages[1], action: "messages", messageID: null, result: null } : null;
       if (record && ["prompt_async", "command"].includes(record.action)) {
         const body: unknown = await request.clone().json();
         if (body && typeof body === "object" && "messageID" in body && typeof body.messageID === "string") record.messageID = body.messageID;
@@ -1589,13 +1713,16 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
         }
       }
       if (record) state.requests.push(record);
-      const owner = url.pathname.startsWith("/workspace/" + encodeURIComponent(state.workspaceId) + "/opencode/");
+      const owner = decodeURIComponent(mount[1]) === state.workspaceId;
       const target = owner && record?.sessionId === state.sessionId;
       if (record?.action === "metadata" && target && state.mode === "hold_archive") {
         await new Promise<void>(resolve => { state.release = resolve; });
         state.release = null;
       }
-      if (record?.action === "command" && target && state.mode === "accepted_command") {
+      if (record && target && (
+        (record.action === "command" && state.mode === "accepted_command")
+        || (record.action === "prompt_async" && state.mode === "accepted_prompt")
+      )) {
         record.result = "accepted, not dispatched";
         const admitted = new Request(request, { signal: new AbortController().signal });
         state.release = async () => {
@@ -1604,13 +1731,13 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
             const response = await original(admitted);
             record.result = response.status;
             record.responseBody = (await response.text()).slice(0, 2000);
-            if (!response.ok) throw new Error("Admitted command dispatch failed: " + response.status + " " + record.responseBody);
+            if (!response.ok) throw new Error("Admitted " + record.action + " dispatch failed: " + response.status + " " + record.responseBody);
           } catch (error) {
             record.dispatchError = error instanceof Error ? error.message : String(error);
             throw error;
           }
         };
-        return Response.json({ ok: true, accepted: true });
+        return record.action === "prompt_async" ? new Response(null, { status: 204 }) : Response.json({ ok: true, accepted: true });
       }
       if (record?.action === "prompt_async" && target && state.mode === "prompt_error") {
         record.result = 400;
@@ -1644,10 +1771,30 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
       }
       const response = await original(request);
       if (record) record.result = response.status;
+      if (record?.action === "messages" && target && state.mode === "hold_messages" && response.ok) {
+        const body = new Uint8Array(await response.arrayBuffer());
+        const previousRelease = state.release;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            record.result = "held";
+            const finish = (expired: boolean) => {
+              if (record.result !== "held") return;
+              clearTimeout(timer);
+              record.result = expired ? "expired" : "released";
+              state.release = null;
+              controller.enqueue(body);
+              controller.close();
+            };
+            const timer = setTimeout(() => finish(true), 20_000);
+            state.release = async () => { await previousRelease?.(); finish(false); };
+          },
+        });
+        return new Response(stream, { status: response.status, headers: response.headers });
+      }
       // Merge only the owning endpoint's target. All unrelated statuses and
       // approvals remain authoritative, including concurrently running sessions.
       const { mode, sessionId, workspaceId } = state;
-      const owningResponse = url.pathname.startsWith("/workspace/" + encodeURIComponent(workspaceId) + "/opencode/");
+      const owningResponse = decodeURIComponent(mount[1]) === workspaceId;
       const stillArmed = () => state.mode === mode && state.sessionId === sessionId && state.workspaceId === workspaceId;
       if (owningResponse && response.ok && mode === "retry" && url.pathname.endsWith("/session/status")) {
         const statuses: Record<string, unknown> = await response.clone().json();
@@ -1665,11 +1812,12 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
       return response;
     };
     return true;
-  });
+  }, [upstreamOrigin, [workspaceA.workspaceId, workspaceB.workspaceId]]));
 
   async function networkFault(mode: ArchiveFault, sessionId: string) {
     const target = [a1, a2, b1, child, faultCandidate].find(session => session.sessionId === sessionId);
     if (!target) throw new Error("Archive fault target has no known workspace owner");
+    if ((await mainControl({ action: "state" })).held) throw new Error("Release the previous main archive fault before replacing it");
     await seed.evalIn(app, browserScript((mode, sessionId, workspaceId) => {
       if (window.__archiveNetwork.release) throw new Error("Release the previous archive fault before replacing it");
       window.__archiveNetwork.mode = mode;
@@ -1677,6 +1825,40 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
       window.__archiveNetwork.workspaceId = workspaceId;
       return true;
     }, [mode, sessionId, target.workspaceId]));
+    await mainControl({ action: "fault", mode, sessionId, workspaceId: target.workspaceId });
+  }
+
+  const requestLedger = new Map<string, ArchiveRequest>();
+  function mergeRequests(renderer: unknown[], main: ArchiveRequest[]) {
+    const entries = [...renderer, ...main].map((entry) => {
+      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.sessionId !== "string"
+        || typeof entry.action !== "string" || typeof entry.at !== "number" || typeof entry.sequence !== "number"
+        || (entry.transport !== "renderer" && entry.transport !== "main")
+        || !(entry.messageID === null || typeof entry.messageID === "string")
+        || !(entry.result === null || typeof entry.result === "string" || typeof entry.result === "number")) {
+        throw new Error("Malformed archive request ledger");
+      }
+      let command: ArchiveRequest["command"];
+      if (entry.command !== undefined) {
+        const value = entry.command;
+        if (!isRecord(value) || typeof value.name !== "string" || typeof value.arguments !== "string"
+          || !(value.model === null || typeof value.model === "string") || !(value.agent === null || typeof value.agent === "string")) {
+          throw new Error("Malformed archive command request");
+        }
+        command = { name: value.name, arguments: value.arguments, model: value.model, agent: value.agent };
+      }
+      const record: ArchiveRequest = {
+        path: entry.path, sessionId: entry.sessionId, action: entry.action, result: entry.result, messageID: entry.messageID,
+        at: entry.at, sequence: entry.sequence, transport: entry.transport,
+        ...(command === undefined ? {} : { command: { name: command.name, arguments: command.arguments, model: command.model, agent: command.agent } }),
+        ...(typeof entry.responseBody === "string" ? { responseBody: entry.responseBody } : {}),
+        ...(typeof entry.dispatchError === "string" ? { dispatchError: entry.dispatchError } : {}),
+        ...(typeof entry.cancelled === "boolean" ? { cancelled: entry.cancelled } : {}),
+      };
+      return record;
+    }).sort((left, right) => left.at - right.at || left.transport.localeCompare(right.transport) || left.sequence - right.sequence);
+    for (const entry of entries) requestLedger.set(`${entry.transport}:${entry.sequence}`, entry);
+    return [...requestLedger.values()];
   }
 
   async function facts() {
@@ -1714,12 +1896,7 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
         || typeof entry.archived !== "boolean" || typeof entry.status !== "string") throw new Error("Malformed archive session");
       return { workspaceId: entry.workspaceId, sessionId: entry.sessionId, archived: entry.archived, status: entry.status };
     });
-    const requests = result.requests.map((entry) => {
-      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.sessionId !== "string"
-        || typeof entry.action !== "string") throw new Error("Malformed archive request");
-      return { path: entry.path, sessionId: entry.sessionId, action: entry.action, result: entry.result, messageID: entry.messageID,
-        command: entry.command, responseBody: entry.responseBody, dispatchError: entry.dispatchError };
-    });
+    const requests = mergeRequests(result.requests, (await mainControl({ action: "state" })).requests);
     return { sessions, requests, surfaces: result.surfaces, activeRows: result.activeRows, tabs: result.tabs, memory: result.memory };
   }
 
@@ -1738,6 +1915,36 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
     commandSetup,
     paletteShortcut,
     facts,
+    mainRequests: async () => (await mainControl({ action: "state" })).requests,
+    archiveAccessibleDescription: async () => {
+      const tree = await app.client.send("Accessibility.getFullAXTree");
+      if (!isRecord(tree) || !Array.isArray(tree.nodes)) throw new Error("Archive accessibility tree is unavailable");
+      const dialog = tree.nodes.find(node => isRecord(node) && isRecord(node.role) && node.role.value === "alertdialog" && node.ignored !== true);
+      if (!isRecord(dialog) || !isRecord(dialog.description) || typeof dialog.description.value !== "string") {
+        throw new Error("Archive dialog has no computed accessible description");
+      }
+      return dialog.description.value;
+    },
+    archiveConfirmation: () => seed.evalIn(app, () => {
+      const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]');
+      const title = dialog?.querySelector<HTMLElement>('[data-slot="alert-dialog-title"]');
+      const bounds = dialog?.getBoundingClientRect();
+      return {
+        title: title?.textContent,
+        text: dialog?.innerText,
+        metadata: [...(dialog?.querySelectorAll("dl > div") ?? [])].map(row => ({
+          label: row.querySelector("dt")?.textContent,
+          value: row.querySelector("dd")?.textContent,
+          selectable: getComputedStyle(row.querySelector("dd") ?? row).userSelect === "text",
+        })),
+        titleUnclipped: Boolean(title && title.scrollWidth <= title.clientWidth && title.scrollHeight <= title.clientHeight
+          && getComputedStyle(title).textOverflow !== "ellipsis" && getComputedStyle(title).webkitLineClamp === "none"),
+        fitsViewport: Boolean(bounds && bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight),
+        noHorizontalOverflow: Boolean(dialog && dialog.scrollWidth <= dialog.clientWidth),
+        contentReachable: Boolean(dialog && (dialog.scrollHeight <= dialog.clientHeight || getComputedStyle(dialog).overflowY === "auto")),
+      };
+    }),
+    resize: (width: number, height: number) => app.client.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }),
     networkFault,
     faultObservation: () => seed.evalIn(app, browserScript(async (workspaceIds) => {
       const info = await window.__OPENWORK_ELECTRON__.invokeDesktop("openworkServerInfo");
@@ -1748,27 +1955,38 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
         for (const endpoint of ["session/status", "permission", "question"]) {
           const url = `${root}/workspace/${workspaceId}/opencode/${endpoint}`;
           const options = { headers: { Authorization: "Bearer " + (info.ownerToken ?? info.clientToken) }, signal: AbortSignal.timeout(10000) };
-          const [actual, observed] = await Promise.all([window.__archiveNetwork.original(url, options), fetch(url, options)]);
-          if (!actual.ok || !observed.ok) throw new Error(`Fault observation failed for ${endpoint}`);
-          results.push({ workspaceId, endpoint, actual: await actual.json(), observed: await observed.json() });
+          const [actual, observed, main] = await Promise.all([
+            window.__archiveNetwork.original(url, options), fetch(url, options),
+            window.__OPENWORK_ELECTRON__.invokeDesktop("__fetch", url, { method: "GET", headers: options.headers, timeoutMs: 10000 }),
+          ]);
+          if (!actual.ok || !observed.ok || main.status < 200 || main.status >= 300) throw new Error(`Fault observation failed for ${endpoint}`);
+          const actualBody = await actual.json();
+          results.push({ workspaceId, endpoint, transport: "renderer", actual: actualBody, observed: await observed.json() });
+          results.push({ workspaceId, endpoint, transport: "main", actual: actualBody, observed: JSON.parse(main.body) });
         }
       }
       return results;
     }, [[workspaceA.workspaceId, workspaceB.workspaceId]]), { timeoutMs: 30_000 }),
-    diagnostics: () => seed.evalIn(app, () => ({
-      hash: location.hash,
-      fault: { mode: window.__archiveNetwork.mode, sessionId: window.__archiveNetwork.sessionId, workspaceId: window.__archiveNetwork.workspaceId, held: window.__archiveNetwork.release !== null },
-      composer: window.__openwork?.slice("composer"),
-      events: window.__openwork?.events(80),
-      drafts: localStorage.getItem("openwork.session-drafts.v2"),
-      surfaces: [...document.querySelectorAll<HTMLElement>("[data-session-surface-id]")].map(surface => ({
-        sessionId: surface.dataset.sessionSurfaceId,
-        text: surface.innerText.slice(-6000),
-        draft: surface.querySelector<HTMLElement>('[data-lexical-editor="true"]')?.innerText,
-      })),
-      actions: window.__openworkControl.listActions().filter(action => action.id.startsWith("composer.")).map(action => ({ id: action.id, disabled: action.disabled })),
-      requests: window.__archiveNetwork.requests,
-    })),
+    diagnostics: async () => {
+      const renderer = await seed.evalIn(app, () => ({
+        hash: location.hash,
+        fault: { mode: window.__archiveNetwork.mode, sessionId: window.__archiveNetwork.sessionId, workspaceId: window.__archiveNetwork.workspaceId, held: window.__archiveNetwork.release !== null },
+        composer: window.__openwork?.slice("composer"),
+        events: window.__openwork?.events(80),
+        drafts: localStorage.getItem("openwork.session-drafts.v2"),
+        surfaces: [...document.querySelectorAll<HTMLElement>("[data-session-surface-id]")].map(surface => ({
+          sessionId: surface.dataset.sessionSurfaceId,
+          text: surface.innerText.slice(-6000),
+          draft: surface.querySelector<HTMLElement>('[data-lexical-editor="true"]')?.innerText,
+        })),
+        actions: window.__openworkControl.listActions().filter(action => action.id.startsWith("composer.")).map(action => ({ id: action.id, disabled: action.disabled })),
+        requests: window.__archiveNetwork.requests,
+      }));
+      const main = await mainControl({ action: "state" });
+      return { ...renderer, fault: { ...renderer.fault, held: renderer.fault.held || main.held },
+        mainFault: { mode: main.mode, sessionId: main.sessionId, workspaceId: main.workspaceId, held: main.held },
+        requests: mergeRequests(renderer.requests, main.requests) };
+    },
     surfaceReady: (sessionId: string) => seed.evalIn(app, browserScript((sessionId) => {
       const surface = document.querySelector<HTMLElement>(`[data-session-surface-id="${sessionId}"]`);
       const snapshot = window.__openwork?.slice("composer")?.snapshotQuery;
@@ -1791,11 +2009,19 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
       if (!response.ok) throw new Error("Independent prompt rejected: " + response.status);
       return true;
     }, [session, providerId, modelId]), { timeoutMs: 20_000 }),
-    releaseAbort: () => seed.evalIn(app, async () => {
-      if (!window.__archiveNetwork.release) throw new Error("No pending archive request to release");
-      await window.__archiveNetwork.release();
+    releaseAbort: async () => {
+      const main = await mainControl({ action: "state" });
+      const rendererHeld = await seed.evalIn(app, () => window.__archiveNetwork.release !== null);
+      if (!main.held && !rendererHeld) throw new Error("No pending archive request to release");
+      if (main.held) await mainControl({ action: "release" });
+      if (rendererHeld) await seed.evalIn(app, async () => {
+        if (!window.__archiveNetwork.release) throw new Error("Renderer archive request was cancelled before release");
+        await window.__archiveNetwork.release();
+        return true;
+      }, { timeoutMs: 30_000 });
+      if (main.mode === "hold") await networkFault("none", main.sessionId);
       return true;
-    }, { timeoutMs: 30_000 }),
+    },
     requests: async () => (await mock.agentRequests()).filter(request => request.kind !== "utility"),
     releaseRun: () => setHeld(false),
     holdRun: () => setHeld(true),
@@ -1817,11 +2043,81 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
 }
 
 export async function archiveSessions(seed: Seed) {
-  const engine = resolveEvalEngine();
   const app = await seed.desktop({ name: "session-archive-undo" });
-  const workspacePath = seed.tmpPath("session-archive-undo");
-  const workspace = await seed.workspace(app, workspacePath);
-  const [candidate, neighbor] = await seed.sessions(app, ["Archive candidate", "Archive neighbor"]);
+  return archiveWorld(seed, app, seed.tmpPath("session-archive-undo"), ["Archive candidate", "Archive neighbor"]);
+}
+
+/**
+ * Archive in a workspace the desktop stores by a linked path. The folder does
+ * not exist when the workspace is added, so the desktop keeps the path as
+ * given (`<root>/link/OpenWork Chat`) while the engine resolves it and stamps
+ * every session with the real path (`<root>/real/OpenWork Chat`) — the shape a
+ * fresh macOS profile has under `/var` -> `/private/var`.
+ */
+export async function archiveSessionsInLinkedWorkspace(seed: Seed) {
+  if (resolveEvalEngine() !== "v1") throw new SkipError("Archive is unavailable in the v2 preview; session-archive-undo covers that.");
+  const app = await seed.desktop({ name: "session-archive-linked-path" });
+  const root = seed.tmpPath("session-archive-linked");
+  const real = `${root}/real`;
+  const link = `${root}/link`;
+  // The real parent as the app host resolves it; `seed.tmpPath` itself may sit behind a symlink (macOS /tmp).
+  let resolvedReal: string;
+  if (app.handle.sandboxId) {
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const script = `mkdir -p ${quote(real)} && ln -sfn ${quote(real)} ${quote(link)} && readlink -f ${quote(real)}`;
+    const result = await execInSandbox(defaultDaytonaExec, app.handle.sandboxId, `printf %s ${Buffer.from(script).toString("base64")} | base64 -d | bash`, { timeoutMs: 15_000, context: "Arrange the linked workspace parent" });
+    resolvedReal = result.stdout.trim();
+    if (result.code !== 0 || !resolvedReal.startsWith("/")) throw new Error(`Linked workspace parent arrangement failed: ${result.stderr || result.stdout}`);
+  } else {
+    await mkdir(real, { recursive: true });
+    await symlink(real, link);
+    resolvedReal = await realpath(real);
+  }
+  const world = await archiveWorld(seed, app, `${link}/OpenWork Chat`, ["Split pane conversation", "Other pane"], { create: true });
+  return {
+    ...world,
+    realWorkspacePath: `${resolvedReal}/OpenWork Chat`,
+    /** The path the desktop persisted for the workspace, exactly as it will address the engine. */
+    storedWorkspacePath: async () => {
+      const value = await seed.evalIn(app, browserScript((workspaceId) =>
+        window.__openwork?.slice?.("route")?.workspaces?.find(item => item.id === workspaceId)?.path ?? null, [world.workspace.workspaceId]));
+      if (typeof value !== "string") throw new Error(`Stored workspace path was malformed: ${JSON.stringify(value)}`);
+      return value;
+    },
+    /** The directory the engine stamped on each session, read through the workspace mount. */
+    engineDirectories: async (): Promise<Record<string, string>> => {
+      const value = await seed.evalIn(app, browserScript(async (workspaceId) => {
+        const info = await window.__OPENWORK_ELECTRON__?.invokeDesktop?.("openworkServerInfo");
+        if (!info?.running || !info.baseUrl) throw new Error("OpenWork server is unavailable");
+        const response = await fetch(`${String(info.baseUrl).replace(/\/+$/, "")}/workspace/${encodeURIComponent(workspaceId)}/opencode/session?limit=200`, {
+          headers: { Authorization: "Bearer " + String(info.ownerToken ?? info.clientToken ?? "") }, signal: AbortSignal.timeout(15000),
+        });
+        if (!response.ok) throw new Error("Workspace session listing failed with HTTP " + response.status);
+        const sessions = await response.json();
+        if (!Array.isArray(sessions)) throw new Error("Workspace session listing was not an array");
+        return Object.fromEntries(sessions.filter((session) => typeof session?.id === "string" && typeof session?.directory === "string")
+          .map((session) => [session.id, session.directory]));
+      }, [world.workspace.workspaceId]), { awaitPromise: true, timeoutMs: 20_000 });
+      if (!isRecord(value) || !Object.values(value).every((directory) => typeof directory === "string")) {
+        throw new Error(`Engine directories were malformed: ${JSON.stringify(value)}`);
+      }
+      return Object.fromEntries(Object.entries(value).map(([id, directory]) => [id, String(directory)]));
+    },
+    splitFacts: () => seed.evalIn(app, () => {
+      const layout = window.__openworkControl?.context?.()?.conversations?.layout;
+      return {
+        primarySessionId: (layout?.kind === "split" ? layout.primarySessionId : undefined) ?? (layout?.kind === "single" ? layout.sessionId : undefined) ?? "",
+        secondarySessionId: (layout?.kind === "split" ? layout.secondarySessionId : undefined) ?? "",
+        secondaryPaneCount: document.querySelectorAll('[data-workbench-pane="secondary"]').length,
+      };
+    }),
+  };
+}
+
+async function archiveWorld(seed: Seed, app: Surface, workspacePath: string, titles: [string, string], options: { create?: boolean } = {}) {
+  const engine = resolveEvalEngine();
+  const workspace = await seed.workspace(app, workspacePath, options);
+  const [candidate, neighbor] = await seed.sessions(app, titles);
   if (!candidate || !neighbor) throw new Error("Archive world did not create both sessions.");
   await seed.evalIn(app, browserScript((workspaceId) => {
     const original = window.fetch.bind(window);
@@ -1910,6 +2206,36 @@ export async function archiveSessions(seed: Seed) {
   }
 
   return { app, engine, workspace, workspacePath, candidate, neighbor, archivedAt, sidebar, undoToastSettled,
+    // The rename UI rejects blank input; arrange persisted legacy titles through the native API.
+    setCandidateTitle: (title: string) => seed.evalIn(app, browserScript(async (workspaceId, sessionId, title) => {
+      const info = await window.__OPENWORK_ELECTRON__?.invokeDesktop?.("openworkServerInfo");
+      if (!info?.running || !info.baseUrl) throw new Error("OpenWork server is unavailable");
+      const response = await fetch(`${info.baseUrl.replace(/\/+$/, "")}/workspace/${encodeURIComponent(workspaceId)}/opencode/session/${encodeURIComponent(sessionId)}`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${info.ownerToken ?? info.clientToken ?? ""}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new Error(`Setting fixture title failed with HTTP ${response.status}`);
+      const session = await response.json();
+      if (session.id !== sessionId || typeof session.title !== "string") throw new Error("Unexpected session title response");
+      return session.title;
+    }, [workspace.workspaceId, candidate.sessionId, title]), { awaitPromise: true, timeoutMs: 20_000 }),
+    archiveToast: () => seed.evalIn(app, () => {
+      const pill = document.querySelector<HTMLElement>("[data-undo-toast]");
+      const message = pill?.querySelector("p");
+      const bounds = pill?.getBoundingClientRect();
+      return {
+        text: message?.textContent,
+        fullTitle: message?.querySelector("[title]")?.getAttribute("title"),
+        truncated: Boolean(message && message.scrollWidth > message.clientWidth && getComputedStyle(message).textOverflow === "ellipsis"),
+        fitsViewport: Boolean(bounds && bounds.left >= 0 && bounds.right <= window.innerWidth),
+        actionsInside: Boolean(pill && bounds && [...pill.querySelectorAll("button")].every(button => {
+          const action = button.getBoundingClientRect();
+          return action.width > 0 && action.left >= bounds.left && action.right <= bounds.right;
+        })),
+      };
+    }),
     hoverArchiveButton: async () => {
       // Disabled buttons reject pointer hits; hover their visible bounds without clicking.
       const button = await waitForLocated(app, { testId: `session-archive-${candidate.sessionId}` }, { timeoutMs: 10_000 });

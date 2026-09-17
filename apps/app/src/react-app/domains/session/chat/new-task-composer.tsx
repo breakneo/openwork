@@ -9,7 +9,6 @@ import type { ComposerAttachment, McpServerEntry, McpStatusMap, ModelOption, Mod
 import { t } from "@/i18n";
 import type { ComposerSettingsSection } from "@/react-app/domains/settings/library";
 import { ReactSessionComposer } from "@/react-app/domains/session/surface/composer/composer";
-import { ImageAttachmentBadge } from "@/components/chat/image-attachment-badge";
 import { WorkspaceRunModeMenu } from "@/react-app/domains/session/surface/composer/workspace-run-mode-menu";
 import {
   snapshotComposerSessionState,
@@ -294,15 +293,15 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
     return plugins;
   };
 
-  const handleInsertMention = (kind: ComposerMentionKind, value: string) => {
+  const handleInsertMention = (kind: ComposerMentionKind, value: string, nextDraft?: string) => {
     // @agent mentions switch the pending task's agent instead of inserting a
     // mention token (mirrors the session composer, #2101).
     if (kind === "agent") {
-      updateDraft(continuationHolderRef.current.state.draft.replace(/@([^\s@]*)$/, ""));
+      updateDraft(nextDraft ?? continuationHolderRef.current.state.draft.replace(/@([^\s@]*)$/, ""));
       context?.onSelectAgent(value);
       return;
     }
-    updateDraft(continuationHolderRef.current.state.draft.replace(/@([^\s@]*)$/, `@${encodeComposerMentionValue(value)} `));
+    updateDraft(nextDraft ?? continuationHolderRef.current.state.draft.replace(/@([^\s@]*)$/, `@${encodeComposerMentionValue(value)} `));
     updateMentions({ ...continuationHolderRef.current.state.mentions, [value]: kind });
   };
 
@@ -408,16 +407,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
   };
 
   return (
-    <>
-    {pendingSubmission ? <div className="mb-4 whitespace-pre-wrap rounded-xl bg-muted px-4 py-3 text-sm" data-message-role="user">
-      {resolvePastedTextPlaceholders(pendingSubmission.draft, pendingSubmission.pasteParts).replace(/\[attachment [^\]]+\]/g, "")}
-      {pendingSubmission.attachments.map((attachment) => <span key={attachment.id} className="mx-1 inline-flex align-middle">
-        {attachment.kind === "image" && attachment.previewUrl
-          ? <ImageAttachmentBadge src={attachment.previewUrl} alt={attachment.name} />
-          : attachment.name}
-      </span>)}
-    </div> : null}
-    {pendingSubmission?.attachments.length ? <div role="status" className="mb-2 text-xs text-muted-foreground">Creating conversation...</div> : null}
+    <div>
     {submissionError ? <div role="alert" className="mb-2 text-sm text-red-11">{submissionError}</div> : null}
     {failedSubmission ? <button type="button" disabled={Boolean(props.draft || attachments.length)} className="mb-2 text-sm disabled:opacity-50" onClick={() => {
       restoreComposer(failedSubmission);
@@ -435,8 +425,14 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       busy={false}
       steering={false}
       submissionPreparing={props.busy || pendingSubmission !== null || failedSubmission !== null}
+      submissionPreparingLabel={failedSubmission ? "Restore the unsent message before sending" : "Creating conversation..."}
       queuedCount={0}
       disabled={Boolean(context?.modelUnavailable)}
+      disabledReasons={["send_model_unavailable"]}
+      preparingReasons={[
+        ...(props.busy || pendingSubmission !== null ? ["send_creating_session" as const] : []),
+        ...(failedSubmission !== null ? ["send_restore_unsent" as const] : []),
+      ]}
       modelUnavailable={context?.modelUnavailable}
       modelUnavailableMessage={context?.modelUnavailableMessage}
       organizationModelsEmpty={context?.organizationModelsEmpty}
@@ -487,7 +483,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       flush
       draftScopeKey={`new-task:${workspaceId ?? "chat-first"}`}
     />
-    </>
+    </div>
   );
 }
 

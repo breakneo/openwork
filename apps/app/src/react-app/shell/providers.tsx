@@ -19,12 +19,11 @@ import { ServerProvider } from "@/react-app/kernel/server-provider";
 import { ArchitectureMismatchGate } from "./architecture-mismatch-gate";
 import { BootStateProvider } from "./boot-state";
 import { DesktopRuntimeBoot } from "./desktop-runtime-boot";
-import { useEnterpriseActivationRequired } from "@/react-app/domains/cloud/enterprise-activation-gate";
 import { startDebugLogger, stopDebugLogger } from "./debug-logger";
 import { resolveOpenworkConnection } from "./openwork-connection";
 import { ReloadCoordinatorProvider } from "./reload-coordinator";
 
-function resolveDefaultServerUrl(): string {
+export function resolveDefaultServerUrl(): string {
   if (isDesktopRuntime()) return "http://127.0.0.1:4096";
 
   const openworkUrl =
@@ -32,7 +31,10 @@ function resolveDefaultServerUrl(): string {
       ? import.meta.env.VITE_OPENWORK_URL.trim()
       : "";
   if (openworkUrl) {
-    return `${openworkUrl.replace(/\/+$/, "")}/opencode`;
+    const baseUrl = openworkUrl === "/api/openwork" && typeof window !== "undefined"
+      ? new URL(openworkUrl, window.location.origin).href
+      : openworkUrl;
+    return `${baseUrl.replace(/\/+$/, "")}/opencode`;
   }
 
   if (isWebDeployment() && import.meta.env.PROD && typeof window !== "undefined") {
@@ -50,20 +52,12 @@ type AppProvidersProps = {
   children: ReactNode;
 };
 
+// One provider tree for every activation state. The runtime bridges below
+// (DesktopRuntimeBoot, BrowserLoginSyncAccessBridge, AutomationRunnerBridge,
+// GlobalQueueDrainerBridge) each render nothing until enterprise activation
+// completes, so AppRoot-level consumers such as DesktopUpdaterProvider always
+// find the same contexts and nothing privileged starts before activation.
 export function EnterpriseAwareAppProviders({ children }: AppProvidersProps) {
-  const activationRequired = useEnterpriseActivationRequired();
-  if (activationRequired) {
-    // Pre-activation children still include AppRoot-level consumers
-    // (DesktopUpdaterProvider since #4482) whose hooks read the local and
-    // desktop-config contexts, so those providers must stay mounted here too.
-    return (
-      <ConnectLinkProvider>
-        <DesktopConfigProvider>
-          <LocalProvider>{children}</LocalProvider>
-        </DesktopConfigProvider>
-      </ConnectLinkProvider>
-    );
-  }
   return (
     <>
       <DesktopRuntimeBoot />

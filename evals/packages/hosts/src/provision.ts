@@ -123,6 +123,8 @@ export interface DesktopSandboxOptions {
   releaseFetch?: typeof fetch;
   /** Daytona idle shutdown in minutes; preview worlds pass 0 so their owner process controls expiry. */
   autoStopMinutes?: number;
+  private?: boolean;
+  onCreated?: (sandbox: string) => Promise<void>;
   /** Test-only override for the sandbox exec-readiness budget. */
   sandboxReadyTimeoutMs?: number;
   log?: (line: string) => void;
@@ -171,6 +173,12 @@ export interface PrepareSandboxRepoOptions extends ProvisionExecOptions {
 export interface DenSandboxOptions {
   ref: string;
   reuse?: string;
+  /**
+   * The reused sandbox's baked public identity, as handed back by the runner
+   * that provisioned it. Den signs setup links and OAuth metadata with these
+   * exact hosts, so a reuse without them can only offer fresh aliases.
+   */
+  reuseUrls?: { webUrl: string; apiUrl: string };
   repoRoot?: string;
   bootstrapAdminEmail?: string;
   /** Extra Den environment for a freshly provisioned sandbox; a reused Den is already running and cannot take it. */
@@ -670,6 +678,7 @@ async function provisionSandbox(
     : undefined;
   const ref = release ? "" : assertSafeRef(options.ref);
   const reused = options.reuse?.trim() || "";
+  if (options.private === true && reused) throw new Error("Private sandbox provisioning cannot reuse an unverified sandbox.");
   let sandbox = reused;
   let created = false;
   let ownedSandbox = "";
@@ -697,13 +706,14 @@ async function provisionSandbox(
             "--snapshot", id,
             ...(options.secrets === true ? ["--volume", "openwork-eval-secrets:/daytona-secrets"] : []),
             "--auto-stop", requestedAutoStop,
-            "--public",
+            ...(options.private === true ? [] : ["--public"]),
             "--target", "us",
           ],
           `sandbox creation gate for ${sandbox}`,
           { timeoutMs: 300_000 },
         );
         created = true;
+        await options.onCreated?.(sandbox);
         log(`==> ${surface} sandbox created: ${sandbox}`);
       }
       await waitForExecReady(exec, sandbox, options.sandboxReadyTimeoutMs);
@@ -1098,7 +1108,15 @@ export async function provisionDenSandbox(options: DenSandboxOptions & Provision
   let webUrl: string;
   let apiUrl: string;
 
-  if (reused) {
+  if (reused && options.reuseUrls) {
+    // The runner that provisioned this sandbox kept its baked DEN_*_PUBLIC_URL
+    // identity. Den builds connector setup links and OAuth metadata from those
+    // hosts, and a desktop only opens a setup link on the Den it signed in to.
+    sandbox = reused;
+    webUrl = options.reuseUrls.webUrl;
+    apiUrl = options.reuseUrls.apiUrl;
+    log(`Den baked identity reused for ${sandbox}: ${webUrl}`);
+  } else if (reused) {
     sandbox = reused;
     // Reused sandboxes only get fresh signed aliases: their baked
     // DEN_*_PUBLIC_URL identity is unknown here, so RFC 9728 validating MCP

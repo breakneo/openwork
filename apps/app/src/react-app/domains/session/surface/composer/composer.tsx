@@ -37,6 +37,8 @@ import {
   mergeComposerConnectionInventory,
 } from "./composer-connections";
 import { DevProfiler } from "@/react-app/shell/dev-profiler";
+import { connectionDiagnosticHistory, type ConnectionDiagnosticSource, type SendDiagnosticReason } from "@/app/lib/connection-diagnostic-history";
+import { composerDiagnosticBlockers } from "./composer-diagnostics";
 
 type MentionItem = {
   id: string;
@@ -60,8 +62,11 @@ type ComposerProps = {
   stopping?: boolean;
   steering: boolean;
   submissionPreparing: boolean;
+  submissionPreparingLabel?: string;
   queuedCount: number;
   disabled: boolean;
+  disabledReasons?: readonly SendDiagnosticReason[];
+  preparingReasons?: readonly SendDiagnosticReason[];
   modelUnavailable?: boolean;
   modelUnavailableMessage?: string | null;
   organizationModelsEmpty?: boolean;
@@ -103,7 +108,7 @@ type ComposerProps = {
   onOpenSettingsSection?: (section: ComposerSettingsSection) => void;
   recentFiles: string[];
   searchFiles: (query: string) => Promise<string[]>;
-  onInsertMention: (kind: ComposerMentionKind, value: string) => void;
+  onInsertMention: (kind: ComposerMentionKind, value: string, draft?: string) => void;
   /** Sent-prompt history (oldest first) recalled with ArrowUp/ArrowDown (#2012). */
   inputHistory?: string[];
   onPasteText: (text: string) => void;
@@ -247,6 +252,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
   const [toolMenuLayout, setToolMenuLayout] = useState<ToolMenuLayout | null>(null);
   const [toolMenuSection, setToolMenuSection] = useState<ToolMenuSection>("commands");
   const [mentionItems, setMentionItems] = useState<MentionItem[]>([]);
+  const [activeMentionQuery, setActiveMentionQuery] = useState<string | null>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [menuIndex, setMenuIndex] = useState(0);
   const menuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -365,9 +371,8 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
   const slashCommandQuery = getSlashCommandQuery(props.draft);
   const slashOpenNext = slashCommandQuery !== null;
   const slashQuery = slashCommandQuery ?? "";
-  const mentionMatch = props.draft.match(/@([^\s@]*)$/);
-  const mentionOpenNext = Boolean(mentionMatch);
-  const mentionQuery = mentionMatch?.[1] ?? "";
+  const mentionOpenNext = activeMentionQuery !== null;
+  const mentionQuery = activeMentionQuery ?? "";
   const nonDefaultAgents = useMemo(() => agents.filter(isNonDefaultAgent), [agents]);
   const showAgentPicker = props.selectedAgent !== null;
 
@@ -530,7 +535,11 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     if (!mentionOpen) return;
     let cancelled = false;
     setMentionItems(COMPUTER_MENTIONS);
-    void Promise.all([props.listAgents(), props.searchFiles(mentionQuery), listRunningAppsForMention()]).then(([agentList, files, apps]) => {
+    void Promise.all([
+      props.listAgents().catch(() => []),
+      props.searchFiles(mentionQuery).catch(() => []),
+      listRunningAppsForMention(),
+    ]).then(([agentList, files, apps]) => {
       if (cancelled) return;
       const recent = props.recentFiles.slice(0, 8);
       const next: MentionItem[] = [
@@ -777,6 +786,26 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     ? importedPlugins.find((plugin) => `plugin:${plugin.pluginId}` === toolMenuSection) ?? null
     : null;
   const canSend = props.draft.trim().length > 0 || props.attachments.length > 0;
+  const diagnosticsRef = useRef<ConnectionDiagnosticSource | null>(null);
+  useEffect(() => {
+    const diagnostics = connectionDiagnosticHistory.createSource();
+    diagnosticsRef.current = diagnostics;
+    return () => {
+      diagnostics.dispose();
+      diagnosticsRef.current = null;
+    };
+  }, [props.sessionId, props.draftScopeKey]);
+  useEffect(() => {
+    diagnosticsRef.current?.blockers(composerDiagnosticBlockers({
+      disabled: props.disabled,
+      disabledReasons: props.disabledReasons,
+      busy: props.busy,
+      stopping: props.stopping,
+      canSend,
+      submissionPreparing: props.submissionPreparing,
+      preparingReasons: props.preparingReasons,
+    }));
+  });
 
   const renderConnectionRows = () => {
     const servers = connectionInventory.servers;
@@ -959,6 +988,14 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     props.onOpenSettingsSection?.(composerConfigureSectionForMenu(toolMenuSection));
   };
 
+  const applyMentionSelection = (item: MentionItem) => {
+    const draft = editorRef.current?.insertMentionAtSelection(item.kind, item.value);
+    if (draft == null) return false;
+    props.onInsertMention(item.kind, item.value, draft);
+    setMentionOpen(false);
+    return true;
+  };
+
   const acceptActiveItem = () => {
     if (!activeItems.length) return false;
     if (activeMenu === "slash") {
@@ -970,9 +1007,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     if (activeMenu === "mention") {
       const item = mentionFiltered[menuIndex];
       if (!item) return false;
-      props.onInsertMention(item.kind, item.value);
-      setMentionOpen(false);
-      return true;
+      return applyMentionSelection(item);
     }
     return false;
   };
@@ -1035,7 +1070,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     // Escape-to-stop while the agent is busy. Only when no menu is open so
     // Escape can still close menus. First press arms a confirmation prompt
     // for 3s; a second Escape within that window stops the agent.
-    const anyMenuOpen = agentMenuOpen || toolMenuOpen || Boolean(activeMenu);
+    const anyMenuOpen = agentMenuOpen || toolMenuOpen || props.modelPickerOpen || Boolean(activeMenu);
     if (event.key === "Escape" && props.busy && !anyMenuOpen) {
       event.preventDefault();
       if (props.stopping) return;
@@ -1251,8 +1286,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                   className={`flex w-full items-start gap-3 rounded-[16px] px-3 py-2.5 text-left transition-colors hover:bg-gray-2/70 ${activeMenu === "mention" && mentionFiltered[menuIndex]?.id === item.id ? "bg-gray-3 text-gray-12" : "text-gray-11"}`}
                   onMouseEnter={() => setMenuIndex(index)}
                   onClick={() => {
-                    props.onInsertMention(item.kind, item.value);
-                    setMentionOpen(false);
+                    applyMentionSelection(item);
                   }}
                 >
                   {item.kind === "computer" ? (
@@ -1335,6 +1369,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
               submitDisabled={props.disabled}
               placeholder={t("composer.placeholder")}
               onChange={props.onDraftChange}
+              onMentionQueryChange={setActiveMentionQuery}
               onSubmit={handleEditorSubmit}
               onExpandPastedText={handleExpandPastedText}
               onExpandAttachment={setExpandedAttachmentId}
@@ -1415,6 +1450,11 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
             />
 
             {/* Respond to the pane width, including desktop split views. */}
+            {props.busy && !props.stopping && escapeArmed ? (
+              <div data-composer-stop-confirmation role="status" className="mt-2 text-[12px] font-medium text-gray-10">
+                {t("composer.escape_to_stop")}
+              </div>
+            ) : null}
             <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 @min-[560px]/composer:flex">
               <div className="contents">
                 <div className="col-start-1 row-start-2 flex shrink-0 items-center gap-1.5">
@@ -1451,6 +1491,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                     aria-expanded={toolMenuOpen}
                     aria-haspopup="dialog"
                     title={t("composer.tools_label")}
+                    aria-label={t("composer.tools_label")}
                   >
                     <Plus size={16} />
                   </button>
@@ -1685,13 +1726,13 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-wrap items-center gap-1 border-b border-dls-border pb-2 @min-[560px]/composer:flex-1 @min-[560px]/composer:border-0 @min-[560px]/composer:pb-0">
                 {/* Agent picker (#2101/#1971). Only shown once a non-default
                     agent is selected. Switching back to Default agent lives in
-                    this menu and in the + tools menu. */}
+                    this menu and in the + tools menu. Selection configures
+                    subsequent submissions without interrupting the running turn. */}
                 <div ref={agentMenuRef} className={showAgentPicker ? "relative min-w-0 max-w-full shrink-0" : "hidden"}>
                   <button
                     type="button"
                     className="flex h-9 max-h-9 max-w-full items-center gap-1 rounded-md px-1.5 text-[12px] font-medium text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12"
                     onClick={() => setAgentMenuOpen((value) => !value)}
-                    disabled={props.busy}
                     aria-expanded={agentMenuOpen}
                     title={t("composer.agent_label")}
                   >
@@ -1801,11 +1842,6 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                   Cmd/Ctrl+Enter still steers).
               */}
               <div data-composer-actions className="col-start-2 row-start-2 ml-auto flex shrink-0 items-center gap-1.5">
-                {props.busy && !props.stopping && escapeArmed ? (
-                  <span className="self-center pr-1 text-[12px] font-medium text-gray-10 hidden @min-[720px]/composer:inline">
-                    {t("composer.escape_to_stop")}
-                  </span>
-                ) : null}
                 <button
                   type="button"
                   onClick={
@@ -1826,10 +1862,10 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                       : props.busy
                         ? t("composer.stop")
                         : props.submissionPreparing
-                          ? "Preparing connected service tools…"
+                          ? props.submissionPreparingLabel ?? "Preparing connected service tools…"
                           : t("composer.run_task")
                   }
-                  aria-busy={props.stopping || undefined}
+                  aria-busy={props.stopping || props.submissionPreparing || undefined}
                   className={`inline-flex h-9 max-h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
                     props.stopping
                       ? "cursor-wait bg-[var(--dls-accent)] text-[var(--dls-accent-fg)]"
@@ -1845,7 +1881,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                       : props.busy
                         ? t("composer.stop")
                         : props.submissionPreparing
-                          ? "Preparing connected service tools…"
+                          ? props.submissionPreparingLabel ?? "Preparing connected service tools…"
                           : t("composer.run_task")
                   }
                 >
@@ -1864,7 +1900,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                       : props.busy
                         ? t("composer.stop")
                         : props.submissionPreparing
-                          ? "Preparing connected service tools…"
+                          ? props.submissionPreparingLabel ?? "Preparing connected service tools…"
                           : t("composer.run_task")}
                   </span>
                 </button>

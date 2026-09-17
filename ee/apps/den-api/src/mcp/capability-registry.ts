@@ -1,4 +1,5 @@
 import { Tool, toolError } from "@openwork/codemode"
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import type { DenTypeId } from "@openwork-ee/utils/typeid"
 import { Effect } from "effect"
 import type { Hono } from "hono"
@@ -56,6 +57,7 @@ import {
   type MarketplaceCapabilityObjectType,
 } from "./marketplace-capabilities.js"
 import {
+  connectionStatusMatch,
   executeNativeCapability,
   parseNativeCapabilityName,
   searchNativeCapabilities,
@@ -77,7 +79,6 @@ import {
   type CapabilityMatch,
   type SearchCapabilityType,
 } from "./search.js"
-import type { AgentToolContentPart } from "./tool-content.js"
 import { externalToolContent } from "./tool-content.js"
 
 export const CAPABILITY_SOURCE_KINDS = ["catalog", "native", "externalMcp", "marketplace", "builtinSkill", "remoteSession", "admin"] as const
@@ -94,7 +95,7 @@ export type ParsedCapability =
 
 export type ExecuteCapabilityToolResult = {
   isError?: boolean
-  content: AgentToolContentPart[]
+  content: CallToolResult["content"]
   structuredContent?: Record<string, unknown>
   _meta?: Record<string, unknown>
 }
@@ -231,6 +232,7 @@ const externalMcpProviderErrorOutputSchema = z.object({
 const externalCapabilityErrorPayloadSchema = z.object({
   error: z.string(),
   message: z.string(),
+  requiredScope: z.enum(["mcp:read", "mcp:write"]).optional(),
   referenceId: z.string().optional(),
   retryable: z.boolean().optional(),
   providerError: externalMcpProviderErrorOutputSchema.optional(),
@@ -260,6 +262,7 @@ export function externalCapabilityErrorToolResult(
   const payload = externalCapabilityErrorPayloadSchema.parse({
     error: result.error,
     message: result.message,
+    ...(result.requiredScope ? { requiredScope: result.requiredScope } : {}),
     ...(result.referenceId === undefined ? {} : { referenceId: result.referenceId }),
     ...(result.retryable === undefined ? {} : { retryable: result.retryable }),
     ...(result.providerError ? { providerError: result.providerError } : {}),
@@ -295,38 +298,28 @@ export function externalCapabilitySuccessToolResult(
     && isRecord(result.result.structuredContent)
     ? result.result.structuredContent
     : undefined
-  const structuredContent = result.mcpApp
-    ? {
-        ...(providerStructuredContent ?? {}),
-        serverTools: {
-          searchCapabilities: SEARCH_CAPABILITIES_TOOL_NAME,
-          executeCapability: EXECUTE_CAPABILITY_TOOL_NAME,
-        },
-      }
-    : providerStructuredContent
   const providerMeta = isRecord(result.result) && isRecord(result.result._meta)
     ? result.result._meta
     : {}
   const meta = {
     ...providerMeta,
-    ...(result.mcpApp ? { "openwork/mcpApp": result.mcpApp } : {}),
-  }
-  if (!result.schemaGuidance) {
-    return {
-      content,
-      ...(structuredContent ? { structuredContent } : {}),
-      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
-    }
+    ...(result.mcpApp ? {
+      "openwork/mcpApp": result.mcpApp,
+      "openwork/serverTools": {
+        searchCapabilities: SEARCH_CAPABILITIES_TOOL_NAME,
+        executeCapability: EXECUTE_CAPABILITY_TOOL_NAME,
+      },
+    } : {}),
+    ...(result.schemaGuidance ? { "openwork/schemaGuidance": result.schemaGuidance } : {}),
   }
   return {
+    ...(isRecord(result.result) && typeof result.result.isError === "boolean" ? { isError: result.result.isError } : {}),
     content: [
       ...content,
-      ...textContent(JSON.stringify({ schemaGuidance: result.schemaGuidance })),
+      // Only the advisory is model-visible; never serialize provider _meta.
+      ...(result.schemaGuidance ? textContent(JSON.stringify({ "openwork/schemaGuidance": result.schemaGuidance })) : []),
     ],
-    structuredContent: {
-      ...(structuredContent ?? {}),
-      schemaGuidance: result.schemaGuidance,
-    },
+    ...(providerStructuredContent ? { structuredContent: providerStructuredContent } : {}),
     ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
   }
 }
@@ -536,6 +529,7 @@ const externalMcpSource: CapabilitySource = {
     return leavesFromBuilt(await buildExternalMcpToolTree({
       organizationId: ctx.organizationId,
       member: ctx.member,
+      scopes: ctx.principal.scopes,
       redirectUriBase: ctx.redirectUriBase,
       namespaceContext: await ctx.resolveNamespaceContext(),
     }))
@@ -574,6 +568,7 @@ const externalMcpSource: CapabilitySource = {
     const result = await executeExternalCapability({
       organizationId: ctx.organizationId,
       member: ctx.member,
+      scopes: ctx.principal.scopes,
       connectionId: parsed.connectionId,
       toolName: parsed.toolName,
       args: normalizeToolBody(input.body),
@@ -689,10 +684,6 @@ const remoteSessionSource: CapabilitySource = {
     return action ? { kind: "remoteSession", name, action } : null
   },
   search: async (ctx, query, limit) => {
-    // Remote sessions require an active membership and the organization's
-    // Cloud capability flag: a member of a flag-off org never discovers
-    // these capabilities. Worker provisioning state is checked at execute
-    // time and reported as an actionable needs-setup result.
     if (!ctx.sourceFilter.api || !ctx.member || !ctx.remoteSessionsEnabled) return []
     return searchRemoteSessionCapabilities(query, limit)
   },
@@ -848,3 +839,22 @@ export const CAPABILITY_REGISTRY = createCapabilityRegistry(CAPABILITY_SOURCES)
 export const searchCapabilityRegistry = CAPABILITY_REGISTRY.search
 export const executeCapability = CAPABILITY_REGISTRY.execute
 export const buildCapabilityToolTree = CAPABILITY_REGISTRY.buildToolTree
+
+export async function liveArtifactConnectionFailure(
+  context: CapabilityRegistryContext,
+  missing: readonly { capabilityName: string }[],
+) {
+  const ids = new Set(missing.flatMap((entry) => {
+    const parsed = parseNativeCapabilityName(entry.capabilityName)
+    return parsed ? [parsed.connectionId] : []
+  }))
+  if (!ids.size) return null
+  const namespace = await context.resolveNamespaceContext()
+  const connection = namespace.nativeProviderEntries.find((entry) => ids.has(entry.id) && !entry.connectedForMe)
+  if (!connection) return null
+  const status = connectionStatusMatch(connection, 1).connectionStatus
+  return status ? {
+    connectionStatus: status,
+    connectionCard: connectionActionPayloadFromStatus(status),
+  } : null
+}

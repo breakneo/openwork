@@ -548,6 +548,7 @@ test("MCP App launch metadata is published by default alongside regular search a
   })
 
   const executed = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -566,8 +567,8 @@ test("MCP App launch metadata is published by default alongside regular search a
   })
   if (!executed.ok) throw new Error(executed.message)
   const launchResult = externalCapabilitySuccessToolResult(executed)
-  expect(launchResult.structuredContent).toMatchObject({
-    serverTools: {
+  expect(launchResult._meta).toMatchObject({
+    "openwork/serverTools": {
       searchCapabilities: "search_capabilities",
       executeCapability: "execute_capability",
     },
@@ -653,6 +654,7 @@ test("execute_capability shares one external MCP lifecycle budget across schema 
 
   try {
     const result = await executeExternalCapability({
+      scopes: new Set(["mcp:read", "mcp:write"]),
       organizationId: seed.organizationId,
       member: { orgMembershipId: seed.memberId, teamIds: [] },
       connectionId: connection.id,
@@ -701,6 +703,7 @@ test("external capability execution reports schema guidance but always attempts 
   })
 
   const providerAccepted = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -722,6 +725,7 @@ test("external capability execution reports schema guidance but always attempts 
   expect(mutableSchemaServer.toolCalls()).toBe(1)
 
   const providerRejected = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -744,6 +748,7 @@ test("external capability execution reports schema guidance but always attempts 
   expect(mutableSchemaServer.toolCalls()).toBe(2)
 
   const invalidShape = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -765,6 +770,7 @@ test("external capability execution reports schema guidance but always attempts 
   expect(mutableSchemaServer.toolCalls()).toBe(3)
 
   const valid = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -779,6 +785,7 @@ test("external capability execution reports schema guidance but always attempts 
 
   mutableSchemaServer.useSchema("incidentId")
   const stale = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -847,6 +854,7 @@ test("status-row execute returns a clean needs_connection error", async () => {
   })
 
   const result = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -892,6 +900,7 @@ test("dead-url execution returns a structured connection diagnostic instead of t
   })
 
   const result = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -929,6 +938,7 @@ test("shared invalid_grant recovery cannot reuse the cleared in-memory refresh t
     connectionId: connection.id,
     accessToken: "stale-access-token",
     refreshToken: "revoked-refresh-token",
+    scope: "tools.read tools.write",
   })
   const connected = await getExternalMcpConnection({
     organizationId: seed.organizationId,
@@ -944,6 +954,22 @@ test("shared invalid_grant recovery cannot reuse the cleared in-memory refresh t
   )
 
   expect(await provider.tokens()).toMatchObject({ refresh_token: "revoked-refresh-token" })
+  await provider.saveTokens({ access_token: "scope-refresh", token_type: "Bearer" })
+  expect((await provider.tokens())?.scope).toBe("tools.read tools.write")
+  await provider.saveTokens({ access_token: "scope-narrowed", token_type: "Bearer", scope: "tools.read" })
+  expect((await provider.tokens())?.scope).toBe("tools.read")
+  await provider.saveTokens({ access_token: "scope-empty", token_type: "Bearer", scope: "" })
+  expect((await provider.tokens())?.scope).toBe("")
+  await provider.saveTokens({ access_token: "scope-still-empty", token_type: "Bearer" })
+  expect((await provider.tokens())?.scope).toBe("")
+  await provider.saveCodeVerifier("s".repeat(43))
+  const pending = await getExternalMcpConnection({ organizationId: seed.organizationId, connectionId: connection.id })
+  if (!pending) throw new Error("Expected the pending shared connection")
+  const callbackProvider = new ExternalMcpOAuthProvider(pending, `${redirectUriBase}/callback`, "signed-state",
+    undefined, new ExternalMcpDiagnosticTracker("req_shared_scope_callback"))
+  await callbackProvider.codeVerifier()
+  await callbackProvider.saveTokens({ access_token: "scope-new-grant", token_type: "Bearer" })
+  expect((await callbackProvider.tokens())?.scope).toBeUndefined()
   await provider.invalidateCredentials("tokens")
   expect(await provider.tokens()).toBeUndefined()
   expect(await getExternalMcpConnection({
@@ -983,6 +1009,18 @@ test("per-member OAuth reads JSON scopes returned as text by MySQL", async () =>
     access_token: "member-access-token",
     scope: "tools.read tools.write",
   })
+  await provider.saveTokens({ access_token: "scope-refresh", token_type: "Bearer" })
+  expect((await provider.tokens())?.scope).toBe("tools.read tools.write")
+  await provider.saveTokens({ access_token: "scope-narrowed", token_type: "Bearer", scope: "tools.read" })
+  expect((await provider.tokens())?.scope).toBe("tools.read")
+  await provider.saveTokens({ access_token: "scope-empty", token_type: "Bearer", scope: "" })
+  expect((await provider.tokens())?.scope).toBe("")
+  await provider.saveTokens({ access_token: "scope-still-empty", token_type: "Bearer" })
+  expect((await provider.tokens())?.scope).toBe("")
+  await provider.saveCodeVerifier("s".repeat(43))
+  await provider.codeVerifier()
+  await provider.saveTokens({ access_token: "scope-new-grant", token_type: "Bearer" })
+  expect((await provider.tokens())?.scope).toBeUndefined()
 })
 
 test("the 16-connection fanout reports incomplete coverage when the only match is connection 17", async () => {
@@ -1026,6 +1064,7 @@ test("MCP tool isError is surfaced as a provider failure, not transport success"
     url: providerErrorServer.url,
   })
   const result = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -1057,6 +1096,7 @@ test("provider-declared unknown JSON-RPC errors expose provider words without in
       url: providerDeclaredErrorServer.url,
     })
     const result = await executeExternalCapability({
+      scopes: new Set(["mcp:read", "mcp:write"]),
       organizationId: seed.organizationId,
       member: { orgMembershipId: seed.memberId, teamIds: [] },
       connectionId: connection.id,
@@ -1095,6 +1135,7 @@ test("standard MCP SDK invalid-argument tool errors become a corrective executio
     url: providerErrorServer.url,
   })
   const result = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -1131,6 +1172,7 @@ test("structured provider denial keeps connection health separate and names the 
     url: providerErrorServer.url,
   })
   const result = await executeExternalCapability({
+    scopes: new Set(["mcp:read", "mcp:write"]),
     organizationId: seed.organizationId,
     member: { orgMembershipId: seed.memberId, teamIds: [] },
     connectionId: connection.id,
@@ -1168,6 +1210,7 @@ test("downstream provider authorization links are relayed as needs_connection", 
     })
 
     const result = await executeExternalCapability({
+      scopes: new Set(["mcp:read", "mcp:write"]),
       organizationId: seed.organizationId,
       member: { orgMembershipId: seed.memberId, teamIds: [] },
       connectionId: connection.id,
@@ -1226,6 +1269,7 @@ test("foreign-origin downstream authorization links are dropped but still surfac
     })
 
     const result = await executeExternalCapability({
+      scopes: new Set(["mcp:read", "mcp:write"]),
       organizationId: seed.organizationId,
       member: { orgMembershipId: seed.memberId, teamIds: [] },
       connectionId: connection.id,

@@ -1,9 +1,13 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { proxyOpencodeRequest, startServer } from "./server.js";
+import * as engineV2Preview from "./engine-v2-preview.js";
+import { ApiError } from "./errors.js";
+import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import type { ServerConfig, WorkspaceInfo } from "./types.js";
 
 type Served = {
@@ -35,7 +39,13 @@ function auth(token: string) {
   return { Authorization: `Bearer ${token}` };
 }
 
-function startMockOpencode(input?: { holdCommand?: Promise<void>; foreignSessionDirectory?: string; recovery?: { active: boolean; turn: number } }) {
+type MockReadOptions = {
+  onRead?: (request: Request) => Promise<void>;
+  sessions?: unknown;
+  messagePage?: (request: Request) => Response;
+};
+
+function startMockOpencode(input?: MockReadOptions & { holdCommand?: Promise<void>; foreignSessionDirectory?: string; nativeV2Directory?: string; recovery?: { active: boolean; turn: number } }) {
   const requests: Array<{ pathname: string; search: string; directory: string | null; method: string; body?: unknown }> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -45,14 +55,41 @@ function startMockOpencode(input?: { holdCommand?: Promise<void>; foreignSession
       const record: { pathname: string; search: string; directory: string | null; method: string; body?: unknown } = {
         pathname: url.pathname,
         search: url.search,
-        directory: request.headers.get("x-opencode-directory"),
+        directory: input?.nativeV2Directory ? url.searchParams.get("location[directory]") : request.headers.get("x-opencode-directory"),
         method: request.method,
       };
-      if (request.method === "POST") {
+      if (!["GET", "HEAD"].includes(request.method)) {
         const text = await request.text();
         if (text) record.body = JSON.parse(text);
       }
       requests.push(record);
+      if (request.method === "GET") await input?.onRead?.(request);
+
+      if (input?.nativeV2Directory) {
+        const sessionId = url.pathname.match(/^\/api\/session\/(ses_[^/]+)$/)?.[1];
+        if (sessionId) {
+          if (sessionId === "ses_missing") return Response.json({ code: "not_found" }, { status: 404 });
+          if (sessionId === "ses_unavailable") return Response.json({ code: "storage_unavailable" }, { status: 503 });
+          const directory = sessionId === "ses_foreign" ? input.foreignSessionDirectory
+            : sessionId === "ses_unscoped" ? undefined : input.nativeV2Directory;
+          return Response.json({ data: { info: { id: sessionId, location: { directory }, title: "Stored thread" } } });
+        }
+        const messageSession = url.pathname.match(/^\/api\/session\/(ses_[^/]+)\/message(?:\/(msg_[^/]+))?$/);
+        if (messageSession) {
+          const message = { info: { id: "msg_1", sessionID: messageSession[1], role: "assistant" },
+            parts: [{ id: "prt_1", type: "text", text: "Stored history" }] };
+          return Response.json({ data: messageSession[2] ? message : [message] });
+        }
+        if (url.pathname === "/api/session") return Response.json({ data: input.sessions ?? [
+          { id: "ses_1", location: { directory: input.nativeV2Directory } },
+          { id: "ses_foreign", location: { directory: input.foreignSessionDirectory } },
+          { id: "ses_unscoped" },
+        ] });
+        if (["/api/mcp", "/api/skill"].includes(url.pathname)) return Response.json({ data: [] });
+        if (url.pathname === "/api/session/ses_1/instructions/entries/openwork.context"
+          || url.pathname === "/api/session/ses_1/prompt") return Response.json({ data: { accepted: true } });
+        return Response.json({ code: "not_found" }, { status: 404 });
+      }
 
       if (input?.recovery) {
         if (url.pathname === "/session/ses_1/prompt_async") {
@@ -126,6 +163,7 @@ function startMockOpencode(input?: { holdCommand?: Promise<void>; foreignSession
       }
 
       if (url.pathname === "/session/ses_1/message") {
+        if (input?.messagePage) return input.messagePage(request);
         return Response.json([
           {
             info: {
@@ -229,8 +267,61 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function waitUntil(predicate: () => boolean) {
-  for (let index = 0; index < 20; index++) {
+function readinessGate() {
+  const entered = deferred();
+  const released = deferred();
+  let failure: ApiError | undefined;
+  const calls: string[][] = [];
+  return {
+    calls,
+    entered: entered.promise,
+    release: released.resolve,
+    fail() {
+      failure = new ApiError(503, "fixture_readiness_failed", "Execution readiness failed");
+      released.resolve();
+    },
+    async wait(...args: string[]) {
+      calls.push(args);
+      entered.resolve();
+      await released.promise;
+      if (failure) throw failure;
+    },
+  };
+}
+
+async function startV2Proxy(options?: MockReadOptions) {
+  const workspaceRoot = await createWorkspaceRoot();
+  const secondWorkspaceRoot = await createWorkspaceRoot();
+  const engine = startMockOpencode({ ...options, nativeV2Directory: workspaceRoot, foreignSessionDirectory: secondWorkspaceRoot });
+  const provider = readinessGate();
+  const mcp = readinessGate();
+  const status = () => ({ enabled: true, chatRouting: true, running: true,
+    mirroredProviderIds: [], skippedProviderIds: [], catalogModelIds: [] });
+  // Hold only execution preparation; requests still cross the real HTTP server,
+  // auth/policy checks, native proxy and ownership lookup into a loopback witness.
+  const preview = spyOn(engineV2Preview, "createEngineV2Preview").mockReturnValue({
+    start() {}, status, setEnabled: async () => status(), setChatRouting: async () => status(),
+    connection: () => ({ url: `http://127.0.0.1:${engine.server.port}`, username: "opencode", password: "fixture" }),
+    ensureWorkspaceReady: provider.wait, syncWorkspaceMcp: mcp.wait,
+    syncCloudSkills: async () => ({ root: join(workspaceRoot, "cloud-skills"), state: { root: null, skills: [] } }),
+    stop: async () => {},
+  });
+  try {
+    const openwork = await startOpenworkServer({ workspaceRoot, secondWorkspaceRoot, readOnly: false });
+    stops.push(() => { provider.release(); mcp.release(); });
+    const base = `http://127.0.0.1:${openwork.server.port}`;
+    const request = (path: string, init: RequestInit = {}, workspaceId = "ws_1") => fetch(
+      `${base}/workspace/${workspaceId}/opencode2${path}`,
+      { signal: AbortSignal.timeout(2_000), headers: auth(openwork.token), ...init },
+    );
+    return { ...openwork, base, request, engine, provider, mcp, workspaceRoot, secondWorkspaceRoot };
+  } finally {
+    preview.mockRestore();
+  }
+}
+
+async function waitUntil(predicate: () => boolean, attempts = 20) {
+  for (let index = 0; index < attempts; index++) {
     if (predicate()) return true;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -238,6 +329,305 @@ async function waitUntil(predicate: () => boolean) {
 }
 
 describe("workspace OpenCode proxy", () => {
+  test.serial("native history pagination exposes cursors to browsers, preserves upstream headers, and verifies every page owner", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const cursor = "opaque+/=%25?older&owner=one";
+    const link = '<http://internal-engine/session/ses_1/message?before=opaque>; rel="next"';
+    const engine = startMockOpencode({
+      foreignSessionDirectory: "/workspace/foreign",
+      messagePage: (request) => {
+        const before = new URL(request.url).searchParams.get("before");
+        if (before !== null) {
+          expect(before).toBe(cursor);
+          return Response.json([], { headers: { "Access-Control-Expose-Headers": "X-Upstream-Trace" } });
+        }
+        return Response.json([{ info: { id: "msg_1", sessionID: "ses_1" }, parts: [] }], { headers: {
+          "X-Next-Cursor": cursor, Link: link, "Access-Control-Expose-Headers": "X-Upstream-Trace",
+        } });
+      },
+    });
+    const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+    const request = (sessionId: string, before?: string) => fetch(
+      `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode/session/${sessionId}/message?${new URLSearchParams({ limit: "1", ...(before ? { before } : {}) })}`,
+      { headers: { ...auth(openwork.token), Origin: "https://app.example" }, signal: AbortSignal.timeout(2_000) },
+    );
+    const newest = await request("ses_1");
+    expect(newest.status).toBe(200);
+    expect(newest.headers.get("X-Next-Cursor")).toBe(cursor);
+    expect(newest.headers.get("Link")).toBe(link);
+    const older = await request("ses_1", newest.headers.get("X-Next-Cursor") ?? undefined);
+    expect(older.status).toBe(200);
+    expect(await older.json()).toEqual([]);
+    expect(older.headers.get("X-Next-Cursor")).toBeNull();
+    for (const response of [newest, older]) {
+      expect(response.headers.get("Access-Control-Expose-Headers")?.split(/,\s*/)).toEqual(expect.arrayContaining(["X-Upstream-Trace", "X-Next-Cursor", "Link"]));
+    }
+    const foreign = await request("ses_foreign", cursor);
+    expect(foreign.status).toBe(404);
+    // The proof runs beside the read; only the proof decides what the caller receives.
+    expect(await foreign.text()).not.toContain("msg_foreign");
+    expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1")).toHaveLength(2);
+    const pages = engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/message");
+    expect(pages).toHaveLength(2);
+    expect(new URLSearchParams(pages[1]?.search).get("before")).toBe(cursor);
+    expect(pages.every(({ method }) => method === "GET")).toBe(true);
+  });
+
+  test.serial("v1 session reads dispatch beside the ownership proof and withhold a foreign body until it fails", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const release = deferred();
+    const engine = startMockOpencode({
+      foreignSessionDirectory: "/workspace/foreign",
+      onRead: async (request) => {
+        if (new URL(request.url).pathname === "/session/ses_foreign") await release.promise;
+      },
+    });
+    const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+    const request = (path: string) => fetch(
+      `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode${path}`,
+      { headers: auth(openwork.token), signal: AbortSignal.timeout(2_000) },
+    );
+    const foreign = request("/session/ses_foreign/message");
+    try {
+      // The requested read reaches the engine while its proof is still pending.
+      expect(await waitUntil(() => engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign/message"), 100)).toBe(true);
+      expect(engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign")).toBe(true);
+      // Nothing is released before the proof settles, even though the engine already answered.
+      expect(await Promise.race([foreign.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 20))])).toBe("pending");
+    } finally {
+      release.resolve();
+    }
+    const response = await foreign;
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("msg_foreign");
+    // An owned read still answers from a single pass over the engine.
+    const owned = await request("/session/ses_1/todo");
+    expect(owned.status).toBe(200);
+    expect(await owned.json()).toEqual([{ content: "Validate session reads", status: "completed", priority: "high" }]);
+    expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/todo")).toHaveLength(1);
+  });
+
+  for (const version of ["v1", "v2"]) {
+    for (const phase of ["ownership", "history"]) {
+      test.serial(`${version} history disconnect cancels the upstream ${phase} GET`, async () => {
+        const prefix = version === "v2" ? "/api" : "";
+        const historyPath = `${prefix}/session/ses_1/message`;
+        const heldPath = phase === "ownership" ? `${prefix}/session/ses_1` : historyPath;
+        const release = deferred();
+        let observed: AbortSignal | undefined;
+        const onRead = async (request: Request) => {
+          if (new URL(request.url).pathname !== heldPath) return;
+          observed = request.signal;
+          await release.promise;
+        };
+        const fixture = version === "v2" ? await startV2Proxy({ onRead }) : await (async () => {
+          const workspaceRoot = await createWorkspaceRoot();
+          const engine = startMockOpencode({ onRead });
+          const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+          return { engine, request: (path: string, init: RequestInit) => fetch(
+            `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode${path}`,
+            { headers: auth(openwork.token), ...init },
+          ) };
+        })();
+        const caller = new AbortController();
+        const result = fixture.request(historyPath, { signal: caller.signal }).catch((error: unknown) => error);
+        try {
+          expect(await waitUntil(() => observed !== undefined, 100)).toBe(true);
+          caller.abort();
+          expect(await result).toMatchObject({ name: "AbortError" });
+          expect(await waitUntil(() => observed?.aborted === true, 100)).toBe(true);
+          // v1 dispatches the history read beside its ownership proof; v2 still proves first.
+          if (phase === "ownership" && version === "v2") expect(fixture.engine.requests.some((entry) => entry.pathname === historyPath)).toBe(false);
+          expect(fixture.engine.requests.every((entry) => entry.method === "GET")).toBe(true);
+        } finally {
+          caller.abort();
+          release.resolve();
+          await result;
+        }
+      });
+    }
+  }
+
+  test.serial("v2 session list resolves each directory once per page without caching ownership across pages", async () => {
+    const alias = join(await createWorkspaceRoot(), "alias");
+    const sessions = { items: [
+      { id: "ses_a", location: { directory: alias } },
+      { info: { id: "ses_b", location: { directory: alias } } },
+      { id: "ses_unscoped" },
+    ], next: "next-page" };
+    const fixture = await startV2Proxy({ sessions });
+    await symlink(fixture.workspaceRoot, alias, "dir");
+    const resolvePath = spyOn(fs, "realpath");
+    try {
+      const first = await fixture.request("/api/session?limit=50");
+      expect(first.status).toBe(200);
+      await expect(first.json()).resolves.toEqual({ data: { ...sessions, items: sessions.items.slice(0, 2) } });
+      expect(resolvePath.mock.calls.filter(([directory]) => directory === alias)).toHaveLength(1);
+      await rm(alias);
+      await symlink(fixture.secondWorkspaceRoot, alias, "dir");
+      const second = await fixture.request("/api/session?cursor=next-page&limit=50");
+      expect(second.status).toBe(200);
+      await expect(second.json()).resolves.toEqual({ data: { ...sessions, items: [] } });
+      expect(resolvePath.mock.calls.filter(([directory]) => directory === alias)).toHaveLength(2);
+      expect(fixture.provider.calls).toEqual([]);
+      expect(fixture.mcp.calls).toEqual([]);
+    } finally {
+      resolvePath.mockRestore();
+    }
+  });
+
+  test.serial("v2 stored history responds while provider and MCP readiness are held; prompts wait for both", async () => {
+    const fixture = await startV2Proxy();
+    let promptSettled = false;
+    const prompt = fixture.request("/api/session/ses_1/prompt", { method: "POST", body: JSON.stringify({ parts: [] }) })
+      .finally(() => { promptSettled = true; });
+    for (const gate of [fixture.provider, fixture.mcp]) {
+      await gate.entered;
+      const before = fixture.engine.requests.length;
+      const list = await fixture.request(`/api/session?limit=50&location[directory]=${encodeURIComponent(fixture.secondWorkspaceRoot)}`);
+      expect(list.status).toBe(200);
+      await expect(list.json()).resolves.toEqual({ data: [{ id: "ses_1", location: { directory: fixture.workspaceRoot } }] });
+      for (const suffix of ["", "/message", "/message/msg_1"]) {
+        const query = new URLSearchParams({ "location[directory]": fixture.secondWorkspaceRoot,
+          "location[project]": "foreign", location: "foreign", limit: "50" });
+        query.append("location[directory]", "another-directory");
+        const response = await fixture.request(`/api/session/ses_1${suffix}?${query}`, {
+          headers: { ...auth(fixture.token), "x-opencode-directory": fixture.secondWorkspaceRoot },
+        });
+        expect(response.status).toBe(200);
+        const payload = await response.json();
+        expect(JSON.stringify(payload)).toContain(suffix ? "Stored history" : "Stored thread");
+      }
+      const reads = fixture.engine.requests.slice(before);
+      expect(reads.map((item) => item.pathname)).toEqual([
+        "/api/session",
+        "/api/session/ses_1", "/api/session/ses_1",
+        "/api/session/ses_1", "/api/session/ses_1/message",
+        "/api/session/ses_1", "/api/session/ses_1/message/msg_1",
+      ]);
+      for (const read of reads) {
+        expect(read.method).toBe("GET");
+        expect(read.directory).toBe(fixture.workspaceRoot);
+        const query = new URLSearchParams(read.search);
+        expect([...query.keys()].filter((key) => key.startsWith("location"))).toEqual(["location[directory]"]);
+      }
+      expect(promptSettled).toBe(false);
+      gate.release();
+    }
+    expect((await prompt).status).toBe(200);
+    expect(fixture.provider.calls).toEqual([[fixture.workspaceRoot]]);
+    expect(fixture.mcp.calls).toEqual([["ws_1", fixture.workspaceRoot]]);
+    expect(fixture.engine.requests.slice(-5).map((item) => `${item.method} ${item.pathname}`)).toEqual([
+      "GET /api/session/ses_1", "GET /api/mcp", "GET /api/skill",
+      "PUT /api/session/ses_1/instructions/entries/openwork.context", "POST /api/session/ses_1/prompt",
+    ]);
+  });
+
+  for (const failingGate of ["provider", "mcp"]) {
+    test.serial(`v2 history survives failed ${failingGate} readiness without admitting other reads or mutations`, async () => {
+      const fixture = await startV2Proxy();
+      if (failingGate === "provider") { fixture.provider.fail(); fixture.mcp.release(); }
+      else { fixture.provider.release(); fixture.mcp.fail(); }
+      const guarded: Array<[string, string]> = [
+        ["GET", "/api/session/"], ["GET", "/api/%73ession"], ["HEAD", "/api/session"],
+        ["GET", "/api/session/status"], ["GET", "/api/session/active"],
+        ["GET", "/api/session/ses_1/todo"], ["GET", "/api/session/ses_1/permission"],
+        ["GET", "/api/permission"], ["GET", "/api/form/request"], ["GET", "/api/provider"],
+        ["GET", "/api/session/ses_1/unknown"], ["GET", "/api/session/status/message"],
+        ["GET", "/api/session/ses_1/messages"], ["GET", "/api/session/ses_1/message/"],
+        ["GET", "/api/session/ses_1/message/msg_1/part/prt_1"],
+        ["GET", "/apix/session/ses_1/message"], ["GET", "/api/%73ession/ses_1/message"],
+        ["GET", "/api/session/%73es_1/message"], ["GET", "/api/session/ses_1/%6dessage"],
+        ["GET", "/api/session/ses_1/message/%6dsg_1"],
+        ["GET", "/api/session/ses_1%2Fprompt/message"], ["GET", "/api/session/ses_1%252Fprompt/message"],
+        ["GET", "/api/session/ses_1/message/msg_1%2F..%2Fprompt"],
+        ["GET", "/api/session/ses_1/message/%2e%2e/prompt"],
+        ["HEAD", "/api/session/ses_1/message"],
+        ["POST", "/api/session"], ["POST", "/api/session/ses_1/prompt"],
+        ["POST", "/api/session/ses_1/command"], ["POST", "/api/session/ses_1/generate"],
+        ["POST", "/api/session/ses_1/message"], ["PUT", "/api/session/ses_1/message/msg_1"],
+        ["PATCH", "/api/session/ses_1"], ["DELETE", "/api/session/ses_1/message/msg_1"],
+      ];
+      for (const [method, path] of guarded) {
+        const response = await fixture.request(path, { method });
+        expect({ method, path, status: response.status }).toEqual({ method, path, status: 503 });
+        if (method !== "HEAD") await expect(response.json()).resolves.toMatchObject({ code: "fixture_readiness_failed" });
+      }
+      expect(fixture.engine.requests).toEqual([]);
+      expect(fixture.provider.calls).toHaveLength(guarded.length);
+      expect(fixture.mcp.calls).toHaveLength(failingGate === "provider" ? 0 : guarded.length);
+      const list = await fixture.request("/api/session");
+      expect(list.status).toBe(200);
+      await expect(list.json()).resolves.toEqual({ data: [{ id: "ses_1", location: { directory: fixture.workspaceRoot } }] });
+      for (const suffix of ["", "/message", "/message/msg_1"]) {
+        const response = await fixture.request(`/api/session/ses_1${suffix}`);
+        expect(response.status).toBe(200);
+        expect(JSON.stringify(await response.json())).toContain(suffix ? "Stored history" : "Stored thread");
+      }
+      expect(fixture.provider.calls).toHaveLength(guarded.length);
+      expect(fixture.mcp.calls).toHaveLength(failingGate === "provider" ? 0 : guarded.length);
+    });
+  }
+
+  test.serial("v2 history preserves authentication, token revocation, policy and workspace ownership while readiness is held", async () => {
+    const fixture = await startV2Proxy();
+    const browsePaths = ["/api/session", "/api/session/ses_1", "/api/session/ses_1/message", "/api/session/ses_1/message/msg_1"];
+    expect((await fixture.request("/api/session", {}, "ws_missing")).status).toBe(404);
+    for (const path of browsePaths) {
+      for (const headers of [{}, auth("invalid-token")]) {
+        expect((await fixture.request(path, { headers })).status).toBe(401);
+      }
+    }
+    expect(fixture.engine.requests).toEqual([]);
+
+    const issued = await fetch(`${fixture.base}/tokens`, {
+      method: "POST", headers: { "x-openwork-host-token": fixture.config.hostToken }, body: JSON.stringify({ scope: "viewer" }),
+    });
+    expect(issued.status).toBe(201);
+    const viewer = await issued.json();
+    const viewerList = await fixture.request("/api/session", { headers: auth(viewer.token) });
+    expect(viewerList.status).toBe(200);
+    await expect(viewerList.json()).resolves.toEqual({ data: [{ id: "ses_1", location: { directory: fixture.workspaceRoot } }] });
+    expect((await fixture.request("/api/session/ses_1/message", { headers: auth(viewer.token) })).status).toBe(200);
+    fixture.engine.requests.length = 0;
+    expect((await fixture.request("/api/session/ses_1/message", { method: "POST", headers: auth(viewer.token) })).status).toBe(403);
+    const revoked = await fetch(`${fixture.base}/tokens/${viewer.id}`, {
+      method: "DELETE", headers: { "x-openwork-host-token": fixture.config.hostToken },
+    });
+    expect(revoked.status).toBe(200);
+    for (const path of browsePaths) {
+      expect((await fixture.request(path, { headers: auth(viewer.token) })).status).toBe(401);
+    }
+    expect(fixture.engine.requests).toEqual([]);
+
+    const deniedSessions: Array<[string, number]> = [["ses_foreign", 404], ["ses_missing", 404], ["ses_unavailable", 503], ["ses_unscoped", 404]];
+    for (const [sessionId, status] of deniedSessions) {
+      for (const suffix of ["", "/message", "/message/msg_1"]) {
+        const response = await fixture.request(`/api/session/${sessionId}${suffix}`);
+        expect(response.status).toBe(status);
+        expect(JSON.stringify(await response.json())).not.toContain("Stored history");
+      }
+    }
+    expect(fixture.engine.requests.every((item) => !item.pathname.includes("/message"))).toBe(true);
+    const owner = await fixture.request("/api/session/ses_foreign/message", {}, "ws_2");
+    expect(owner.status).toBe(200);
+    expect(JSON.stringify(await owner.json())).toContain("Stored history");
+    fixture.engine.requests.length = 0;
+
+    const policy = spyOn(managedDesktopPolicy(fixture.config), "assertRequest")
+      .mockRejectedValue(new ApiError(403, "organization_policy_denied", "Fixture policy denied"));
+    try {
+      for (const path of browsePaths) {
+        const response = await fixture.request(path);
+        expect(response.status).toBe(403);
+        await expect(response.json()).resolves.toMatchObject({ code: "organization_policy_denied" });
+      }
+    } finally { policy.mockRestore(); }
+    expect(fixture.engine.requests).toEqual([]);
+    expect(fixture.provider.calls).toEqual([]);
+    expect(fixture.mcp.calls).toEqual([]);
+  });
+
   test("desktop-owned recovery survives a server restart and admits one continuation through the authenticated proxy", async () => {
     const workspaceRoot = await createWorkspaceRoot();
     const recovery = { active: false, turn: 0 };

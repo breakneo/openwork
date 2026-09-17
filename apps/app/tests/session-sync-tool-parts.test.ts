@@ -90,6 +90,15 @@ function writeToolPart(
 }
 
 describe("tool part mapper", () => {
+  test("forwards native tool start time without inventing pending timing", () => {
+    expect(parseDynamicToolUIPart(writeToolPart("running", { description: "Review" }, { tool: "task" })))
+      .toMatchObject({ callProviderMetadata: { openwork: { toolStartedAt: 1 } } });
+    expect(parseDynamicToolUIPart(writeToolPart("pending", { description: "Review" }, { tool: "task" })))
+      .toMatchObject({ callProviderMetadata: { opencode: { partId: "part-write" } } });
+    expect(parseDynamicToolUIPart(writeToolPart("pending", { description: "Review" }, { tool: "task" }))?.callProviderMetadata?.openwork)
+      .toBeUndefined();
+  });
+
   test("v1 execute tools keep their existing representation even with code or toolCalls metadata", () => {
     const part = writeToolPart("completed", { code: 'tools["openwork-cloud"].search_capabilities({})' }, { tool: "execute" });
     if (part.state.status !== "completed") throw new Error("Expected completed fixture");
@@ -163,11 +172,12 @@ describe("tool part mapper", () => {
     });
   });
 
-  test("preserves MCP Apps result metadata for the chat host", () => {
+  test.each([true, false, undefined])("preserves MCP Apps result metadata for the chat host (isError=%s)", (isError) => {
     const part = writeToolPart("completed", { configObjectId: "script_1" });
     if (part.state.status !== "completed") throw new Error("Expected completed fixture");
     part.state.metadata = {
       openworkMcpApp: {
+        ...(isError === undefined ? {} : { isError }),
         content: [{ type: "text", text: "Fallback" }],
         structuredContent: { schemaVersion: "1", value: 42 },
         _meta: { receiptId: "receipt_1" },
@@ -178,6 +188,7 @@ describe("tool part mapper", () => {
       opencode: { partId: "part-write" },
       openwork: {
         mcpResult: {
+          ...(isError === undefined ? {} : { isError }),
           content: [{ type: "text", text: "Fallback" }],
           structuredContent: { schemaVersion: "1", value: 42 },
           _meta: { receiptId: "receipt_1" },
@@ -197,7 +208,7 @@ describe("tool part mapper", () => {
 
     expect(parseDynamicToolUIPart(running)?.callProviderMetadata).toEqual({
       opencode: { partId: "part-task" },
-      openwork: { childSessionId: "ses_child_1" },
+      openwork: { childSessionId: "ses_child_1", toolStartedAt: 1 },
     });
 
     const completed = writeToolPart(
@@ -210,7 +221,7 @@ describe("tool part mapper", () => {
 
     expect(parseDynamicToolUIPart(completed)?.callProviderMetadata).toEqual({
       opencode: { partId: "part-task" },
-      openwork: { childSessionId: "ses_child_1" },
+      openwork: { childSessionId: "ses_child_1", toolStartedAt: 1 },
     });
   });
 
@@ -250,6 +261,7 @@ describe("tool part mapper", () => {
       callProviderMetadata: {
         openwork: {
           mcpResult: {
+            isError: true,
             structuredContent: {
               schemaVersion: "1",
               connectionId: "emc_acme",
@@ -320,6 +332,71 @@ describe("tool part mapper", () => {
       text: "{}",
       state: "done",
     });
+  });
+
+  test.each([
+    { name: "repeated header with tied neighbor", headerCreated: 10, neighborCreated: 10 },
+    { name: "repeated header with untimestamped neighbor", headerCreated: 10, neighborCreated: undefined },
+    { name: "late header with tied neighbor", headerCreated: undefined, neighborCreated: 10 },
+    { name: "late header with untimestamped neighbor", headerCreated: undefined, neighborCreated: undefined },
+  ])("metadata preserves source neighbors: $name", ({ headerCreated, neighborCreated }) => {
+    const syncInput = { workspaceId: "workspace-a", baseUrl: "http://127.0.0.1:1234", openworkToken: "token" };
+    const cleanup = __createWorkspaceSessionSyncForTest(syncInput);
+    const release = trackWorkspaceSessionSync(syncInput, "session-a");
+    const apply = (id: string, created: number | undefined) => __applySessionSyncEventForTest(syncInput, {
+      type: "message.updated", properties: { info: {
+        id, role: "assistant", sessionID: "session-a", ...(created === undefined ? {} : { time: { created } }),
+      } },
+    });
+    const ids = () => getReactQueryClient().getQueryData<UIMessage[]>(transcriptKey("workspace-a", "session-a"))?.map((message) => message.id);
+    try {
+      apply("first", headerCreated);
+      apply("neighbor", neighborCreated);
+      apply("later", 20);
+      expect(ids()).toEqual(["first", "neighbor", "later"]);
+      apply("first", 10);
+      expect(ids()).toEqual(["first", "neighbor", "later"]);
+      apply("first", 30);
+      expect(ids()).toEqual(["neighbor", "later", "first"]);
+    } finally {
+      release();
+      cleanup();
+    }
+  });
+
+  test.each([false, true])("late user metadata orders the settled transcript without losing parts (part first: %s)", (partFirst) => {
+    const syncInput = { workspaceId: "workspace-a", baseUrl: "http://127.0.0.1:1234", openworkToken: "token" };
+    const cleanup = __createWorkspaceSessionSyncForTest(syncInput);
+    const release = trackWorkspaceSessionSync(syncInput, "session-a");
+    const apply = (id: string, role: "user" | "assistant", created: number) => __applySessionSyncEventForTest(syncInput, {
+      type: "message.updated", properties: { info: { id, role, sessionID: "session-a", time: { created } } },
+    });
+    const transcript = () => getReactQueryClient().getQueryData<UIMessage[]>(transcriptKey("workspace-a", "session-a")) ?? [];
+    try {
+      apply("msg-a", "assistant", 20);
+      __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: {
+        part: writeToolPart("running", { filePath: "package.json" }),
+      } });
+      const userPart = { type: "message.part.updated", properties: { part: {
+        id: "user-text", messageID: "late-user", sessionID: "session-a", type: "text", text: "Read this file",
+      } } };
+      if (partFirst) __applySessionSyncEventForTest(syncInput, userPart);
+      apply("late-user", "user", 10);
+      if (!partFirst) __applySessionSyncEventForTest(syncInput, userPart);
+      expect(transcript().map((message) => message.id)).toEqual(["late-user", "msg-a"]);
+      expect(transcript()[0]).toMatchObject({ role: "user", parts: [{ type: "text", text: "Read this file" }] });
+      expect(transcript()[1]?.parts).toMatchObject([{ type: "dynamic-tool", state: "input-streaming" }]);
+      apply("follow-up", "user", 30);
+      apply("late-user", "user", 10);
+      __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: {
+        part: writeToolPart("completed", { filePath: "package.json" }),
+      } });
+      expect(transcript().map((message) => message.id)).toEqual(["late-user", "msg-a", "follow-up"]);
+      expect(transcript()[1]?.parts).toMatchObject([{ type: "dynamic-tool", state: "output-available" }]);
+    } finally {
+      release();
+      cleanup();
+    }
   });
 
   test("session sync defers empty in-progress write tools until input arrives", () => {

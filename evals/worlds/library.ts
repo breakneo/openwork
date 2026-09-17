@@ -10,6 +10,7 @@ import { allocateFreePort } from "@openwork/cdp";
 import { startMockMcp } from "@openwork/labs";
 import { captureExternalBrowserUrls, electronProfilePaths } from "@openwork/hosts";
 import { configureProvider } from "./chat.ts";
+import { browserScriptValue, runBrowserHost } from "../packages/env/src/browser-task.ts";
 
 export const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -291,14 +292,19 @@ export async function preseededConnect(seed: Seed) {
   });
   if (provider.response.status !== 201) throw new Error(`Could not publish the Connect fixture model: HTTP ${provider.response.status}`);
   const mcpSession = await mintMcpSession(seed, den, organizationId);
-  const app = await seed.desktop({ den, signIn: false });
+  const proxy = await seed.faultProxy(den);
+  // Keep desktop handoff and subsequent token mints on the shaped connection.
+  const runtimeConfig = { denApiUrl: proxy.ref.apiUrl };
+  await proxy.faults.status("/api/runtime-config", 200, { times: 1000, body: runtimeConfig });
+  const tokenPath = "/api/den/v1/mcp/token";
+  await proxy.faults.status(tokenPath, 503, { times: 1000, body: { error: "connect_startup_unavailable" } });
+  const app = await seed.desktop({ den: { ...den, ref: proxy.ref }, signIn: false });
   const workspace = await seed.workspace(app, seed.tmpPath("preseeded-connect"));
-  // TODO(primitive): seed.route
-  await seed.evalIn(app, browserScript((workspaceId) => { location.hash = "#/workspace/" + workspaceId + "/settings/general"; return true; }, [workspace.workspaceId]));
+  // Stay on the task route: Settings has its own reconciliation path.
   return {
-    app, den, prompt, proofPhrase, providerName, modelId,
+    app, den, proxy, runtimeConfig, tokenPath, prompt, proofPhrase, providerName, modelId,
     admin: den.admin,
-    member: den.admin,
+    member: { ...den.admin, ...proxy.ref },
     mcpSession,
     pluginId,
     rawSourceText,
@@ -409,11 +415,41 @@ export async function connectorCatalogManagement(seed: Seed) {
   return { den, web, memberWeb, connection, rejectedConnection, connector: den.mocks.connector, rejected };
 }
 
+export async function desktopWithExternalOpenCapture(seed: Seed, den: Den, identity: string, model?: string) {
+  const app = await seed.desktop({
+    den, as: identity, model,
+    env: { OPENWORK_DEV_MODE: "1", OPENWORK_EVAL_CAPTURE_EXTERNAL_OPENS: "1" },
+  });
+  const profileDir = app.handle.profileDir;
+  if (!profileDir) throw new Error("The fixture desktop did not expose its profile directory.");
+  const browserUrls = {
+    async opened(): Promise<string[]> {
+      const text = await runBrowserHost(app, `
+        const { readFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const path = join(${browserScriptValue(profileDir)}, "electron-userdata", "openwork-eval-external-opens.jsonl");
+        try { return await readFile(path, "utf8"); }
+        catch (error) { if (error.code === "ENOENT") return ""; throw error; }
+      `);
+      if (typeof text !== "string") throw new Error("External-open capture read did not return text.");
+      if (!text) return [];
+      if (!text.endsWith("\n")) throw new Error("External-open capture has an incomplete record.");
+      return text.slice(0, -1).split("\n").map((line) => {
+        const url: unknown = JSON.parse(line);
+        if (typeof url !== "string") throw new Error("External-open capture contains a non-string URL.");
+        return url;
+      });
+    },
+  };
+  return { app, browserUrls };
+}
+
 export async function libraryConnectorDiscovery(seed: Seed) {
   const den = await seed.den({ org: { name: `Library connector discovery ${Date.now()}`, admin: { name: "Library Connector Admin" } } });
   const organizationId = await activeOrganizationId(seed, den.admin);
-  const app = await seed.desktop({ den, as: "admin" });
-  const workspace = await seed.workspace(app, seed.tmpPath("library-connector-discovery"));
+  const { app, browserUrls } = await desktopWithExternalOpenCapture(seed, den, "admin");
+  // Keep repository-local skills out of this empty Library fixture.
+  const workspace = await seed.workspace(app, seed.tmpPath("library-connector-discovery"), { create: true });
   await app.client.send("Emulation.setDeviceMetricsOverride", {
     width: 820,
     height: 760,
@@ -426,7 +462,7 @@ export async function libraryConnectorDiscovery(seed: Seed) {
     location.hash = "#/workspace/" + workspaceId + "/settings/general";
     return true;
   }, [workspace.workspaceId]));
-  return { app, workspaceId: workspace.workspaceId, organizationId, denWebUrl: den.ref.webUrl };
+  return { app, browserUrls, workspaceId: workspace.workspaceId, organizationId, denWebUrl: den.ref.webUrl };
 }
 
 export async function librarySessionRestore(seed: Seed) {

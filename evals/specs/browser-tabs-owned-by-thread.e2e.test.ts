@@ -76,7 +76,7 @@ lifecycleTest("the global tab limit rejects new pages without disturbing live ta
     }, { within: 15_000, label: "closing the tab removes its native page and releases one slot" });
 
     const pending = agent.run("browser.open_url", { url: retryUrl, provider: "builtin" });
-    await user.click({ role: "button", label: "Allow origin in this tab" });
+    await user.click({ role: "button", label: "Allow for this thread" });
     const result = await pending;
     const retried = await eventually(() => world.readBrowserState(), {
       within: 15_000,
@@ -182,7 +182,7 @@ lifecycleTest("repeated refused navigations leave no allocated page or hidden ho
       const rejected = expect(world.openTabAs(`refused-${attempt}`, ownerSessionId, "http://127.0.0.1:1"))
         .rejects.toThrow(/Browser operation could not finish/);
       if (ownerSessionId === researching.sessionId) await user.click(conversation(researching.title));
-      await user.click({ role: "button", label: "Allow origin in this tab" });
+      await user.click({ role: "button", label: "Allow for this thread" });
       await rejected;
       if (ownerSessionId === researching.sessionId) await user.click(conversation(reading.title));
       await eventually(async () => {
@@ -202,7 +202,7 @@ lifecycleTest("repeated refused navigations leave no allocated page or hidden ho
   await step("An approved retry remains usable in the background after the failures", async () => {
     const pending = world.openTabAs("navigation-recovered", researching.sessionId);
     await user.click(conversation(researching.title));
-    await user.click({ role: "button", label: "Allow origin in this tab" });
+    await user.click({ role: "button", label: "Allow for this thread" });
     const recovered = await pending;
     await user.click(conversation(reading.title));
     expect((await world.readBrowserState()).tabs).toHaveLength(2);
@@ -269,7 +269,7 @@ test("a background conversation reads its owned page silently and requests atten
   const researching = { sessionId: await agent.createSession("Background research"), title: "Background research" };
   await user.click(conversation(reading.title));
   const readingOpen = agent.run("browser.open_url", { url: `${world.origin}/?viewport-probe=reading`, provider: "builtin" });
-  await user.click({ role: "button", label: "Allow origin in this tab" });
+  await user.click({ role: "button", label: "Allow for this thread" });
   const readingTab = browserTabHandle(await readingOpen);
   await user.see(tabButton("reading"), { timeoutMs: 30_000 });
   const initial = await probe.browserTabMetrics(readingTab.targetId);
@@ -281,9 +281,10 @@ test("a background conversation reads its owned page silently and requests atten
   const researchTab = await step("A background open waits without switching conversations or contacting its destination", async () => {
     const requests = (await witness()).pageRequests;
     let settled = false;
-    const pending = agent.desktopApi("/experimental/ui-control/request", { method: "POST", body: {
-      kind: "command", input: { id: "browser.open_url", args: { url: `${world.origin}/?viewport-probe=research`, provider: "builtin" }, origin: { sessionId: researching.sessionId } },
-    } }).then((response) => { settled = true; return response; });
+    // The server's HTTP mailbox answers within 5 s, so a command that must wait
+    // for approval is stamped with its origin at the window boundary instead.
+    const pending = world.commandFrom(researching.sessionId, "browser.open_url", { url: `${world.origin}/?viewport-probe=research`, provider: "builtin" })
+      .then((result) => { settled = true; return result; });
     const state = await probe.eventually(() => probe.browserState(), { within: 10_000, until: (value) => value.tabs.some((tab) => tab.ownerSessionId === researching.sessionId), label: "the background command allocates an owned review tab" });
     const blank = state.tabs.find((tab) => tab.ownerSessionId === researching.sessionId);
     if (!blank) throw new Error("Missing background review tab.");
@@ -292,19 +293,20 @@ test("a background conversation reads its owned page silently and requests atten
     expect(blank.label).toBe("New tab");
     expect(settled).toBe(false);
     expect((await witness()).pageRequests).toEqual(requests);
-    expect(state.nativeViews.find((view) => view.tabId === blank.id)).toMatchObject({ attached: false, aboveApp: false, bounds: { x: 0, y: 0, ...BACKGROUND_TAB_VIEWPORT } });
+    // A consent tab has no document yet: it stays off every host, unsized, and
+    // allocates no hidden window until its approved first navigation completes.
+    expect(state).toMatchObject({ backgroundWindowCount: 0 });
+    expect(state.nativeViews.find((view) => view.tabId === blank.id)).toMatchObject({ attached: false, aboveApp: false, bounds: { x: 0, y: 0, width: 0, height: 0 } });
     await user.see(tabButton("reading"));
     await user.notSee(tabButton("research"));
-    await user.notSee({ role: "button", label: "Allow origin in this tab" });
+    await user.notSee({ role: "button", label: "Allow for this thread" });
     expect(await probe.browserTabMetrics(readingTab.targetId)).toMatchObject(panelViewport);
     await user.click(conversation(researching.title));
-    await user.see({ role: "button", label: "Allow origin in this tab" });
+    await user.see({ role: "button", label: "Allow for this thread" });
     expect((await witness()).pageRequests).toEqual(requests);
-    await user.click({ role: "button", label: "Allow origin in this tab" });
-    const response = await pending;
-    expect(response.status).toBe(200);
-    const result = response.body;
-    if (!result || typeof result !== "object" || !("result" in result)) throw new Error("The background browser command returned no result.");
+    await user.click({ role: "button", label: "Allow for this thread" });
+    const result = await pending;
+    if (!result || typeof result !== "object" || !("result" in result)) throw new Error(`The background browser command returned no result: ${JSON.stringify(result)}`);
     expect(result).toMatchObject({ ok: true, result: { owner_session_id: researching.sessionId, visible: true } });
     const opened = browserTabHandle(result.result);
     expect(opened.tabId).toBe(blank.id);
@@ -318,12 +320,16 @@ test("a background conversation reads its owned page silently and requests atten
 
   await step("The browser reads and images a hidden page, but click, fill and site callbacks need attention", async () => {
     await user.click(conversation(researching.title));
-    const access = task("observe");
-    await user.click({ role: "button", label: "Allow reading this origin" });
-    expect((await access).ok).toBe(true);
+    expect((await task("observe")).ok).toBe(true);
+    await user.notSee({ role: "button", label: "Allow for this thread" });
+    await user.notSee({ role: "button", label: "Allow reading this origin" });
     await user.click(conversation(reading.title));
     const metrics = await probe.eventually(() => probe.browserTabMetrics(researchTab.targetId), { within: 15_000, until: (value) => value.width === BACKGROUND_TAB_VIEWPORT.width && value.hasFocus, label: "the hidden page has its background viewport and focus" });
     expect(metrics).toMatchObject({ ...BACKGROUND_TAB_VIEWPORT, hasFocus: true });
+    // Once it holds a document, the owned page lives in the single hidden host at the background viewport.
+    const parked = await probe.browserState();
+    expect(parked).toMatchObject({ backgroundWindowCount: 1, backgroundWindowVisible: false });
+    expect(parked.nativeViews.find((view) => view.tabId === researchTab.tabId)).toMatchObject({ attached: false, aboveApp: false, bounds: { x: 0, y: 0, ...BACKGROUND_TAB_VIEWPORT } });
     const observed = await task("observe", { includeImage: true });
     expect(observed.text).toContain("Project status");
     expect(browserImageTarget(observed.image)).toMatchObject(BACKGROUND_TAB_VIEWPORT);
@@ -361,7 +367,7 @@ test("a background conversation reads its owned page silently and requests atten
     await user.see(tabButton("reading"));
   });
 
-  await step("Switching to the owner restores its native view and permits only explicitly approved actions", async () => {
+  await step("Switching to the owner restores its native view but visible inputs still need action approval", async () => {
     await user.click(conversation(researching.title));
     const state = await probe.eventually(() => probe.browserState(), { within: 30_000, until: (value) => value.visibleSessionId === researching.sessionId && value.activeTabId === researchTab.tabId, label: "the research conversation takes the screen" });
     expect(state.tabs.map((tab) => tab.ownerSessionId).sort()).toEqual([reading.sessionId, researching.sessionId].sort());
@@ -374,27 +380,42 @@ test("a background conversation reads its owned page silently and requests atten
     expect(native.nativeViews.find((view) => view.tabId === readingTab.tabId)).toMatchObject({ attached: false, aboveApp: false, bounds: { x: 0, y: 0, ...BACKGROUND_TAB_VIEWPORT } });
     const actions: Array<{ type: "click" | "fill"; name: string; text?: string }> = [{ type: "click", name: "Save draft" }, { type: "fill", name: "Draft title", text: "ok" }];
     for (const action of actions) {
-      const observed = await task("observe");
-      const ref = observed.elements?.find((element) => element.name === action.name)?.ref;
-      if (!ref) throw new Error(`Missing observed ${action.name} control.`);
       const before = await witness();
-      const pending = task("act", { observationId: observed.observationId, action: { type: action.type, ref, text: action.text } });
-      await user.see({ role: "button", label: "Allow once" });
-      expect(await witness()).toMatchObject({ records: before.records, inputValue: before.inputValue });
-      await user.click({ role: "button", label: "Allow once" });
-      expect(await pending).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+      for (const decision of ["Deny", "Allow once"]) {
+        const observed = await task("observe");
+        const ref = observed.elements?.find((element) => element.name === action.name)?.ref;
+        if (!ref) throw new Error(`Missing observed ${action.name} control.`);
+        let settled = false;
+        const pending = task("act", { observationId: observed.observationId, action: { type: action.type, ref, text: action.text } })
+          .then((result) => { settled = true; return result; });
+        await user.see({ text: "Allow browser action?" });
+        await user.see({ role: "button", label: "Allow once" });
+        await user.notSee({ role: "button", label: "Allow for this thread" });
+        expect(settled).toBe(false);
+        expect(await witness()).toMatchObject({ records: before.records, inputValue: before.inputValue });
+        await user.click({ role: "button", label: decision });
+        const result = await pending;
+        if (decision === "Deny") {
+          expect(result).toMatchObject({ ok: false, code: "user_denied", dispatched: false, mayHaveChangedState: false });
+          expect(await witness()).toMatchObject({ records: before.records, inputValue: before.inputValue });
+        } else expect(result).toMatchObject({ ok: true, dispatched: true, outcome: "not_yet_verified" });
+        await user.notSee({ role: "button", label: "Allow once" });
+        await user.notSee({ role: "button", label: "Share result" });
+      }
       if (action.type === "click") await probe.eventually(() => task("observe"), { within: 5_000, until: (value) => value.text?.includes("Saved 1") === true, label: "the approved save visibly completes before the next action" });
     }
     const completed = await probe.eventually(witness, { within: 5_000, until: (value) => value.records.length === 1 && value.inputValue === "ok", label: "the fixture receives only the approved click and text" });
     expect(completed.records).toEqual([{ method: "dom", count: 1, signedIn: false }]);
     expect((await task("observe")).text).toContain("Saved 1");
-    evidence.recordAssertionEvidence("Selecting the owner restores its tab and approved actions", "Native attachment, z-order and both panel dimensions recovered. The guest fixture saw no writes before approval, then one DOM save and the expected field value; a new page observation verified Saved 1.", true);
+    evidence.recordAssertionEvidence("Selecting the owner restores its tab while inputs require separate approval", "Native attachment, z-order and both panel dimensions recovered. Reading reused the thread grant. Hidden, pending and denied inputs caused no writes; separately approved inputs produced one DOM save and the expected field value, and a new page observation verified Saved 1.", true);
   });
 
   await step("A paused background conversation cannot open through the legacy automation command", async () => {
     await user.click({ role: "button", label: "Take over" });
     await user.click(conversation(reading.title));
-    const before = await probe.browserState();
+    // Baseline once the reading tab is back in the panel, so the comparison below sees only the rejected command's effect.
+    const before = await probe.eventually(() => probe.browserState(), { within: 15_000, until: (value) => value.visibleSessionId === reading.sessionId && value.activeTabId === readingTab.tabId
+      && value.nativeViews.some((view) => view.tabId === readingTab.tabId && view.attached && view.aboveApp), label: "the reading tab is attached in the panel before the paused open" });
     const requests = (await witness()).pageRequests;
     const response = await agent.desktopApi("/experimental/ui-control/request", { method: "POST", body: {
       kind: "command", input: { id: "browser.open_url", args: { url: `${world.origin}/paused-open`, provider: "builtin" }, origin: { sessionId: researching.sessionId } },
@@ -418,17 +439,24 @@ test("a background conversation reads its owned page silently and requests atten
     expect(await agent.run("browser.restore_tab", { tabId: readingTab.tabId }))
       .toMatchObject({ tab_id: readingTab.tabId, target_id: readingTab.targetId, owner_session_id: reading.sessionId });
     await expect(agent.run("browser.restore_tab", { tabId: researchTab.tabId })).rejects.toThrow(/owner/i);
-    await user.click({ role: "button", label: "Suspend tab" });
-    await user.see({ text: /Browser tab is protected or busy/ });
+    // While a task protects the page, the panel refuses suspension; disabled controls never reach the browser.
+    const suspendButton = (title: string) => probe.dom(`button[title=${JSON.stringify(title)}]`);
+    await probe.eventually(() => suspendButton("Protected until browser work is released"), { within: 15_000,
+      until: (value) => value.elements.length === 1 && value.elements[0].text === "Suspend", label: "the protected page shows a disabled Suspend control" });
+    expect((await probe.dom('button[title="Protected until browser work is released"]:disabled')).elements).toHaveLength(1);
+    expect((await suspendButton("Suspend this tab to free memory")).elements).toEqual([]);
     expect(await agent.run("browser.release_tab", { tabId: readingTab.tabId }))
       .toMatchObject({ tabId: readingTab.tabId, released: true });
-    expect((await world.readBrowserState()).tabs.map(tab => tab.id).sort())
+    await probe.eventually(() => probe.dom('button[title="Suspend this tab to free memory"]:not(:disabled)'), { within: 15_000,
+      until: (value) => value.elements.length === 1 && value.elements[0].text === "Suspend", label: "releasing the task lets the user suspend the page" });
+    expect((await suspendButton("Protected until browser work is released")).elements).toEqual([]);
+    expect((await probe.browserState()).tabs.map(tab => tab.id).sort())
       .toEqual([readingTab.tabId, researchTab.tabId].sort());
     expect(await witness()).toMatchObject({ records: [{ method: "dom", count: 1, signedIn: false }], inputValue: "ok", sessionReads: 0 });
   });
 });
 
-linkTest("a transcript link's menu copies its exact address and opens only its own conversation's browser", async ({ world, user, step }) => {
+linkTest("a transcript link's menu copies its exact address and opens only its own conversation's browser", async ({ world, user, agent, step }) => {
   const tabButton = (name: string): Target => ({ role: "button", label: new RegExp(`^Select tab: .*viewport-probe=${name}$`) });
   const link: Target = { role: "link", label: world.linkUrl };
   const menuItem = (label: string): Target => ({ role: "menuitem", label });
@@ -454,37 +482,48 @@ linkTest("a transcript link's menu copies its exact address and opens only its o
     await user.see(link);
   };
 
-  await user.rightClick(link);
-  const attached = await eventually(() => world.menuOverlay(), {
-    within: 15_000, until: value => value !== null, label: "the native overlay.html menu target appears",
+  // The link menu is a native OS popup: it has no DOM and no CDP target, so the
+  // development seam is the only way to read its entries or deliver a choice.
+  const menuOpen = (open: boolean) => eventually(() => world.nativeMenu(), {
+    within: 15_000, until: value => value.open === open,
+    label: open ? "the native menu is on screen" : "the native menu has closed",
   });
-  if (!attached) throw new Error("The link context menu has no native overlay surface.");
-  await using overlay = attached;
-  const menu = user.on(overlay);
-  const menuShown = (shown: boolean) => eventually(() => world.menuShown(overlay), {
-    within: 10_000, until: value => value === shown,
-    label: shown ? "the native link menu is rendered" : "the dismissed link menu is cleared",
-  });
+  const openMenu = async (target: Target) => {
+    await user.rightClick(target);
+    const shown = await menuOpen(true);
+    if (!shown.current) throw new Error("The native menu is open without a template.");
+    return shown.current;
+  };
+  const labels = (popup: { items: Array<{ type: string; label: string | null }> }) =>
+    popup.items.filter(item => item.type === "item").map(item => item.label);
+  const choose = async (popup: { items: Array<{ id: string | null; label: string | null }> }, label: string) => {
+    const id = popup.items.find(item => item.label === label)?.id;
+    if (!id) throw new Error(`The native menu offers no "${label}" entry.`);
+    expect(await world.chooseMenuItem(id)).toBe(true);
+    const closed = await menuOpen(false);
+    expect(closed.last).toMatchObject({ selectedId: id });
+  };
 
   await step("Right-click and Escape leave the transcript and every browser page unchanged", async () => {
-    await menuShown(true);
-    for (const label of ["Open in OpenWork", "Open in Default Browser", "Copy Link Address"]) {
-      await menu.see(menuItem(label));
-    }
-    // TargetRole excludes menu; keep its container semantics as a DOM observation.
-    expect(await world.menuLabels(overlay)).toEqual(["link context menu"]);
+    const popup = await openMenu(link);
+    const entries = labels(popup);
+    expect(entries.slice(0, 2)).toEqual(["Open in OpenWork", "Open in Default Browser"]);
+    expect(entries.at(-1)).toBe("Copy Link Address");
+    for (const installed of entries.slice(2, -1)) expect(installed).toMatch(/^Open in .+/);
+    expect(entries).not.toContain("Edit message");
+    expect(popup.items.filter(item => item.type === "item").every(item => item.enabled)).toBe(true);
+    // A native popup renders no HTML menu in the app document.
+    await user.notSee(menuItem("Open in OpenWork"));
     await user.notSee(menuItem("Edit message"));
     await unchanged();
-    await menu.press("Escape");
-    await menuShown(false);
+    await user.press("Escape");
+    const dismissed = await menuOpen(false);
+    expect(dismissed.last).toMatchObject({ selectedId: null });
     await unchanged();
   });
 
   await step("Copy Link Address copies the exact URL, not the whole message, without opening a page", async () => {
-    await user.rightClick(link);
-    await menuShown(true);
-    await menu.click(menuItem("Copy Link Address"));
-    await menuShown(false);
+    await choose(await openMenu(link), "Copy Link Address");
     // Clipboard reads require the app document to be focused.
     await user.click("composer");
     expect(await world.readClipboard()).toBe(world.linkUrl);
@@ -492,21 +531,18 @@ linkTest("a transcript link's menu copies its exact address and opens only its o
   });
 
   await step("Right-clicking nonlink message text still offers the message menu", async () => {
-    await user.rightClick({ text: world.note });
-    await user.see(menuItem("Edit message"));
-    await user.see(menuItem("Copy"));
-    await user.notSee(menuItem("Open in OpenWork"));
-    expect(await world.menuShown(overlay)).toBe(false);
-    await user.press("Escape");
+    const popup = await openMenu({ text: world.note });
+    const entries = labels(popup);
+    expect(entries).toEqual(expect.arrayContaining(["Edit message", "Copy"]));
+    expect(entries).not.toContain("Open in OpenWork");
     await user.notSee(menuItem("Edit message"));
+    expect(await world.dismissMenu()).toBe(true);
+    expect((await menuOpen(false)).last).toMatchObject({ selectedId: null });
     await unchanged();
   });
 
   const opened = await step("Open in OpenWork creates exactly one tab owned by the link's conversation", async () => {
-    await user.rightClick(link);
-    await menuShown(true);
-    await menu.click(menuItem("Open in OpenWork"));
-    await menuShown(false);
+    await choose(await openMenu(link), "Open in OpenWork");
     const state = await eventually(() => world.readBrowserState(), {
       within: 30_000,
       until: value => value.tabs.some(tab => tab.url === world.linkUrl && tab.id === value.activeTabId),
@@ -552,7 +588,7 @@ linkTest("a transcript link's menu copies its exact address and opens only its o
     await user.see({ placeholder: "Enter URL..." }, { value: world.linkUrl });
   });
 
-  await step("Normal click opens an owned sidebar tab instead of a separate native window", async () => {
+  const manualTabId = await step("Normal click loads an owned sidebar tab without browser control consent or controls", async () => {
     const before = await world.pageTargets();
     const browserBefore = await world.readBrowserState();
     await user.click(link);
@@ -571,7 +607,29 @@ linkTest("a transcript link's menu copies its exact address and opens only its o
     expect(newPages).toHaveLength(1);
     expect(newPages[0].url).toBe(world.linkUrl);
     expect(await world.readMainUrl()).toBe(mainUrl);
-    expect(await world.menuShown(overlay)).toBe(false);
+    expect((await world.nativeMenu()).open).toBe(false);
+    await user.see({ placeholder: "Enter URL..." }, { value: world.linkUrl });
+    await user.notSee({ role: "button", label: "Allow for this thread" });
+    await user.notSee({ role: "button", label: "Take over" });
+    await user.notSee({ role: "button", label: "Resume browser" });
+    if (!state.activeTabId) throw new Error("The manual link did not select a tab.");
+    return state.activeTabId;
+  });
+
+  await step("The agent must request control before reading the manually opened page", async () => {
+    let returned = false;
+    const observing = agent.browserTask({ sessionId: world.reading.sessionId, operation: "observe", args: { tabId: manualTabId } })
+      .then(result => { returned = true; return result; });
+    await user.see({ role: "button", label: "Allow for this thread" });
+    await user.see({ role: "button", label: "Take over" });
+    expect(returned).toBe(false);
+    await user.click({ role: "button", label: "Allow for this thread" });
+    const observed = await observing;
+    const destination = new URL(world.linkUrl);
+    expect(observed).toMatchObject({ ok: true, tabId: manualTabId, url: destination.origin + destination.pathname });
+    expect(typeof observed.text).toBe("string");
+    await user.notSee({ role: "button", label: "Allow for this thread" });
+    await user.see({ role: "button", label: "Take over" });
   });
 });
 
@@ -650,7 +708,7 @@ artifactTest("a transcript link replaces the selected artifact with its own live
     expect((await world.readBrowserState()).nativeViews.every((view) => !view.attached)).toBe(true);
 
     const pending = world.openTabAs("requested-preview", reading.sessionId);
-    await user.click({ role: "button", label: "Allow origin in this tab" });
+    await user.click({ role: "button", label: "Allow for this thread" });
     const requested = await pending;
     const state = await eventually(() => world.readBrowserState(), {
       within: 15_000,

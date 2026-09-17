@@ -7,8 +7,17 @@ export const MAX_SESSIONS_PREVIEW = 6;
 
 export type SessionListItem = WorkspaceSessionGroup["sessions"][number];
 export type FlattenedSessionRow = { session: SessionListItem };
+export type GlobalPinnedSessionEntry = {
+  group: WorkspaceSessionGroup;
+  session: SessionListItem;
+};
+type ArchivedSession = SessionListItem & { time: { archived: number } };
+export type GlobalArchivedSessionEntry = {
+  group: WorkspaceSessionGroup;
+  session: ArchivedSession;
+};
 
-export const isSessionArchived = (session: SessionListItem): boolean =>
+export const isSessionArchived = (session: SessionListItem): session is ArchivedSession =>
   typeof session.time?.archived === "number" && session.time.archived > 0;
 
 /** Active agent work shown as the left-lane loader (never a completion / unread state). */
@@ -88,12 +97,69 @@ export const getSessionDescendantIds = (
 /** Split sessions into active vs. archived. Archived sessions live in their own section. */
 export const partitionArchivedSessions = (sessions: WorkspaceSessionGroup["sessions"]) => {
   const active: SessionListItem[] = [];
-  const archived: SessionListItem[] = [];
+  const archived: ArchivedSession[] = [];
   for (const session of sessions) {
-    (isSessionArchived(session) ? archived : active).push(session);
+    if (isSessionArchived(session)) archived.push(session);
+    else active.push(session);
   }
   return { active, archived };
 };
+
+export function buildGlobalPinnedSessions(groups: WorkspaceSessionGroup[], pinnedIds: readonly string[]): GlobalPinnedSessionEntry[] {
+  const sessionsById = new Map<string, GlobalPinnedSessionEntry>();
+  for (const group of groups) {
+    const seen = new Set<string>();
+    for (const session of getRootSessions(partitionArchivedSessions(group.sessions).active)) {
+      if (seen.has(session.id)) continue;
+      seen.add(session.id);
+      sessionsById.set(session.id, { group, session });
+    }
+  }
+  return pinnedIds.flatMap((id) => {
+    const entry = sessionsById.get(id);
+    return entry ? [entry] : [];
+  });
+}
+
+export function groupSessionRows(
+  sessionRows: FlattenedSessionRow[],
+  groups: readonly { id: string }[],
+  assignments: Readonly<Record<string, string>>,
+) {
+  const groupIds = groups.map((group) => group.id);
+  const knownGroupIds = new Set(groupIds);
+  const rootRowsByGroup = new Map<string, FlattenedSessionRow[]>();
+  const ungroupedRows: FlattenedSessionRow[] = [];
+  for (const row of sessionRows) {
+    const groupId = assignments[row.session.id];
+    if (groupId && knownGroupIds.has(groupId)) {
+      const bucket = rootRowsByGroup.get(groupId) ?? [];
+      bucket.push(row);
+      rootRowsByGroup.set(groupId, bucket);
+    } else {
+      ungroupedRows.push(row);
+    }
+  }
+  return { groupIds, rootRowsByGroup, ungroupedRows };
+}
+
+export function buildGlobalArchivedSessions(groups: WorkspaceSessionGroup[]): GlobalArchivedSessionEntry[] {
+  const entries: GlobalArchivedSessionEntry[] = [];
+  for (const group of groups) {
+    for (const session of partitionArchivedSessions(group.sessions).archived) {
+      entries.push({ group, session });
+    }
+  }
+  return entries.sort((a, b) => {
+    if (a.session.time.archived !== b.session.time.archived) {
+      return b.session.time.archived - a.session.time.archived;
+    }
+    if (a.group.workspace.id !== b.group.workspace.id) {
+      return a.group.workspace.id < b.group.workspace.id ? -1 : 1;
+    }
+    return a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0;
+  });
+}
 
 /**
  * Order root sessions: pinned first, then manual order, then server recency.

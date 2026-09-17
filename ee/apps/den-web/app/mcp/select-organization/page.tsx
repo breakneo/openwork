@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { TemporaryAuthNotice } from "../../(den)/_components/temporary-auth-notice";
-import { denApiCredentials, denApiEndpoint } from "../../(den)/_lib/den-api-origin";
+import { denApiCredentials, denBrowserEndpoint } from "../../(den)/_lib/den-api-origin";
+import { getRuntimeConfig } from "../../(den)/_lib/runtime-config";
 import { useOrgListWindow } from "../../(den)/_lib/use-org-list-window";
+import { McpConsentPermissions } from "../consent-permissions";
 
 type Organization = {
   id: string;
@@ -42,7 +44,8 @@ function getErrorMessage(payload: unknown, fallback: string) {
 }
 
 async function requestJson(path: string, init?: RequestInit) {
-  const endpoint = denApiEndpoint(path);
+  await getRuntimeConfig();
+  const endpoint = denBrowserEndpoint(path);
   const response = await fetch(endpoint, {
     credentials: denApiCredentials(endpoint),
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
@@ -229,7 +232,7 @@ export default function McpSelectOrganizationPage() {
           ? "Finishing authorization and sending you back to the MCP client now."
           : flowState === "submitting"
             ? "Authorizing the MCP client..."
-            : "The MCP client will only see data for the workspace you choose.";
+            : "Choose the workspace for this connection, then review the access you're authorizing below.";
 
   const primaryLabel =
     flowState === "submitting"
@@ -270,8 +273,8 @@ export default function McpSelectOrganizationPage() {
                   Pick the workspace this client can use.
                 </h1>
                 <p className="max-w-[34rem] text-[14px] leading-7 text-white/80">
-                  The MCP client only sees data and tools for the workspace you
-                  select here.
+                  This connection can only use the access you authorize for the
+                  workspace you select here.
                 </p>
               </div>
             </div>
@@ -399,6 +402,10 @@ export default function McpSelectOrganizationPage() {
                   </div>
                 ) : null}
               </div>
+            ) : null}
+
+            {orgs.length > 0 && flowState !== "loading" && flowState !== "error" ? (
+              <McpConsentPermissions scope={requestedScope} />
             ) : null}
 
             {errorMessage ? (

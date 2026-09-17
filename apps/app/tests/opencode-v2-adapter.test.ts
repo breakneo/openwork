@@ -1,12 +1,82 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 import {
   createClientV2,
   createV2EventTranslationState,
   translateV2Event,
+  v2PromptText,
+  type V2MappedMessage,
 } from "../src/app/lib/opencode-v2-adapter";
 import { parseDynamicToolUIPart } from "../src/react-app/domains/session/sync/parse-tool-parts";
 import { codeModeToolCalls } from "../src/lib/code-mode-tools";
+import { getModelBehaviorControls, getModelBehaviorOptions } from "../src/app/lib/model-behavior";
+import { catalogFastVariants, fastVariantId, nativeModelVariants } from "@openwork/types/cloud-model-fast";
+import { mentionPromptParts } from "../src/react-app/domains/session/sync/mention-parts";
+
+describe("explicit native skill attachments", () => {
+  test("preserves v1 instructions but attaches live native IDs on v2, deduplicated", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: { path: string; body: unknown }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      requests.push({ path: new URL(request.url).pathname, body: request.method === "POST" ? await request.json() : null });
+      return jsonResponse({ data: request.url.endsWith("/skill") ? [{ id: "native-release", name: "release" }] : { effect: "allow" } });
+    };
+    try {
+      const selected = mentionPromptParts({ type: "skill", name: "release" });
+      expect(selected[1]).toMatchObject({ synthetic: true, text: "Load [skill release] and follow its instructions." });
+      const parts = [{ type: "text", text: "Prepare a report " }, ...selected, selected[1]];
+      expect(v2PromptText(parts)).toBe("Prepare a report [skill release]");
+      const result = await createClientV2("http://localhost:4096/opencode2", "/workspace", {}).session.promptAsync({
+        sessionID: "ses_skills", model: { providerID: "witness", modelID: "model" }, parts,
+      });
+      expect(result.error).toBeUndefined();
+      expect(requests.at(-1)?.body).toEqual({ text: "Prepare a report [skill release]", skills: [{ id: "native-release" }] });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test.each([{ catalog: [] }, { catalog: [{ id: "one", name: "release" }, { id: "two", name: "release" }] }])("rejects missing or ambiguous selections before sending", async ({ catalog }) => {
+    const originalFetch = globalThis.fetch;
+    const methods: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      methods.push(new Request(input, init).method);
+      return jsonResponse({ data: catalog });
+    };
+    try {
+      const result = await createClientV2("http://localhost:4096/opencode2", "/workspace", {}).session.promptAsync({
+        sessionID: "ses_skills", model: { providerID: "witness", modelID: "model" },
+        parts: mentionPromptParts({ type: "skill", name: "release" }),
+      });
+      expect(result.error).toMatchObject({ message: expect.stringContaining("Nothing was sent") });
+      expect(methods).toEqual(["GET"]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("does not interpret user prose as selection metadata", () => {
+    const text = "Load [skill release] and follow its instructions.";
+    expect(v2PromptText([{ type: "text", text }])).toBe(text);
+    expect(v2PromptText([{ type: "text", text, metadata: { openworkSelectedSkill: { name: "release" } } }])).toBe(text);
+  });
+
+  test.each(["deny", "ask"])("does not send an attachment when native permission is %s", async (effect) => {
+    const originalFetch = globalThis.fetch;
+    const paths: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      paths.push(new URL(request.url).pathname);
+      return jsonResponse({ data: request.url.endsWith("/skill") ? [{ id: "release", name: "release" }] : { effect } });
+    };
+    try {
+      const result = await createClientV2("http://localhost:4096/opencode2", "/workspace", {}).session.promptAsync({
+        sessionID: "ses_skills", model: { providerID: "witness", modelID: "model" },
+        parts: mentionPromptParts({ type: "skill", name: "release" }),
+      });
+      expect(result.error).toMatchObject({ message: expect.stringContaining("Nothing was sent") });
+      expect(paths).toEqual(["/opencode2/api/skill", "/opencode2/api/session/ses_skills/permission"]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
 
 const capturedPermissionAsked = {
   id: "evt_permission_asked",
@@ -912,6 +982,168 @@ describe("OpenCode v2 event translation", () => {
       { type: "session.execution.succeeded", properties: { sessionID: "ses_child", sequence: undefined } },
     ]);
   });
+
+  test("keeps an explicit subagent session through empty updates without bleeding across messages, calls, or parents", () => {
+    const state = createV2EventTranslationState();
+    const start = (sessionID: string, id: string, assistantMessageID = `msg_${sessionID}`) => {
+      const identity = { sessionID, assistantMessageID, id };
+      translateV2Event({ type: "session.tool.input.started", data: { ...identity, name: "subagent" } }, state);
+      translateV2Event({ type: "session.tool.called", data: { ...identity, input: { agent: "general" } } }, state);
+      return identity;
+    };
+    const exact = start("ses_parent_exact", "call_exact");
+    const otherCall = start("ses_parent_exact", "call_other");
+    const otherParent = start("ses_parent_other", "call_exact");
+
+    expect(translateV2Event({ type: "session.tool.progress", data: {
+      ...exact, metadata: { sessionID: "ses_child_exact", status: "running" },
+    } }, state)).toMatchObject([{ properties: { part: { state: { metadata: {
+      sessionID: "ses_child_exact", sessionId: "ses_child_exact", status: "running",
+    } } } } }]);
+    expect(translateV2Event({ type: "session.tool.progress", data: { ...exact, metadata: {} } }, state))
+      .toMatchObject([{ properties: { part: { state: { metadata: {
+        sessionId: "ses_child_exact",
+      } } } } }]);
+    expect(JSON.stringify(translateV2Event({
+      type: "session.tool.progress", data: { ...otherCall, metadata: {} },
+    }, state))).not.toContain("ses_child_exact");
+    expect(JSON.stringify(translateV2Event({
+      type: "session.tool.progress", data: { ...otherParent, metadata: {} },
+    }, state))).not.toContain("ses_child_exact");
+    const otherMessage = start("ses_parent_exact", "call_exact", "msg_next_turn");
+    expect(JSON.stringify(translateV2Event({
+      type: "session.tool.progress", data: { ...otherMessage, metadata: {} },
+    }, state))).not.toContain("ses_child_exact");
+  });
+});
+
+describe("OpenCode v2 message pagination", () => {
+  test("transmits the opaque older cursor, caps native pages at 200, and does not infer exhaustion from filtered content", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Request[] = [];
+    const cursor = "opaque+/=?%25&older";
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      const url = new URL(request.url);
+      expect(url.pathname).toBe("/workspace/ws/opencode2/api/session/ses_pages/message");
+      expect(request.headers.get("Authorization")).toBe("Bearer page-token");
+      expect(url.searchParams.get("limit")).toBe("200");
+      expect(url.searchParams.has("before")).toBe(false);
+      expect(url.searchParams.has("order")).toBe(false);
+      if (requests.length === 1) {
+        expect(url.searchParams.has("cursor")).toBe(false);
+        return jsonResponse({ data: [{ id: "msg_system", type: "system", text: "Internal context" }], cursor: { next: cursor } });
+      }
+      expect(url.searchParams.get("cursor")).toBe(cursor);
+      return jsonResponse({ data: [], cursor: {} });
+    };
+    try {
+      const client = createClientV2("https://worker.example/workspace/ws/opencode2", undefined, { token: "page-token" });
+      const newest = await client.listMessagesPage({ sessionID: "ses_pages", limit: 300 });
+      expect(newest.data).toEqual([]);
+      expect(newest.pagination).toEqual({ nextCursor: cursor, limit: 200 });
+      const older = await client.listMessagesPage({ sessionID: "ses_pages", limit: 300, before: newest.pagination?.nextCursor ?? undefined });
+      expect(older.data).toEqual([]);
+      expect(older.pagination).toEqual({ before: cursor, nextCursor: null, limit: 200 });
+      expect(requests).toHaveLength(2);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("unbounded compatibility reads normalize descending pages chronologically while preserving native ties and skipping filtered content", async () => {
+    const originalFetch = globalThis.fetch;
+    const cursors: Array<string | null> = [];
+    const records = (ids: string[]) => ids.map((id) => ({ id, type: "user", text: id, time: { created: 7 } }));
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(new Request(input, init).url);
+      expect(url.searchParams.has("limit")).toBe(false);
+      const cursor = url.searchParams.get("cursor");
+      cursors.push(cursor);
+      if (cursor === null) return jsonResponse({ data: records(["b-last", "m-next"]), cursor: { next: "middle" } });
+      if (cursor === "middle") return jsonResponse({ data: [{ id: "hidden", type: "synthetic", text: "hidden" }], cursor: { next: "oldest" } });
+      if (cursor === "oldest") return jsonResponse({ data: records(["a-answer", "z-first"]), cursor: { next: "empty" } });
+      return jsonResponse({ data: [], cursor: {} });
+    };
+    try {
+      const client = createClientV2("http://opencode.test/opencode2", undefined, {});
+      const result = await client.listMessagesPage({ sessionID: "ses_pages" });
+      expect(result.data?.map(({ info }) => info.id)).toEqual(["z-first", "a-answer", "m-next", "b-last"]);
+      expect(result.pagination).toBeUndefined();
+      expect(cursors).toEqual([null, "middle", "oldest", "empty"]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("unbounded reads reject cycling cursors instead of publishing a partial history", async () => {
+    const originalFetch = globalThis.fetch;
+    let reads = 0;
+    globalThis.fetch = async () => {
+      reads += 1;
+      return jsonResponse({ data: [{ id: `msg_${reads}`, type: "user", text: "page" }], cursor: { next: reads === 2 ? "b" : "a" } });
+    };
+    try {
+      const result = await createClientV2("http://opencode.test/opencode2", undefined, {}).listMessagesPage({ sessionID: "ses_pages" });
+      expect(result.data).toBeUndefined();
+      expect(result.error).toMatchObject({ message: expect.stringContaining("cursor did not advance") });
+      expect(reads).toBe(3);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("legacy responses retain their existing order without trustworthy pagination", async () => {
+    const originalFetch = globalThis.fetch;
+    let reads = 0;
+    globalThis.fetch = async () => { reads += 1; return jsonResponse({ data: [
+      { id: "msg_2", type: "user", text: "newer", time: { created: 2 } },
+      { id: "msg_1", type: "user", text: "older", time: { created: 1 } },
+    ] }); };
+    try {
+      const client = createClientV2("http://opencode.test/opencode2", undefined, {});
+      for (const limit of [undefined, 24]) {
+        const result = await client.listMessagesPage({ sessionID: "ses_pages", limit });
+        expect(result.data?.map(({ info }) => info.id)).toEqual(["msg_2", "msg_1"]);
+        expect(result.pagination).toBeUndefined();
+      }
+      const older = await client.listMessagesPage({ sessionID: "ses_pages", limit: 24, before: "older" });
+      expect(older.data).toBeUndefined();
+      expect(older.error).toMatchObject({ name: "InvalidV2MessagePageResponse" });
+      expect(reads).toBe(3);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test.each([
+    { data: [], cursor: { next: 12 } },
+    { data: [], cursor: { next: "unexpected" } },
+    { data: [{ id: "msg_1", type: "user" }], cursor: {} },
+    { data: [], cursor: null },
+    { data: "invalid", cursor: {} },
+  ])("malformed native pages cannot imply exhaustion (%j)", async (payload) => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => jsonResponse(payload);
+    try {
+      const result = await createClientV2("http://opencode.test/opencode2", undefined, {}).listMessagesPage({ sessionID: "ses_pages", limit: 24 });
+      expect(result.data).toBeUndefined();
+      expect(result.pagination).toBeUndefined();
+      expect(result.error).toMatchObject({ name: "InvalidV2MessagePageResponse" });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("cancellation after a page prevents another native read or partial publication", async () => {
+    const originalFetch = globalThis.fetch;
+    const controller = new AbortController();
+    const aborted = new Error("page read cancelled");
+    let reads = 0;
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      reads += 1;
+      controller.abort(aborted);
+      expect(request.signal.aborted).toBe(true);
+      return jsonResponse({ data: [{ id: "msg_1", type: "user" }], cursor: { next: "older" } });
+    };
+    try {
+      await expect(createClientV2("http://opencode.test/opencode2", undefined, {}).session.messages({ sessionID: "ses_pages" }, { signal: controller.signal }))
+        .rejects.toBe(aborted);
+      expect(reads).toBe(1);
+    } finally { globalThis.fetch = originalFetch; }
+  });
 });
 
 describe("OpenCode v2 client compatibility", () => {
@@ -1191,6 +1423,156 @@ describe("OpenCode v2 client compatibility", () => {
         .toEqual([{ type: "message.part.updated", properties: { part: result.data?.[0]?.parts[0] } }]);
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("hydrates only exact previously observed subagent associations from live and reload caches", async () => {
+    const ownedDom = typeof window === "undefined";
+    if (ownedDom) GlobalRegistrator.register({ url: "http://localhost/" });
+    const storageKey = "openwork.v2.task-session-associations.v1";
+    const previous = globalThis.sessionStorage.getItem(storageKey);
+    const liveBaseUrl = "http://live-association.test/opencode2";
+    const coldBaseUrl = "http://cold-association.test/opencode2";
+    const directory = "/workspace";
+    globalThis.sessionStorage.setItem(storageKey, JSON.stringify([
+      {
+        scope: coldBaseUrl,
+        parentSessionID: "ses_parent_cold",
+        messageID: "msg_call_evicted",
+        callID: "call_evicted",
+        childSessionID: "ses_child_evicted",
+      },
+      ...Array.from({ length: 255 }, (_, index) => ({
+        scope: coldBaseUrl,
+        parentSessionID: `ses_noise_${index}`,
+        messageID: `msg_noise_${index}`,
+        callID: `call_noise_${index}`,
+        childSessionID: `ses_child_noise_${index}`,
+      })),
+      {
+        scope: coldBaseUrl,
+        parentSessionID: "ses_parent_cold",
+        callID: "call_legacy",
+        childSessionID: "ses_child_legacy",
+      },
+      {
+        scope: coldBaseUrl,
+        parentSessionID: "ses_parent_cold",
+        messageID: "msg_call_exact",
+        callID: "call_exact",
+        childSessionID: "ses_child_cold",
+      },
+    ]));
+    const originalFetch = globalThis.fetch;
+    let liveReads = 0;
+    const message = (callID: string, metadata: Record<string, unknown>, id = `msg_${callID}`) => ({
+      id,
+      type: "assistant",
+      time: { created: 10 },
+      content: [{
+        type: "tool", id: callID, name: "subagent", time: { created: 10, ran: 20 },
+        state: { status: "running", input: { agent: "general" }, metadata },
+      }],
+    });
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const match = new URL(request.url).pathname.match(/\/api\/session\/([^/]+)\/message$/);
+      const sessionID = match?.[1];
+      const hostname = new URL(request.url).hostname;
+      if (hostname === "live-association.test" && new URL(request.url).pathname.endsWith("/api/event")) {
+        return new Response("", { headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (hostname === "live-association.test" && sessionID === "ses_parent_live") {
+        liveReads += 1;
+        return jsonResponse({ data: [message("call_exact", liveReads === 1 ? { sessionID: "ses_child_live" } : {})] });
+      }
+      if (hostname === "cold-association.test" && sessionID === "ses_parent_cold") {
+        return jsonResponse({ data: [
+          message("call_exact", {}),
+          message("call_exact", {}, "msg_next_turn"),
+          message("call_other", {}),
+          message("call_legacy", {}),
+          message("call_evicted", {}),
+        ] });
+      }
+      if (hostname === "cold-association.test" && sessionID === "ses_parent_other") {
+        return jsonResponse({ data: [message("call_exact", {})] });
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    };
+    const uiPart = (messages: V2MappedMessage[] | undefined, index: number) => {
+      const part = messages?.[index]?.parts[0];
+      if (!part || part.type !== "tool") throw new Error("Missing subagent tool part");
+      return parseDynamicToolUIPart(part);
+    };
+    try {
+      const live = createClientV2(liveBaseUrl, undefined, {});
+      expect(uiPart((await live.session.messages({ sessionID: "ses_parent_live" })).data, 0)?.callProviderMetadata)
+        .toMatchObject({ openwork: { childSessionId: "ses_child_live" } });
+      const subscription = await live.event.subscribe();
+      await subscription.stream.return(undefined);
+      expect(uiPart((await live.session.messages({ sessionID: "ses_parent_live" })).data, 0)?.callProviderMetadata)
+        .toMatchObject({ openwork: { childSessionId: "ses_child_live" } });
+      const hydrated = createClientV2(liveBaseUrl, directory, {});
+      expect(uiPart((await hydrated.session.messages({ sessionID: "ses_parent_live" })).data, 0)?.callProviderMetadata)
+        .toMatchObject({ openwork: { childSessionId: "ses_child_live" } });
+      expect(globalThis.sessionStorage.getItem(storageKey)).toContain("ses_child_live");
+
+      const cold = createClientV2(coldBaseUrl, directory, {});
+      const exact = await cold.session.messages({ sessionID: "ses_parent_cold" });
+      expect(uiPart(exact.data, 0)?.callProviderMetadata)
+        .toMatchObject({ openwork: { childSessionId: "ses_child_cold" } });
+      for (const index of [1, 2, 3, 4]) {
+        expect(JSON.stringify(uiPart(exact.data, index)?.callProviderMetadata)).not.toContain("ses_child_");
+      }
+      const otherParent = await cold.session.messages({ sessionID: "ses_parent_other" });
+      expect(JSON.stringify(uiPart(otherParent.data, 0)?.callProviderMetadata)).not.toContain("ses_child_cold");
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previous === null) globalThis.sessionStorage.removeItem(storageKey);
+      else globalThis.sessionStorage.setItem(storageKey, previous);
+      if (ownedDom) await GlobalRegistrator.unregister();
+    }
+  });
+
+  test("keeps observed subagent associations in memory when browser cache access throws", async () => {
+    const ownedDom = typeof window === "undefined";
+    if (ownedDom) GlobalRegistrator.register({ url: "http://localhost/" });
+    const getItem = spyOn(globalThis.sessionStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("Storage blocked", "SecurityError");
+    });
+    const setItem = spyOn(globalThis.sessionStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("Storage blocked", "SecurityError");
+    });
+    const originalFetch = globalThis.fetch;
+    let reads = 0;
+    globalThis.fetch = async () => {
+      reads += 1;
+      return jsonResponse({ data: [{
+        id: "msg_storage_blocked", type: "assistant", time: { created: 10 },
+        content: [{
+          type: "tool", id: "call_storage_blocked", name: "subagent", time: { created: 10, ran: 20 },
+          state: {
+            status: "running", input: { agent: "general" },
+            metadata: reads === 1 ? { sessionID: "ses_child_storage_blocked" } : {},
+          },
+        }],
+      }] });
+    };
+    try {
+      const client = createClientV2("http://storage-blocked.test/opencode2", "/workspace", {});
+      for (let read = 0; read < 2; read += 1) {
+        const result = await client.session.messages({ sessionID: "ses_parent_storage_blocked" });
+        const part = result.data?.[0]?.parts[0];
+        if (!part || part.type !== "tool") throw new Error("Missing blocked-storage subagent");
+        expect(parseDynamicToolUIPart(part)?.callProviderMetadata)
+          .toMatchObject({ openwork: { childSessionId: "ses_child_storage_blocked" } });
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      getItem.mockRestore();
+      setItem.mockRestore();
+      if (ownedDom) await GlobalRegistrator.unregister();
     }
   });
 
@@ -1887,11 +2269,19 @@ describe("OpenCode v2 client compatibility", () => {
 });
 
 
-test("v2 provider catalog retains display names without exposing request settings", async () => {
+test("v2 provider catalog retains display names and advertised effort without exposing provider credentials", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
-    if (request.url.endsWith("/api/model")) return jsonResponse({ data: [{ id: "coding", providerID: "lpr_fixture", name: "Coding" }] });
+    if (request.url.endsWith("/api/model")) return jsonResponse({ data: [
+      { id: "coding", providerID: "lpr_fixture", name: "Coding", variants: [
+        { id: "low", settings: { reasoningEffort: "low" } },
+        { id: "high", settings: { reasoningEffort: "high" } },
+        { id: "CustomExact", settings: { thinking: { budgetTokens: 4096 } } },
+      ] },
+      { id: "standard", providerID: "lpr_fixture", name: "Standard", variants: [] },
+      { id: "builtin", providerID: "lpr_fixture", capabilities: { output: ["text", "reasoning"] } },
+    ] });
     if (request.url.endsWith("/api/provider")) return jsonResponse({ data: [{ id: "lpr_fixture", name: "Assigned Coding", settings: { apiKey: "fixture-private" } }] });
     if (request.url.endsWith("/api/model/default")) return jsonResponse({ data: {} });
     throw new Error(`Unexpected request: ${request.url}`);
@@ -1900,10 +2290,69 @@ test("v2 provider catalog retains display names without exposing request setting
     const client = createClientV2("http://opencode.test/opencode2", "/workspace", {});
     const result = await client.provider.list();
     expect(result.data?.all[0]?.name).toBe("Assigned Coding");
+    const models = result.data?.all[0]?.models;
+    expect(models?.coding?.variants).toEqual({ low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" }, CustomExact: { thinking: { budgetTokens: 4096 } } });
+    if (!models?.coding || !models.standard || !models.builtin) throw new Error("Missing mapped models");
+    expect(getModelBehaviorOptions("lpr_fixture", models.coding).map((option) => option.value)).toEqual(["low", "high", "CustomExact"]);
+    expect(getModelBehaviorOptions("lpr_fixture", models.standard)).toEqual([]);
+    expect(getModelBehaviorOptions("lpr_fixture", models.builtin)).toEqual([]);
     expect(JSON.stringify(result.data)).not.toContain("fixture-private");
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("v2 prompts set the exact selected variant on the native model ref and omit it for Default", async () => {
+  const originalFetch = globalThis.fetch;
+  const writes: { path: string; body: unknown }[] = [];
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    writes.push({ path: new URL(request.url).pathname, body: await request.json() });
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const client = createClientV2("http://owner.test/opencode2", "/workspace", {});
+    for (const variant of ["high", "CustomExact", fastVariantId("CustomExact"), undefined]) {
+      const result = await client.session.promptAsync({ sessionID: "ses_effort", model: { providerID: "witness", modelID: "model" }, variant, parts: [{ type: "text", text: "Hello" }] });
+      expect(result.response.status).toBe(204);
+    }
+    expect(writes.filter((write) => write.path.endsWith("/model")).map((write) => write.body)).toEqual([
+      { model: { providerID: "witness", id: "model", variant: "high" } },
+      { model: { providerID: "witness", id: "model", variant: "CustomExact" } },
+      { model: { providerID: "witness", id: "model", variant: fastVariantId("CustomExact") } },
+      { model: { providerID: "witness", id: "model" } },
+    ]);
+    expect(writes.filter((write) => write.path.endsWith("/prompt")).map((write) => write.body)).toEqual([
+      { text: "Hello" }, { text: "Hello" }, { text: "Hello" }, { text: "Hello" },
+    ]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("v2 redacted catalog preserves Fast identities without requiring provider settings in the UI", async () => {
+  const variants = nativeModelVariants(catalogFastVariants({ variants: { high: { reasoningEffort: "high" } },
+    experimental: { modes: { fast: { provider: { body: { service_tier: "priority" } } } } } }, "@ai-sdk/openai"),
+  "@opencode-ai/ai/providers/openai");
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    // The server's publicModel sanitizer intentionally exposes only variant IDs.
+    if (request.url.endsWith("/api/model")) return jsonResponse({ data: [{ id: "model", providerID: "witness", name: "Witness",
+      variants: variants.map(({ id }) => ({ id })) }] });
+    if (request.url.endsWith("/api/provider")) return jsonResponse({ data: [{ id: "witness", name: "Witness" }] });
+    if (request.url.endsWith("/api/model/default")) return jsonResponse({ data: {} });
+    throw new Error(`Unexpected request: ${request.url}`);
+  });
+  try {
+    const client = createClientV2("http://synthetic.test/opencode2", "/workspace", {});
+    const result = await client.provider.list();
+    const model = result.data?.all[0]?.models.model;
+    if (!model) throw new Error("Missing mapped model");
+    const options = getModelBehaviorOptions("witness", model);
+    expect(options.find((option) => option.value === fastVariantId("high"))?.label).toBe("High + Fast");
+    expect(getModelBehaviorControls(options, "high").toggleValue).toBe(fastVariantId("high"));
+    expect(getModelBehaviorControls(options, fastVariantId("high")).toggleValue).toBe("high");
+    expect(getModelBehaviorControls(options, fastVariantId(null)).toggleValue).toBeNull();
+    expect(JSON.stringify(model)).not.toContain("serviceTier");
+  } finally { fetchSpy.mockRestore(); }
 });
 
 describe("v2 question forms", () => {

@@ -69,12 +69,44 @@ async function routeSessionEndpoint(endpoint: ResolvedWorkspaceEndpoint): Promis
     : endpoint;
 }
 
-export async function createRouteSession(endpoint: ResolvedWorkspaceEndpoint, directory?: string): Promise<Session> {
+/**
+ * Create a session and report the engine endpoint that owns it. Callers that
+ * key follow-up state by `opencodeBaseUrl` (the hero's one-step auto-send) must
+ * use this endpoint, not the workspace's default v1 one, or the mounted
+ * session surface never finds that state when chat is routed to v2.
+ */
+export async function createRouteSessionOnEngine(
+  endpoint: ResolvedWorkspaceEndpoint,
+  directory?: string,
+): Promise<{ session: Session; endpoint: ResolvedWorkspaceEndpoint }> {
   const native = await routeSessionEndpoint(endpoint);
   const client = isOpencodeV2BaseUrl(native.opencodeBaseUrl)
     ? createClientV2(native.opencodeBaseUrl, directory, { token: native.token })
     : createClient(native.opencodeBaseUrl, directory, { token: native.token, mode: "openwork" });
-  return unwrap(await client.session.create({ directory }));
+  return { session: unwrap(await client.session.create({ directory })), endpoint: native };
+}
+
+export async function createRouteSession(endpoint: ResolvedWorkspaceEndpoint, directory?: string): Promise<Session> {
+  return (await createRouteSessionOnEngine(endpoint, directory)).session;
+}
+
+/** Sidebar creation starts a main conversation, independent of side-chat focus. */
+export async function startSidebarTask(options: {
+  workspaceId: string;
+  groupId?: string;
+  hasWorkspaceError: boolean;
+  openEmptyComposer: (workspaceId: string) => void;
+  createTask: (workspaceId: string, openAs: "primary", source: "new_task") => Promise<string | null>;
+  assignGroup: (workspaceId: string, sessionId: string, groupId: string) => void;
+}): Promise<void> {
+  const { workspaceId, groupId } = options;
+  if (!groupId && !options.hasWorkspaceError) {
+    // Opening an empty composer must not wait for an engine request.
+    options.openEmptyComposer(workspaceId);
+    return;
+  }
+  const sessionId = await options.createTask(workspaceId, "primary", "new_task");
+  if (sessionId && groupId) options.assignGroup(workspaceId, sessionId, groupId);
 }
 
 export async function deleteRouteSession(endpoint: ResolvedWorkspaceEndpoint, sessionId: string): Promise<boolean> {

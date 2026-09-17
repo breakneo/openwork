@@ -23,12 +23,13 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
   const delay = mock((ms: number) => { waiting.resolve(ms); return release.promise; });
   const externalFetch = mock(async (_url: string, _init?: RequestInit) => Response.json(policy));
   const parse = mock((_value: unknown) => policy);
+  const read = mock(async (): Promise<{ managedPolicy?: typeof policy }> => ({}));
   const write = mock(async (_config: ServerConfig, _policy: unknown) => ({ changed: false }));
   mock.module("node:timers/promises", () => ({ setTimeout: delay }));
   mock.module("./server-fetch.js", () => ({ externalFetch }));
   mock.module("@openwork/types/den/desktop-policies-runtime", () => ({ desktopConfigSchema: { parse } }));
   mock.module("./runtime-opencode-config-store.js", () => ({
-    readGlobalRuntimeOpencodeConfig: async () => ({}), writeManagedDesktopPolicy: write,
+    readGlobalRuntimeOpencodeConfig: read, writeManagedDesktopPolicy: write,
     runtimeProviderMap: () => ({}),
   }));
   mock.module("./workspace-kv-store.js", () => ({
@@ -50,10 +51,33 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
     delay.mockClear();
     externalFetch.mockReset().mockImplementation(async () => Response.json(policy));
     parse.mockReset().mockImplementation(() => policy);
+    read.mockReset().mockImplementation(async () => ({}));
     write.mockClear();
     service = managedDesktopPolicy({ ...config });
   });
   afterEach(() => { release.resolve(); });
+
+  test.each([false, true])("no-session browser evaluation fences identity installation during its persisted read (install=%s)", async (install) => {
+    const reading = Promise.withResolvers<void>();
+    const persisted = Promise.withResolvers<Awaited<ReturnType<typeof read>>>();
+    read.mockImplementationOnce(() => { reading.resolve(); return persisted.promise; });
+    const result = service.assert("browser", { url: "https://unapproved.example" }).catch((error: unknown) => error);
+    await reading.promise;
+    if (install) await service.setSession(session);
+    persisted.resolve({});
+    if (install) expect(await result).toMatchObject({ code: "policy_identity_changed", status: 409 });
+    else expect(await result).toBeUndefined();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(externalFetch).toHaveBeenCalledTimes(install ? 1 : 0);
+    expect(write).toHaveBeenCalledTimes(install ? 1 : 0);
+  });
+
+  test("no-session browser evaluation keeps retained managed policy fail closed", async () => {
+    read.mockResolvedValue({ managedPolicy: policy });
+    await expect(service.assert("browser", { url: "https://unapproved.example" })).rejects.toMatchObject({ code: "policy_unavailable", status: 403 });
+    expect(externalFetch).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
 
   test("503 waits for the explicit 200ms release before the second read succeeds", async () => {
     externalFetch.mockImplementationOnce(async () => new Response(null, { status: 503 }));
@@ -118,10 +142,24 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
     expect(await result).toMatchObject({ code: "policy_identity_changed", status: 409 });
     await turn();
     expect(externalFetch.mock.calls.map(([url, init]) => [url, init?.headers])).toEqual([
-      [`${session.baseUrl}/v1/me/desktop-config`, { Authorization: "Bearer old-token", "x-openwork-legacy-org-id": "old-org" }],
-      [`${next.baseUrl}/v1/me/desktop-config`, { Authorization: "Bearer new-token", "x-openwork-legacy-org-id": "new-org" }],
+      [`${session.baseUrl}/v1/me/desktop-config`, { Accept: "application/json", Authorization: "Bearer old-token", "x-openwork-org-id": "old-org", "x-openwork-legacy-org-id": "old-org" }],
+      [`${next.baseUrl}/v1/me/desktop-config`, { Accept: "application/json", Authorization: "Bearer new-token", "x-openwork-org-id": "new-org", "x-openwork-legacy-org-id": "new-org" }],
     ]);
     expect(delay).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  test("re-delivering the same identity during backoff keeps the in-flight verification", async () => {
+    externalFetch.mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    const result = service.setSession(session);
+    expect(await waiting.promise).toBe(200);
+    const redelivered = service.setSession({ ...session });
+    release.resolve();
+    await expect(result).resolves.toBeUndefined();
+    await expect(redelivered).resolves.toBeUndefined();
+    await turn();
+    expect(externalFetch).toHaveBeenCalledTimes(2);
+    expect(externalFetch.mock.calls.every(([, init]) => init?.headers && "Authorization" in init.headers && init.headers.Authorization === "Bearer old-token")).toBe(true);
     expect(write).toHaveBeenCalledTimes(1);
   });
 }

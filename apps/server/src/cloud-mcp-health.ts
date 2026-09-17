@@ -2,6 +2,7 @@ import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { createOpencodeClient, McpStatus, ToolIds, ToolList } from "@opencode-ai/sdk/v2/client";
 import { ApiError } from "./errors.js";
+import type { ConnectMcpCatalogDiagnostic } from "./connect-mcp-server-catalog.js";
 import { diagnoseMcpToolDenies, type McpToolDeny } from "./mcp.js";
 import { openworkPluginPath } from "./openwork-extensions-plugin-path.js";
 import { sanitizeDiagnosticString, sanitizeDiagnosticValue } from "./diagnostic-sanitizer.js";
@@ -216,6 +217,14 @@ export type CloudMcpHealth = {
   usable: boolean;
   usableByCurrentModel: boolean | null;
   connectCatalogEnabled: boolean;
+  /**
+   * Workspace-private auth is locally provisioned for the effective trusted origin.
+   * False means missing, malformed, or origin-mismatched auth; null means ineligible or unreadable.
+   * This does not establish token validity, provider availability, or access.
+   */
+  appHostAuthorizationReady: boolean | null;
+  /** Result of this reconciliation's private catalog discovery; absent when not attempted. */
+  connectCatalogDiagnostic?: ConnectMcpCatalogDiagnostic;
   workspace: {
     id: string;
     type: WorkspaceInfo["workspaceType"];
@@ -2189,6 +2198,15 @@ async function readOpenworkCloudMcpHealthInternal(
   const checkedAt = new Date().toISOString();
   const startedAtMs = Date.now();
   const desired = await readDesiredState({ config: input.config, workspace: input.workspace, directory: input.directory });
+  let appHostAuthorizationReady: boolean | null = null;
+  if (desired.config && !desired.validationProblem) {
+    try {
+      const { readOpenWorkConnectMcpAppHostAuthorizationReady } = await import("./connect-mcp-server-catalog.js");
+      appHostAuthorizationReady = await readOpenWorkConnectMcpAppHostAuthorizationReady(input.config, input.workspace.id, desired.config);
+    } catch {
+      appHostAuthorizationReady = null;
+    }
+  }
   let delivery = cloudMcpDeliveryState.snapshot(input.workspace, input.directory, desired.revision);
   const toolDenies = desired.present
     ? await diagnoseMcpToolDenies(input.workspace.path, OPENWORK_CLOUD_MCP_NAME, expectedTools())
@@ -2281,6 +2299,7 @@ async function readOpenworkCloudMcpHealthInternal(
     usable: firstFailure === null,
     usableByCurrentModel: usableByModel(inspection.providerProjection, firstFailure),
     connectCatalogEnabled: desired.metadata.connectCatalogEnabled,
+    appHostAuthorizationReady,
     workspace: {
       id: input.workspace.id,
       type: input.workspace.workspaceType,
@@ -2424,6 +2443,40 @@ function reusableDirectProbeFromHealth(health: CloudMcpHealth): DirectProbeReuse
     : undefined;
 }
 
+async function reconcileConnectMcpCatalog(input: {
+  config: ServerConfig;
+  workspace: WorkspaceInfo;
+  directory: string;
+  cloudMcp: Record<string, unknown>;
+  appHostAuthorization?: string;
+  createWorkspaceOpencodeClient: ReadOpenworkCloudMcpHealthInput["createWorkspaceOpencodeClient"];
+}) {
+  const { reconcileOpenWorkConnectMcpServers } = await import("./connect-mcp-server-catalog.js");
+  const servers = await reconcileOpenWorkConnectMcpServers(input).catch((): {
+    diagnostic: ConnectMcpCatalogDiagnostic; directNames: string[]; removedNames: string[];
+  } => ({ diagnostic: "discovery_unavailable", directNames: [], removedNames: [] }));
+  const opencode = input.createWorkspaceOpencodeClient(input.config, input.workspace);
+  for (const name of servers.removedNames) {
+    await opencode.mcp.disconnect({ name, ...locationParams(input.directory) }).catch(() => undefined);
+  }
+  return servers;
+}
+
+export async function refreshOpenworkCloudMcpCatalog(input: ReadOpenworkCloudMcpHealthInput & {
+  registerRuntimeMcp: CloudMcpRuntimeRegistrar;
+}): Promise<CloudMcpHealth> {
+  const health = await readOpenworkCloudMcpHealth(input);
+  if (input.config.readOnly || !input.directory || !health.usable || health.appHostAuthorizationReady !== true) return health;
+  const cloudMcp = await readPersistedDesiredConfig(input.config, input.workspace.id);
+  if (!cloudMcp || cloudMcp.enabled === false) return health;
+  const servers = await reconcileConnectMcpCatalog({ ...input, directory: input.directory, cloudMcp });
+  if (servers.directNames.length > 0) {
+    await input.registerRuntimeMcp(input.config, input.workspace, servers.directNames, { throwOnFailure: false })
+      .catch(() => undefined);
+  }
+  return { ...health, connectCatalogDiagnostic: servers.diagnostic };
+}
+
 export async function reconcileOpenworkCloudMcp(input: {
   config: ServerConfig;
   workspace: WorkspaceInfo;
@@ -2436,16 +2489,20 @@ export async function reconcileOpenworkCloudMcp(input: {
   refreshRegistrationFromLiveStatus?: CloudMcpLiveStatusObserver;
   fanoutGlobalDesired?: boolean;
 }): Promise<CloudMcpHealth> {
-  const readHealth = (directProbeReuse?: DirectProbeReuse) => readOpenworkCloudMcpHealthInternal({
-    config: input.config,
-    workspace: input.workspace,
-    directory: input.directory,
-    providerModel: input.providerModel,
-    serverMetadata: input.serverMetadata,
-    createWorkspaceOpencodeClient: input.createWorkspaceOpencodeClient,
-    probe: true,
-    directProbeReuse,
-    refreshRegistrationFromLiveStatus: input.refreshRegistrationFromLiveStatus,
+  let connectCatalogDiagnostic: ConnectMcpCatalogDiagnostic | undefined;
+  const readHealth = async (directProbeReuse?: DirectProbeReuse): Promise<CloudMcpHealth> => ({
+    ...await readOpenworkCloudMcpHealthInternal({
+      config: input.config,
+      workspace: input.workspace,
+      directory: input.directory,
+      providerModel: input.providerModel,
+      serverMetadata: input.serverMetadata,
+      createWorkspaceOpencodeClient: input.createWorkspaceOpencodeClient,
+      probe: true,
+      directProbeReuse,
+      refreshRegistrationFromLiveStatus: input.refreshRegistrationFromLiveStatus,
+    }),
+    ...(connectCatalogDiagnostic === undefined ? {} : { connectCatalogDiagnostic }),
   });
   const configBody = input.body.config ?? input.body;
   const desiredConfig = canonicalizeCloudMcpConfig(normalizeCloudMcpConfig(configBody));
@@ -2504,18 +2561,15 @@ export async function reconcileOpenworkCloudMcp(input: {
   // the normal engine prerequisites pass, then purge stale model-runtime
   // entries before registration. Independent projection filters keep stale
   // rows from ever reaching an engine while prerequisites are unavailable.
-  const { reconcileOpenWorkConnectMcpServers } = await import("./connect-mcp-server-catalog.js");
-  const connectServers = await reconcileOpenWorkConnectMcpServers({
-    config: input.config,
-    workspace: input.workspace,
+  const connectServers = await reconcileConnectMcpCatalog({
+    ...input,
+    directory: input.directory,
     cloudMcp: desiredConfig,
     appHostAuthorization: readString(input.body.appHostAuthorization) ?? undefined,
-  }).catch(() => ({ status: "unavailable" as const, appHostNames: [], directNames: [], removedNames: [] }));
+  });
+  connectCatalogDiagnostic = connectServers.diagnostic;
 
   const opencode = input.createWorkspaceOpencodeClient(input.config, input.workspace);
-  for (const name of connectServers.removedNames) {
-    await opencode.mcp.disconnect({ name, ...locationParams(input.directory) }).catch(() => undefined);
-  }
 
   cloudMcpDeliveryState.markRegistering(input.workspace, input.directory, desiredRevision);
   const registration = await input.registerRuntimeMcp(input.config, input.workspace, [OPENWORK_CLOUD_MCP_NAME], { throwOnFailure: false });

@@ -1,20 +1,61 @@
-import { browserScript, reattachSurface, type Surface } from "@openwork/cdp";
+import { addInitScript, browserScript, reattachSurface, type Surface } from "@openwork/cdp";
+import { CATALOG_FAST_VARIANT, FAST_DEFAULT_VARIANT, fastVariantId } from "@openwork/types/cloud-model-fast";
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { evalIn, assertNoLiveSecret, liveOpenAiEnabled, liveOpenAiModel, liveProviderId, provisionLiveOpenAi } from "@openwork/behaviors";
 import { resolveEvalEngine, SkipError, type Seed } from "@openwork/env";
-import type { MockAgentWorkload } from "@openwork/labs";
+import type { MockAgentWorkload, MockMcpHandle } from "@openwork/labs";
 import { chatContinuity } from "./chat-continuity.ts";
 
 const repoRoot = resolve(import.meta.dirname, "../..");
 
+type AppSurface = "electron" | "web";
+
 declare global {
   interface Window {
+    __modelEffortRequests?: unknown[];
     __openworkSubmissionFault?: { attempts: number; release: () => void };
+    __openworkLongHistoryFault?: { dispose: () => void };
+    __openworkWarmHistoryFault?: {
+      state: {
+        armed: boolean;
+        released: boolean;
+        expired: boolean;
+        held: number;
+        mutations: number;
+        reads: {
+          warm: boolean;
+          limit: string | null;
+          nativeCount: number;
+          count: number;
+          hasTail: boolean;
+          delivered: boolean;
+        }[];
+      };
+      arm: () => void;
+      release: () => void;
+      dispose: () => void;
+    };
+    __openworkStoppingFault?: {
+      state: {
+        attempts: number;
+        held: number;
+        nativeStatus: number | null;
+        nativeFailed: boolean;
+        released: boolean;
+        failed: boolean;
+        clickCaptured: boolean;
+        trusted: boolean;
+        elapsedMs: number | null;
+        expired: boolean;
+      };
+      fail: () => void;
+      dispose: () => void;
+    };
   }
 }
 
@@ -137,8 +178,16 @@ export async function configureProvider(
   }, [workspaceId, providerId, modelId, `${providerId}/${modelId}`, JSON.stringify(opencode)]), { awaitPromise: true, timeoutMs: 120_000 });
   if (result !== "ok") throw new Error(`Provider configuration failed: ${String(result)}`);
   await seed.evalIn(app, () => { location.reload(); return true; });
-  const ready = await seed.evalIn(app, browserScript(async (workspaceId, engine, providerId, modelId) => {
+  // The display name the app gives the configured model once its provider list
+  // contains it; a fixture provider declares it in opencode.json, a live one is
+  // read from the engine catalog.
+  const configuredModel = recordValue(recordValue(recordValue(opencode, "provider"), providerId), "models");
+  const configuredNameValue = recordValue(recordValue(configuredModel, modelId), "name");
+  const configuredName = typeof configuredNameValue === "string" ? configuredNameValue : null;
+  const ready = await seed.evalIn(app, browserScript(async (workspaceId, engine, providerId, modelId, configuredName) => {
     const deadline = Date.now() + 60000;
+    const expectedRef = providerId + "/" + modelId;
+    let observed = "";
     while (Date.now() < deadline) {
       const base = "http://127.0.0.1:" + localStorage.getItem("openwork.server.port");
       const headers = { Authorization: "Bearer " + localStorage.getItem("openwork.server.token") };
@@ -153,21 +202,42 @@ export async function configureProvider(
         const mounted = base + "/workspace/" + encodeURIComponent(workspaceId);
         const response = await fetch(mounted + (engine === "v2" ? "/opencode2/api/model" : "/opencode/session"), { headers });
         if (response.ok && window.__openworkControl) {
-          if (engine === "v1") return true;
-          const catalog = JSON.stringify(await response.json());
-          if (catalog.includes(providerId) && catalog.includes(modelId)) return true;
+          let catalogName: string | null = null;
+          if (engine === "v2") {
+            const record = (value: unknown): value is Record<string, unknown> =>
+              typeof value === "object" && value !== null && !Array.isArray(value);
+            const catalog: unknown = await response.json();
+            const items: unknown[] = Array.isArray(catalog) ? catalog : record(catalog) && Array.isArray(catalog.data) ? catalog.data : [];
+            const entry = items.find((item) => record(item) && item.id === modelId && item.providerID === providerId);
+            if (!record(entry)) throw new Error("catalog pending");
+            catalogName = typeof entry.name === "string" ? entry.name : null;
+          }
+          // The engine lists the provider; now the app must too. Its composer
+          // shows the model's display name only once the app's own provider
+          // list contains the configured model, and the stored default must
+          // have survived boot rather than being replaced by an organization
+          // model while that list was still loading.
+          const name = configuredName ?? catalogName ?? modelId;
+          const chip = document.querySelector<HTMLElement>('button[aria-label="Change model"]');
+          const chipText = chip?.innerText.trim() ?? "";
+          const stored = localStorage.getItem("openwork.defaultModel");
+          observed = JSON.stringify({ composerModel: chipText, storedDefault: stored, expected: { name, ref: expectedRef } });
+          if (stored === expectedRef && chipText.startsWith(name)) return true;
         }
       } catch {}
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    return false;
-  }, [workspaceId, engine, providerId, modelId]), { awaitPromise: true, timeoutMs: 120_000 });
-  if (ready !== true) throw new Error(`Selected ${engine} engine did not become ready after provider configuration.`);
+    return observed || false;
+  }, [workspaceId, engine, providerId, modelId, configuredName]), { awaitPromise: true, timeoutMs: 120_000 });
+  if (ready !== true) {
+    throw new Error(`Selected ${engine} engine did not become ready after provider configuration`
+      + (typeof ready === "string" ? `; last observed ${ready}` : "."));
+  }
 }
 
 async function seedControls(
   seed: Seed,
-  app: Awaited<ReturnType<Seed["desktop"]>>,
+  app: Surface,
   calls: readonly { action: string; args?: unknown }[],
 ): Promise<void> {
   for (const call of calls) await arrangeControl(seed, app, call.action, call.args);
@@ -175,7 +245,7 @@ async function seedControls(
 
 export async function arrangeControl(
   seed: Seed,
-  app: Awaited<ReturnType<Seed["desktop"]>>,
+  app: Surface,
   action: string,
   args?: unknown,
 ): Promise<unknown> {
@@ -230,13 +300,43 @@ async function splitPaneQuestions(
   name: string,
   agentWorkloads: MockAgentWorkload[],
   policy: Record<string, unknown> = { permission: { question: "allow" } },
+  surface: AppSurface = "electron",
+  options: { createWorkspace?: boolean } = {},
 ) {
   const providerId = "split-send-mock";
   const modelId = "split-send-model";
-  const mock = seed.mock({ agentWorkloads });
-  const den = await seed.den({ mocks: { agent: mock } });
-  const app = await seed.desktop({ name, den, as: "admin", model: `${providerId}/${modelId}` });
-  const workspace = await seed.workspace(app, seed.tmpPath(name));
+  const mock = seed.mock({ isolatedProcessEnv: surface === "web", agentWorkloads });
+  // Electron stores realpath'd workspace roots; give the web server the same root
+  // so Stop's engine-directory verification matches (macOS /tmp is a symlink).
+  const requestedPath = seed.tmpPath(name);
+  const workspacePath = surface === "web"
+    ? join(realpathSync(dirname(requestedPath)), basename(requestedPath))
+    : requestedPath;
+  let app: Surface;
+  let agentMock: MockMcpHandle;
+  if (surface === "web") {
+    const web = await seed.appWeb({
+      name,
+      workspacePath,
+      mocks: { agent: mock },
+    });
+    app = web;
+    const configured = web.mocks.agent;
+    if (!configured) throw new Error(`The app-web fixture did not boot the ${name} model witness.`);
+    agentMock = configured;
+  } else {
+    const den = await seed.den({ mocks: { agent: mock } });
+    app = await seed.desktop({ name, den, as: "admin", model: `${providerId}/${modelId}` });
+    agentMock = den.mocks.agent;
+  }
+  // Worlds whose `policy` must govern the agent create the workspace at the
+  // declared tmp path. Without `create`, the seed adopts the first-launch
+  // default workspace, which the dev profile places inside the repo checkout on
+  // Daytona; the engine then merges the repo's `.opencode/opencode.json`
+  // (`"permission": "allow"`) after the workspace's own opencode.json, so a
+  // workspace `bash: "ask"` never holds (observed agent ruleset
+  // `[* allow, bash ask, * allow]`; the last match wins).
+  const workspace = await seed.workspace(app, workspacePath, options.createWorkspace ? { create: true } : {});
   // Arrange an allowed native question tool independently of custom-agent defaults.
   // TODO(primitive): write workspace fixture files through a first-class seed API.
   const questionPolicyWritten = await seed.evalIn(app, browserScript(async (workspaceId, content) => {
@@ -255,12 +355,12 @@ async function splitPaneQuestions(
       [providerId]: {
         npm: "@ai-sdk/openai-compatible",
         name: "Split send mock",
-        options: { baseURL: `${den.mocks.agent.url}/v1`, apiKey: "sk-split-send" },
+        options: { baseURL: `${agentMock.url}/v1`, apiKey: "sk-split-send" },
         models: { [modelId]: { name: "Split send model" } },
       },
     },
   });
-  return { app, workspace, mock: den.mocks.agent };
+  return { app, workspace, mock: agentMock };
 }
 
 export async function delegatedQuestionHandoff(seed: Seed) {
@@ -312,6 +412,32 @@ export async function delegatedQuestionHandoff(seed: Seed) {
   return { ...base, engine, delegationTool, followup, root: { ...root, prompt: rootPrompt }, child, unrelated: { ...other, ...unrelated } };
 }
 
+/** A real native question whose turn is stopped and superseded by a follow-up prompt, as another agent's STOP does. */
+export async function abandonedQuestion(seed: Seed) {
+  const engine = resolveEvalEngine();
+  if (engine !== "v1") throw new SkipError("Abandoned-question archive requires v1; v2 has no session archive.");
+  const ask = {
+    prompt: "Help me choose the abandoned task format",
+    question: "Which format should the abandoned task use?",
+    answer: "Abandoned outline",
+    alternative: "Abandoned checklist",
+  };
+  const followup = { prompt: "Skip the format question and summarize instead", reply: "Summary finished without the format answer." };
+  const base = await splitPaneQuestions(seed, "abandoned-question", [
+    {
+      promptMarker: ask.prompt, latestUserTurn: true,
+      finalReply: "Unused: return the actual question result.", finalReplyFrom: "last-tool-text",
+      steps: [{ tool: "question", arguments: { questions: [{
+        header: "Task format", question: ask.question,
+        options: [{ label: ask.answer, description: "Use this format" }, { label: ask.alternative, description: "Use the other format" }],
+      }] } }],
+    },
+    { promptMarker: followup.prompt, latestUserTurn: true, finalReply: followup.reply, steps: [] },
+  ]);
+  const session = await seedSessionRetry(seed, base.app, { title: "Abandoned question task" });
+  return { ...base, engine, ask, followup, session };
+}
+
 /** Real native permissions and a provider retry, without synthetic UI events. */
 export async function permissionStopRecovery(seed: Seed) {
   const engine = resolveEvalEngine();
@@ -328,7 +454,7 @@ export async function permissionStopRecovery(seed: Seed) {
       } }],
     })),
     { promptMarker: followup.prompt, latestUserTurn: true, finalReply: followup.reply, steps: [] },
-  ], { permission: { bash: "ask" } });
+  ], { permission: { bash: "ask" } }, "electron", { createWorkspace: true });
   const stoppedSession = await seedSessionRetry(seed, base.app, { title: "Stop permission task" });
   const otherSession = await seedSessionRetry(seed, base.app, { title: "Keep permission task" });
   return { ...base, engine, retry, followup, stopped: { ...stopped, ...stoppedSession }, other: { ...other, ...otherSession } };
@@ -485,6 +611,80 @@ export async function modelPicker(seed: Seed) {
   const app = await seed.desktop({ den, as: "admin" });
   const session = await seedSessionRetry(seed, app);
   return { app, den, session };
+}
+
+/** Model picker contract through a real native engine and a synthetic provider. */
+export async function modelPickerEffortWeb(seed: Seed) {
+  const engine = resolveEvalEngine();
+  const fastProviderId = "fast-witness";
+  const fastModelId = "gpt-5.4";
+  const providerId = "effort-witness";
+  const modelId = "reasoning-model";
+  const prompt = "Explain why the sky looks blue.";
+  const mock = seed.mock({ isolatedProcessEnv: true, agentWorkloads: [{
+    promptMarker: prompt, latestUserTurn: true, finalReply: "Air scatters blue light more strongly.", steps: [],
+  }] });
+  const workspacePath = seed.tmpPath("model-picker-effort");
+  const app = await seed.appWeb({ name: "model-picker-effort", workspacePath, mocks: { agent: mock } });
+  // Observe model references without consuming or changing the app's requests.
+  await addInitScript(app.client, () => {
+    window.__modelEffortRequests = [];
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+      if (method === "POST" && /\/opencode2\/api\/session\/[^/]+\/model$/.test(new URL(url, location.href).pathname)) {
+        const body: unknown = await new Request(input instanceof Request ? input.clone() : input, init).json();
+        window.__modelEffortRequests?.push(body);
+      }
+      return originalFetch(input, init);
+    };
+  });
+  const witness = app.mocks.agent;
+  if (!witness) throw new Error("Missing effort provider witness");
+  const workspace = await seed.workspace(app, workspacePath);
+  await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, { provider: {
+    [providerId]: {
+      npm: "@ai-sdk/openai-compatible", name: "Effort witness",
+      options: { baseURL: `${witness.url}/v1`, apiKey: "synthetic-effort-key" },
+      models: {
+        [modelId]: { name: "Reasoning witness", reasoning: true, variants: {
+          low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" },
+          CustomExact: { reasoningEffort: "low" },
+          auto: { reasoningEffort: "low" },
+          hidden: { disabled: true, reasoningEffort: "high" },
+        } },
+        standard: { name: "Standard witness", reasoning: false },
+      },
+    },
+    [fastProviderId]: {
+      npm: "@ai-sdk/openai", name: "Fast witness",
+      options: { baseURL: `${witness.url}/v1`, apiKey: "synthetic-fast-key" },
+      models: { [fastModelId]: { name: "Fast witness", reasoning: true, variants: {
+        high: { reasoningEffort: "high" },
+        [CATALOG_FAST_VARIANT]: { disabled: true, openworkNativeFast: 1 },
+      } } },
+    },
+  } }, engine);
+  const session = await seedSessionRetry(seed, app, { title: "Model effort contract" });
+  return { app, engine, workspace, session, prompt, providerId, modelId,
+    fastProviderId, fastModelId, fastDefaultVariant: FAST_DEFAULT_VARIANT, fastHighVariant: fastVariantId("high"),
+    modelRequests: () => seed.evalIn(app, () => window.__modelEffortRequests ?? []),
+    runtimeFacts: async () => ({
+      ...await seed.evalIn(app, () => ({ browser: navigator.userAgent, electronBridge: Boolean(window.__OPENWORK_ELECTRON__) })),
+      sourceSha: app.actualSourceSha,
+    }),
+    readNative: (path: string) => seed.evalIn(app, browserScript(async (path) => {
+      const base = "http://127.0.0.1:" + localStorage.getItem("openwork.server.port");
+      const response = await fetch(base + path, {
+        headers: { Authorization: "Bearer " + localStorage.getItem("openwork.server.token") },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const body: unknown = await response.json();
+      return { status: response.status, body };
+    }, [path]), { awaitPromise: true, timeoutMs: 20_000 }),
+    requests: async () => (await witness.agentRequests({ promptMarker: prompt })).filter((request) => request.kind === "final"),
+  };
 }
 
 export async function connectionsMenu(seed: Seed) {
@@ -778,6 +978,12 @@ export async function streamedToolHistory(seed: Seed) {
   const den = await seed.den({ mocks: { agent: mock } });
   const app = await seed.desktop({ name: "streamed-tool-history", den, as: "admin", model: `${providerId}/${modelId}` });
   const workspace = await seed.workspace(app, seed.tmpPath("streamed-tool-history"));
+  const profile = await seed.api(den.admin, "/v1/me");
+  if (!profile.response.ok || !isRecord(profile.body) || !isRecord(profile.body.user)
+    || typeof profile.body.user.id !== "string" || !profile.body.user.id.trim()) {
+    throw new Error("Streamed history fixture could not resolve its authenticated principal");
+  }
+  const principalId = profile.body.user.id.trim();
   await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, {
     permission: { bash: "allow" },
     provider: { [providerId]: {
@@ -822,7 +1028,7 @@ export async function streamedToolHistory(seed: Seed) {
       }
     }
   }, [historyPath, history, toolNames.map(command), providerId, modelId]), { awaitPromise: true, timeoutMs: 185_000 });
-  return { app, workspace, session, neighbor, historyPath, history, toolNames, latestTool, prompt, opening, middle, closing };
+  return { app, workspace, session, neighbor, principalId, historyPath, history, toolNames, latestTool, prompt, opening, middle, closing };
 }
 
 export const streamedMarkdownMarker = "STREAM_MARKDOWN_ANSWER";
@@ -1675,10 +1881,27 @@ export const longHistoryFirst = "LONG-HISTORY-FIRST-MESSAGE 7c31";
 export const longHistoryLast = "LONG-HISTORY-LAST-MESSAGE 7c31";
 
 /** A long stored conversation opened cold, from another selected session. */
-export async function longHistory(seed: Seed) {
+export async function longHistory(seed: Seed, options: { holdAncillaryReads?: boolean } = {}) {
+  if (resolveEvalEngine() !== "v1") throw new SkipError("native v1 stored history (OPENWORK_EVAL_ENGINE=v1)");
   const app = await seed.desktop({ name: "session-full-history" });
   const workspace = await seed.workspace(app, seed.tmpPath("session-full-history"));
-  const session = await seedSessionRetry(seed, app, { title: longHistoryTitle });
+  const createStoredSession = (title: string) => seed.evalIn(app, browserScript(async (workspaceId, title) => {
+    const port = localStorage.getItem("openwork.server.port");
+    const token = localStorage.getItem("openwork.server.token");
+    if (!port || !token) throw new Error("Long history arrangement requires the owned local server");
+    const response = await fetch(`http://127.0.0.1:${port}/workspace/${encodeURIComponent(workspaceId)}/opencode/session`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title }), signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`Long history session creation failed: ${response.status}`);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || !("id" in body) || typeof body.id !== "string"
+      || !("title" in body) || body.title !== title) throw new Error("Native session did not preserve its seeded title");
+    return { sessionId: body.id, title };
+  }, [workspace.workspaceId, title]), { timeoutMs: 20_000 });
+  const session = options.holdAncillaryReads
+    ? await createStoredSession(longHistoryTitle)
+    : await seedSessionRetry(seed, app, { title: longHistoryTitle });
   // TODO(primitive): store many engine messages without a model turn.
   const seeded = await seed.evalIn(app, browserScript(async (workspaceId, sessionId, count, first, last) => {
     const port = localStorage.getItem("openwork.server.port");
@@ -1703,8 +1926,339 @@ export async function longHistory(seed: Seed) {
     return Array.isArray(storedMessages) ? storedMessages.length : "stored:not-an-array";
   }, [workspace.workspaceId, session.sessionId, longHistoryCount, longHistoryFirst, longHistoryLast]), { awaitPromise: true, timeoutMs: 180_000 });
   if (seeded !== longHistoryCount) throw new Error(`Long history was not stored: ${String(seeded)}`);
-  const other = await seedSessionRetry(seed, app, { title: longHistoryOtherTitle });
-  return { app, workspace, session, other };
+  const other = options.holdAncillaryReads
+    ? await createStoredSession(longHistoryOtherTitle)
+    : await seedSessionRetry(seed, app, { title: longHistoryOtherTitle });
+  if (options.holdAncillaryReads) {
+    await seed.evalIn(app, browserScript((workspaceId, sessionId) => {
+      location.hash = `/workspace/${encodeURIComponent(workspaceId)}/session/${encodeURIComponent(sessionId)}`;
+    }, [workspace.workspaceId, other.sessionId]));
+  }
+  const ancillaryFaultKey = `openwork.eval.long-history-ancillary.${session.sessionId}`;
+  const ancillaryFault = options.holdAncillaryReads
+    ? await addInitScript(app.client, browserScript((workspaceId, sessionId, storageKey, count, last) => {
+      if (window.top !== window) return;
+      const port = localStorage.getItem("openwork.server.port");
+      if (!port || !/^\d+$/.test(port)) throw new Error("Long history fault requires the owned local server port");
+      const serverOrigin = `http://127.0.0.1:${port}`;
+      const paths = ["workspace", "w"].map((mount) => `/${mount}/${encodeURIComponent(workspaceId)}/opencode/session`);
+      const statusPaths = new Set(paths.map((path) => `${path}/status`));
+      const todoPaths = new Set(paths.map((path) => `${path}/${encodeURIComponent(sessionId)}/todo`));
+      const messagePaths = new Set(paths.map((path) => `${path}/${encodeURIComponent(sessionId)}/message`));
+      const originalFetch = window.fetch;
+      type Read = {
+        id: number;
+        kind: "status" | "todo";
+        openedAt: number | null;
+        startedAt: number;
+        settledAt: number | null;
+        outcome: "pending" | "aborted" | "failed";
+        abortName: string | null;
+        sameTurnAbort: boolean;
+      };
+      type Paint = {
+        at: number;
+        elapsedMs: number;
+        messageCount: number;
+        latestVisible: boolean;
+        historyComplete: boolean;
+        reads: Read[];
+        released: boolean;
+        expired: boolean;
+      };
+      const reads: Read[] = [];
+      const opening: { openedAt: number | null; trusted: boolean; first: Paint | null; latest: Paint | null; full: Paint | null } = {
+        openedAt: null, trusted: false, first: null, latest: null, full: null,
+      };
+      const pageReads: { before: string | null; limit: string | null; nextCursor: string | null }[] = [];
+      const state = {
+        workspaceId, sessionId, documentId: performance.timeOrigin, opening, reads,
+        status: { attempts: 0, pending: 0, aborted: 0, failed: 0 },
+        todo: { attempts: 0, pending: 0, aborted: 0, failed: 0 },
+        history: { limited: 0, full: 0, fullSucceeded: 0, single: 0, pageReads },
+        released: false,
+        expired: false,
+      };
+      const publish = () => localStorage.setItem(storageKey, JSON.stringify(state));
+      let frame = 0;
+      const sample = () => {
+        if (opening.openedAt === null || state.released) return;
+        const root = document.querySelector<HTMLElement>(`[data-session-surface-id="${sessionId}"]`);
+        const viewport = root?.querySelector<HTMLElement>("[data-thread-scroll]")?.getBoundingClientRect();
+        if (root && viewport && document.visibilityState === "visible") {
+          const messages = [...root.querySelectorAll<HTMLElement>("[data-message-id]")];
+          const visible = (element: HTMLElement) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none"
+              && rect.bottom > Math.max(0, viewport.top) && rect.top < Math.min(innerHeight, viewport.bottom)
+              && rect.right > Math.max(0, viewport.left) && rect.left < Math.min(innerWidth, viewport.right);
+          };
+          const latest = messages.find((message) => message.textContent?.includes(last));
+          const at = performance.now();
+          const paint: Paint = {
+            at, elapsedMs: at - opening.openedAt, messageCount: messages.length,
+            latestVisible: Boolean(latest && visible(latest)),
+            historyComplete: Boolean(root.querySelector('[data-thread-history-complete="true"]')),
+            reads: reads.map((read) => ({ ...read })), released: state.released, expired: state.expired,
+          };
+          let changed = false;
+          if (!opening.first && messages.some(visible)) { opening.first = paint; changed = true; }
+          if (!opening.latest && paint.latestVisible) { opening.latest = paint; changed = true; }
+          if (!opening.full && paint.messageCount === count && paint.historyComplete && messages.some(visible)) {
+            opening.full = paint;
+            changed = true;
+          }
+          if (changed) publish();
+        }
+        if (!opening.first || !opening.latest || !opening.full) frame = requestAnimationFrame(sample);
+      };
+      const captureOpen = (event: MouseEvent) => {
+        if (opening.openedAt !== null || !event.isTrusted) return;
+        const button = event.composedPath().find((node): node is HTMLElement => node instanceof HTMLElement
+          && node.getAttribute("data-testid") === `sidebar-session-${sessionId}`);
+        if (!button || button.closest("[data-sidebar-session-workspace-id]")?.getAttribute("data-sidebar-session-workspace-id") !== workspaceId) return;
+        opening.openedAt = performance.now();
+        opening.trusted = true;
+        publish();
+        frame = requestAnimationFrame(sample);
+      };
+      window.addEventListener("click", captureOpen, true);
+      const pending = new Set<() => void>();
+      const wrappedFetch: typeof window.fetch = async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+        if (method !== "GET" || url.origin !== serverOrigin) return originalFetch.call(window, input, init);
+        const kind = statusPaths.has(url.pathname) ? "status" : todoPaths.has(url.pathname) ? "todo" : null;
+        if (!kind) {
+          const historyRead = messagePaths.has(url.pathname);
+          const full = historyRead && !url.searchParams.has("limit");
+          const pageRead: (typeof pageReads)[number] | null = historyRead
+            ? { before: url.searchParams.get("before"), limit: url.searchParams.get("limit"), nextCursor: null } : null;
+          if (pageRead) {
+            pageReads.push(pageRead);
+            if (full) state.history.full += 1;
+            else state.history.limited += 1;
+            publish();
+          } else if ([...messagePaths].some((path) => url.pathname.startsWith(`${path}/`) && !url.pathname.slice(path.length + 1).includes("/"))) {
+            state.history.single += 1;
+            publish();
+          }
+          const response = await originalFetch.call(window, input, init);
+          if (pageRead) {
+            pageRead.nextCursor = response.headers.get("X-Next-Cursor");
+            if (full && response.ok) state.history.fullSucceeded += 1;
+            publish();
+          }
+          return response;
+        }
+        const counter = state[kind];
+        const read: Read = {
+          id: reads.length + 1, kind, openedAt: opening.openedAt, startedAt: performance.now(),
+          settledAt: null, outcome: "pending", abortName: null, sameTurnAbort: false,
+        };
+        reads.push(read);
+        counter.attempts += 1;
+        const unavailable = () => new Response(JSON.stringify({ message: "Long history ancillary read unavailable" }), {
+          status: 503, headers: { "content-type": "application/json" },
+        });
+        if (state.released) {
+          read.outcome = "failed";
+          read.settledAt = performance.now();
+          counter.failed += 1;
+          publish();
+          return unavailable();
+        }
+        counter.pending += 1;
+        publish();
+        return new Promise<Response>((resolve, reject) => {
+          const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+          let sameTurn = true;
+          queueMicrotask(() => { sameTurn = false; });
+          const settle = (aborted: boolean) => {
+            if (read.settledAt !== null) return;
+            read.settledAt = performance.now();
+            read.outcome = aborted ? "aborted" : "failed";
+            read.abortName = aborted && signal?.reason instanceof Error ? signal.reason.name : null;
+            read.sameTurnAbort = aborted && sameTurn && read.abortName === "AbortError"
+              && read.settledAt - read.startedAt < 50 && opening.first === null;
+            signal?.removeEventListener("abort", onAbort);
+            pending.delete(fail);
+            counter.pending -= 1;
+            if (aborted) counter.aborted += 1;
+            else counter.failed += 1;
+            publish();
+            if (aborted) reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+            else resolve(unavailable());
+          };
+          const onAbort = () => settle(true);
+          const fail = () => settle(false);
+          pending.add(fail);
+          signal?.addEventListener("abort", onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+        });
+      };
+      const release = () => {
+        state.released = true;
+        cancelAnimationFrame(frame);
+        for (const fail of pending) fail();
+        publish();
+      };
+      const expiry = window.setTimeout(() => { state.expired = true; release(); }, 180_000);
+      const dispose = () => {
+        window.clearTimeout(expiry);
+        release();
+        if (window.fetch === wrappedFetch) window.fetch = originalFetch;
+        window.removeEventListener("pagehide", dispose);
+        window.removeEventListener("click", captureOpen, true);
+      };
+      window.__openworkLongHistoryFault = { dispose };
+      window.addEventListener("pagehide", dispose, { once: true });
+      window.fetch = wrappedFetch;
+      publish();
+    }, [workspace.workspaceId, session.sessionId, ancillaryFaultKey, longHistoryCount, longHistoryLast]))
+    : null;
+  return {
+    app, workspace, session, other, ancillaryFaultKey,
+    async [Symbol.asyncDispose]() {
+      if (!ancillaryFault) return;
+      try { await evalIn(app, () => window.__openworkLongHistoryFault?.dispose(), { timeoutMs: 5_000, reattachAttempts: 0 }); }
+      finally { await ancillaryFault.dispose(); }
+    },
+  };
+}
+
+export async function warmCachedLongHistory(seed: Seed) {
+  if (resolveEvalEngine() !== "v1") throw new SkipError("native v1 stored history (OPENWORK_EVAL_ENGINE=v1)");
+  const base = await longHistory(seed, { holdAncillaryReads: false });
+  return {
+    ...base,
+    startHistoryFault: () => warmHistoryFault(seed, base.app, base.workspace.workspaceId, base.session.sessionId),
+  };
+}
+
+async function warmHistoryFault(seed: Seed, app: Surface, workspaceId: string, sessionId: string) {
+  await seed.evalIn(app, browserScript((workspaceId, sessionId, tail) => {
+    if (window.__openworkWarmHistoryFault) throw new Error("A warm history fault is already active");
+    const port = localStorage.getItem("openwork.server.port");
+    if (!port) throw new Error("Warm history fault requires the local server port");
+    const origin = `http://127.0.0.1:${port}`;
+    const paths = ["workspace", "w"].map((mount) =>
+      `/${mount}/${encodeURIComponent(workspaceId)}/opencode/session/${encodeURIComponent(sessionId)}`);
+    const originalFetch = window.fetch;
+    const state: NonNullable<Window["__openworkWarmHistoryFault"]>["state"] = {
+      armed: false, released: false, expired: false, held: 0, mutations: 0, reads: [],
+    };
+    const pending = new Set<() => void>();
+    let expiry: ReturnType<typeof setTimeout>;
+    const release = () => {
+      state.released = true;
+      clearTimeout(expiry);
+      for (const resume of pending) resume();
+    };
+    const dispose = () => {
+      release();
+      if (window.fetch === wrappedFetch) window.fetch = originalFetch;
+    };
+    const expire = () => { state.expired = true; dispose(); };
+    const hasTail = (message: unknown) => {
+      if (!message || typeof message !== "object" || !("parts" in message) || !Array.isArray(message.parts)) return false;
+      return message.parts.some((part: unknown) => part && typeof part === "object"
+        && "type" in part && part.type === "text" && "text" in part && part.text === tail);
+    };
+    const wrappedFetch: typeof window.fetch = async (...args) => {
+      const [input, init] = args;
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const owned = url.origin === origin && paths.some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
+      if (owned && method !== "GET") state.mutations += 1;
+      if (state.released || !owned || method !== "GET" || !paths.some((path) => url.pathname === `${path}/message`)) {
+        return originalFetch.apply(window, args);
+      }
+      const warm = state.armed;
+      const signal = init?.signal !== undefined ? init.signal : input instanceof Request ? input.signal : undefined;
+      const response = await originalFetch.apply(window, args);
+      if (!response.ok) throw new Error(`Warm history read failed: HTTP ${response.status}`);
+      const messages: unknown = await response.clone().json();
+      signal?.throwIfAborted();
+      if (!Array.isArray(messages)) throw new Error("Warm history read did not return native messages");
+      const returned = warm ? messages : messages.filter((message: unknown) => !hasTail(message));
+      const read = {
+        warm, limit: url.searchParams.get("limit"), nativeCount: messages.length,
+        count: returned.length, hasTail: returned.some(hasTail), delivered: false,
+      };
+      state.reads.push(read);
+      if (warm && read.limit === null && !state.released) {
+        state.held += 1;
+        try {
+          await new Promise<void>((resolveHold, rejectHold) => {
+            const cleanup = () => { pending.delete(resume); signal?.removeEventListener("abort", abort); };
+            const resume = () => { cleanup(); resolveHold(); };
+            const abort = () => { cleanup(); rejectHold(signal?.reason ?? new DOMException("Aborted", "AbortError")); };
+            pending.add(resume);
+            signal?.addEventListener("abort", abort, { once: true });
+            if (signal?.aborted) abort();
+          });
+        } finally {
+          state.held -= 1;
+        }
+      }
+      signal?.throwIfAborted();
+      read.delivered = true;
+      if (warm) return response;
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      headers.delete("content-encoding");
+      return new Response(JSON.stringify(returned), { status: response.status, statusText: response.statusText, headers });
+    };
+    window.fetch = wrappedFetch;
+    expiry = setTimeout(expire, 120_000);
+    window.__openworkWarmHistoryFault = {
+      state,
+      arm: () => {
+        if (state.armed || state.released) throw new Error("Warm history fault cannot be armed again");
+        state.armed = true;
+        clearTimeout(expiry);
+        expiry = setTimeout(expire, 120_000);
+      },
+      release,
+      dispose,
+    };
+  }, [workspaceId, sessionId, longHistoryLast]));
+
+  return {
+    read: () => seed.evalIn(app, () => {
+      const fault = window.__openworkWarmHistoryFault;
+      if (!fault) throw new Error("Warm history fault lost its document");
+      const composer: unknown = window.__openwork?.slice("composer");
+      const snapshot = composer && typeof composer === "object" && "snapshotQuery" in composer ? composer.snapshotQuery : null;
+      return {
+        ...fault.state,
+        snapshot: snapshot && typeof snapshot === "object" ? {
+          sessionId: "dataSessionId" in snapshot && typeof snapshot.dataSessionId === "string" ? snapshot.dataSessionId : null,
+          count: "dataMessageCount" in snapshot && typeof snapshot.dataMessageCount === "number" ? snapshot.dataMessageCount : null,
+          status: "status" in snapshot && typeof snapshot.status === "string" ? snapshot.status : null,
+          fetchStatus: "fetchStatus" in snapshot && typeof snapshot.fetchStatus === "string" ? snapshot.fetchStatus : null,
+        } : null,
+      };
+    }),
+    arm: () => seed.evalIn(app, () => {
+      const fault = window.__openworkWarmHistoryFault;
+      if (!fault) throw new Error("Warm history fault lost its document");
+      fault.arm();
+    }),
+    release: () => seed.evalIn(app, () => {
+      const fault = window.__openworkWarmHistoryFault;
+      if (!fault || fault.state.held < 1 || fault.state.expired) throw new Error("No uncapped history response is held");
+      fault.release();
+    }),
+    async [Symbol.asyncDispose]() {
+      await seed.evalIn(app, () => {
+        window.__openworkWarmHistoryFault?.dispose();
+        delete window.__openworkWarmHistoryFault;
+      });
+    },
+  };
 }
 
 export async function taskActivity(seed: Seed) {
@@ -1715,12 +2269,226 @@ export async function taskActivity(seed: Seed) {
   return { app, workspace, session };
 }
 
-export async function unfinishedTools(seed: Seed) {
-  const app = await seed.desktop({ name: "unfinished-tool-lifecycle" });
-  const workspace = await seed.workspace(app, seed.tmpPath("unfinished-tool-lifecycle"));
-  const session = await seedSessionRetry(seed, app);
-  await arrangeControl(seed, app, "eval.session_lifecycle.seed_unfinished_tools", { lifecycle: "active" });
-  return { app, workspace, session };
+async function stoppingFeedbackFault(
+  seed: Seed,
+  app: Surface,
+  workspaceId: string,
+  sessionId: string,
+) {
+  await seed.evalIn(app, browserScript((workspaceId, sessionId) => {
+    if (window.__openworkStoppingFault) throw new Error("A Stop feedback fault is already active");
+    const port = localStorage.getItem("openwork.server.port");
+    if (!port) throw new Error("Stop feedback fault requires the local server port");
+    const serverOrigin = `http://127.0.0.1:${port}`;
+    const encodedWorkspaceId = encodeURIComponent(workspaceId);
+    const encodedSessionId = encodeURIComponent(sessionId);
+    const paths = new Set(["workspace", "w"].flatMap((mount) => [
+      `/${mount}/${encodedWorkspaceId}/opencode/session/${encodedSessionId}/abort`,
+      `/${mount}/${encodedWorkspaceId}/opencode2/api/session/${encodedSessionId}/interrupt`,
+    ]));
+    const originalFetch = window.fetch;
+    let releaseHold = () => {};
+    const hold = new Promise<void>((resolve) => { releaseHold = resolve; });
+    const state = {
+      attempts: 0,
+      held: 0,
+      nativeStatus: null as number | null,
+      nativeFailed: false,
+      released: false,
+      failed: false,
+      clickCaptured: false,
+      trusted: false,
+      elapsedMs: null as number | null,
+      expired: false,
+    };
+    let clickedAt = 0;
+    let frame = 0;
+    let expiry: ReturnType<typeof setTimeout> | null = null;
+    const sessionRoot = () => [...document.querySelectorAll<HTMLElement>("[data-session-surface-id]")]
+      .find((candidate) => candidate.dataset.sessionSurfaceId === sessionId) ?? null;
+    const visible = (element: HTMLElement | null) => {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return element.getClientRects().length > 0 && rect.width > 0 && rect.height > 0
+        && style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
+    };
+    const sample = () => {
+      if (!state.clickCaptured || state.elapsedMs !== null) return;
+      const button = sessionRoot()?.querySelector<HTMLButtonElement>('button[aria-label="Stopping…"][aria-busy="true"]') ?? null;
+      if (button?.disabled && visible(button)) state.elapsedMs = performance.now() - clickedAt;
+    };
+    const paint = () => { sample(); frame = requestAnimationFrame(paint); };
+    const capture = (event: MouseEvent) => {
+      if (state.clickCaptured || !event.isTrusted || !(event.target instanceof Element)) return;
+      const button = event.target.closest<HTMLButtonElement>('button[aria-label="Stop"]');
+      const root = sessionRoot();
+      if (!button || !root?.contains(button)) return;
+      state.clickCaptured = true;
+      state.trusted = true;
+      clickedAt = performance.now();
+      expiry = setTimeout(() => { state.expired = true; }, 2_000);
+      queueMicrotask(sample);
+    };
+    window.addEventListener("click", capture, true);
+    const observer = new MutationObserver(sample);
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
+    frame = requestAnimationFrame(paint);
+
+    const wrappedFetch: typeof window.fetch = async (...args) => {
+      const input = args[0];
+      const init = args[1];
+      const requestUrl = new URL(input instanceof Request ? input.url : String(input), location.href);
+      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      if (state.released || method !== "POST" || requestUrl.origin !== serverOrigin || !paths.has(requestUrl.pathname)) {
+        return originalFetch(...args);
+      }
+      state.attempts += 1;
+      state.held += 1;
+      try {
+        await hold;
+        if (state.failed) {
+          state.nativeStatus = 503;
+          return new Response(JSON.stringify({ message: "Stop unavailable" }), {
+            status: 503,
+            statusText: "Service Unavailable",
+            headers: { "content-type": "application/json" },
+          });
+        }
+        try {
+          const response = await originalFetch(...args);
+          state.nativeStatus = response.status;
+          return response;
+        } catch (error) {
+          state.nativeFailed = true;
+          throw error;
+        }
+      } finally {
+        state.held -= 1;
+      }
+    };
+    window.fetch = wrappedFetch;
+    const release = (failed: boolean) => {
+      if (state.released) return;
+      state.failed = failed;
+      state.released = true;
+      releaseHold();
+    };
+    const dispose = () => {
+      release(true);
+      if (window.fetch === wrappedFetch) window.fetch = originalFetch;
+      if (expiry) clearTimeout(expiry);
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+      window.removeEventListener("click", capture, true);
+    };
+    window.__openworkStoppingFault = { state, fail: () => release(true), dispose };
+  }, [workspaceId, sessionId]));
+
+  let disposed = false;
+  return {
+    async read() {
+      return seed.evalIn(app, browserScript((sessionId) => {
+        const fault = window.__openworkStoppingFault;
+        if (!fault) throw new Error("Stop feedback fault lost its document");
+        const root = [...document.querySelectorAll<HTMLElement>("[data-session-surface-id]")]
+          .find((candidate) => candidate.dataset.sessionSurfaceId === sessionId) ?? null;
+        const stopping = root?.querySelector<HTMLButtonElement>('button[aria-label="Stopping…"]') ?? null;
+        const retry = root?.querySelector<HTMLButtonElement>('button[aria-label="Stop"]') ?? null;
+        const run = root?.querySelector<HTMLButtonElement>('button[aria-label="Run task"]') ?? null;
+        const error = root?.querySelector<HTMLElement>('[data-testid="session-error-card"]') ?? null;
+        const aggregate = root?.querySelector<HTMLElement>("[data-tool-aggregate]") ?? null;
+        const composer: unknown = window.__openwork?.slice("composer");
+        const snapshotQuery = composer && typeof composer === "object" && "snapshotQuery" in composer
+          ? composer.snapshotQuery
+          : null;
+        const visible = (element: HTMLElement | null) => {
+          if (!element) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return element.getClientRects().length > 0 && rect.width > 0 && rect.height > 0
+            && style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
+        };
+        return {
+          ...fault.state,
+          stoppingVisible: visible(stopping),
+          stoppingDisabled: stopping?.disabled ?? false,
+          ariaBusy: stopping?.getAttribute("aria-busy") ?? null,
+          spinnerVisible: visible(stopping?.querySelector<HTMLElement>("svg.lucide-loader-circle.animate-spin") ?? null),
+          retryEnabled: Boolean(retry && visible(retry) && !retry.disabled),
+          runVisible: visible(run),
+          errorText: error?.innerText.replace(/\s+/g, " ").trim() ?? "",
+          aggregateText: aggregate?.innerText.replace(/\s+/g, " ").trim() ?? "",
+          snapshotMessageCount: snapshotQuery && typeof snapshotQuery === "object" && "dataMessageCount" in snapshotQuery
+            && typeof snapshotQuery.dataMessageCount === "number" ? snapshotQuery.dataMessageCount : 0,
+          surfaceError: composer && typeof composer === "object" && "error" in composer ? composer.error : null,
+        };
+      }, [sessionId]));
+    },
+    async fail() {
+      await seed.evalIn(app, () => {
+        const fault = window.__openworkStoppingFault;
+        if (!fault || fault.state.held < 1) throw new Error("No native Stop response is held");
+        fault.fail();
+      });
+    },
+    async [Symbol.asyncDispose]() {
+      if (disposed) return;
+      disposed = true;
+      await seed.evalIn(app, () => {
+        window.__openworkStoppingFault?.dispose();
+        delete window.__openworkStoppingFault;
+      });
+    },
+  };
+}
+
+export async function unfinishedToolsWeb(seed: Seed) {
+  const engine = resolveEvalEngine();
+  const prompt = "Hold the native tool open for Stop feedback proof.";
+  const warmup = { prompt: "Create the Stop feedback fixture.", reply: "Stop feedback fixture ready." };
+  const base = await splitPaneQuestions(seed, "unfinished-tool-lifecycle", [
+    { promptMarker: warmup.prompt, latestUserTurn: true, finalReply: warmup.reply, steps: [] },
+    {
+      promptMarker: prompt,
+      latestUserTurn: true,
+      finalReply: "The held tool finished without Stop.",
+      steps: [{ tool: engine === "v2" ? "shell" : "bash", arguments: {
+        command: "sleep 120",
+        description: "Hold the native tool for Stop feedback",
+        timeout: 180_000,
+      } }],
+    },
+  ], { permission: { bash: "allow" } }, "web");
+  const session = await seedSessionRetry(seed, base.app);
+  // v2 exposes live runs through /session/active ({ type: "running" }) rather than /session/status.
+  const statusPath = `/workspace/${encodeURIComponent(base.workspace.workspaceId)}`
+    + `/${engine === "v2" ? "opencode2/api/session/active" : "opencode/session/status"}`;
+  return {
+    ...base,
+    session,
+    prompt,
+    warmup,
+    engine,
+    startStopFault: () => stoppingFeedbackFault(seed, base.app, base.workspace.workspaceId, session.sessionId),
+    nativeStatus: () => seed.evalIn(base.app, browserScript(async (statusPath, sessionId) => {
+      const port = localStorage.getItem("openwork.server.port");
+      const token = localStorage.getItem("openwork.server.token");
+      const response = await fetch(`http://127.0.0.1:${port}${statusPath}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) return `http-${response.status}`;
+      const payload: unknown = await response.json();
+      // v2 wraps its body in { data }; v1 answers with the bare status map.
+      const statuses: unknown = payload && typeof payload === "object" && "data" in payload ? payload.data : payload;
+      if (!statuses || typeof statuses !== "object") return "missing";
+      // The engine only lists sessions with live work; an absent session is idle.
+      if (!(sessionId in statuses)) return "idle";
+      const status: unknown = Object.entries(statuses).find(([id]) => id === sessionId)?.[1];
+      if (!status || typeof status !== "object" || !("type" in status) || typeof status.type !== "string") return "invalid";
+      return status.type === "running" ? "busy" : status.type;
+    }, [statusPath, session.sessionId]), { awaitPromise: true }),
+  };
 }
 
 /** Signed-in chat with a deterministic model and a scheduled desktop task. */
@@ -1858,35 +2626,113 @@ export async function visualization(seed: Seed) {
 }
 
 
-/** A persisted workspace and conversation created before opting into the other engine. */
+/** One profile across engine switches; the journey, not the seed, creates its history. */
 export async function workspaceEngineUpgrade(seed: Seed) {
-  const providerId = "workspace-upgrade-mock";
-  const modelId = "workspace-upgrade-model";
-  const mock = seed.mock({ agentWorkloads: [{
-    promptMarker: "hi",
+  if (resolveEvalEngine() !== "v1") throw new SkipError("upgrade baseline requires OPENWORK_EVAL_ENGINE=v1");
+  const live = liveOpenAiEnabled();
+  const orgName = "Workspace engine upgrade";
+  const mocks: Record<string, ReturnType<Seed["mock"]>> = live ? {} : { agent: seed.mock({ agentWorkloads: [{
+    promptMarker: "upgrade conversation",
     finalReply: "Hello. Your upgrade conversation is working.",
     finalReplyChunkSize: 3,
     finalReplyDelayMs: 750,
     steps: [],
-  }] });
-  const den = await seed.den({ mocks: { agent: mock } });
-  const primaryPath = seed.tmpPath("upgrade-primary");
-  const otherPath = seed.tmpPath("upgrade-existing");
-  const app = await seed.desktop({ den, as: "admin", workspacePath: primaryPath, model: `${providerId}/${modelId}` });
-  const primary = await seed.workspace(app, primaryPath);
-  const provider = { provider: { [providerId]: {
-    npm: "@ai-sdk/openai-compatible", name: "Upgrade mock",
-    options: { baseURL: `${den.mocks.agent.url}/v1`, apiKey: "sk-upgrade-fixture" },
-    models: { [modelId]: { name: "Upgrade model" } },
-  } } };
-  await configureProvider(seed, app, primary.workspaceId, providerId, modelId, provider);
-  const original = await seedSessionRetry(seed, app, { title: "Before engine upgrade" });
-  const other = await seed.workspace(app, otherPath, { create: true });
-  await configureProvider(seed, app, other.workspaceId, providerId, modelId, provider);
-  const otherOriginal = await seedSessionRetry(seed, app, { title: "Existing workspace history" });
-  return { app, den, primary, other, original, otherOriginal, providerId, modelId,
-    otherName: otherPath.split("/").at(-1),
-  };
+  }] }) };
+  const den = await seed.den({ org: { name: orgName }, mocks });
+  const managed = await provisionLiveOpenAi(den.admin, orgName);
+  try {
+    const primaryPath = seed.tmpPath("upgrade-primary");
+    const otherPath = seed.tmpPath("upgrade-after-switch");
+    const app = await seed.desktop({ den, as: "admin", workspacePath: primaryPath });
+    const request = async (path: string, method = "GET", body?: unknown) => {
+      const result = await seed.evalIn(app, browserScript(async (path, method, body) => {
+        const response = await fetch("http://127.0.0.1:" + localStorage.getItem("openwork.server.port") + path, {
+          method, headers: { Authorization: "Bearer " + localStorage.getItem("openwork.server.token"), "Content-Type": "application/json" },
+          body, signal: AbortSignal.timeout(30_000),
+        });
+        const json: unknown = await response.json();
+        return { status: response.status, json };
+      }, [path, method, body === undefined ? null : JSON.stringify(body)]), { awaitPromise: true, timeoutMs: 35_000 });
+      assertNoLiveSecret(result);
+      return result;
+    };
+    const providerId = live ? await liveProviderId(request, managed.id) : "workspace-upgrade-mock";
+    const modelId = live ? liveOpenAiModel() : "workspace-upgrade-model";
+    const primary = await seed.workspace(app, primaryPath);
+    const provider = !live ? { provider: { [providerId]: {
+      npm: "@ai-sdk/openai-compatible", name: "Upgrade mock",
+      options: { baseURL: `${den.mocks.agent.url}/v1`, apiKey: "sk-upgrade-fixture" },
+      models: { [modelId]: { name: "Upgrade model" } },
+    } } } : {};
+    await configureProvider(seed, app, primary.workspaceId, providerId, modelId, provider, "v1");
+    const paletteShortcut = await seed.evalIn(app, browserScript(() =>
+      /Mac|iPhone|iPad|iPod/.test(navigator.platform) ? "Meta+K" : "Control+K", []));
+    return {
+      app, den, primary, providerId, modelId, live, paletteShortcut,
+      async readFinalAnswerRows(): Promise<{ id: string; text: string }[]> {
+        // This journey requests plain-text answers. Reasoning folds into :steps;
+        // the answer keeps its native ID and has no timestamp/action children.
+        return seed.evalIn(app, browserScript(() => [...document.querySelectorAll<HTMLElement>(
+          '[data-message-role="assistant"][data-message-id]:not([data-message-id$=":steps"])',
+        )].filter(node => node.getClientRects().length && getComputedStyle(node).visibility !== "hidden")
+          .map(node => ({ id: node.getAttribute("data-message-id") ?? "", text: node.innerText.replace(/\s+/g, " ").trim() })), []));
+      },
+      async readRendererLifetime(): Promise<{ timeOrigin: number; now: number }> {
+        return seed.evalIn(app, browserScript(() => ({ timeOrigin: performance.timeOrigin, now: Date.now() }), []));
+      },
+      async readWorkspaceInventoryRefresh(workspaceId: string, engine: "v1" | "v2", since: number): Promise<{
+        route: string;
+        selectedWorkspaceId: string | null;
+        loading: boolean | null;
+        error: string | null;
+        sessionIds: string[];
+        requests: { path: string; status: number; startedAt: number; completedAt: number }[];
+      }> {
+        // Observe only renderer-owned inventory reads and sidebar state, never
+        // issue an API request that could satisfy the refresh witness itself.
+        return seed.evalIn(app, browserScript((workspaceId, engine, since) => {
+          const sessionPath = `/workspace/${workspaceId}/${engine === "v2" ? "opencode2/api" : "opencode"}/session`;
+          const route = window.__openwork?.slice("route");
+          const workspace = route?.workspaces.find(workspace => workspace.id === workspaceId);
+          const requests = (window.__openwork?.events(200) ?? []).flatMap(event => {
+            const data = event.data;
+            if (event.name !== "log.fetch" || typeof data !== "object" || data === null
+              || !("url" in data) || typeof data.url !== "string"
+              || !("method" in data) || data.method !== "GET"
+              || !("status" in data) || data.status !== 200
+              || !("durationMs" in data) || typeof data.durationMs !== "number"
+              || event.at - data.durationMs < since) return [];
+            const path = new URL(data.url, location.href).pathname;
+            return path === sessionPath ? [{ path, status: data.status, startedAt: event.at - data.durationMs, completedAt: event.at }] : [];
+          });
+          return {
+            route: location.hash.replace(/^#/, ""), selectedWorkspaceId: route?.selectedWorkspaceId ?? null,
+            loading: workspace?.loading ?? null,
+            error: workspace?.error ?? null,
+            sessionIds: (route?.sessionsByWorkspaceId[workspaceId] ?? []).map(session => session.id).sort(),
+            requests,
+          };
+        }, [workspaceId, engine, since]));
+      },
+      async createOtherWorkspace() {
+        const status = await request("/experimental/engine-v2-preview/status");
+        if (!isRecord(status.json) || status.json.chatRouting !== true || status.json.running !== true) {
+          throw new Error("Workspace B must be created only after the Settings switch to v2");
+        }
+        const other = await seed.workspace(app, otherPath, { create: true });
+        // Hot-mirror the mock without reloading the renderer or clearing pending rows.
+        // Live mode inherits its managed provider through normal organization sync.
+        if (!live && (await request(`/workspace/${other.workspaceId}/config`, "PATCH", { opencode: provider })).status !== 200) {
+          throw new Error("Could not configure workspace B's model");
+        }
+        return other;
+      },
+      async [Symbol.asyncDispose]() { await managed[Symbol.asyncDispose](); },
+    };
+  } catch (error) {
+    await managed[Symbol.asyncDispose]();
+    throw error;
+  }
 }
 
 /** A running conversation whose workspace skills can change through OpenWork. */
@@ -1945,13 +2791,18 @@ export async function skillLifecycle(seed: Seed) {
         });
         if (!result.ok) throw new Error("Could not arrange model response");
       },
+      /**
+       * Every completed reply in the conversation came from the arranged
+       * provider and model, never from an organization model that replaced it.
+       * Only a live provider reports token usage; the fixture model streams none.
+       */
       async usedConfiguredModel() {
         const result = await request(`/workspace/${workspace.workspaceId}/opencode2/api/session/${session.sessionId}/message`);
         const messages = isRecord(result.json) && Array.isArray(result.json.data) ? result.json.data.filter(isRecord) : [];
         const replies = messages.filter(message => message.type === "assistant" && message.finish === "stop");
         return replies.length > 0 && replies.every(message => isRecord(message.model)
           && message.model.id === modelId && message.model.providerID === providerId
-          && isRecord(message.tokens) && typeof message.tokens.output === "number" && message.tokens.output > 0);
+          && (!live || (isRecord(message.tokens) && typeof message.tokens.output === "number" && message.tokens.output > 0)));
       },
       async runtimeIdentity() {
         const result = await request("/experimental/engine-v2-preview/status");

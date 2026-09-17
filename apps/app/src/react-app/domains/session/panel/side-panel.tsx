@@ -117,7 +117,7 @@ function SidePanelTab({ tab, active, onSelect, onClose }: SidePanelTabProps) {
         showBrowserTabContextMenu({ clientX: event.clientX, clientY: event.clientY });
       } : undefined}
     >
-      <div ref={tabRef} className="relative">
+      <div ref={tabRef} className="relative" data-browser-shortcut-tab={tab.type === "browser" ? tab.id : undefined}>
         <PanelTab
           active={active}
           onClick={() => onSelect(tab.id)}
@@ -249,7 +249,8 @@ function BrowserPanelContent({
     };
 
     const resetNativeView = async () => {
-      await browser.hide?.();
+      // This hide only stages fresh geometry; it is not leaving browser focus.
+      await browser.hide?.({ preserveShortcutFocus: true });
 
       if (disposed) {
         return;
@@ -300,8 +301,8 @@ function BrowserPanelContent({
 
   return (
     <>
-      {isAvailable ? (
-        <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border px-3 text-xs">
+      {isAvailable && tab.browserTask ? (
+        <div data-browser-shortcut-tab={tab.id} className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border px-3 text-xs">
           <span className="shrink-0 font-medium">Built-in browser</span>
           <span role="status" className="min-w-0 flex-1 truncate text-muted-foreground">
             {tab.browserTask?.status === "paused" ? "You have control · resume when finished" : tab.browserTask?.status === "running" ? browserOperationLabels[tab.browserTask.operation ?? ""] ?? "Working on this page" : tab.browserTask?.status === "needs_attention" ? browserOperationLabels[tab.browserTask.operation ?? ""] ?? "Review this page" : "This conversation's tab"}
@@ -314,7 +315,7 @@ function BrowserPanelContent({
       ) : null}
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background px-2 mac:bg-background/80 mac:backdrop-blur-2xl mac:backdrop-saturate-150">
         {isAvailable ? (
-          <>
+          <div data-browser-shortcut-tab={tab.id} className="flex min-w-0 flex-1 items-center gap-1">
             <Tooltip>
               <TooltipTrigger
                 render={(
@@ -449,7 +450,7 @@ function BrowserPanelContent({
                 </PopoverContent>
               </Popover>
             ) : null}
-          </>
+          </div>
         ) : (
           <p className="px-2 text-sm text-muted-foreground">
             Browser panel is only available in the desktop app.
@@ -466,13 +467,13 @@ function BrowserPanelContent({
         </Button>
       </div>
       {tab.loadError ? (
-        <div role="alert" className="shrink-0 border-b border-border bg-muted px-3 py-2 text-xs">
+        <div data-browser-shortcut-tab={tab.id} role="alert" className="shrink-0 border-b border-border bg-muted px-3 py-2 text-xs">
           {tab.loadError.message}
         </div>
       ) : null}
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {isAvailable ? (
-          <div ref={contentRef} className="h-full overflow-hidden">
+          <div ref={contentRef} data-browser-shortcut-tab={tab.id} className="h-full overflow-hidden">
             {suspended ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
                 <p className="text-sm font-medium">Tab suspended</p>
@@ -501,7 +502,7 @@ function BrowserPanelContent({
 const browserOperationLabels: Record<string, string> = {
   observe: "Reading this page", site_tools: "Finding website tools", site_tool: "Using a website tool",
   navigate: "Opening a page", click: "Clicking a control", fill: "Entering text", key: "Using the keyboard", scroll: "Scrolling",
-  "Website access": "Review website access", website_blocked: "This website is blocked", browser_disabled: "Browser control is disabled",
+  "Browser control": "Allow control for this thread", website_blocked: "This website is blocked", browser_disabled: "Browser control is disabled",
   stale_observation: "A fresh page view is needed", stale_tool: "Website tools have changed", user_denied: "The action was declined",
   needs_attention: "Review this page", sign_in_required: "Sign in directly in this browser", timeout: "Check the page before continuing",
   result_withheld: "Website result was kept private",

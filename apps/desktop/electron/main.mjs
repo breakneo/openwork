@@ -55,9 +55,11 @@ import {
 } from "./connect-link-branding.mjs";
 import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
+import { resolveWorkspaceFileLaunch } from "./workspace-file-access.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
-import { downloadBinaryToPath, uploadMultipartFromBytes } from "./binary-transfer.mjs";
+import { fetchFiniteDesktopHttp } from "./finite-http-fetch.mjs";
+import { createDesktopTransferRegistry, downloadBinaryToPath, uploadMultipartFromBytes } from "./binary-transfer.mjs";
 import {
   createLinuxDesktopIntegration,
 } from "./linux-desktop-integration.mjs";
@@ -102,6 +104,7 @@ const desktopPackageMetadata = require("../package.json");
 const {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -167,6 +170,7 @@ const applicationMenu = createApplicationMenu({
   appName: APP_NAME,
   docsUrl: DOCS_PAGE_URL,
   getWindow: () => createMainWindow(),
+  closeBrowserTab: (host) => browserPanel?.closeFocusedBrowserTab(host) ?? false,
 });
 
 let browserPanel = null;
@@ -397,7 +401,11 @@ async function resolveArchitectureInfo() {
   const version = app.getVersion();
   const targetArch = systemArch === "arm64" || systemArch === "x64" ? systemArch : appArch;
   const assetName = `openwork-${platformDownloadSlug()}-${downloadAssetArch(targetArch)}-${version}.${downloadAssetExtension()}`;
-  const latestDownloadUrl = await resolveCorrectArchitectureDownloadUrl(targetArch);
+  // The public release manifest only matters when the installed build does not
+  // match the machine; a matching install never shows a download, so it must
+  // not contact the release host (an unactivated enterprise install in
+  // particular has no business reaching anything before its Den is known).
+  const latestDownloadUrl = appArch === systemArch ? null : await resolveCorrectArchitectureDownloadUrl(targetArch);
   const hasCorrectArchitectureDownload = Boolean(latestDownloadUrl);
   return {
     appArch,
@@ -410,6 +418,28 @@ async function resolveArchitectureInfo() {
     downloadUrl: latestDownloadUrl || `${RELEASE_DOWNLOAD_BASE_URL}/${assetName}`,
     releaseUrl: RELEASE_PAGE_URL,
   };
+}
+
+// On Windows and Linux Chromium's spellchecker downloads its Hunspell
+// dictionary from Google (redirector.gvt1.com). Electron starts that load the
+// moment the default session object is first created, so an unactivated
+// install clears the dictionary list in the same synchronous step (the
+// download itself waits on a file-thread hop) and restores it once activation
+// completes. macOS uses the native spellchecker; these calls are no-ops there.
+// An empty persisted list is re-defaulted by Electron on the next boot, so a
+// quit before activation cannot leave the spellchecker off for good.
+let spellcheckerLanguagesHeldForActivation = null;
+function holdSpellcheckerUntilActivation(bootstrapConfig) {
+  if (!desktopActivationRequired(DESKTOP_DISTRIBUTION, bootstrapConfig)) return;
+  const defaultSession = session.defaultSession;
+  spellcheckerLanguagesHeldForActivation = defaultSession.getSpellCheckerLanguages();
+  defaultSession.setSpellCheckerLanguages([]);
+}
+function releaseSpellcheckerAfterActivation() {
+  const languages = spellcheckerLanguagesHeldForActivation;
+  spellcheckerLanguagesHeldForActivation = null;
+  if (!languages || languages.length === 0) return;
+  session.defaultSession.setSpellCheckerLanguages(languages);
 }
 
 const APP_ICON_PATH = resolveAppIconPath();
@@ -1074,7 +1104,7 @@ const IDLE_ROUTER_INFO = Object.freeze({
 
 let mainWindow = null;
 const pendingDeepLinks = [];
-const nativeContextMenus = createNativeContextMenus({ Menu, getWindow: () => mainWindow });
+const nativeContextMenus = createNativeContextMenus({ Menu, clipboard, getWindow: () => mainWindow });
 
 browserPanel = createBrowserPanel({
   showNativeContextMenu: nativeContextMenus.show,
@@ -1110,24 +1140,10 @@ const workspaceStore = createWorkspaceStore({
   forceRequireSignin: FORCE_DESKTOP_REQUIRE_SIGNIN,
 });
 
-const activeDesktopTransfers = new Map();
-
-function desktopTransferKey(event, transferId) {
-  const normalizedId = typeof transferId === "string" ? transferId.trim() : "";
-  if (!normalizedId || normalizedId.length > 128 || !/^[a-zA-Z0-9._-]+$/.test(normalizedId)) {
-    throw new Error("A valid transferId is required.");
-  }
-  return `${event.sender.id}:${normalizedId}`;
-}
+const desktopTransfers = createDesktopTransferRegistry();
 
 async function runDesktopTransfer(event, input, operation) {
-  const key = desktopTransferKey(event, input?.transferId);
-  if (activeDesktopTransfers.has(key)) throw new Error("transferId is already active.");
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  activeDesktopTransfers.set(key, controller);
-  event.sender.once("destroyed", abort);
-  try {
+  return desktopTransfers.run(event, input?.transferId, async (signal) => {
     // Both authorities come from app-owned state in userData; workspace-
     // writable configuration must never widen where a transfer may write.
     const [authorizedRoots, allowedUrlPrefixes] = await Promise.all([
@@ -1141,12 +1157,9 @@ async function runDesktopTransfer(event, input, operation) {
       // workspace root until they complete.
       stagingDir: path.join(app.getPath("userData"), "binary-transfers"),
       fetcher: electronNet.fetch,
-      signal: controller.signal,
+      signal,
     });
-  } finally {
-    event.sender.removeListener("destroyed", abort);
-    activeDesktopTransfers.delete(key);
-  }
+  });
 }
 
 const connectLinkReplayGuard = createConnectLinkReplayGuard({
@@ -1204,6 +1217,7 @@ async function persistConnectLinkClaims(claims) {
     desktopActivationRequired(DESKTOP_DISTRIBUTION, previous)
     && !desktopActivationRequired(DESKTOP_DISTRIBUTION, config)
   ) {
+    releaseSpellcheckerAfterActivation();
     await uiControlServer.start().catch((error) => {
       console.warn("[ui-control] failed to start", error);
     });
@@ -2003,6 +2017,7 @@ const desktopCommandHandlers = {
         desktopActivationRequired(DESKTOP_DISTRIBUTION, previous)
         && !desktopActivationRequired(DESKTOP_DISTRIBUTION, next)
       ) {
+        releaseSpellcheckerAfterActivation();
         await uiControlServer.start().catch((error) => {
           console.warn("[ui-control] failed to start", error);
         });
@@ -2223,6 +2238,23 @@ const desktopCommandHandlers = {
       if (!target) return "Path is required.";
       return shell.openPath(target);
   },
+  "__openWorkspaceFile": async (event, ...args) => {
+      // Chat links are renderer-derived text. Resolve them on disk here so only a real
+      // file inside the real workspace launches; anything else is revealed, never run.
+      const workspaceRoot = String(args[0] ?? "").trim();
+      const target = String(args[1] ?? "").trim();
+      const decision = await resolveWorkspaceFileLaunch(workspaceRoot, target);
+      if (decision.ok === true) {
+        const error = await shell.openPath(decision.path);
+        if (error && error.trim()) return { ok: false, error };
+        return { ok: true, action: "opened" };
+      }
+      if (decision.reason === "outside" && existsSync(target)) {
+        shell.showItemInFolder(target);
+        return { ok: true, action: "revealed" };
+      }
+      return { ok: false, error: decision.error };
+  },
   "__revealItemInDir": async (event, ...args) => {
       const target = String(args[0] ?? "").trim();
       if (!target) return "Path is required.";
@@ -2344,9 +2376,13 @@ const desktopCommandHandlers = {
       return results;
   },
   "__openWithApp": async (event, ...args) => {
-      const target = String(args[0] ?? "").trim();
+      const requested = String(args[0] ?? "").trim();
       const appPath = String(args[1] ?? "").trim();
-      if (!target || !appPath) return "Target and app path are required.";
+      const workspaceRoot = String(args[2] ?? "").trim();
+      if (!requested || !appPath) return "Target and app path are required.";
+      const decision = await resolveWorkspaceFileLaunch(workspaceRoot, requested);
+      if (decision.ok === false) return decision.error;
+      const target = decision.path;
       const platform = process.platform;
       try {
         if (platform === "darwin") {
@@ -2382,16 +2418,23 @@ const desktopCommandHandlers = {
         );
       }
       const timeoutMs = Number(init.timeoutMs);
-      const response = await electronNet.fetch(url, {
-        ...requestInit,
-        signal: Number.isFinite(timeoutMs) && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined,
-      });
-      return {
-        status: response.status,
-        statusText: response.statusText,
-        headers: Array.from(response.headers.entries()),
-        body: await response.text(),
+      const fetchResponse = async (callerSignal) => {
+        const deadline = Number.isFinite(timeoutMs) && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+        const signal = callerSignal && deadline ? AbortSignal.any([callerSignal, deadline]) : callerSignal ?? deadline;
+        const response = await fetchFiniteDesktopHttp(url, { ...requestInit, signal }, electronNet.fetch);
+        return {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Array.from(response.headers.entries()),
+          body: await response.text(),
+        };
       };
+      const method = (requestInit.method ?? "GET").toUpperCase();
+      const cancellable = ["GET", "PATCH"].includes(method)
+        || (method === "POST" && /\/(?:session\/[^/]+\/abort|permission\/[A-Za-z0-9_-]+\/reply)$/.test(new URL(url).pathname));
+      return cancellable && init.transferId
+        ? desktopTransfers.run(event, init.transferId, fetchResponse)
+        : fetchResponse(undefined);
   },
   "__uploadMultipart": async (event, ...args) => {
       return runDesktopTransfer(event, args[0] ?? {}, uploadMultipartFromBytes);
@@ -2400,10 +2443,7 @@ const desktopCommandHandlers = {
       return runDesktopTransfer(event, args[0] ?? {}, downloadBinaryToPath);
   },
   "__cancelTransfer": async (event, ...args) => {
-      const controller = activeDesktopTransfers.get(desktopTransferKey(event, args[0]));
-      if (!controller) return false;
-      controller.abort();
-      return true;
+      return desktopTransfers.cancel(event, args[0]);
   },
   "__homeDir": async (event, ...args) => {
       return os.homedir();
@@ -2589,6 +2629,7 @@ async function createMainWindow() {
     await applyCachedBrandIcon(cachedBrandImage, bootSourceUrl);
   }
   applicationMenu.applyVisibility(mainWindow);
+  browserPanel.registerWindowShortcuts(mainWindow);
 
   mainWindow.webContents.on("context-menu", (_event, params) => {
     void nativeContextMenus.showEditing(params).catch((error) => {
@@ -2770,6 +2811,19 @@ ipcMain.handle("openwork:terminal:kill", (event, terminalId) => {
 });
 
 browserPanel.registerIpc(ipcMain);
+// Native popups cannot be seen or clicked over CDP. In development only, let the
+// app's main frame read the open/last menu as plain data and choose an item.
+if (isDevMode && !app.isPackaged) {
+  const fromMainFrame = (event) => Boolean(mainWindow) && event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+  ipcMain.handle("openwork:context-menu:inspect", (event) => (fromMainFrame(event) ? nativeContextMenus.inspect() : null));
+  ipcMain.handle("openwork:context-menu:choose", (event, id) => fromMainFrame(event) && nativeContextMenus.choose(id));
+  ipcMain.handle("openwork:context-menu:dismiss", (event) => {
+    if (!fromMainFrame(event)) return false;
+    const { open } = nativeContextMenus.inspect();
+    nativeContextMenus.close();
+    return open;
+  });
+}
 const browserLoginEvalSeam = !app.isPackaged && process.env.OPENWORK_EVAL_BROWSER_LOGIN_SYNC === "1";
 const browserLoginSync = createBrowserLoginSync({
   statePath: path.join(app.getPath("userData"), "browser-login-sync.json"),
@@ -2862,6 +2916,7 @@ or use: pnpm dev:worktree`);
   });
 
   app.whenReady().then(async () => {
+    holdSpellcheckerUntilActivation(workspaceStore.readDesktopBootstrapConfigSync());
     const systemCaCertificates = await runtimeManager.systemCaCertificates();
     session.defaultSession.setCertificateVerifyProc(createSystemCaCertificateVerifyProc(systemCaCertificates));
     installMediaPermissionHandlers(session, () => mainWindow);

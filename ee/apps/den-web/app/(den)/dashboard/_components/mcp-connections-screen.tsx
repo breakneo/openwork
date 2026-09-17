@@ -53,6 +53,8 @@ import {
 import { McpCredentialInput } from "./mcp-credential-input";
 import { shouldShowMcpConnectionsStagingBanner } from "./mcp-connections-capability";
 import { useOrgDashboard } from "../_providers/org-dashboard-provider";
+import { useDenFlow } from "../../_providers/den-flow-provider";
+import { McpConnectionAppSetup } from "./mcp-connection-app-setup";
 import { marketplaceQueryKeys, useMarketplaces } from "./marketplace-data";
 import {
   type CreateMcpConnectionInput,
@@ -905,10 +907,10 @@ export function McpConnectionsScreen({ view = "catalog", connectorId }: { view?:
               Add connector
             </Link>
           ) : (
-            <Link href={configuredRoute} className={buttonVariants({ variant: "secondary" })} data-testid="connectors-open-configured">
-              Configured
-              <ChevronRight className="h-4 w-4" aria-hidden="true" />
-            </Link>
+            <DenButton variant="primary" onClick={() => openAdvancedSetup()} data-testid="connectors-add-connector">
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Add connector
+            </DenButton>
           )}
         />
       )}
@@ -2376,6 +2378,7 @@ function EditConnectionDialog({
   onSubmit: (input: UpdateMcpConnectionInput) => Promise<UpdatedMcpConnection>;
 }) {
   const { orgContext } = useOrgDashboard();
+  const { runtimeConfig, runtimeConfigLoaded } = useDenFlow();
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [authType, setAuthType] = useState<ExternalMcpAuthType>("oauth");
@@ -2648,6 +2651,11 @@ function EditConnectionDialog({
           </div>
 
           <ExposeDirectlyField checked={exposeDirectly} onChange={setExposeDirectly} />
+          <McpConnectionAppSetup
+            connection={connection}
+            publicApiUrl={runtimeConfigLoaded ? runtimeConfig.denApiUrl : ""}
+            enabled={orgContext?.capabilities.mcpConnections === true}
+          />
 
           <div>
             <label className="mb-1.5 block text-[12px] font-medium text-gray-700">Who can use this?</label>

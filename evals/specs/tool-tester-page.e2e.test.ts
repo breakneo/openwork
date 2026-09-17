@@ -17,16 +17,18 @@ test("an admin reaches the Tool Tester from Connectors and can test and govern a
   const testToolsHref = await world.testToolsHref();
   expect(testToolsHref).toContain(`/dashboard/tool-tester?connectionId=${encodeURIComponent(world.connection.id)}`);
   await user.notSee({ text: "View tools" });
-  expect(await world.toolTesterSidebarPlacement()).toEqual({ inManage: true, inSettings: false });
+  // Settings children are collapsed while Connectors is active.
+  expect(await world.toolTesterSidebarPlacement()).toEqual({ inManage: false, inSettings: false });
   await user.click({ testId: `test-mcp-tools-${world.connection.id}` });
   // The sidebar also reads "Tool Tester", so wait on the route and the page description instead of the title.
   const testerHref = await probe.eventually(() => world.location(), {
-    timeoutMs: 60_000,
+    within: 60_000,
     label: "tool tester route",
     until: (href) => href.includes("/dashboard/tool-tester?connectionId="),
   });
   expect(testerHref).toContain(`connectionId=${encodeURIComponent(world.connection.id)}`);
   await user.see({ text: /Run any tool your connections expose/ }, { timeoutMs: 60_000 });
+  expect(await world.toolTesterSidebarPlacement()).toEqual({ inManage: false, inSettings: true });
   await user.see({ text: world.connection.name });
   await user.see({ label: "Search tools" });
 
