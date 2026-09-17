@@ -34,6 +34,9 @@ test("an existing Models subscriber can decline, enable and disable task analyti
   await user.notSee({ role: "link", label: "Workflow Runs" });
   await user.click({ role: "link", label: "Models & usage" });
   await user.see({ text: "Shared usage limits" });
+  await user.see({ role: "progressbar", label: "5 hour usage limit remaining" });
+  await user.see({ role: "progressbar", label: "Weekly usage limit remaining" });
+  await user.see({ role: "progressbar", label: "Monthly usage limit remaining" });
   await user.notSee({ role: "button", label: "Manage subscription" });
   await user.notSee({ text: "Unlock custom insights" });
   evidence.recordAssertionEvidence("Shared usage limits appear on both Models and Analytics independently of the Enterprise plan", "The existing subscriber's Models page contains subscription controls and all three usage meters without task analytics. Analytics also exposes Models & usage and shared limits, while enterprise adoption analytics is locked and Workflow Runs is absent.", true);
@@ -91,6 +94,9 @@ test("an existing Models subscriber can decline, enable and disable task analyti
   await user.see({ role: "tab", label: "Activity" });
   await user.see({ role: "button", label: "Turn off analytics" });
   await user.see({ text: "Shared usage limits" });
+  await user.see({ role: "progressbar", label: "5 hour usage limit remaining" });
+  await user.see({ role: "progressbar", label: "Weekly usage limit remaining" });
+  await user.see({ role: "progressbar", label: "Monthly usage limit remaining" });
   expect(await settings()).toMatchObject({ enabled: true, consentVersion: 1 });
   evidence.recordAssertionEvidence("Moving between Models and Analytics preserves consent and keeps the Models page focused", "After opting in, the Models page retains all three usage meters without task analytics, analytics navigation or integrations. Returning through Analytics retains shared usage limits and restores the enabled Activity view without asking again.", true);
 
