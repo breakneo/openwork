@@ -13,8 +13,8 @@ import { openworkCloudMcpConnectionActionSchema } from "@openwork/types/den/mcp-
 import type { Hono } from "hono"
 import type { RequestIdVariables } from "hono/request-id"
 import { z } from "zod"
-import { connectorCatalogSchema } from "@openwork/types/connection-action-app"
-import { connectorSetupList } from "./connector-catalog.js"
+import { connectorCatalogSchema, type ConnectorCatalog } from "@openwork/types/connection-action-app"
+import { connectorCatalogForQuery } from "./connector-catalog.js"
 import { registerAgentPluginFlowApp } from "./plugin-flow-app.js"
 import { registerAgentConnectionActionApp } from "./connection-action-app.js"
 import { publicRoute, tokenRoute } from "../middleware/index.js"
@@ -173,7 +173,7 @@ export const SEARCH_CAPABILITIES_OUTPUT_SCHEMA = z.object({
 })
 
 export const AGENT_MCP_INSTRUCTIONS = [
-  "When asked what can be connected or to browse quick adds, call search_capabilities with type connectors and any descriptive query. This returns the legacy version 1 connectorCatalog envelope, including Google Workspace and Microsoft 365. Released clients may render their existing browse catalog; new clients intentionally ignore it. No new setup card is introduced. Setup options are not executable capabilities or proof of connection. Organization administrators manage setup in the organization Connections dashboard. Named-service searches return available capabilities and connection status, not suggested connector catalogs. Never invent credentials or claim setup is finished. Existing connection actions take priority.",
+  "When asked what can be connected or to browse quick adds, call search_capabilities with type connectors and any descriptive query. This returns the legacy version 1 connectorCatalog envelope, including Google Workspace and Microsoft 365. Released clients may render their existing browse catalog; new clients intentionally ignore it. No new setup card is introduced. Setup options are not executable capabilities or proof of connection. Organization administrators manage setup in the organization Connections dashboard. Named-service searches include legacy setup suggestions only with explicit intent connect, type omitted, all, or mcp, and no matching mcp connection; modern clients ignore these catalogs. Never invent credentials or claim setup is finished. Existing connection actions take priority.",
   "This OpenWork Cloud MCP server uses standard MCP tools, resources, structured results, and list-changed notifications.",
   "For connection actions and saved Workflows, call search_capabilities with 2-4 keyword variants before concluding something is unavailable. Direct MCP tools are not capability search results; call them directly. Use execute_capability only with exact names returned by search_capabilities. A successful search_capabilities call proves this connection is authorized: Never tell the user to reconnect OpenWork Cloud because a downstream connector failed.",
   "Capabilities include native Google Workspace operations (Gmail read/search, Calendar list/create, Drive search/read, and Gmail draft creation) executed with the signed-in member's organization credentials, plus any MCP connections the organization has added. Allowlisted platform admins also discover namespaced OpenWork Admin capabilities here; other members cannot.",
@@ -189,7 +189,7 @@ export const AGENT_MCP_INSTRUCTIONS = [
   "External MCP matches include the provider-advertised argumentsSchema, schemaDigest, and invocation.argumentsField. Put an object matching argumentsSchema in execute_capability.body and copy schemaDigest into execute_capability.schemaDigest. OpenWork always attempts the downstream provider call even when local schema checks find a mismatch; schemaGuidance is advisory (returned as openwork/schemaGuidance alongside provider results): if the provider succeeded, accept the result and do not retry because of the warning; if it failed, use the warning to correct the arguments or search again.",
   "If the provider returns invalid_capability_arguments, correct the listed issues and retry once with changed arguments; never retry the same arguments unchanged. If it returns unknown_capability, call search_capabilities again before retrying.",
   "When the user explicitly asks to connect or reconnect a service, search for that service by name with intent connect. Ordinary capability searches must omit intent connect: blocked connection matches are informational and must not trigger sign-in cards or automatic status calls. Only propose authorization when an explicitly requested operation actually depends on that connection. Explicit connection searches render a card when the result identifies one connection. Do not execute the same status again when the search response includes connectionAction. For an explicit connection request without a card, execute that exact status match once. When execute_capability fails with needs_connection or connection_not_connected, execute that connection's status capability (mcp:<connectionId>:*) once for the same card. For member-owned OAuth connections in OpenWork desktop, ask the user to click Connect or Reconnect on the inline card; desktop handles authorization directly, so do not send them to Den. For other actions, name connectionStatus.connectionName and relay connectionStatus.action exactly in text, distinguishing the member's Your Connections page, the organization Connections dashboard, and the provider's own admin console. Probes are live: after the human fixes the connector, search again in the same task; otherwise do not retry unchanged or improvise workarounds through other tools.",
-  "Successful postMarketplacesPlugins, postPluginsAccess, and postMarketplacesAccess calls return ordinary operation results. Report the verified outcome in text; no confirmation App is attached to new operations. The app-only plugin_flow formatter and its original resource remain available solely for legacy launches.",
+  "Successful postMarketplacesPlugins, postPluginsAccess, and postMarketplacesAccess calls preserve original operation content and legacy plugin-flow confirmation metadata for released clients. Modern OpenWork clients suppress that first-party confirmation presentation. Report the verified outcome in text; the app-only plugin_flow formatter and its original resource remain available for legacy launches.",
 ].join("\n")
 
 async function mcpRequestInfo(request: Request): Promise<{ method: string | null; resourceUri: string | null }> {
@@ -238,9 +238,9 @@ function textContent(text: string): { text: string; type: "text" }[] {
   return [{ type: "text", text }]
 }
 
-export function capabilitySearchToolResult<T extends CapabilityMatch>(matches: T[], coverageHint?: string, connectionIntent = false) {
+export function capabilitySearchToolResult<T extends CapabilityMatch>(matches: T[], coverageHint?: string, connectorCatalog?: ConnectorCatalog | null, connectionIntent = false) {
   const hint = [
-    ...(matches.length === 0 ? ["No matches. Try broader or different keywords."] : []),
+    ...(matches.length === 0 ? [connectorCatalog ? "These are setup suggestions, not connected tools. Use their setup actions; adding a connector requires an organization admin." : "No matches. Try broader or different keywords."] : []),
     ...(coverageHint ? [coverageHint] : []),
   ].join(" ")
   const card = connectionIntent ? connectionActionSearchCard(matches) : null
@@ -248,6 +248,7 @@ export function capabilitySearchToolResult<T extends CapabilityMatch>(matches: T
     matches,
     ...(hint ? { hint } : {}),
     ...(card ? { connectionAction: card } : {}),
+    ...(connectorCatalog ? { connectorCatalog } : {}),
   }
   return {
     content: textContent(JSON.stringify(result, null, 2)),
@@ -257,15 +258,7 @@ export function capabilitySearchToolResult<T extends CapabilityMatch>(matches: T
 }
 
 export function connectorSetupToolResult() {
-  const result = {
-    matches: [],
-    connectorCatalog: connectorCatalogSchema.parse({ version: 1, selectedIds: [], entries: connectorSetupList() }),
-    hint: "These are setup options, not connected tools or proof of connection. Organization administrators manage setup in the organization Connections dashboard.",
-  }
-  return {
-    content: textContent(JSON.stringify(result, null, 2)),
-    structuredContent: result,
-  }
+  return capabilitySearchToolResult([], undefined, connectorCatalogForQuery("", true))
 }
 
 function capabilityTimeoutResult(capability: string): ExecuteCapabilityToolResult {
@@ -577,7 +570,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
         const boundedLimit = limit ?? 5
         const result = await searchCapabilityRegistry(capabilityContext, { query, limit: boundedLimit, type })
         const matches = result.matches.sort(compareCapabilityMatches).slice(0, boundedLimit)
-        return capabilitySearchToolResult(matches, result.externalCoverageHint, intent === "connect")
+        return capabilitySearchToolResult(matches, result.externalCoverageHint, intent === "connect" && (type === undefined || type === "all" || type === "mcp") && !matches.some(match => match.name.startsWith("mcp:")) ? connectorCatalogForQuery(query) : null, intent === "connect")
       },
     )
 

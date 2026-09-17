@@ -1,3 +1,4 @@
+import { openworkModelRemovalImpactSchema, type OpenworkSessionModel } from "@openwork/types/openwork-affordance";
 import type { McpStatusMap } from "../types";
 import type { ConnectionActionIntent } from "@openwork/types/connection-action-app";
 import type { Message, Part, Session, Todo } from "@opencode-ai/sdk/v2/client";
@@ -63,6 +64,7 @@ export type OpenworkCloudProviderSyncSkippedProvider = {
 };
 
 export type OpenworkCloudProviderSyncStatus = {
+  affectedSessions?: Array<{ workspaceId: string; removedModels: OpenworkSessionModel[]; sessionIds: string[]; inventoryComplete: boolean }>;
   hasSession: boolean;
   lastRun: { at: string | number; status: OpenworkCloudProviderSyncRun["status"]; message?: string } | null;
   providers: CloudImportedProvider[];
@@ -186,7 +188,8 @@ function parseCloudProviderSyncStatus(value: unknown): OpenworkCloudProviderSync
       });
     }
   }
-  return { hasSession: value.hasSession, lastRun, providers, reloadPending, skippedProviders };
+  const affected = openworkModelRemovalImpactSchema.array().safeParse("affectedSessions" in value ? value.affectedSessions : []);
+  return { hasSession: value.hasSession, lastRun, providers, reloadPending, skippedProviders, affectedSessions: affected.success ? affected.data : [] };
 }
 
 export type OpenworkServerStatus = "connected" | "disconnected" | "limited";
@@ -972,6 +975,7 @@ export type OpenworkAuditEntry = {
 };
 
 export type OpenworkReloadTrigger = {
+  modelRemoval?: unknown;
   type: "skill" | "plugin" | "config" | "mcp" | "agent" | "command";
   name?: string;
   action?: "added" | "removed" | "updated";

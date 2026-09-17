@@ -625,6 +625,20 @@ export async function openDesktopPath(target: string): Promise<void> {
   }
 }
 
+/**
+ * Open a chat-referenced workspace file with its default application. The desktop resolves
+ * the path on disk and launches only a real file inside the real workspace; a path that
+ * resolves outside (for example through a symlink) is revealed in its folder instead.
+ */
+export async function openDesktopWorkspaceFile(workspaceRoot: string, target: string): Promise<"opened" | "revealed"> {
+  const result = await invokeElectronHelper("__openWorkspaceFile", workspaceRoot, target);
+  if (!result || typeof result !== "object" || !("ok" in result)) {
+    throw new Error("Could not open this file.");
+  }
+  if (!result.ok) throw new Error(result.error || "Could not open this file.");
+  return result.action;
+}
+
 export async function revealDesktopItemInDir(target: string): Promise<void> {
   const result = await invokeElectronHelper("__revealItemInDir", target);
   if (typeof result === "string" && result.trim()) {
@@ -670,8 +684,8 @@ export async function getDesktopApplicationsForFile(target: string): Promise<Des
   return invokeElectronHelper("__getApplicationsForFile", target);
 }
 
-export async function openDesktopWithApp(target: string, appPath: string): Promise<void> {
-  const result = await invokeElectronHelper("__openWithApp", target, appPath);
+export async function openDesktopWithApp(target: string, appPath: string, workspaceRoot: string): Promise<void> {
+  const result = await invokeElectronHelper("__openWithApp", target, appPath, workspaceRoot);
   if (typeof result === "string" && result.trim()) {
     throw new Error(result);
   }

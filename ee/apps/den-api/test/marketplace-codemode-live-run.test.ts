@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, expect, mock, setSystemTime, test } from "bun:test"
 import { Tool } from "@openwork/codemode"
 import {
   ArtifactViewRevisionTable, ArtifactViewTable, ConfigObjectAccessGrantTable,
@@ -281,6 +281,31 @@ test("live saved runs generate fresh runtime, default UTC, and validate without 
     expect(rows(WorkflowRunTable).at(-1)).toMatchObject({ validated_result: result.result.value, output_schema_digest: artifactDigest(runtimeSchema) })
   }
   expect(new Set(rows(WorkflowRunTable).map((row) => row.id)).size).toBe(2)
+})
+
+test("opening a live app regenerates calendar bounds across Los Angeles midnight and fall-back", async () => {
+  const saved = seed(code, { inputSchema: runtimeSchema, exampleInput: { runtime: { today: "2000-01-01" } } })
+  const savedPayload = structuredClone(rows(ConfigObjectVersionTable)[0]?.normalizedPayloadJson)
+  const timeZone = "America/Los_Angeles"
+  try {
+    for (const [now, today, dayStart, dayEnd] of [
+      ["2026-11-01T06:59:59.999Z", "2026-10-31", "2026-10-31T07:00:00.000Z", "2026-11-01T07:00:00.000Z"],
+      ["2026-11-01T07:00:00.000Z", "2026-11-01", "2026-11-01T07:00:00.000Z", "2026-11-02T08:00:00.000Z"],
+      ["2026-11-01T08:30:00.000Z", "2026-11-01", "2026-11-01T07:00:00.000Z", "2026-11-02T08:00:00.000Z"],
+      ["2026-11-01T09:30:00.000Z", "2026-11-01", "2026-11-01T07:00:00.000Z", "2026-11-02T08:00:00.000Z"],
+      ["2026-11-02T08:00:00.000Z", "2026-11-02", "2026-11-02T08:00:00.000Z", "2026-11-03T08:00:00.000Z"],
+    ]) {
+      setSystemTime(new Date(now))
+      const result = await workflows.executeLiveArtifactWorkflow({
+        context, configObjectId: saved.configObjectId, expectedOutputSchemaDigest: artifactDigest(outputSchema), timeZone, buildTools,
+      })
+      expect(result).toMatchObject({ ok: true, value: { count: 2 } })
+      expect(calls.at(-1)).toEqual({ name: "read", input: { now, today, dayStart, dayEnd, timeZone } })
+      expect(rows(ConfigObjectVersionTable)[0]?.normalizedPayloadJson).toEqual(savedPayload)
+    }
+    expect(calls).toHaveLength(5)
+    expect(new Set(rows(WorkflowRunTable).map(row => row.id)).size).toBe(5)
+  } finally { setSystemTime() }
 })
 
 test("exact saved version is executed rather than a newer version or retained authoring source", async () => {

@@ -24,7 +24,9 @@
     "./openwork-affordance": {
       "types": "./src/openwork-affordance.ts",
       "development": "./src/openwork-affordance.ts",
-      "default": "./src/openwork-affordance.ts"
+      "bun": "./src/openwork-affordance.ts",
+      "browser": "./src/openwork-affordance.ts",
+      "default": "./dist/openwork-affordance.js"
     },
     "./openwork-context": {
       "types": "./src/openwork-context.ts",
@@ -54,7 +56,9 @@
     "./connection-action-app": {
       "types": "./src/connection-action-app.ts",
       "development": "./src/connection-action-app.ts",
-      "default": "./src/connection-action-app.ts"
+      "bun": "./src/connection-action-app.ts",
+      "browser": "./src/connection-action-app.ts",
+      "default": "./dist/connection-action-app.js"
     },
     "./plugin-flow-app": {
       "types": "./src/plugin-flow-app.ts",

@@ -5,6 +5,7 @@ import {
   isWorkspaceContainedArtifactTarget,
   localArtifactPath,
   nativeFileAction,
+  openTargetForHref,
   resolveCollectibleOpenTarget,
 } from "../src/react-app/domains/session/artifacts/resolve-open-target";
 
@@ -19,6 +20,28 @@ const target: OpenTarget = {
 };
 
 describe("on-demand artifact target resolution", () => {
+  test("explicit links resolve without inventory and preserve exact identity", () => {
+    for (const href of ["reports/Report.pdf", "./reports/Report.pdf", "/workspace/reports/Report.pdf", "file:///workspace/reports/Report%20Final.pdf", "C:\\Work\\Report.pdf"]) {
+      const resolved = openTargetForHref(href, [], "/workspace");
+      expect(resolved?.kind).toBe("file");
+      expect(resolved?.exists).toBeUndefined();
+      expect(resolved?.preview).toBe("pdf");
+    }
+    const sibling = { ...target, value: "Report.pdf", exists: true };
+    expect(openTargetForHref("/other/Report.pdf", [sibling], "/workspace")?.value).toBe("/other/Report.pdf");
+    expect(openTargetForHref("report.pdf", [sibling], "/workspace")?.exists).toBeUndefined();
+    expect(openTargetForHref("file:///workspace/Report.pdf", [sibling], "/workspace")).toBe(sibling);
+    expect(openTargetForHref("Report.pdf", [], undefined)?.value).toBe("Report.pdf");
+  });
+
+  test("explicit links keep full web addresses and reject unsafe file targets", () => {
+    const href = "https://example.com/report?q=one#section";
+    expect(openTargetForHref(href, [], "/workspace")?.value).toBe(href);
+    for (const value of ["#section", "javascript:alert(1)", "mailto:hello@example.com", "file://host/report.pdf", "//host/report.pdf", "\\\\host\\report.pdf", "../report.pdf", "file:///tmp/report.pdf#section", "file:///tmp/%00report.pdf"]) {
+      expect(openTargetForHref(value, [], "/workspace")).toBeNull();
+    }
+  });
+
   test("native file actions preserve local paths without accepting schemes or network shares", () => {
     expect(localArtifactPath("/workspace", "/tmp/Fresh Start.png")).toBe("/tmp/Fresh Start.png");
     expect(localArtifactPath("/workspace", "images/Result.png")).toBe("/workspace/images/Result.png");

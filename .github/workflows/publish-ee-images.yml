@@ -291,7 +291,7 @@ jobs:
             sentry_release=${{ secrets.SENTRY_RELEASE }}
             sentry_dist=${{ secrets.SENTRY_DIST }}
 
-      - name: Assert Den DB migration and MCP App assets
+      - name: Assert Den DB migration assets and MCP App assets
         if: ${{ github.event_name == 'pull_request' && matrix.image == 'openwork-den-api' }}
         shell: bash
         env:

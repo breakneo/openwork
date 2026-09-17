@@ -19,6 +19,8 @@ import {
 import { useMessageList } from "./message-list-provider"
 import { createMcpAppActions, type McpAppOrigin } from "./mcp-app-origin"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { t } from "@/i18n"
 import {
   formatMcpAppDiagnostic,
   safeMcpAppDiagnosticMessage,
@@ -75,6 +77,8 @@ const ACTIONABLE_MCP_APP_RESOLUTION_CODES = new Set([
   "invalid_resource_uri",
   "invalid_launch_reference",
   "mcp_unreachable",
+  "mcp_auth_required",
+  "mcp_access_denied",
   "resource_read_failed",
   "resource_too_large",
   "server_unavailable",
@@ -269,7 +273,7 @@ export function McpAppDiagnosticNotice({ error, notice, onRetry }: { error: McpA
         <p className="mt-1">The connection was not ready. Retry, or check the connection under Settings &gt; Library.</p>
       ) : null}
       {onRetry ? (
-        <button type="button" className="mt-1 underline underline-offset-2" onClick={onRetry}>Retry</button>
+        <Button type="button" variant="link" size="xs" className="mt-1 px-0" onClick={onRetry}>{t("common.retry")}</Button>
       ) : null}
       <details className="mt-1">
         <summary className="cursor-pointer select-none">Technical details ({error.code})</summary>
@@ -315,6 +319,7 @@ export type McpAppSandboxViewProps = {
   presentation?: "inline" | "dashboard"
   /** Let the dashboard restore visible recovery controls if the sandbox fails. */
   onError?: () => void
+  onRetry?: () => void
 }
 
 /**
@@ -322,7 +327,7 @@ export type McpAppSandboxViewProps = {
  * bridges it to the workspace MCP App host. Chat messages and dashboard tiles
  * share this exact pipeline so rendering and diagnostics stay identical.
  */
-export function McpAppSandboxView({ origin, app, toolName, inputArguments, result, connectionController, updateMode = "replace", onReady, unavailableNotice, onRequestTeardown, initialHeight, onHeightChange, presentation = "inline", onError }: McpAppSandboxViewProps) {
+export function McpAppSandboxView({ origin, app, toolName, inputArguments, result, connectionController, updateMode = "replace", onReady, unavailableNotice, onRequestTeardown, initialHeight, onHeightChange, presentation = "inline", onError, onRetry }: McpAppSandboxViewProps) {
   const openworkServerClient = origin.client
   const workspaceId = origin.workspaceId
   const readOnly = origin.readOnly
@@ -331,6 +336,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
   const heightRef = useRef(height)
   const reportedHeightRef = useRef<number | null>(null)
   const [error, setError] = useState<McpAppDiagnostic | null>(null)
+  const [retryAttempt, setRetryAttempt] = useState(0)
   const teardownRef = useRef(onRequestTeardown)
   teardownRef.current = onRequestTeardown
   const onHeightChangeRef = useRef(onHeightChange)
@@ -720,9 +726,12 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       disposed = true
       stopSandbox?.()
     }
-  }, [app, replacementInput, openworkServerClient, replacementResult, toolName, workspaceId, readOnly, origin, origin.sessionId, origin.engine, presentation, updateMode, connectionController])
+  }, [app, replacementInput, openworkServerClient, replacementResult, toolName, workspaceId, readOnly, origin, origin.sessionId, origin.engine, presentation, updateMode, connectionController, retryAttempt])
 
-  if (error) return <McpAppDiagnosticNotice error={error} notice={unavailableNotice} />
+  if (error) return <McpAppDiagnosticNotice error={error} notice={unavailableNotice} onRetry={onRetry ?? (() => {
+    setError(null)
+    setRetryAttempt((attempt) => attempt + 1)
+  })} />
   return (
     <div
       className={cn(

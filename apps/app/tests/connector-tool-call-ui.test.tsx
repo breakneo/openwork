@@ -42,6 +42,33 @@ test("renders probe branding and accessible human labels in every state", () => 
   expect(html).not.toContain("animate-spin");
 });
 
+test("valid probe payload names do not brand unknown connections", () => {
+  const part: DynamicToolUIPart = {
+    type: "dynamic-tool", toolName: "openwork-cloud_execute_capability", toolCallId: "unknown-probe",
+    state: "output-available", input: { name: "mcp:emc_unknown:*" },
+    output: { connectionStatus: {
+      schemaVersion: "1", connectionId: "emc_unknown", connectionName: "Notion",
+      state: "connected", actor: null, message: "Connected", action: null,
+    } },
+  };
+  const inventory = buildConnectorToolIdentities({ mcpServers: [], orgConnections: [] });
+  const connector = resolveConnectorToolIdentity(part, inventory);
+  expect(connector).toBeNull();
+  const html = renderToStaticMarkup(<CapabilityCallLine part={part} connector={connector} />);
+  expect(html).toContain("Checked connection");
+  expect(html).not.toContain("Notion");
+  expect(html).not.toContain("ext-notion.svg");
+  expect(html).not.toContain("emc_unknown");
+  const known = resolveConnectorToolIdentity(part, [{
+    id: "connection:emc_unknown", connectionId: "emc_unknown", name: "Notion",
+    iconUrl: "/ext-notion.svg", serviceUrl: null, toolNamespace: null,
+  }]);
+  const knownHtml = renderToStaticMarkup(<CapabilityCallLine part={part} connector={known} />);
+  expect(knownHtml).toContain("Checked Notion connection");
+  expect(knownHtml).toContain('data-connector-name="Notion"');
+  expect(knownHtml).toContain("/ext-notion.svg");
+});
+
 test("unfinished code mode calls do not resume animating after interruption", () => {
   const part: DynamicToolUIPart = {
     type: "dynamic-tool", toolName: "openwork-cloud_execute_capability_script", toolCallId: "script",

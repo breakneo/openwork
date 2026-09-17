@@ -1,5 +1,4 @@
 import type { DynamicToolUIPart } from "ai";
-import { connectionCardPayloadFromChatToolResult, connectionResultFromChatToolPart } from "@/components/tools/error-attribution";
 import { getConnectionStatusProbeId } from "@/lib/capability-call";
 
 import { getMcpServerName, MCP_QUICK_CONNECT } from "@/app/constants";
@@ -158,18 +157,7 @@ export function resolveConnectorToolIdentity(
 ): ConnectorToolIdentity | null {
   const probeId = getConnectionStatusProbeId(part);
   if (probeId) {
-    const inventory = identities.find((identity) => identity.connectionId === probeId);
-    if (inventory) return inventory;
-    const payload = connectionCardPayloadFromChatToolResult(part.toolName, connectionResultFromChatToolPart(part), part.input);
-    if (!payload || payload.connectionId !== probeId) return null;
-    return {
-      id: `connection:${probeId}`,
-      name: payload.connectionName,
-      iconUrl: iconFor({ name: payload.connectionName, url: null }),
-      serviceUrl: null,
-      toolNamespace: null,
-      connectionId: probeId,
-    };
+    return identities.find((identity) => identity.connectionId === probeId) ?? null;
   }
   const capability = capabilityName(part);
   if (capability) {

@@ -65,7 +65,7 @@ export function ConnectionView({ payload, app, hostContext }: AppViewProps<z.inf
   const title = connected ? `${payload.connectionName} connected`
     : outcome === "skipped" ? `Skipped ${payload.connectionName}`
       : outcome === "dismissed" ? `Dismissed ${payload.connectionName}`
-        : member ? `Connect ${payload.connectionName}` : `${payload.connectionName} needs setup`
+        : member ? `Connect ${payload.connectionName} for account access` : `${payload.connectionName} needs setup`
   return <>
     <main className="connection" aria-busy={busy}>
       <span className="logo" aria-hidden="true">{slug && !logoFailed
@@ -79,6 +79,15 @@ export function ConnectionView({ payload, app, hostContext }: AppViewProps<z.inf
         </button>
       </div>}
     </main>
-    {(status || (!finished && (!member || (!native && !link.success)))) && <p className="status" role="status">{status || payload.message}</p>}
+    {!finished && <details>
+      <summary>Access details</summary>
+      {member && <>
+        <p>Review the requested permissions on the provider’s sign-in screen.</p>
+        <p>You can disconnect this connection in settings.</p>
+      </>}
+      {native && member && <p>Skip continues without connecting.</p>}
+      {(!member || (!native && !link.success)) && <p>{payload.message}</p>}
+    </details>}
+    {status && <p className="status" role="status">{status}</p>}
   </>
 }

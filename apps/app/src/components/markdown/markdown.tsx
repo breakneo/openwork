@@ -10,7 +10,8 @@ import { cn } from "@/lib/utils";
 import { useOpenTargets } from "@/lib/target-provider";
 import { useSessionReferencesMaybe } from "@/components/chat/session-reference-context";
 import { useOpenArtifactPath } from "@/lib/artifacts";
-import { openTargetFromUrl, type OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
+import type { OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
+import { openTargetForHref } from "@/react-app/domains/session/artifacts/resolve-open-target";
 
 import { applyTextHighlights } from "./text-highlights";
 import {
@@ -30,8 +31,6 @@ import { enhanceNearViewport } from "./near-viewport";
 
 export { renderHighlightedMarkdownHtml, renderMarkdownHtml } from "./markdown-primitive";
 
-const WORKSPACES_PREFIX_PATTERN = /^workspaces\/[^/]+\//i;
-const WORKSPACE_ID_PREFIX_PATTERN = /^workspace\/(?:ws_[^/]+|\d+|[0-9a-f-]{6,})\//i;
 const CODE_COPY_RESET_DELAY_MS = 2000;
 
 function localPathFromHref(href: string) {
@@ -59,38 +58,6 @@ function localPathFromHref(href: string) {
   }
 
   return trimmed.split(/[?#]/)[0] ?? trimmed;
-}
-
-function normalizeFilePathForMatch(path: string) {
-  return path
-    .trim()
-    .replace(/[\\]+/g, "/")
-    .replace(/^\.\//, "")
-    .replace(WORKSPACES_PREFIX_PATTERN, "")
-    .replace(WORKSPACE_ID_PREFIX_PATTERN, "")
-    .replace(/[/]+$/, "")
-    .toLowerCase();
-}
-
-function filePathMatchesTarget(path: string, targetValue: string) {
-  const normalizedPath = normalizeFilePathForMatch(path);
-  const normalizedTarget = normalizeFilePathForMatch(targetValue);
-
-  return normalizedPath === normalizedTarget || normalizedPath.endsWith(`/${normalizedTarget}`);
-}
-
-function openTargetForHref(href: string, openTargets: OpenTarget[]) {
-  // A website in the transcript is a conversation target too. Let its owner
-  // open the built-in browser instead of Chromium spawning a separate window.
-  const urlTarget = openTargetFromUrl(href);
-  if (urlTarget) return urlTarget;
-  const path = localPathFromHref(href);
-
-  if (!path) {
-    return null;
-  }
-
-  return openTargets.find((target) => target.kind === "file" && filePathMatchesTarget(path, target.value)) ?? null;
 }
 
 type MarkdownBlockInnerProps = {
@@ -133,6 +100,7 @@ function MarkdownBlockInner({
     videoCleanups.current.clear();
   }, [client, workspaceId, workspaceRoot]);
   const [linkMenu, setLinkMenu] = useState<{ target: OpenTarget; rect: DOMRect } | null>(null);
+  useEffect(() => setLinkMenu(null), [client, workspaceId, workspaceRoot]);
   const [imagePreview, setImagePreview] = useState<{ src: string; alt: string } | null>(null);
   const references = useSessionReferencesMaybe();
   const resolveReference = sessionReferences ? references?.resolve : undefined;
@@ -292,8 +260,8 @@ function MarkdownBlockInner({
         showError();
         continue;
       }
-      const target = openTargetForHref(href, openTargets);
-      void client.downloadWorkspaceFile(workspaceId, target?.value ?? path).then((result) => {
+      const target = openTargetForHref(href, openTargets, workspaceRoot);
+      void client.downloadWorkspaceFile(workspaceId, target?.exists === true ? target.value : path).then((result) => {
         if (cancelled) return;
         const extension = path.split(".").pop()?.toLowerCase();
         const fallbackType = extension === "webm" ? "video/webm" : extension === "ogv" ? "video/ogg" : extension === "mov" ? "video/quicktime" : "video/mp4";
@@ -377,7 +345,7 @@ function MarkdownBlockInner({
         event.preventDefault();
         event.stopPropagation();
         const href = chevron.dataset.openworkLinkChevron ?? "";
-        const target = openTargetForHref(href, openTargets);
+        const target = openTargetForHref(href, openTargets, workspaceRoot);
         if (target) {
           setLinkMenu({ target, rect: chevron.getBoundingClientRect() });
         }
@@ -387,7 +355,7 @@ function MarkdownBlockInner({
       const link = event.target.closest("a[data-openwork-link-href]");
       if (link instanceof HTMLAnchorElement) {
         const href = link.dataset.openworkLinkHref ?? link.getAttribute("href") ?? "";
-        const target = openTargetForHref(href, openTargets);
+        const target = openTargetForHref(href, openTargets, workspaceRoot);
 
         if (target && onOpenTarget) {
           event.preventDefault();
@@ -406,6 +374,18 @@ function MarkdownBlockInner({
       setImagePreview({ src: image.src, alt: image.alt || "Image" });
     };
 
+    const handleContextMenu = (event: MouseEvent) => {
+      if (!(event.target instanceof Element) || !onOpenTarget) return;
+      const link = event.target.closest("[data-openwork-link-href], [data-openwork-link-chevron]");
+      if (!(link instanceof HTMLElement)) return;
+      const href = link.dataset.openworkLinkHref ?? link.dataset.openworkLinkChevron ?? "";
+      const target = openTargetForHref(href, openTargets, workspaceRoot);
+      if (target?.kind !== "file") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setLinkMenu({ target, rect: link.getBoundingClientRect() });
+    };
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       if (!(event.target instanceof HTMLElement) || !event.target.matches("[data-openwork-inline-code-path]")) return;
@@ -419,6 +399,7 @@ function MarkdownBlockInner({
     root.addEventListener("click", handleClick);
     root.addEventListener("auxclick", handleAuxClick);
     root.addEventListener("mousedown", handleMouseDown);
+    root.addEventListener("contextmenu", handleContextMenu);
     root.addEventListener("keydown", handleKeyDown);
 
     if (globalThis.ResizeObserver === undefined) {
@@ -427,6 +408,7 @@ function MarkdownBlockInner({
         root.removeEventListener("click", handleClick);
         root.removeEventListener("auxclick", handleAuxClick);
         root.removeEventListener("mousedown", handleMouseDown);
+        root.removeEventListener("contextmenu", handleContextMenu);
         root.removeEventListener("keydown", handleKeyDown);
       };
     }
@@ -440,9 +422,10 @@ function MarkdownBlockInner({
       root.removeEventListener("click", handleClick);
       root.removeEventListener("auxclick", handleAuxClick);
       root.removeEventListener("mousedown", handleMouseDown);
+      root.removeEventListener("contextmenu", handleContextMenu);
       root.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleCodeBlockCopy, onOpenTarget, openArtifactPath, openTargets, rendered, references, resolveReference, sessionReferences]);
+  }, [handleCodeBlockCopy, onOpenTarget, openArtifactPath, openTargets, workspaceRoot, rendered, references, resolveReference, sessionReferences]);
 
   if (isEmpty) {
     return null;
@@ -471,6 +454,7 @@ function MarkdownBlockInner({
       )}
       {linkMenu && onOpenTarget ? (
         <LinkActionMenu
+          key={linkMenu.target.value}
           target={linkMenu.target}
           anchorRect={linkMenu.rect}
           onOpenTarget={onOpenTarget}

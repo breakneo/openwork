@@ -7,7 +7,7 @@ import { z } from "zod"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { McpServer } from "@modelcontextprotocol/server"
 import { legacyConfirmationAppHtml } from "@openwork/mcp-apps/legacy-confirmation"
-import { PLUGIN_FLOW_APP_HTML, PLUGIN_FLOW_APP_RESOURCE_URI, registerAgentPluginFlowApp } from "../src/mcp/plugin-flow-app.js"
+import { attachPluginFlowCard, PLUGIN_FLOW_APP_HTML, PLUGIN_FLOW_APP_RESOURCE_URI, registerAgentPluginFlowApp } from "../src/mcp/plugin-flow-app.js"
 import type { CapabilityRegistryContext } from "../src/mcp/capability-registry.js"
 import type { McpToolOperation } from "../src/mcp/catalog.js"
 
@@ -106,7 +106,7 @@ const sharingOperations = [
   { name: "postPlugins", path: "/v1/plugins", params: {}, body: { name: "Fixture" } },
 ]
 
-test.each(sharingOperations)("$name preserves the ordinary write response without a confirmation App", async (fixture) => {
+test.each(sharingOperations)("$name preserves operation content and only attaches tracked legacy confirmations on success", async (fixture) => {
   const app = new Hono()
   const requests: Array<{ path: string; body: unknown }> = []
   let forbidden = false
@@ -119,9 +119,28 @@ test.each(sharingOperations)("$name preserves the ordinary write response withou
   const ctx = context(app, operation)
   const input = { name: fixture.name, path: JSON.stringify(fixture.params), body: JSON.stringify(fixture.body) }
   const result = await executeCapability(ctx, input)
-  expect(result).toEqual({ isError: false, content: [{ type: "text", text: JSON.stringify(response, null, 2) }] })
-  expect(result._meta).toBeUndefined()
-  expect(result.structuredContent).toBeUndefined()
+  expect(result.isError).toBe(false)
+  expect(result.content).toEqual([{ type: "text", text: JSON.stringify(response, null, 2) }])
+  if (fixture.name === "postPlugins") {
+    expect(result._meta).toBeUndefined()
+    expect(result.structuredContent).toBeUndefined()
+  } else {
+    const mode = fixture.name === "postMarketplacesPlugins" ? "marketplace_plugin_added" : fixture.name === "postPluginsAccess" ? "plugin_access_granted" : "marketplace_access_granted"
+    const recipient = fixture.body.orgMembershipId ? { kind: "member", id: fixture.body.orgMembershipId, role: fixture.body.role }
+      : fixture.body.teamId ? { kind: "team", id: fixture.body.teamId, role: fixture.body.role }
+      : fixture.body.orgWide ? { kind: "org_wide", id: null, role: fixture.body.role } : null
+    expect(result.structuredContent).toEqual({
+      schemaVersion: "1",
+      mode,
+      pluginId: fixture.params.pluginId ?? fixture.body.pluginId ?? null,
+      marketplaceId: fixture.params.marketplaceId ?? null,
+      recipient,
+    })
+    expect(pluginFlowPayloadSchema.parse(result.structuredContent)).toEqual(result.structuredContent)
+    expect(result._meta).toEqual({ "openwork/mcpApp": {
+      toolName: "plugin_flow", resourceUri: PLUGIN_FLOW_APP_RESOURCE_URI, arguments: { mode },
+    } })
+  }
   expect(requests).toEqual([{
     path: fixture.path.replace(/\{[^}]+\}/g, () => Object.values(fixture.params)[0] ?? ""),
     body: fixture.body,
@@ -138,13 +157,27 @@ test.each(sharingOperations)("$name preserves the ordinary write response withou
   expect(requests).toHaveLength(2)
 })
 
-test("agent retains legacy registration without automatic result attachments", async () => {
+test("agent retains legacy registration and original automatic result attachments", async () => {
   const agent = await readFile(new URL("../src/mcp/agent.ts", import.meta.url), "utf8")
   const registry = await readFile(new URL("../src/mcp/capability-registry.ts", import.meta.url), "utf8")
   expect(agent).toContain("registerAgentPluginFlowApp(server)")
   expect(agent).toContain("plugin-flow-app")
-  expect(registry).not.toContain("attachPluginFlowCard")
-  expect(registry).not.toContain("plugin-flow-app")
+  expect(registry).toContain("attachPluginFlowCard({ name: parsed.name, path, body, result })")
+  expect(registry).toContain("plugin-flow-app")
+})
+
+test("legacy attachment preserves unrelated metadata and leaves errors and untracked results untouched", () => {
+  const result = { isError: false, content: [{ type: "text", text: "original response" }], structuredContent: { original: true }, _meta: { unrelated: "retained" } }
+  const attached = attachPluginFlowCard({ name: "postPluginsAccess", path: null, body: [], result })
+  expect(attached.content).toBe(result.content)
+  expect(attached._meta).toEqual({ unrelated: "retained", "openwork/mcpApp": {
+    toolName: "plugin_flow", resourceUri: PLUGIN_FLOW_APP_RESOURCE_URI, arguments: { mode: "plugin_access_granted" },
+  } })
+  expect(attached.structuredContent).toEqual({ schemaVersion: "1", mode: "plugin_access_granted", pluginId: null, marketplaceId: null, recipient: null })
+  expect(result.structuredContent).toEqual({ original: true })
+  const failure = { ...result, isError: true }
+  expect(attachPluginFlowCard({ name: "postPluginsAccess", path: {}, body: {}, result: failure })).toBe(failure)
+  expect(attachPluginFlowCard({ name: "postPlugins", path: {}, body: {}, result })).toBe(result)
 })
 
 test("historical confirmation payloads remain parseable", () => {

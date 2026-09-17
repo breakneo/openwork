@@ -13,7 +13,7 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
   const browserUrlsBefore = await world.browserUrls.opened();
 
   for (const request of [
-    { prompt: connectorCatalogPrompt, reply: connectorCatalogReply, query: "Slack", ids: [] },
+    { prompt: connectorCatalogPrompt, reply: connectorCatalogReply, query: "Slack", ids: world.expectedIds },
     { prompt: allConnectorsPrompt, reply: allConnectorsReply, query: "quick add connectors", ids: world.expectedIds },
   ]) {
     await step(`${request.query} returns an ordinary result without a catalog card`, async () => {
@@ -29,13 +29,9 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
       expect(await appProbe.eval(() => document.querySelectorAll('[data-capability-call$="search_capabilities"]').length)).toBe(1);
       await appUser.screenshot();
       await appUser.click({ role: "button", label: `Searched your connections for “${request.query}”. Show technical details` });
-      if (request.ids.length === 0) {
-        await appUser.notSee({ text: /"connectorCatalog"\s*:/ });
-        await appUser.notSee({ text: /"setupUrl"\s*:|quickAdd=/ });
-      } else {
-        await appUser.see({ text: /"connectorCatalog"\s*:/ });
-        for (const id of request.ids) await appUser.see({ text: new RegExp(`quickAdd=${id}`) });
-      }
+      await appUser.see({ text: /"connectorCatalog"\s*:/ });
+      await appUser.see({ text: request.query === "Slack" ? /"selectedIds"\s*:\s*\[\s*"slack"\s*\]/ : /"selectedIds"\s*:\s*\[\s*\]/ });
+      for (const id of request.ids) await appUser.see({ text: new RegExp(`quickAdd=${id}`) });
       await appUser.notSee({ text: /"connectors"\s*:/ });
       await appUser.click({ role: "button", label: `Searched your connections for “${request.query}”. Hide technical details` });
       const calls = await world.den.mocks.connector.agentRequests({ promptMarker: request.prompt });
@@ -45,7 +41,7 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
       expect((await world.den.mocks.connector.requests()).filter(entry => entry.path === "/authorize" || entry.path === "/token")).toEqual([]);
       expect(await world.browserUrls.opened()).toEqual(browserUrlsBefore);
       expect((await probe.api(world.den.admin, "/v1/mcp-connections?scope=manageable")).body).toEqual(beforeRequests.body);
-      evidence.recordAssertionEvidence("Setup discovery uses an ordinary tool line without connecting or opening a catalog", `${request.query} returned ${request.ids.length === 0 ? "no connector suggestions or setup URLs" : "plain connector metadata and setup URLs in technical details"}; one search, no provider calls, no OAuth, no browser handoff, and no connection mutation.`, true);
+      evidence.recordAssertionEvidence("Setup discovery uses an ordinary tool line without connecting or opening a catalog", `${request.query} returned legacy connector metadata and setup URLs in technical details without modern catalog UI; one search, no provider calls, no OAuth, no browser handoff, and no connection mutation.`, true);
     });
     await appUser.click({ role: "button", label: "New session" });
     await appUser.see("composer", { editable: true });

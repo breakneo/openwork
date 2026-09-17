@@ -330,7 +330,7 @@ test("capability search results include structured output alongside text compati
   expect(quiet.structuredContent.matches).toEqual(blocked)
   expect(quiet.structuredContent.connectionAction).toBeUndefined()
   expect(quiet).not.toHaveProperty("_meta")
-  const actionable = agentModule.capabilitySearchToolResult(blocked, undefined, true)
+  const actionable = agentModule.capabilitySearchToolResult(blocked, undefined, null, true)
   expect(actionable.structuredContent.matches).toEqual(blocked)
   expect(actionable.structuredContent.connectionAction?.connectionId).toBe("emc_notes")
   expect(actionable).toHaveProperty("_meta.openwork/mcpApp", {
@@ -519,7 +519,7 @@ test("agent steering separates legacy compatibility from modern presentation and
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("explicitly call the standard preview tool")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("original skill-created MCP App binding")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("Modern OpenWork clients ignore that metadata and do not auto-open")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("return ordinary operation results")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("legacy plugin-flow confirmation metadata for released clients")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("No new setup card is introduced")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("chooses Save")
   for (const capability of [BUILTIN_CREATE_SKILL_CAPABILITY, BUILTIN_SHARE_PLUGIN_CAPABILITY, BUILTIN_ADD_TO_MARKETPLACE_CAPABILITY, BUILTIN_ADD_USER_TO_MARKETPLACE_CAPABILITY]) {
@@ -584,6 +584,7 @@ test("connector discovery preserves the released version 1 browse envelope witho
   const { EXTERNAL_MCP_PRESETS } = await import("../src/capability-sources/external-mcp-presets.js")
   const result = agentModule.connectorSetupToolResult()
   const { connectorCatalog } = result.structuredContent
+  if (!connectorCatalog) throw new Error("Missing legacy connector catalog")
   const connectors = connectorCatalog.entries
   expect(connectorCatalog.version).toBe(1)
   expect(connectorCatalog.selectedIds).toEqual([])
@@ -599,8 +600,40 @@ test("connector discovery preserves the released version 1 browse envelope witho
   for (const entry of connectors) expect(new URL(entry.setupUrl).searchParams.get("quickAdd")).toBe(entry.id)
 })
 
-test.each([false, true])("empty capability search never suggests a connector catalog (connect intent: %s)", (connectionIntent) => {
-  const result = agentModule.capabilitySearchToolResult([], undefined, connectionIntent)
+test.each([
+  { query: "Slack", selectedIds: ["slack"] },
+  { query: "please connect SLACK!", selectedIds: ["slack"] },
+  { query: "Google Workspace", selectedIds: ["google-workspace"] },
+  { query: "Microsoft-365", selectedIds: ["microsoft-365"] },
+  { query: "Slack and Linear", selectedIds: ["linear", "slack"] },
+  { query: "connectors", selectedIds: [] },
+  { query: "integrations", selectedIds: [] },
+  { query: "quick adds", selectedIds: [] },
+  { query: "quick connect", selectedIds: [] },
+  { query: "unknown-service", selectedIds: null },
+  { query: "available services", selectedIds: null },
+  { query: "slackish", selectedIds: null },
+])("legacy catalog selection preserves origin/dev behavior for $query", async ({ query, selectedIds }) => {
+  const { connectorCatalogForQuery } = await import("../src/mcp/connector-catalog.js")
+  const full = connectorCatalogForQuery(query, true)
+  expect(full).toEqual(connectorCatalogForQuery("", true))
+  expect(full?.selectedIds).toEqual([])
+  const catalog = connectorCatalogForQuery(query)
+  if (selectedIds === null) {
+    expect(catalog).toBeNull()
+  } else {
+    expect(catalog).toEqual({ ...full, selectedIds })
+  }
+  const result = agentModule.capabilitySearchToolResult([], undefined, catalog, true)
+  expect(result.structuredContent.connectorCatalog).toEqual(catalog ?? undefined)
+  expect(result).not.toHaveProperty("_meta")
+  expect(JSON.parse(toolText(result))).toEqual(result.structuredContent)
+  expect(agentModule.SEARCH_CAPABILITIES_OUTPUT_SCHEMA.parse(result.structuredContent)).toEqual(result.structuredContent)
+  expect(agentModule.capabilitySearchToolResult([]).structuredContent).not.toHaveProperty("connectorCatalog")
+})
+
+test.each([false, true])("empty capability search without setup suggestions stays quiet (connect intent: %s)", (connectionIntent) => {
+  const result = agentModule.capabilitySearchToolResult([], undefined, null, connectionIntent)
   expect(result.structuredContent).toEqual({ matches: [], hint: "No matches. Try broader or different keywords." })
   expect(result).not.toHaveProperty("_meta")
 })

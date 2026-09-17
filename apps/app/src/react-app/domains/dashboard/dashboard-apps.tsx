@@ -6,7 +6,7 @@ import type { SavedAppSummary } from "@openwork/types/workflows";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useSavedApps, useAppsClient } from "../apps/use-apps";
+import { useSavedApps, useAppsClient, dashboardManagementReason } from "../apps/use-apps";
 import { AppActionsMenu, getAppUpdatePrompt } from "../apps/app-actions-menu";
 import { GeneratedAppPreview, type GeneratedAppPreviewGeometry } from "../apps/generated-app-preview";
 import { useWorkspace } from "@/react-app/shell/workspace-provider";
@@ -25,7 +25,7 @@ function snapshotGeometryScopeKey(scope: ReturnType<typeof useAppsClient>["scope
 }
 
 export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp: CreateDashboardApp; fallbackEndpoints?: DashboardLaunchEndpoint[] }) {
-  const { available, client, orgId, query, scope } = useSavedApps();
+  const { available, client, orgId, query, scope, canManage } = useSavedApps();
   const cache = useQueryClient();
   const [chooser, setChooser] = useState<"add" | "existing" | null>(null);
   const [search, setSearch] = useState("");
@@ -33,6 +33,7 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
   const [error, setError] = useState<string | null>(null);
   const placement = useMutation({
     mutationFn: async ({ appId, added }: { appId: string; added: boolean; geometry?: GeneratedAppPreviewGeometry }) => {
+      if (!canManage) throw new Error(dashboardManagementReason);
       if (!client || !orgId) throw new Error("Sign in to update your dashboard.");
       await client.setAppOnDashboard(orgId, appId, added);
     },
@@ -42,6 +43,7 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
     },
   });
   const create = async () => {
+    if (!canManage) return;
     setCreating(true); setError(null);
     try { await onCreateApp("Create one live app for my dashboard in one shot. Use my request to build and save one app that fetches fresh data with each viewer’s own connections whenever opened or refreshed. Handle the underlying workflow internally; do not ask me workflow questions. My app should "); setChooser(null); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start a conversation. Try again."); }
@@ -53,7 +55,7 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
   return <>
     <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
       <div><h1 className="text-xl font-medium">Dashboard</h1><p className="mt-1 text-sm text-muted-foreground">Your apps and the tools your team shares with you.</p></div>
-      {available ? <div className="flex items-center gap-2">{query.data?.sharingEnabled ? <ShareDashboardButton key={JSON.stringify(scope)} apps={personal} /> : null}<Button onClick={() => { setChooser("add"); setError(null); placement.reset(); }}><Plus className="size-4" />Add</Button></div> : null}
+      {available && canManage ? <div className="flex items-center gap-2">{query.data?.sharingEnabled ? <ShareDashboardButton key={JSON.stringify(scope)} apps={personal} /> : null}<Button onClick={() => { setChooser("add"); setError(null); placement.reset(); }}><Plus className="size-4" />Add</Button></div> : null}
     </header>
     {query.isError ? <div className="mb-5 flex items-center gap-3"><p role="alert" className="text-sm">Your apps could not be loaded.</p><Button variant="outline" onClick={() => void query.refetch()}>Try again</Button></div> : null}
     {placement.error && !chooser ? <p role="alert" className="mb-4 text-sm text-destructive">{placement.error.message}</p> : null}
@@ -62,14 +64,14 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
       <DashboardMasonry>{personal.map((app) => <SavedDashboardApp key={JSON.stringify([...scope, app.view.id])} app={app} fallbackEndpoints={fallbackEndpoints} onCreateApp={onCreateApp}
         removing={placement.isPending && placement.variables?.appId === app.view.id}
         onRemove={(geometry) => placement.mutate({ appId: app.view.id, added: false, geometry })} />)}</DashboardMasonry>
-    </section> : available ? <section className="mb-8 rounded-xl border border-dashed p-6">
+    </section> : available && canManage ? <section className="mb-8 rounded-xl border border-dashed p-6">
       <div className="flex items-start gap-3"><Sparkles className="mt-0.5 size-5 text-muted-foreground" /><div>
         <h2 className="text-sm font-medium">Make this dashboard yours</h2>
         <p className="mt-1 max-w-lg text-sm text-muted-foreground">Create a meeting briefing, a project tracker, or a view of your weekly work. Describe what you need, try the preview, then save it here.</p>
         <Button className="mt-4" variant="outline" onClick={() => setChooser("add")}>Add your first app</Button>
       </div></div>
-    </section> : null}
-    <Dialog open={chooser !== null} onOpenChange={(open) => { if (!open && !creating && !placement.isPending) setChooser(null); }}>
+    </section> : available ? <p className="mb-8 text-xs text-muted-foreground">This dashboard has no apps yet.</p> : null}
+    <Dialog open={canManage && chooser !== null} onOpenChange={(open) => { if (!open && !creating && !placement.isPending) setChooser(null); }}>
       <DialogContent>
         <DialogHeader><DialogTitle>{chooser === "existing" ? "Choose an existing app" : "Add to your dashboard"}</DialogTitle>
           <DialogDescription>{chooser === "existing" ? "Apps you have access to. Adding one keeps its existing sharing settings." : "Create something useful or choose an app already available to you."}</DialogDescription></DialogHeader>
@@ -97,7 +99,7 @@ export function DashboardApps({ onCreateApp, fallbackEndpoints }: { onCreateApp:
 
 function SavedDashboardApp({ app, onRemove, removing, onCreateApp, fallbackEndpoints }: { fallbackEndpoints?: DashboardLaunchEndpoint[]; app: SavedAppSummary; onRemove: (geometry?: GeneratedAppPreviewGeometry) => void; removing: boolean; onCreateApp: CreateDashboardApp }) {
   const navigate = useNavigate();
-  const { client, orgId, scope } = useAppsClient();
+  const { client, orgId, scope, canManage } = useAppsClient();
   const { workspaceId } = useWorkspace();
   const detail = useQuery({
     queryKey: ["app-preview", ...scope, app.view.id, undefined, undefined],
@@ -116,11 +118,11 @@ function SavedDashboardApp({ app, onRemove, removing, onCreateApp, fallbackEndpo
   const reserved = useMemo(() => geometryEntryId && workspaceId
     ? readDashboardTileGeometry(geometryScopeKey, geometryEntryId, workspaceId) : null,
   [geometryScopeKey, geometryEntryId, workspaceId]);
-  const updatePrompt = app.canManage && !detail.isError ? getAppUpdatePrompt(isLiveGeneratedApp(app.view) ? { ...app, revision: liveRevision ?? null, html: null, payload: null, previewNotice: null } : detail.data) : undefined;
+  const updatePrompt = canManage && app.canManage && !detail.isError ? getAppUpdatePrompt(isLiveGeneratedApp(app.view) ? { ...app, revision: liveRevision ?? null, html: null, payload: null, previewNotice: null } : detail.data) : undefined;
   const update = useMutation({ mutationFn: onCreateApp });
   const onUpdate = updatePrompt ? () => { if (!update.isPending && !removing) update.mutate(updatePrompt); } : undefined;
   const renderActions: DashboardTileActions = (props) => <AppActionsMenu appId={app.view.id} title={app.view.title}
-    canDelete={app.canManage} onRemove={() => onRemove(geometry)} onUpdate={onUpdate} busy={removing || update.isPending}
+    canManage={app.canManage} canDelete={app.canManage} onRemove={() => onRemove(geometry)} onUpdate={onUpdate} busy={removing || update.isPending}
     onOpen={() => navigate(`/dashboard/apps/${app.view.id}`)} {...props} />;
   const live = liveRevision ? { view: app.view, revision: liveRevision }
     : !isLiveGeneratedApp(app.view) && !detail.isError && detail.data && isLiveGeneratedApp(detail.data.view) && detail.data.revision ? { view: detail.data.view, revision: detail.data.revision } : null;
