@@ -1,6 +1,6 @@
 import type { Client } from "../types";
 import type { Message, Part } from "@opencode-ai/sdk/v2/client";
-import { createPromptMessageID, isPromptAdmissionUnknown, PromptAdmissionUnknownError, unwrap } from "./opencode";
+import { cancelPromptAdmission, createPromptMessageID, isPromptAdmissionUnknown, PromptAdmissionUnknownError, unwrap } from "./opencode";
 import { engineDirectory } from "./session-ownership";
 
 type Submission = {
@@ -144,6 +144,8 @@ export function subscribeSessionInterruption(baseUrl: string, sessionID: string,
   return () => { turn.listeners.delete(listener); };
 }
 
+export type StoppedPromptAdmission = { messageID: string; state: "accepted" | "cancelled" | "rejected" };
+
 /** Keep a failed interruption fenced until the user retries Stop. Forgetting
  * it on failure would silently steer the next message into the old run. */
 export function interruptSessionTurn(
@@ -151,7 +153,7 @@ export function interruptSessionTurn(
   client: Client,
   sessionID: string,
   directory?: string,
-  options: { timeoutMs?: number; admissionUnknown?: boolean; admissionMessageID?: string; onStopped?: () => void } = {},
+  options: { timeoutMs?: number; admissionUnknown?: boolean; admissionMessageID?: string; onStopped?: (admission?: StoppedPromptAdmission) => void } = {},
 ): Promise<void> {
   const turn = turnFor(baseUrl, sessionID);
   // Share the cancellation request, not permission for intervening sends to
@@ -169,9 +171,9 @@ export function interruptSessionTurn(
   const interruption = Promise.race([
     stopForegroundTree(client, sessionID, directory, pending, controller.signal, options.admissionUnknown === true, options.admissionMessageID),
     deadline,
-  ]).then(() => {
+  ]).then((admission) => {
     // Reconcile the old admission before releasing waiting successor sends.
-    options.onStopped?.();
+    options.onStopped?.(admission);
     for (const submission of pending) turn.submissions.delete(submission);
     turn.interruption = undefined;
     turn.needsStop = false;
@@ -196,7 +198,7 @@ async function stopForegroundTree(
   signal: AbortSignal,
   admissionUnknown: boolean,
   admissionMessageID?: string,
-) {
+): Promise<StoppedPromptAdmission | undefined> {
   const options = { signal };
   const childrenInMessages = (sessionID: string, messages: readonly { info: Message; parts: Part[] }[]) => {
     return foregroundDelegations(messages).flatMap((part) => {
@@ -219,11 +221,15 @@ async function stopForegroundTree(
   // Stop must reach the engine even when session/transcript reads are broken.
   // Read concurrently to retain child references, but never gate the root abort
   // on discovery. Failed discovery still prevents claiming a complete handoff.
-  const [aborted, rootResult, childResult, ownerResult] = await Promise.allSettled([
+  const admissionIDs = new Set(pending.filter((submission) => !submission.waitForTerminal).flatMap((submission) => submission.messageID ? [submission.messageID] : []));
+  if (admissionUnknown && admissionMessageID) admissionIDs.add(admissionMessageID);
+  const [aborted, rootResult, childResult, ownerResult, cancelledAdmissions] = await Promise.allSettled([
     abort(rootID),
     client.session.get({ sessionID: rootID, directory }, options).then(unwrap),
     children(rootID),
     directory === undefined ? undefined : engineDirectory(client, directory, options),
+    // Cancellation is independent of engine health/transcript discovery.
+    Promise.all([...admissionIDs].map(async (id) => ({ messageID: id, state: await cancelPromptAdmission(client, rootID, id) }))),
   ]);
   // Do not let a fast discovery failure cancel an abort still in flight.
   if (aborted.status === "rejected") throw aborted.reason;
@@ -258,9 +264,34 @@ async function stopForegroundTree(
   };
   const waiting = new Set(pending);
   const reconciled = new Set<Submission>();
+  const admissionSettled = new Map<string, StoppedPromptAdmission["state"]>();
+  // A finalized server slot may be reclaimed while native Stop is in flight.
+  // Keep the exact proof already returned by our initial cancellation request.
+  const initialAdmissions = cancelledAdmissions.status === "fulfilled" ? cancelledAdmissions.value : [];
+  const reconcileAdmissions = async () => {
+    const ids = new Set([...waiting].filter((submission) => !submission.waitForTerminal).flatMap((submission) => submission.messageID ? [submission.messageID] : []));
+    if (admissionUnknown && admissionMessageID) ids.add(admissionMessageID);
+    await Promise.all([...ids].filter((id) => !admissionSettled.has(id)).map(async (id) => {
+      const initial = initialAdmissions.find((entry) => entry.messageID === id)?.state;
+      const state = initial === "accepted" || initial === "cancelled" || initial === "rejected"
+        ? initial : await cancelPromptAdmission(client, rootID, id);
+      signal.throwIfAborted();
+      // Accepted is also safe to hand to the native abort below: forwarding
+      // has finished, so that abort cannot precede a delayed proxy dispatch.
+      if (state !== "accepted" && state !== "cancelled" && state !== "rejected") return;
+      admissionSettled.set(id, state);
+      for (const submission of waiting) {
+        if (submission.messageID !== id || submission.waitForTerminal) continue;
+        reconciled.add(submission);
+        submission.cancel();
+        waiting.delete(submission);
+      }
+    }));
+  };
   const interruptedCommands = new Set<Submission>();
   while (waiting.size > 0) {
     signal.throwIfAborted();
+    await reconcileAdmissions();
     for (const submission of waiting) {
       if (submission.settled && !isPromptAdmissionUnknown(submission.error)
         && (!submission.waitForTerminal || submission.error)) waiting.delete(submission);
@@ -298,12 +329,13 @@ async function stopForegroundTree(
     if (waiting.size > 0) await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
   signal.throwIfAborted();
+  await reconcileAdmissions();
   await stop(rootID, before);
   // A lost admission response is not proof that the old POST cannot arrive
   // later. Do not claim a clean handoff or replay that prompt.
-  const unknown = admissionUnknown && !(admissionMessageID && hasTerminalSessionReply(
+  const unknown = admissionUnknown && !(admissionMessageID && (admissionSettled.has(admissionMessageID) || hasTerminalSessionReply(
     unwrap(await client.session.messages({ sessionID: rootID, directory }, options)), rootID, admissionMessageID,
-  ));
+  )));
   if (unknown || pending.some((submission) => !reconciled.has(submission) && isPromptAdmissionUnknown(submission.error))) {
     throw new Error("The previous message's acceptance is still unknown. Check acceptance, then retry Stop.");
   }
@@ -314,6 +346,11 @@ async function stopForegroundTree(
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
   await withdrawRequests(client, targets, directory, options);
+  if (admissionUnknown && admissionMessageID) {
+    // Reaching here without a ledger outcome required exact terminal-message
+    // evidence above. Never invent an ID or certify an absent history snapshot.
+    return { messageID: admissionMessageID, state: admissionSettled.get(admissionMessageID) ?? "accepted" };
+  }
 }
 
 /** The engine marks an interrupted tool part as aborted but keeps its unanswered
