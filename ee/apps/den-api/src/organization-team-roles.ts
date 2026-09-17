@@ -1,7 +1,6 @@
 import { and, eq, isNotNull, isNull, or } from "@openwork-ee/den-db/drizzle"
 import { InvitationTable, MemberTable, OrganizationTable, ScimGroupMemberTable, ScimGroupTable, ScimProviderTable, TeamMemberTable, TeamTable } from "@openwork-ee/den-db/schema"
 import { db } from "./db.js"
-import { withGatewayUsageEntitlementMutation } from "@openwork-ee/den-db/gateway-usage-limits"
 import { organizationRoleValueSatisfies } from "./organization-role-hierarchy.js"
 
 export type OrganizationAdminTeam = { id: string; name: string }
@@ -17,7 +16,7 @@ export function withOrganizationTeamMutation<T>(
   return db.transaction(async (tx) => {
     await tx.select({ id: OrganizationTable.id }).from(OrganizationTable)
       .where(eq(OrganizationTable.id, organizationId)).for("update")
-    return withGatewayUsageEntitlementMutation(tx, organizationId, () => mutation(tx))
+    return mutation(tx)
   })
 }
 

@@ -1,5 +1,4 @@
 import type {
-  ApiError,
   FilePart,
   Model,
   Part,
@@ -155,7 +154,7 @@ export type V2MappedMessage = {
       created: number;
       completed?: number;
     };
-    error?: UnknownError | ApiError;
+    error?: UnknownError;
   };
   parts: Part[];
 };
@@ -626,7 +625,7 @@ function mapV2Message(
         ...(completed === undefined ? {} : { completed }),
       },
       ...(role === "assistant" && error
-        ? { error: mapV2SessionError(error) }
+        ? { error: { name: "UnknownError", data: { message: errorMessage(error) } } }
         : {}),
     },
     parts,
@@ -783,27 +782,6 @@ function mapDefaultModels(value: unknown): Record<string, string> {
     if (typeof item === "string") defaults[key] = item;
   }
   return defaults;
-}
-
-export function mapV2SessionError(value: unknown): UnknownError | ApiError {
-  const data = readRecord(value, "data") ?? value;
-  const reportedStatus = readNumber(data, "statusCode") ?? readNumber(data, "status");
-  const statuses = [readNumber(value, "statusCode"), readNumber(value, "status"), readNumber(data, "status"),
-    readNumber(readRecord(value, "response"), "status"), readNumber(readRecord(data, "response"), "status")];
-  const statusCode = reportedStatus === 429 ? statuses.find((status) => status !== undefined && status !== 429) ?? reportedStatus : reportedStatus;
-  const responseBody = readString(data, "responseBody");
-  if (statusCode !== undefined && responseBody !== undefined) {
-    const rawHeaders = readRecord(data, "responseHeaders");
-    const responseHeaders: Record<string, string> = {};
-    for (const [key, header] of Object.entries(rawHeaders ?? {})) {
-      if (typeof header === "string") responseHeaders[key] = header;
-    }
-    return { name: "APIError", data: {
-      message: errorMessage(data), statusCode, responseBody, responseHeaders,
-      isRetryable: isRecord(data) && data.isRetryable === true,
-    } };
-  }
-  return { name: "UnknownError", data: { message: errorMessage(value) } };
 }
 
 function errorMessage(value: unknown): string {
@@ -1114,7 +1092,7 @@ export function translateV2Event(
     return [{ type, properties: {
       ...properties, sequence: readNumber(value.durable, "seq"),
       ...(type === "session.execution.failed" ? {
-        error: mapV2SessionError(properties.error),
+        error: { name: "UnknownError", data: { message: errorMessage(properties.error) } },
       } : {}),
     } }];
   }

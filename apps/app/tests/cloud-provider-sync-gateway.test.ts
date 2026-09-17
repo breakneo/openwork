@@ -4,8 +4,6 @@ import { createOpenworkServerClient } from "../src/app/lib/openwork-server";
 import { createClient } from "../src/app/lib/opencode";
 import type { ProviderListItem, WorkspaceDisplay } from "../src/app/types";
 import { createProviderAuthStore } from "../src/react-app/domains/connections/provider-auth/store";
-import { readGatewayUsageScope } from "../src/app/lib/gateway-usage-scope";
-import { resolveGatewayProviderIds } from "../src/react-app/domains/connections/provider-auth/cloud-provider-config";
 
 const originalWindow = globalThis.window;
 const originalFetch = globalThis.fetch;
@@ -382,49 +380,6 @@ describe("cloud provider sync in server-capability mode", () => {
     console.info = originalConsoleInfo;
     if (originalDeployment === undefined) delete process.env.VITE_OPENWORK_DEPLOYMENT;
     else process.env.VITE_OPENWORK_DEPLOYMENT = originalDeployment;
-  });
-
-  test("quota notice provenance stays with org A through delayed/failed B sync and changes only on verified B success", async () => {
-    const storage = installWindow({ origin: "https://self-hosted.example" });
-    installCloudSession(storage);
-    const requests: RecordedRequest[] = [];
-    const provider = (id: string) => ({ cloudProviderId: id, providerId: id, sourceProviderId: "openai", source: "openwork_gateway", name: "Assigned", modelIds: ["model"] });
-    const options: NonNullable<Parameters<typeof installProviderSyncFetch>[1]> = {
-      statusProviders: [provider("ipr_org_a")], runStatuses: [{ status: "applied" }],
-    };
-    installProviderSyncFetch(requests, options);
-    const { store } = createProviderAuthTestStore({ read: true, write: true, providerSync: true });
-    const eligible = (id: string) => store.getSnapshot().gatewayUsageProviderScope === readGatewayUsageScope().generation
-      && resolveGatewayProviderIds(store.getSnapshot().importedCloudProviders).has(id);
-    try {
-      await store.refreshImportedCloudProviders();
-      expect(eligible("ipr_org_a")).toBe(false);
-      const readOnlyOptions = { strict: false, verifiedScope: readGatewayUsageScope().generation };
-      await store.refreshImportedCloudProviders(readOnlyOptions);
-      expect(eligible("ipr_org_a")).toBe(false);
-      await store.runCloudProviderSync("manual");
-      expect(eligible("ipr_org_a")).toBe(true);
-      const scopeA = store.getSnapshot().gatewayUsageProviderScope;
-      storage.setItem("openwork.den.activeOrgId", "org_b");
-      storage.setItem("openwork.den.authToken", "token_b");
-      let release: (() => void) | undefined;
-      const delayed = new Promise<void>((resolve) => { release = resolve; });
-      options.onRun = async () => { await delayed; throw new Error("Sync unavailable"); };
-      const syncB = store.runCloudProviderSync("manual");
-      await Promise.resolve();
-      expect(store.getSnapshot().importedCloudProviders.ipr_org_a).toBeDefined();
-      expect(eligible("ipr_org_a")).toBe(false);
-      expect(scopeA).not.toBe(readGatewayUsageScope().generation);
-      release?.();
-      await syncB;
-      expect(store.getSnapshot().importedCloudProviders.ipr_org_a).toBeDefined();
-      expect(eligible("ipr_org_a")).toBe(false);
-      options.onRun = undefined;
-      options.statusProviders = [provider("ipr_org_b")];
-      await store.runCloudProviderSync("manual");
-      expect(eligible("ipr_org_b")).toBe(true);
-      expect(eligible("ipr_org_a")).toBe(false);
-    } finally { store.dispose(); }
   });
 
   test("posts run-now without fetching Den providers in the renderer", async () => {

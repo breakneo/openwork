@@ -9,7 +9,7 @@ export const provider: GatewayProvider = {
 }
 export const credentialSet: GatewayAccessRow["credentialSet"] = {
   id: "gcs_00000000000000000000000001", gateway_provider_id: provider.id, name: "Member tokens", credential_mode: "member", status: "active",
-  oauth_client_id: "client-id", oauth_client_secret: "client-secret", created_at: now, updated_at: now, created_by_org_membership_id: null,
+  oauth_client_id: "client-id", oauth_client_secret: "client-secret", created_at: now, updated_at: now,
 }
 export function matrixRow(overrides: Partial<GatewayAccessRow> = {}): GatewayAccessRow {
   return {

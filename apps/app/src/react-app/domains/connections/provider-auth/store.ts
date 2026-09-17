@@ -15,7 +15,6 @@ import {
   type DenOrgLlmProvider,
   type DenOrgLlmProviderConnection,
 } from "../../../../app/lib/den";
-import { readGatewayUsageScope } from "../../../../app/lib/gateway-usage-scope";
 import { getOpenworkGatewayOrigin } from "../../../../app/lib/gateway-runtime";
 import { unwrap, waitForHealthy } from "../../../../app/lib/opencode";
 import {
@@ -298,7 +297,6 @@ export type ProviderLoadState = {
 
 export type ProviderAuthStoreSnapshot = {
   providerLoadState: ProviderLoadState;
-  gatewayUsageProviderScope?: number | null;
   providerAuthModalOpen: boolean;
   providerAuthBusy: boolean;
   providerAuthError: string | null;
@@ -335,7 +333,6 @@ type CreateProviderAuthStoreOptions = {
 
 type MutableState = {
   providerLoadState: ProviderLoadState;
-  gatewayUsageProviderScope?: number | null;
   providerAuthModalOpen: boolean;
   providerAuthBusy: boolean;
   providerAuthError: string | null;
@@ -388,7 +385,6 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     lastSyncError: {},
   };
 
-  let verifiedGatewayUsageContext = "";
   let cloudOrgProvidersLoadKey = "";
   let cloudOrgProvidersInFlightKey = "";
   let cloudOrgProvidersInFlight: Promise<DenOrgLlmProvider[]> | null = null;
@@ -582,9 +578,6 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   const refreshSnapshot = () => {
     snapshot = {
       providerLoadState: state.providerLoadState,
-      gatewayUsageProviderScope: state.gatewayUsageProviderScope === readGatewayUsageScope().generation
-        && verifiedGatewayUsageContext === getCloudProviderSyncContextKey()
-        && state.cloudProviderServerSync?.reloadPending !== true ? state.gatewayUsageProviderScope : null,
       providerAuthModalOpen: state.providerAuthModalOpen,
       providerAuthBusy: state.providerAuthBusy,
       providerAuthError: state.providerAuthError,
@@ -723,7 +716,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     options.openworkServer.getSnapshot().openworkServerClient?.baseUrl,
   ]);
 
-  const refreshImportedCloudProviders = async (refreshOptions?: { strict?: boolean; verifiedScope?: number }) => {
+  const refreshImportedCloudProviders = async (refreshOptions?: { strict?: boolean }) => {
     try {
       if (serverHandlesProviderSync()) {
         const delivery = syncDenSessionDelivery();
@@ -733,18 +726,16 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
         const status = await openworkClient.getCloudProviderSyncStatus();
         if (!isCurrentDenSessionDelivery(delivery) || contextKey !== getCloudProviderSyncContextKey()) return state.importedCloudProviders;
         const next = Object.fromEntries(status.providers.map((provider) => [provider.cloudProviderId, provider]));
-        if (status.hasSession && refreshOptions?.verifiedScope === readGatewayUsageScope().generation) {
-          verifiedGatewayUsageContext = contextKey;
-        }
-        mutateState((current) => ({
-          ...current, importedCloudProviders: next,
-          gatewayUsageProviderScope: status.hasSession && verifiedGatewayUsageContext === contextKey
-            ? refreshOptions?.verifiedScope ?? current.gatewayUsageProviderScope : null,
-          cloudProviderServerSync: {
-            reloadPending: status.reloadPending,
-            skippedProviders: Object.fromEntries(status.skippedProviders.map((provider) => [provider.credentialSetId ? `${provider.cloudProviderId}:${provider.credentialSetId}` : provider.cloudProviderId, provider])),
-          },
-        }));
+        setStateField("importedCloudProviders", next);
+        // Carry the server's truth alongside the records: rows must not show
+        // "Connected" while an engine reload is still owed, and skipped
+        // providers must name themselves instead of staying "Syncing".
+        setStateField("cloudProviderServerSync", {
+          reloadPending: status.reloadPending,
+          skippedProviders: Object.fromEntries(
+            status.skippedProviders.map((provider) => [provider.credentialSetId ? `${provider.cloudProviderId}:${provider.credentialSetId}` : provider.cloudProviderId, provider]),
+          ),
+        });
         return next;
       }
       // Legacy renderer-side import path (remote/hostless workspaces): the
@@ -2142,8 +2133,6 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   };
 
   async function performCloudProviderSync(reason: CloudProviderSyncReason) {
-    const usageScope = readGatewayUsageScope();
-    const usageContext = getCloudProviderSyncContextKey();
     if (!hasCloudProviderSyncPrerequisites()) {
       return;
     }
@@ -2273,15 +2262,9 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       }
     }
 
-    const refreshedCatalog = await refreshProvidersAfterCloudSync(
+    await refreshProvidersAfterCloudSync(
       configChanged ? { dispose: true } : { force: true },
     ).catch(() => null);
-    if (refreshedCatalog && failures.length === 0 && usageScope === readGatewayUsageScope()
-      && usageContext === getCloudProviderSyncContextKey()
-      && Object.values(state.importedCloudProviders).every((provider) => liveProviderMap.has(provider.cloudProviderId))) {
-      verifiedGatewayUsageContext = usageContext;
-      setStateField("gatewayUsageProviderScope", usageScope.generation);
-    }
 
     // Notify the UI about newly imported providers so the global toast
     // can be shown regardless of which route is active.
@@ -2335,7 +2318,6 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
 
     if (serverHandlesProviderSync()) {
       const contextKey = getCloudProviderSyncContextKey();
-      const usageScope = readGatewayUsageScope();
       const isCurrent = () => isCurrentDenSessionDelivery(delivery) && contextKey === getCloudProviderSyncContextKey();
       try {
         const result = await enqueueGlobalCloudProviderSync(
@@ -2364,13 +2346,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
         // Cloud Providers rows kept whatever the one-shot start() read found
         // (usually nothing) and sat on "Syncing" forever even though the
         // server had long since applied the sync (#3671, UI layer).
-        if (result.status === "failed" || result.status === "no_session") {
-          verifiedGatewayUsageContext = "";
-          setStateField("gatewayUsageProviderScope", null);
-        }
-        await refreshImportedCloudProviders({
-          verifiedScope: result.status === "applied" || result.status === "noop" ? usageScope.generation : undefined,
-        });
+        await refreshImportedCloudProviders();
         if (!isCurrent()) return;
         if (result.status === "failed" || result.status === "no_session") {
           const message = logCloudProviderSyncError(
@@ -2833,7 +2809,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     dispose,
     syncFromOptions,
     refreshCloudOrgProviders,
-    refreshImportedCloudProviders: (input?: { strict?: boolean }) => refreshImportedCloudProviders({ strict: input?.strict }),
+    refreshImportedCloudProviders,
     runCloudProviderSync,
     startGatewayProviderOAuth,
     startProviderAuth,

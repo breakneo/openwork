@@ -19,7 +19,6 @@ import type {
   UpdateAutomation,
 } from "@openwork/types/automations";
 import { generatedArtifactViewSchema, savedAppDetailSchema, savedAppSummarySchema, type SaveApp, type WorkflowDetail } from "@openwork/types/workflows";
-import { gatewayUsageStatusSchema, gatewayUsageResetRequestSchema } from "@openwork/types/den/gateway-usage-limits";
 
 // Re-export the shared schema under the local alias so React consumers
 // (e.g. the cloud domain's desktop-config provider) can import it alongside
@@ -3090,24 +3089,6 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
       };
     },
 
-    async getGatewayUsageStatus(orgId: string) {
-      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to view usage limits.");
-      const status = gatewayUsageStatusSchema.parse(await requestJson<unknown>(baseUrls, "/v1/gateway/usage-limits/me", {
-        method: "GET", token, organizationId: orgId,
-      }));
-      if (status.organizationId !== orgId) throw new Error("Usage response belongs to a different organization.");
-      return status;
-    },
-    async requestGatewayUsageReset(orgId: string, input: { bucketId: string; reason: string }) {
-      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to request an increase.");
-      const reason = input.reason.trim();
-      if (!reason || reason.length > 2000 || !input.bucketId || input.bucketId.length > 64) {
-        throw new Error("Choose a usage bucket and enter a reason (1–2000 characters).");
-      }
-      return gatewayUsageResetRequestSchema.parse(await requestJson<unknown>(baseUrls, "/v1/gateway/usage-limit-reset-requests", {
-        method: "POST", token, organizationId: orgId, body: { bucketId: input.bucketId, reason },
-      }));
-    },
     async listSavedApps(orgId: string) {
       const payload = await requestJson<unknown>(baseUrls, "/v1/apps", {
         method: "GET", token, organizationId: orgId,

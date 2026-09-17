@@ -374,7 +374,6 @@ const openApiOptions: Parameters<typeof generateSpecs>[1] = {
       { name: "LLM Providers", description: "Organization LLM provider catalog, configuration, and access routes." },
       { name: "Inference", description: "Organization inference settings." },
       { name: "Inference Providers", description: "Organization inference Gateway providers, model groups, credential sets, access grants, member connections, and usage." },
-      { name: "Gateway Usage Limits", description: "Estimated-cost policies, independent member calendar buckets, assignments, and audited usage-extension requests." },
       { name: "Cloud", description: "Organization Cloud instance lifecycle and browser gateway resolution." },
       { name: "Workers", description: "Worker lifecycle, billing, and runtime routes." },
       { name: "Worker Runtime", description: "Worker runtime inspection and upgrade routes." },
