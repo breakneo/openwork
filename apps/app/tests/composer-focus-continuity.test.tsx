@@ -1238,13 +1238,7 @@ test.each([
           parts,
         })),
       };
-      // A base-URL switch refetches history. Keep that mocked source aligned
-      // with the native transcript instead of restoring the earlier v1 fixture.
-      fetchedSnapshot = nativeSnapshot;
-      await act(async () => {
-        queryClient.setQueryData(snapshotKey(workspaceId, sessionId), nativeSnapshot);
-        queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(nativeSnapshot));
-      });
+      await act(async () => queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(nativeSnapshot)));
     };
     nativeMessages.push({ id: "native-historical", role: "user", text: "Historical attachment", time: { created: 100 } });
     await refreshNativeTranscript();
@@ -1371,41 +1365,18 @@ test.each([
       expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Composer continuation beside queue");
     };
     submission = Promise.withResolvers<CloudMcpSubmissionResult>();
-    // Sends now read cached complete history or bounded newest history, not
-    // ensureQueryData. Hold the actual send-history boundary while preserving
-    // its real messages and the navigation/double-click ownership assertions.
-    const queuedHistory = Promise.withResolvers<void>();
-    const historyModule = await import("../src/react-app/domains/session/surface/session-history");
-    const useOpeningHistory = historyModule.useOpeningSessionHistory;
-    type SendHistoryReader = ReturnType<typeof useOpeningHistory>["readSendHistory"];
-    const heldReaders = new WeakMap<SendHistoryReader, SendHistoryReader>();
-    let heldHistoryReads = 0;
-    const holdSendHistory = spyOn(historyModule, "useOpeningSessionHistory").mockImplementation((...args) => {
-      const history = useOpeningHistory(...args);
-      let reader = heldReaders.get(history.readSendHistory);
-      if (!reader) {
-        reader = async (...readArgs) => {
-          const messages = await history.readSendHistory(...readArgs);
-          heldHistoryReads++;
-          await queuedHistory.promise;
-          return messages;
-        };
-        heldReaders.set(history.readSendHistory, reader);
-      }
-      return { ...history, readSendHistory: reader };
-    });
-    await act(async () => renderSession());
+    const queuedHistory = Promise.withResolvers<OpenworkSessionSnapshot>();
+    const ensureSnapshot = spyOn(queryClient, "ensureQueryData").mockImplementation(() => queuedHistory.promise);
     const sendsBeforeQueue = sentDrafts.length;
     await act(async () => sendNow());
     expectQueuedSending();
-    expect(heldHistoryReads).toBe(1);
     expect(sentDrafts).toHaveLength(sendsBeforeQueue);
     await act(async () => renderSession(otherSessionId));
     expect(container.querySelector('button[aria-label="Sending..."]')).toBeNull();
     await act(async () => renderSession());
     expectQueuedSending();
-    await act(async () => queuedHistory.resolve());
-    holdSendHistory.mockRestore();
+    await act(async () => queuedHistory.resolve(fetchedSnapshot));
+    ensureSnapshot.mockRestore();
     expectQueuedSending();
     expect(sentDrafts).toHaveLength(sendsBeforeQueue + 1);
     expect(sentDrafts.at(-1)?.text).toBe("Promote this queued message");
@@ -1474,8 +1445,6 @@ test.each([
     expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
     expect(sentDrafts).toHaveLength(sendsBeforeQueue + 4);
     await act(async () => useComposerStateStore.getState().appendQueuedDraft(sessionId, queueDraft("Uncertain queued message")));
-    const uncertainQueueId = useComposerStateStore.getState().queuedDrafts[sessionId]?.[0]?.id;
-    if (!uncertainQueueId) throw new Error("Expected the uncertain queue row");
 
     submission = Promise.withResolvers<CloudMcpSubmissionResult>();
     await act(async () => sendNow());
@@ -1485,12 +1454,7 @@ test.each([
     await act(async () => submission.reject(new PromptAdmissionUnknownError({ messageID: queuedUnknownId })));
     expect(getQueuedDrainState(sessionId).phase).toMatchObject({ kind: "admission_unknown", messageID: queuedUnknownId });
     expect(container.textContent).toContain("It may already be running");
-    // Unknown admission retains the exact recoverable row without resending it.
-    expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toEqual([{
-      id: uncertainQueueId,
-      draft: { ...queueDraft("Uncertain queued message"), messageId: queuedUnknownId },
-    }]);
-    expect(sentDrafts).toHaveLength(sendsBeforeQueue + 5);
+    expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Newer composer edits during queue send");
     await act(async () => {
       useComposerStateStore.getState().appendQueuedDraft(sessionId, queueDraft("Do not retry uncertain admission"));

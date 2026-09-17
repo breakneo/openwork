@@ -68,7 +68,7 @@ export type QueuedDrainState = {
 
 export type QueuedDrainEvent =
   | { type: "send_started"; itemId: string; steer?: boolean }
-  | { type: "stop_confirmed"; admission?: { itemId: string; messageID: string; state: "accepted" | "cancelled" | "rejected" } }
+  | { type: "stop_confirmed" }
   | { type: "send_result"; itemId: string; outcome: "sent" | "accepted" | "blocked" | "cancelled"; at: number; deferredMessageID?: string; terminalObserved?: boolean }
   | { type: "send_error"; itemId: string }
   | { type: "send_unknown"; itemId: string; messageID: string; at: number; deferred?: boolean }
@@ -107,18 +107,10 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
   const { phase } = state;
   switch (event.type) {
     case "stop_confirmed":
-      // A late confirmation must not clear a successor's claim. The Stop
-      // coordinator certifies the exact old message only after cancellation or
-      // acceptance plus native interruption has been established.
-      if (event.admission && "itemId" in phase && phase.itemId !== event.admission.itemId) return state;
       // A replacement may already hold the send slot while awaiting Stop.
       // Keep that claim, but discard activity belonging to its predecessor.
       if (phase.kind === "sending") return { ...state, phase: { ...phase, busySeen: false } };
-      if (phase.kind === "admission_unknown") {
-        if (!event.admission || event.admission.messageID !== phase.messageID) return state;
-        return resolved(state, { kind: "ready" }, phase.itemId,
-          event.admission.state === "accepted" ? "completed" : "rejected", dropAttempt(state, phase.itemId));
-      }
+      if (phase.kind === "admission_unknown") return state;
       return { ...INITIAL_QUEUED_DRAIN_STATE, lastResolution: state.lastResolution };
     case "send_started": {
       if (phase.kind !== "ready") {
@@ -181,8 +173,8 @@ export function reduceQueuedDrain(state: QueuedDrainState, event: QueuedDrainEve
     }
     case "admission_rejected": {
       if (phase.kind !== "admission_unknown" || phase.itemId !== event.itemId || phase.messageID !== event.messageID) return state;
-      // Authoritative cancellation/rejection, never missing native history.
-      // Halt like any definite failure: the person retries.
+      // Native listed the conversation without the message, so the settled POST
+      // did not admit it. Halt like any definite failure: the person retries.
       return resolved(state, { kind: "halted", itemId: event.itemId, reason: "terminal_failure" }, event.itemId, "terminal_failure");
     }
     case "busy_observed": {

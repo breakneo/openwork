@@ -2439,21 +2439,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         props.workspaceRoot.trim() || undefined, {
           admissionUnknown: phase.kind === "admission_unknown",
           admissionMessageID: phase.kind === "admission_unknown" ? phase.messageID : undefined,
-          onStopped: (admission) => {
-            const exact = admission && phase.kind === "admission_unknown" && admission.messageID === phase.messageID
-              ? { ...admission, itemId: phase.itemId } : undefined;
-            if (exact && exact.state !== "accepted") {
-              // Restore only this certified unsent prompt; never touch a newer
-              // pending message that acquired the conversation in the meantime.
-              const state = useComposerStateStore.getState();
-              const pending = (state.pendingMessages[sessionOwner] ?? []).find((item) => item.draft.messageId === exact.messageID);
-              if (pending) useComposerStateStore.setState({
-                pendingMessages: { ...state.pendingMessages, [sessionOwner]: (state.pendingMessages[sessionOwner] ?? []).filter((item) => item !== pending) },
-                failedDrafts: { ...state.failedDrafts, [sessionOwner]: [...(state.failedDrafts[sessionOwner] ?? []), pending.composer] },
-              });
-            }
-            dispatchQueuedDrain(props.sessionId, { type: "stop_confirmed", admission: exact });
-          },
+          onStopped: () => dispatchQueuedDrain(props.sessionId, { type: "stop_confirmed" }),
         });
       captureAnalyticsEvent("task_run_stopped", {});
       // The surface survives navigation; refresh the stopped conversation, not
