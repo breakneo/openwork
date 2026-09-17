@@ -183,7 +183,7 @@ test("a long conversation pages on demand, restores its saved page cold and load
     expect(renderedCount(transcript)).toBe(count);
     expect(transcript).toMatchObject({ historyComplete: false });
     await probe.eventually(() => probe.dom(`${surface} [data-message-id]`), {
-      within: 5_000, label: "the bounded page finishes progressive mounting", until: (value) => value.elements.length === count,
+      within: 5_000, label: "the loaded page has a bounded mounted window", until: (value) => value.elements.length > 0 && value.elements.length <= Math.min(count, 40),
     });
     expect((await probe.dom(`${surface} [data-thread-loading], ${surface} [data-thread-history-status], ${surface} [data-testid="session-error-card"]`)).elements).toHaveLength(0);
     expect((await readFault()).history).toMatchObject({ full: 0, fullSucceeded: 0, single: 0 });
@@ -247,7 +247,7 @@ test("a long conversation pages on demand, restores its saved page cold and load
     expect(await latestVisible()).toBe(true);
     await expectIdlePage(pageSize);
     const { rows } = await historyDom();
-    rows.forEach((row, index) => expect(row.text).toContain(persisted[longHistoryCount - pageSize + index]));
+    rows.forEach((row) => expect(persisted.slice(-pageSize).some((text) => row.text.includes(text))).toBe(true));
     expect(rows.some((row) => row.text.includes(longHistoryFirst))).toBe(false);
     const fault = await readFault();
     expect(fault).toMatchObject({ workspaceId: world.workspace.workspaceId, sessionId: world.session.sessionId,
@@ -265,8 +265,9 @@ test("a long conversation pages on demand, restores its saved page cold and load
   });
 
   const olderPage = await step("PageUp at the loaded top prepends one native cursor page without moving the reading anchor", async () => {
-    await user.click({ text: persisted[longHistoryCount - pageSize] });
+    await user.click({ text: longHistoryLast });
     await user.press("Tab");
+    await user.press("Home");
     expect((await probe.dom(`${surface} [data-thread-scroll] button:focus`)).elements).toHaveLength(1);
     const atTop = await probe.eventually(async () => {
       const saved = await savedScroll();
@@ -284,9 +285,11 @@ test("a long conversation pages on demand, restores its saved page cold and load
       const geometry = await readingGeometry(atTop.saved.anchor.messageId);
       return { ...dom, geometry, fault: await readFault() };
     }, { within: 10_000, label: "older page mounted at the unchanged native reading anchor",
-      until: ({ rows, geometry }) => rows.length === pageSize * 2 && Boolean(geometry?.visible && Math.abs(geometry.offset - atTop.geometry.offset) <= 2) });
-    prepended.rows.forEach((row, index) => expect(row.text).toContain(persisted[longHistoryCount - pageSize * 2 + index]));
-    expect(new Set(prepended.rows.map((row) => row.text)).size).toBe(pageSize * 2);
+      until: ({ rows, geometry, fault }) => rows.length > 0 && rows.length < pageSize * 2
+        && fault.history.pageReads.some((read) => read.before === initialPage.nextCursor)
+        && Boolean(geometry?.visible && Math.abs(geometry.offset - atTop.geometry.offset) <= 2) });
+    prepended.rows.forEach((row) => expect(persisted.slice(-pageSize * 2).some((text) => row.text.includes(text))).toBe(true));
+    expect(new Set(prepended.rows.map((row) => row.text)).size).toBe(prepended.rows.length);
     expect(prepended.geometry?.text).toBe(atTop.geometry.text);
     const older = prepended.fault.history.pageReads.filter((read) => read.before !== null);
     expect(older).toHaveLength(1);
@@ -318,7 +321,8 @@ test("a long conversation pages on demand, restores its saved page cold and load
     }, { within: 10_000, intervalMs: 100, label: "persisted older-page identity and visible offset settle", until: (value) => value !== null && value.stable >= 3 });
     if (!position) throw new Error("No older-page reading position was saved");
     expect(position.saved.geometry.page).toEqual({ before: initialPage.nextCursor, limit: pageSize, lineage: [null, initialPage.nextCursor] });
-    expect(position.saved.geometry.messageIds).toHaveLength(pageSize);
+    expect(position.saved.geometry.messageIds.length).toBeGreaterThan(0);
+    expect(position.saved.geometry.messageIds.length).toBeLessThanOrEqual(pageSize);
     expect(await latestVisible()).toBe(false);
     await expectIdlePage(pageSize * 2);
     return position;
@@ -351,13 +355,13 @@ test("a long conversation pages on demand, restores its saved page cold and load
       stable = matches ? stable + 1 : 0;
       return { ...dom, geometry, stable, fault: await readFault() };
     }, { within: 15_000, intervalMs: 100, label: "cold saved-page restoration without revealing or scrolling the anchor",
-      until: (value) => value.stable >= 3 && value.rows.length === pageSize });
+      until: (value) => value.stable >= 3 && value.rows.length > 0 && value.rows.length <= pageSize });
     const savedPage = readingPosition.saved.geometry.page;
     expect(restored.fault.opening.trusted).toBe(true);
     expect(restored.fault.history.pageReads.length).toBeGreaterThan(0);
     expect(restored.fault.history.pageReads[0]).toEqual({ before: savedPage.before, limit: String(savedPage.limit), nextCursor: olderPage.nextCursor });
     for (const read of restored.fault.history.pageReads) expect(read).toMatchObject({ before: savedPage.before, limit: String(savedPage.limit) });
-    restored.rows.forEach((row, index) => expect(row.text).toContain(persisted[longHistoryCount - pageSize * 2 + index]));
+    restored.rows.forEach((row) => expect(persisted.slice(-pageSize * 2, -pageSize).some((text) => row.text.includes(text))).toBe(true));
     expect(restored.rows.some((row) => row.text.includes(longHistoryFirst) || row.text.includes(longHistoryLast))).toBe(false);
     await expectIdlePage(pageSize);
     expect(await agent.run("session.read_transcript", { count: 1 })).toMatchObject({ includesNewest: false });
@@ -378,19 +382,36 @@ test("a long conversation pages on demand, restores its saved page cold and load
       const dom = await historyDom();
       const markers = await probe.dom(`${surface} [data-thread-history-complete="true"]`);
       return { ...dom, complete: markers.elements.length === 1, fault: await readFault() };
-    }, { within: 30_000, label: "explicit full-history demand has mounted every message at the top",
-      until: ({ rows, complete, viewport, fault }) => complete && rows.length === longHistoryCount && fault.history.fullSucceeded > 0
+    }, { within: 30_000, label: "explicit full-history demand mounts a bounded window at the top",
+      until: ({ rows, complete, viewport, fault }) => complete && rows.length > 0 && rows.length < 40 && fault.history.fullSucceeded > 0
         && rows[0].rect.top >= viewport.rect.top && rows[0].rect.bottom <= viewport.rect.bottom });
     expect(complete.fault.history.full).toBeGreaterThan(0);
     expect(complete.fault.history.single).toBe(0);
     expect(renderedCount(await agent.run("session.read_transcript", { count: 1 }))).toBe(longHistoryCount);
-    complete.rows.forEach((row, index) => expect(row.text).toContain(persisted[index]));
+    complete.rows.forEach((row) => expect(persisted.some((text) => row.text.includes(text))).toBe(true));
+    expect(new Set(complete.rows.map((row) => row.text)).size).toBe(complete.rows.length);
     expect(complete.rows[0].text).toContain(longHistoryFirst);
     expect((await probe.dom(`${surface} [data-thread-loading], ${surface} [data-thread-history-status], ${surface} [data-testid="session-error-card"]`)).elements).toHaveLength(0);
     await user.looks([
       `The conversation transcript visibly starts with a user message reading "${longHistoryFirst}"`,
       "The transcript shows no loading indicator, error card, or empty-conversation placeholder",
     ]);
+  });
+
+  await step("reading deeper history unmounts earlier rows without growing the transcript DOM", async () => {
+    await user.click({ text: longHistoryFirst });
+    for (let page = 0; page < 8; page++) {
+      await user.press("PageDown");
+      await probe.eventually(() => historyDom(), { within: 5_000, label: "the new reading window settles",
+        until: ({ viewport, rows }) => rows.length > 0 && rows.length < 40
+          && rows.some((row) => row.rect.height > 0 && row.rect.top <= viewport.rect.top && row.rect.bottom > viewport.rect.top) });
+    }
+    await probe.eventually(() => historyDom(), { within: 5_000, label: "the earlier message leaves the mounted window",
+      until: ({ rows }) => !rows.some((row) => row.text.includes(longHistoryFirst)) });
+    expect(renderedCount(await agent.run("session.read_transcript", { count: 1 }))).toBe(longHistoryCount);
+    await user.screenshot();
+    expect(await agent.run("session.scroll_top")).toMatchObject({ ok: true, position: "top" });
+    await user.see({ text: longHistoryFirst });
   });
 
   await step("after full loading, branching at the first message excludes later history and leaves the source unchanged", async () => {
@@ -436,7 +457,7 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     await user.click({ role: "button", label: new RegExp(`^${longHistoryTitle}`) });
     await probe.eventually(() => probe.dom(`${surface} [data-message-id]`), {
       within: 30_000, label: "the bounded opening with its omitted tail is mounted before top navigation",
-      until: (value) => value.elements.length === pageSize - 1,
+      until: (value) => value.elements.length > 0 && value.elements.length <= pageSize - 1,
     });
     expect(await agent.run("session.scroll_top")).toMatchObject({ ok: true, position: "top" });
     const initial = await probe.eventually(() => fault.read(), {
@@ -451,11 +472,12 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     expect(initial).toMatchObject({ armed: false, released: false, expired: false, held: 0, mutations: 0 });
     expect(renderedCount(await agent.run("session.read_transcript", { count: 1 }))).toBe(longHistoryCount - 1);
     await probe.eventually(() => probe.dom(`${surface} [data-thread-history-complete="true"]`), {
-      within: 30_000, label: "all earlier history is mounted", until: (value) => value.elements.length === 1,
+      within: 30_000, label: "all earlier history is loaded", until: (value) => value.elements.length === 1,
     });
     const { rows } = await historyDom();
-    expect(rows).toHaveLength(longHistoryCount - 1);
-    rows.forEach((row, index) => expect(row.text).toContain(persisted[index]));
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(40);
+    rows.forEach((row) => expect(persisted.slice(0, -1).some((text) => row.text.includes(text))).toBe(true));
     expect(rows.some((row) => row.text.includes(longHistoryLast))).toBe(false);
     expect((await probe.dom(`${surface} [data-lexical-editor="true"]`)).elements.map((element) => element.text)).toEqual([""]);
 
@@ -471,7 +493,7 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
       previous = offset;
       return { offset, stable };
     }, { within: 30_000, intervalMs: 100, label: "manual reading anchor settled at the first message", until: (value) => value.stable >= 3 });
-    return { texts: rows.map((row) => row.text), offset: anchor.offset };
+    return { offset: anchor.offset };
   });
 
   let maxAnchorDrift = 0;
@@ -490,14 +512,20 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     });
     await fault.arm();
     await user.click({ role: "button", label: new RegExp(`^${longHistoryTitle}`) });
+    let previousWindow: string[] = [];
+    let stableWindow = 0;
     const returned = await probe.eventually(async () => {
       const dom = await observeReturn();
+      const texts = dom.rows.map((row) => row.text);
+      stableWindow = texts.length === previousWindow.length && texts.every((text, index) => text === previousWindow[index]) ? stableWindow + 1 : 0;
+      previousWindow = texts;
       const state = await fault.read();
-      return { ...dom, state };
+      return { ...dom, state, stableWindow };
     }, {
       within: 30_000,
       label: "persisted tail rendered before delivery of any warm uncapped response",
-      until: ({ rows, state }) => rows.length === longHistoryCount && rows.some((row) => row.text.includes(longHistoryLast)) && state.held > 0,
+      until: ({ rows, state, stableWindow }) => stableWindow >= 3 && rows.length > 0 && rows.length < 40
+        && rows.some((row) => row.text.includes(longHistoryLast)) && state.held > 0,
     });
     expect(returned.state).toMatchObject({
       armed: true, released: false, expired: false, mutations: 0,
@@ -507,7 +535,8 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     expect(returned.state.reads).toContainEqual({ warm: true, limit: null, nativeCount: longHistoryCount, count: longHistoryCount, hasTail: true, delivered: false });
     expect(returned.state.reads.filter((read) => read.warm && read.limit === null && read.delivered)).toHaveLength(0);
     expect(renderedCount(await agent.run("session.read_transcript", { count: 1 }))).toBe(longHistoryCount);
-    expect(returned.rows.slice(0, -1).map((row) => row.text)).toEqual(cached.texts);
+    returned.rows.forEach((row) => expect(persisted.some((text) => row.text.includes(text))).toBe(true));
+    expect(new Set(returned.rows.map((row) => row.text)).size).toBe(returned.rows.length);
     expect(returned.rows.filter((row) => row.text.includes(longHistoryLast))).toHaveLength(1);
     expect(returned.rows.at(-1)?.text).toContain(longHistoryLast);
     expect(returned.rows[0].rect.top).toBeGreaterThanOrEqual(returned.viewport.rect.top);

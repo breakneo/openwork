@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, useCallback, useRef } from "react";
+import { act, Fragment, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { SESSION_SCROLL_NAVIGATION_EVENT, useSessionScrollController } from "../src/react-app/domains/session/surface/scroll-controller";
 import { flushSessionScrollState, getSessionScrollState, readPersistedSessionScrollState, sessionScrollKey, useSessionScrollStore } from "../src/react-app/domains/session/surface/scroll-store";
@@ -84,6 +84,8 @@ function fixture(geometryOwner?: string, pagination: Pick<Parameters<typeof useS
     height: 1_000,
     viewportHeight: 200,
     complete: true,
+    virtualized: false,
+    placeholders: [] as { id: string; before: string; top: number; height: number }[],
     messages: [
       { id: "first", top: 0, height: 300 },
       { id: "reading", top: 300, height: 300 },
@@ -118,11 +120,19 @@ function fixture(geometryOwner?: string, pagination: Pick<Parameters<typeof useS
     controls = scroll;
     return <div ref={setContainer} onScroll={scroll.handleScroll} onWheel={(event) => scroll.markScrollGesture(event.target)}
       onPointerDown={(event) => { if (event.target === event.currentTarget) scroll.markScrollGesture(event.target); }}>
-      <div ref={contentRef}>
+      <div ref={contentRef} data-thread-virtualized={layout.virtualized}>
         <div data-thread-history-complete={layout.complete} data-thread-loading={!ready ? "" : undefined} />
-        {layout.messages.map((message) => <div key={message.id} data-message-id={message.id} ref={(node) => {
-          if (node) node.getBoundingClientRect = () => new DOMRect(0, 40 + message.top - scrollTop, 500, message.height);
-        }}>{message.id}</div>)}
+        {layout.messages.map((message) => <Fragment key={message.id}>
+          {layout.placeholders.filter((placeholder) => placeholder.before === message.id).map((placeholder) =>
+            <div key={placeholder.id} data-thread-placeholder={placeholder.id} ref={(node) => {
+              if (node) node.getBoundingClientRect = () => new DOMRect(0, 40 + placeholder.top - scrollTop, 500, placeholder.height);
+            }} />)}
+          <div data-thread-group={layout.virtualized ? message.id : undefined}>
+            <div data-message-id={message.id} ref={(node) => {
+              if (node) node.getBoundingClientRect = () => new DOMRect(0, 40 + message.top - scrollTop, 500, message.height);
+            }}>{message.id}</div>
+          </div>
+        </Fragment>)}
         <div data-scrollable>Nested scroll area</div>
       </div>
     </div>;
@@ -161,6 +171,48 @@ function fixture(geometryOwner?: string, pagination: Pick<Parameters<typeof useS
 }
 
 describe("session reading position", () => {
+  test("virtual geometry saves only the contiguous reading window, excluding the pinned tail", async () => {
+    const view = fixture("owner-a");
+    view.layout.virtualized = true;
+    view.layout.height = 4000;
+    view.layout.messages[2].top = 3600;
+    view.layout.placeholders = [{ id: "placeholder:gap", before: "latest", top: 600, height: 3000 }];
+    await view.render();
+    view.wheel(325);
+    expect(state("a", "owner-a")).toMatchObject({ anchor: { messageId: "reading", offset: -25 },
+      geometry: { before: 0, after: 3400, messageIds: ["first", "reading"] } });
+    const geometry = state("a", "owner-a").geometry;
+    view.wheel(1200);
+    expect(state("a", "owner-a").geometry).toEqual(geometry);
+    view.layout.messages = [{ id: "destination", top: 1200, height: 300 }, view.layout.messages[2]];
+    view.layout.placeholders = [
+      { id: "placeholder:before", before: "destination", top: 0, height: 1200 },
+      { id: "placeholder:after", before: "latest", top: 1500, height: 2100 },
+    ];
+    await view.render();
+    expect(state("a", "owner-a")).toMatchObject({ scrollTop: 1200, anchor: { messageId: "destination", offset: 0 },
+      geometry: { before: 1200, after: 2500, messageIds: ["destination"] } });
+  });
+
+  test("virtual gaps do not trigger older-page requests until the loaded boundary is reached", async () => {
+    const load = mock(async () => {});
+    const pages = { version: {}, hasOlder: true, hasNewer: false, loading: false, failed: false, load };
+    const view = fixture("owner-a", { historyPages: pages, windowReady: true });
+    view.layout.virtualized = true;
+    view.layout.complete = false;
+    view.layout.placeholders = [{ id: "placeholder:loaded", before: "first", top: 0, height: 1000 }];
+    for (const message of view.layout.messages) message.top += 1000;
+    view.layout.height += 1000;
+    await view.render();
+    view.wheel(1100);
+    runFrames();
+    expect(load).not.toHaveBeenCalled();
+    view.layout.placeholders[0].id = "history-prefix";
+    await view.render();
+    view.wheel(1050);
+    expect(load.mock.calls).toEqual([["older"]]);
+  });
+
   test("explicit first-message navigation waits for complete history and the corresponding DOM commit", async () => {
     let finish = () => {};
     const full = mock(() => new Promise<void>((resolve) => { finish = resolve; }));
