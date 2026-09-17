@@ -16,6 +16,7 @@ import { bundledLanguages, codeToHtml } from "shiki";
 import { faviconUrlForHref } from "@/lib/favicon";
 
 import { markdownMath } from "./markdown-math";
+import { DEFERRED_IMAGE_SOURCE, deferSanitizedMarkdownImages } from "./deferred-images";
 import { parseSessionReference } from "@/components/chat/session-reference";
 import { containsInlineHtml, markUnsafeReferenceTokens, stripSessionReferenceAttributes, renderSessionReferenceText, sessionReferenceHtml, type ResolveSessionReference } from "./session-reference-html";
 
@@ -200,7 +201,7 @@ export function syncMarkdownImagePreviews(root: HTMLElement) {
     if (!(image instanceof HTMLImageElement)) continue;
 
     image.style.maxHeight = `${MARKDOWN_IMAGE_PREVIEW_MAX_HEIGHT}px`;
-    image.style.maxWidth = `${MARKDOWN_IMAGE_PREVIEW_MAX_WIDTH}px`;
+    image.style.maxWidth = image.hasAttribute(DEFERRED_IMAGE_SOURCE) ? "100%" : `${MARKDOWN_IMAGE_PREVIEW_MAX_WIDTH}px`;
   }
 }
 
@@ -240,12 +241,13 @@ export function setCodeWrapButtonState(button: HTMLButtonElement, wrapped: boole
   button.title = wrapped ? "Disable word wrap" : "Enable word wrap";
 }
 
-function sanitizeMarkdownHtml(value: string) {
+function sanitizeMarkdownHtml(value: string, deferImages = false) {
   if (typeof DOMPurify.sanitize !== "function") {
     return value;
   }
 
-  return DOMPurify.sanitize(value, {
+  const sanitized = DOMPurify.sanitize(value, {
+    FORBID_ATTR: [DEFERRED_IMAGE_SOURCE],
     // KaTeX wraps its MathML branch in <semantics>/<annotation>, neither of which is
     // in DOMPurify's default MathML allowlist. Without these the accessible MathML
     // (and copy-as-TeX) half of every formula is stripped.
@@ -283,6 +285,7 @@ function sanitizeMarkdownHtml(value: string) {
        "target",
     ],
   });
+  return deferImages ? deferSanitizedMarkdownImages(sanitized) : sanitized;
 }
 
 function markdownProfileForPresentation(presentation: MarkdownPresentation): MarkdownProfile {
@@ -586,13 +589,13 @@ function parsersForPresentation(presentation: MarkdownPresentation, resolveRefer
   return parsers;
 }
 
-export function renderMarkdownHtml(text: string, presentation: MarkdownPresentation = "chat", resolveReference?: ResolveSessionReference) {
+export function renderMarkdownHtml(text: string, presentation: MarkdownPresentation = "chat", resolveReference?: ResolveSessionReference, deferImages = false) {
   if (!text.trim()) {
     return "";
   }
 
   const { markdownParser } = parsersForPresentation(presentation, resolveReference);
-  return sanitizeMarkdownHtml(markdownParser.parse(text, { async: false }));
+  return sanitizeMarkdownHtml(markdownParser.parse(text, { async: false }), deferImages && presentation === "chat");
 }
 
 /**
@@ -636,12 +639,12 @@ function hasReferenceDefinition(tokens: Token[]) {
  * Reference-style link definitions resolve across blocks, so a source that
  * contains one always takes the full lex.
  */
-export function createStreamingMarkdownRenderer(presentation: MarkdownPresentation = "chat", resolveReference?: ResolveSessionReference): StreamingMarkdownRenderer {
+export function createStreamingMarkdownRenderer(presentation: MarkdownPresentation = "chat", resolveReference?: ResolveSessionReference, deferImages = false): StreamingMarkdownRenderer {
   const { markdownParser, unsafeReferenceTokens } = parsersForPresentation(presentation, resolveReference);
   let state: StreamingMarkdownState | null = null;
 
   const renderBlock = (token: Token): MarkdownBlockHtml => ({
-    __html: sanitizeMarkdownHtml(markdownParser.parser([token])),
+    __html: sanitizeMarkdownHtml(markdownParser.parser([token]), deferImages && presentation === "chat"),
   });
 
   const renderAll = (source: string, previous: StreamingMarkdownState | null): StreamingMarkdownState => {
@@ -692,8 +695,8 @@ export function createStreamingMarkdownRenderer(presentation: MarkdownPresentati
   };
 }
 
-export async function renderHighlightedMarkdownHtml(text: string, presentation: MarkdownPresentation = "chat", resolveReference?: ResolveSessionReference) {
+export async function renderHighlightedMarkdownHtml(text: string, presentation: MarkdownPresentation = "chat", resolveReference?: ResolveSessionReference, deferImages = false) {
   const { highlightedMarkdownParser } = parsersForPresentation(presentation, resolveReference);
   const html = await highlightedMarkdownParser.parse(text, { async: true });
-  return sanitizeMarkdownHtml(html);
+  return sanitizeMarkdownHtml(html, deferImages && presentation === "chat");
 }

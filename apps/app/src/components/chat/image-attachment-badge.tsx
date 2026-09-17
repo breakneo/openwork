@@ -3,12 +3,14 @@ import { X } from "lucide-react"
 
 import { ImageLightbox } from "@/components/chat/image-lightbox"
 import { cn } from "@/lib/utils"
+import { useTranscriptImage } from "./transcript-image-loading"
 
 type ImageAttachmentBadgeProps = {
   src: string
   alt: string
   onRemove?: () => void
   className?: string
+  deferPreview?: boolean
 }
 
 export function ImageAttachmentBadge({
@@ -16,8 +18,10 @@ export function ImageAttachmentBadge({
   alt,
   onRemove,
   className,
+  deferPreview = false,
 }: ImageAttachmentBadgeProps) {
   const [open, setOpen] = React.useState(false)
+  const imageRef = useTranscriptImage(src, deferPreview)
 
   return (
     <div className={cn("relative inline-flex shrink-0", className)}>
@@ -29,11 +33,12 @@ export function ImageAttachmentBadge({
         title={alt}
       >
         <img
-          src={src}
+          ref={imageRef}
+          src={deferPreview ? undefined : src}
           alt={alt}
-          loading="lazy"
+          loading={deferPreview ? "eager" : "lazy"}
           decoding="async"
-          className="h-full w-full object-cover"
+          className="h-full w-full object-cover [&:not([src])]:invisible"
         />
       </button>
       {onRemove ? (

@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   Dialog,
@@ -27,6 +27,7 @@ import { LinkActionMenu } from "./link-action-menu";
 import { useMermaidEnhancer } from "./mermaid";
 import { useSelectionStableValue } from "./selection-stability";
 import { enhanceNearViewport } from "./near-viewport";
+import { deferredMarkdownImageSource, syncDeferredMarkdownImages } from "./deferred-images";
 
 export { renderHighlightedMarkdownHtml, renderMarkdownHtml } from "./markdown-primitive";
 
@@ -100,6 +101,7 @@ type MarkdownBlockInnerProps = {
   /** Opt in only for conversation prose, never tool output or artifact previews. */
   sessionReferences?: boolean;
   highlightQuery?: string;
+  deferImages?: boolean;
 } & Omit<
   React.ComponentProps<"div">,
   "ref" | "className" | "children" | "dangerouslySetInnerHTML"
@@ -120,10 +122,12 @@ function MarkdownBlockInner({
   streaming,
   sessionReferences = false,
   highlightQuery,
+  deferImages = false,
   ...props
 }: MarkdownBlockInnerProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const videoCleanups = useRef(new Map<HTMLVideoElement, () => void>());
+  const imageCleanups = useRef(new Map<HTMLImageElement, () => void>());
   const codeCopyResetTimers = useRef(new Map<HTMLButtonElement, number>());
   const codeWrapStates = useRef(new Map<number, boolean>());
   const { openTargets, onOpenTarget, client, workspaceId, workspaceRoot } = useOpenTargets();
@@ -136,7 +140,7 @@ function MarkdownBlockInner({
   const [imagePreview, setImagePreview] = useState<{ src: string; alt: string } | null>(null);
   const references = useSessionReferencesMaybe();
   const resolveReference = sessionReferences ? references?.resolve : undefined;
-  const streamingRenderer = useMemo(() => createStreamingMarkdownRenderer("chat", resolveReference), [resolveReference]);
+  const streamingRenderer = useMemo(() => createStreamingMarkdownRenderer("chat", resolveReference, deferImages), [resolveReference, deferImages]);
   const streamedBlocks = useMemo(
     () => (streaming ? streamingRenderer.render(text) : null),
     [streaming, streamingRenderer, text],
@@ -145,10 +149,10 @@ function MarkdownBlockInner({
     if (!streaming) streamingRenderer.reset();
   }, [streaming, streamingRenderer]);
   const syncHtml = useMemo(
-    () => (streamedBlocks ? "" : renderMarkdownHtml(text, "chat", resolveReference)),
-    [streamedBlocks, text, resolveReference],
+    () => (streamedBlocks ? "" : renderMarkdownHtml(text, "chat", resolveReference, deferImages)),
+    [streamedBlocks, text, resolveReference, deferImages],
   );
-  const [highlightedHtml, setHighlightedHtml] = useState<{ text: string; html: string; resolveReference: typeof resolveReference } | null>(null);
+  const [highlightedHtml, setHighlightedHtml] = useState<{ text: string; html: string; resolveReference: typeof resolveReference; deferImages: boolean } | null>(null);
 
   const handleCodeBlockCopy = useCallback(async (button: HTMLButtonElement, code: string) => {
     try {
@@ -199,10 +203,10 @@ function MarkdownBlockInner({
   }, []);
 
   const candidate = useMemo<RenderedMarkdown>(() => {
-    if (!streaming && highlightedHtml?.text === text && highlightedHtml.resolveReference === resolveReference) return { kind: "document", html: highlightedHtml.html };
+    if (!streaming && highlightedHtml?.text === text && highlightedHtml.resolveReference === resolveReference && highlightedHtml.deferImages === deferImages) return { kind: "document", html: highlightedHtml.html };
     if (streamedBlocks) return { kind: "blocks", blocks: streamedBlocks };
     return { kind: "document", html: syncHtml };
-  }, [highlightedHtml, streamedBlocks, streaming, syncHtml, text, resolveReference]);
+  }, [highlightedHtml, streamedBlocks, streaming, syncHtml, text, resolveReference, deferImages]);
   const rendered = useSelectionStableValue(rootRef, candidate);
   // Keep the innerHTML prop referentially stable too: a fresh wrapper object
   // can make an unrelated React render replace selected text nodes even when
@@ -226,8 +230,8 @@ function MarkdownBlockInner({
     if (!root || isEmpty || rendered.kind !== "document") return;
     let cancelled = false;
     const stopObserving = enhanceNearViewport([root], () => {
-      void renderHighlightedMarkdownHtml(text, "chat", resolveReference).then((html) => {
-        if (!cancelled && html.trim()) setHighlightedHtml({ text, html, resolveReference });
+      void renderHighlightedMarkdownHtml(text, "chat", resolveReference, deferImages).then((html) => {
+        if (!cancelled && html.trim()) setHighlightedHtml({ text, html, resolveReference, deferImages });
       }).catch(() => {
         if (!cancelled) setHighlightedHtml(null);
       });
@@ -236,9 +240,24 @@ function MarkdownBlockInner({
       cancelled = true;
       stopObserving();
     };
-  }, [isEmpty, rendered.kind, streaming, text, resolveReference]);
+  }, [isEmpty, rendered.kind, streaming, text, resolveReference, deferImages]);
 
   useMermaidEnhancer(rootRef, rendered, !streaming);
+
+  useLayoutEffect(() => () => {
+    imageCleanups.current.forEach((cleanup) => cleanup());
+    imageCleanups.current.clear();
+  }, []);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (root && deferImages) {
+      syncDeferredMarkdownImages(root, imageCleanups.current);
+    } else {
+      imageCleanups.current.forEach((cleanup) => cleanup());
+      imageCleanups.current.clear();
+    }
+  }, [rendered, deferImages]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -402,8 +421,10 @@ function MarkdownBlockInner({
       event.preventDefault();
       event.stopPropagation();
       const image = preview.querySelector("img");
-      if (!(image instanceof HTMLImageElement) || !image.src) return;
-      setImagePreview({ src: image.src, alt: image.alt || "Image" });
+      if (!(image instanceof HTMLImageElement)) return;
+      const src = deferImages ? deferredMarkdownImageSource(image) : image.getAttribute("src");
+      if (!src) return;
+      setImagePreview({ src, alt: image.alt || "Image" });
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -442,7 +463,7 @@ function MarkdownBlockInner({
       root.removeEventListener("mousedown", handleMouseDown);
       root.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleCodeBlockCopy, onOpenTarget, openArtifactPath, openTargets, rendered, references, resolveReference, sessionReferences]);
+  }, [handleCodeBlockCopy, onOpenTarget, openArtifactPath, openTargets, rendered, references, resolveReference, sessionReferences, deferImages]);
 
   if (isEmpty) {
     return null;

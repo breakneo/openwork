@@ -384,12 +384,13 @@ function FileMessage({ part, tone }: FileMessageProps) {
   )
 
   if (isImage && tone === "user") {
-    return <ImageAttachmentBadge src={part.url} alt={title} />
+    return <ImageAttachmentBadge src={part.url} alt={title} deferPreview />
   }
 
   if (isImage) {
     return (
       <Image
+        deferPreview
         src={part.url}
         alt={title}
         loading="lazy"
@@ -523,6 +524,7 @@ const AssistantMessage = React.memo(
                   key={`text-${index}`}
                   className="text-foreground prose w-full min-w-0 flex-1 rounded-lg bg-transparent p-0"
                   markdown
+                  deferImages
                   sessionReferences
                   isStreaming={isStreaming}
                   highlightQuery={highlightQuery}

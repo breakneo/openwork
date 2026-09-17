@@ -6,6 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { useTranscriptImage } from "@/components/chat/transcript-image-loading"
 
 export type GeneratedImageLike = {
   src?: string
@@ -19,6 +20,7 @@ export type ImageProps = GeneratedImageLike &
     alt: string
     previewMaxHeight?: number
     previewMaxWidth?: number
+    deferPreview?: boolean
   }
 
 const DEFAULT_PREVIEW_MAX_HEIGHT = 160
@@ -43,6 +45,7 @@ export const Image = ({
   alt,
   previewMaxHeight = DEFAULT_PREVIEW_MAX_HEIGHT,
   previewMaxWidth = DEFAULT_PREVIEW_MAX_WIDTH,
+  deferPreview = false,
   onLoad,
   style,
   ...props
@@ -65,6 +68,7 @@ export const Image = ({
 
   const base64Src = getImageSrc({ base64, mediaType })
   const imageSrc = src ?? base64Src ?? objectUrl
+  const imageRef = useTranscriptImage(imageSrc, deferPreview)
 
   if (!imageSrc) {
     return (
@@ -85,16 +89,18 @@ export const Image = ({
     ? {
         ...style,
         ...(previewMaxHeight > 0 ? { maxHeight: previewMaxHeight } : {}),
-        ...(previewMaxWidth > 0 ? { maxWidth: previewMaxWidth } : {}),
+        ...(previewMaxWidth > 0 ? { maxWidth: deferPreview ? "100%" : previewMaxWidth } : {}),
       }
     : style
 
   const image = (
     <img
-      src={imageSrc}
+      ref={imageRef}
+      src={deferPreview ? undefined : imageSrc}
       alt={alt}
       className={cn(
         "h-auto w-auto overflow-hidden rounded-md object-contain",
+        deferPreview && "[&:not([src])]:invisible",
         constrained ? null : "max-w-full",
         className
       )}
@@ -102,6 +108,8 @@ export const Image = ({
       style={previewStyle}
       onLoad={onLoad}
       {...props}
+      loading={deferPreview ? "eager" : props.loading}
+      srcSet={deferPreview ? undefined : props.srcSet}
     />
   )
 
@@ -113,7 +121,11 @@ export const Image = ({
     <>
       <button
         type="button"
-        className="inline-block max-w-full cursor-zoom-in rounded-md text-left transition-opacity hover:opacity-90"
+        className={cn(
+          "max-w-full cursor-zoom-in rounded-md text-left transition-opacity hover:opacity-90",
+          deferPreview ? "inline-flex items-center justify-center bg-muted [&>img]:max-w-full" : "inline-block"
+        )}
+        style={deferPreview ? { width: previewMaxWidth || undefined, height: previewMaxHeight || undefined } : undefined}
         onClick={() => setOpen(true)}
         aria-label={`Expand ${alt}`}
         title={alt}

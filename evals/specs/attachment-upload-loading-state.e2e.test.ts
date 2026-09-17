@@ -112,11 +112,34 @@ test(`sending an image in ${entryPoint} immediately moves it into the thread whi
   // TODO(primitive): observe a transient attachment status during a user send.
   await seed.evalIn(world.app, () => {
     globalThis.__attachmentUploadingSeen = false;
+    globalThis.__attachmentImageActivation = undefined;
+    let firstFrame: number | undefined;
     const record = () => {
       if (document.querySelector<HTMLElement>('[data-attachment-status="uploading"]')) globalThis.__attachmentUploadingSeen = true;
+      const row = document.querySelector('[data-message-role="user"]');
+      const image = row?.querySelector<HTMLImageElement>("img");
+      if (image && !globalThis.__attachmentImageActivation) {
+        const activation = {
+          textPresent: row?.textContent?.includes("Describe the attached image.") ?? false,
+          sourceInitiallyAbsent: !image.hasAttribute("src"),
+          sourceAbsentAtFirstFrame: false,
+        };
+        globalThis.__attachmentImageActivation = activation;
+        firstFrame = requestAnimationFrame(() => {
+          activation.sourceAbsentAtFirstFrame = !image.hasAttribute("src");
+        });
+      }
+      if (image?.hasAttribute("src") && globalThis.__attachmentUploadingSeen) {
+        observer.disconnect();
+        clearTimeout(timeout);
+      }
     };
     const observer = new MutationObserver(record);
-    observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-attachment-status"], childList: true });
+    const timeout = setTimeout(() => {
+      observer.disconnect();
+      if (firstFrame !== undefined) cancelAnimationFrame(firstFrame);
+    }, 30_000);
+    observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-attachment-status", "src"], childList: true });
     record();
     return true;
   });
@@ -137,6 +160,13 @@ test(`sending an image in ${entryPoint} immediately moves it into the thread whi
     label: "one decoded thread preview and cleared composer while upload is held",
     until: (value) => value === true,
   })).toBe(true);
+  await step("thread text precedes preview source activation, including the first frame opportunity", async () => {
+    expect(await probe.eval(() => globalThis.__attachmentImageActivation)).toEqual({
+      textPresent: true,
+      sourceInitiallyAbsent: true,
+      sourceAbsentAtFirstFrame: true,
+    });
+  });
   // Mark the held preview element. React never touches this attribute on the
   // element it keeps and never copies it to a replacement, so its survival
   // after the send settles proves the thread swapped the bitmap in place.

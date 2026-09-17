@@ -11,12 +11,15 @@ import { createDefaultPlatform, PlatformProvider } from "../src/react-app/kernel
 
 const ownedDom = typeof window === "undefined";
 if (ownedDom) GlobalRegistrator.register({ url: "http://localhost/" });
+const originalObserver = window.IntersectionObserver;
+Reflect.set(window, "IntersectionObserver", undefined);
 const actEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 afterAll(async () => {
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", actEnvironment);
+  Reflect.set(window, "IntersectionObserver", originalObserver);
   if (ownedDom) await GlobalRegistrator.unregister();
 });
 
@@ -54,7 +57,12 @@ function mount() {
   cleanups.push(async () => { await act(async () => root.unmount()); container.remove(); });
   return {
     container,
-    async render(messages: UIMessage[]) { await act(async () => root.render(list(messages))); },
+    async render(messages: UIMessage[]) {
+      await act(async () => root.render(list(messages)));
+      await act(async () => {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
+      });
+    },
   };
 }
 

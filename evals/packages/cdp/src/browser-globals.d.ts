@@ -111,4 +111,9 @@ declare global {
     next: BrowserHook | null;
   }
   var __attachmentUploadingSeen: boolean;
+  var __attachmentImageActivation: {
+    textPresent: boolean;
+    sourceInitiallyAbsent: boolean;
+    sourceAbsentAtFirstFrame: boolean;
+  } | undefined;
 }
