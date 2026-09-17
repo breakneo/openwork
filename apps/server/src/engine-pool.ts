@@ -565,6 +565,21 @@ export class EnginePool {
     };
   }
 
+  /**
+   * How the event fan-in should treat frames from a generation. With one
+   * primary generation and no ownership pinned elsewhere, every frame is
+   * forwarded verbatim and never parsed; `filter` requires the payload-level
+   * check in `shouldForwardEvent`, which is what a rollover needs.
+   */
+  eventForwardMode(generationId: string): "forward" | "filter" | "drop" {
+    const generation = this.generationForId(generationId);
+    if (!generation) return "drop";
+    if (generation.status !== "primary" || this.generations.filter(isRoutableGeneration).length !== 1) return "filter";
+    for (const owner of this.sessionOwnership.values()) if (owner !== generation.id) return "filter";
+    for (const owner of this.pinnedRequests.values()) if (owner !== generation.id) return "filter";
+    return "forward";
+  }
+
   shouldForwardEvent(generationId: string, payload: unknown): boolean {
     const generation = this.generationForId(generationId);
     if (!generation) return false;

@@ -222,6 +222,18 @@ function materializeAuth(credential: UsableCredential, provider: GatewayProvider
   }
 }
 
+function isInlineResponseItem(item: JsonObject) {
+  if (item.type === "function_call") return typeof item.call_id === "string" && typeof item.name === "string" && typeof item.arguments === "string"
+  if (typeof item.id !== "string" || !item.id) return false
+  if (item.type === "message") return item.role === "assistant" && Array.isArray(item.content) && item.content.length > 0
+    && item.content.every((part) => isJsonObject(part) && (
+      (part.type === "output_text" && typeof part.text === "string")
+      || (part.type === "refusal" && typeof part.refusal === "string")
+    ))
+  return item.type === "reasoning" && typeof item.encrypted_content === "string" && item.encrypted_content.trim().length > 0
+    && Array.isArray(item.summary) && item.summary.every((part) => isJsonObject(part) && part.type === "summary_text" && typeof part.text === "string")
+}
+
 function unsupportedGatewayPayload(body: JsonObject, family: ProtocolFamily, providerId: string): "resource" | "model" | null {
   // Grants cover models, not ownership of provider-side state. Walk protocol
   // envelopes, never interpret user text or client function schemas/arguments.
@@ -244,7 +256,7 @@ function unsupportedGatewayPayload(body: JsonObject, family: ProtocolFamily, pro
       if (key === "prompt" && isJsonObject(child)) return "resource" // Saved OpenAI prompt templates.
       if (key === "audio" && isJsonObject(child) && Object.hasOwn(child, "id")) return "resource"
       if (key === "input" && Array.isArray(child) && child.some((item) => isJsonObject(item) && Object.hasOwn(item, "id")
-        && !(item.type === "function_call" && typeof item.call_id === "string" && typeof item.name === "string" && typeof item.arguments === "string"))) return "resource"
+        && !isInlineResponseItem(item))) return "resource"
       if (key === "tool_choice" && isJsonObject(child) && (typeof child.type !== "string" || !["auto", "none", "required", "any", "tool", "function", "custom", "allowed_tools"].includes(child.type))) return "resource"
       if (key === "tools") {
         if (!Array.isArray(child)) return "resource"

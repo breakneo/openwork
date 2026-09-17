@@ -1,3 +1,4 @@
+import { openworkModelRemovalImpactSchema, type OpenworkSessionModel } from "@openwork/types/openwork-affordance";
 import type { McpStatusMap } from "../types";
 import type { Message, Part, Session, Todo } from "@opencode-ai/sdk/v2/client";
 import type { GatewayDesktopOauthStartRequest, GatewayDesktopOauthStartResponse } from "@openwork/types/den/gateway";
@@ -12,7 +13,7 @@ import {
   AGENT_CONTEXT_DIAGNOSTICS_REQUEST_TIMEOUT_MS,
   requestAgentContextDiagnosticsPayload,
 } from "./agent-context-diagnostics-transport";
-import { desktopFetch, desktopFetchAgentContextDiagnostics, desktopUploadMultipart, electronLocalPathForFile } from "./desktop";
+import { desktopFetch, desktopFetchViaMain, desktopFetchAgentContextDiagnostics, desktopUploadMultipart, electronLocalPathForFile } from "./desktop";
 import { isOpenworkGatewayRuntime } from "./gateway-runtime";
 import { isDesktopRuntime } from "./runtime-env";
 import type { ExecResult, OpencodeConfigFile, WorkspaceInfo, WorkspaceList } from "./desktop";
@@ -62,6 +63,7 @@ export type OpenworkCloudProviderSyncSkippedProvider = {
 };
 
 export type OpenworkCloudProviderSyncStatus = {
+  affectedSessions?: Array<{ workspaceId: string; removedModels: OpenworkSessionModel[]; sessionIds: string[]; inventoryComplete: boolean }>;
   hasSession: boolean;
   lastRun: { at: string | number; status: OpenworkCloudProviderSyncRun["status"]; message?: string } | null;
   providers: CloudImportedProvider[];
@@ -185,7 +187,8 @@ function parseCloudProviderSyncStatus(value: unknown): OpenworkCloudProviderSync
       });
     }
   }
-  return { hasSession: value.hasSession, lastRun, providers, reloadPending, skippedProviders };
+  const affected = openworkModelRemovalImpactSchema.array().safeParse("affectedSessions" in value ? value.affectedSessions : []);
+  return { hasSession: value.hasSession, lastRun, providers, reloadPending, skippedProviders, affectedSessions: affected.success ? affected.data : [] };
 }
 
 export type OpenworkServerStatus = "connected" | "disconnected" | "limited";
@@ -260,6 +263,7 @@ export type OpenworkSessionMessage = {
 export type OpenworkSessionSnapshot = {
   session: Session;
   messages: OpenworkSessionMessage[];
+  pagination?: { before?: string; nextCursor: string | null; limit: number };
   todos: Todo[];
   status:
     | { type: "idle" }
@@ -269,7 +273,7 @@ export type OpenworkSessionSnapshot = {
 
 // Stored history is independently readable. Missing activity fields are not an
 // observed idle state or an empty todo list; live hydration owns those values.
-export type OpenworkSessionHistory = Pick<OpenworkSessionSnapshot, "session" | "messages">
+export type OpenworkSessionHistory = Pick<OpenworkSessionSnapshot, "session" | "messages" | "pagination">
   & Partial<Pick<OpenworkSessionSnapshot, "status" | "todos">>;
 
 export type OpenworkPluginItem = {
@@ -968,6 +972,7 @@ export type OpenworkAuditEntry = {
 };
 
 export type OpenworkReloadTrigger = {
+  modelRemoval?: unknown;
   type: "skill" | "plugin" | "config" | "mcp" | "agent" | "command";
   name?: string;
   action?: "added" | "removed" | "updated";
@@ -1437,10 +1442,10 @@ async function fetchWithTimeout(
 async function requestJson<T>(
   baseUrl: string,
   path: string,
-  options: { method?: string; token?: string; hostToken?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal } = {},
+  options: { method?: string; token?: string; hostToken?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal; desktopTransport?: "main" } = {},
 ): Promise<T> {
   const url = `${baseUrl}${path}`;
-  const fetchImpl = resolveFetch(url);
+  const fetchImpl = options.desktopTransport === "main" && isDesktopRuntime() ? desktopFetchViaMain : resolveFetch(url);
   const response = await fetchWithTimeout(
     fetchImpl,
     url,
@@ -2476,11 +2481,11 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
 
     // User-level env vars (host-auth only — desktop shell is the sole caller).
     // See apps/server/src/env-file.ts and apps/app/pr/environment-variables.md.
-    listUserEnvKeys: () =>
+    listUserEnvKeys: (options?: { desktopTransport?: "main" }) =>
       requestJson<{ keys: string[] }>(
         baseUrl,
         "/env/keys",
-        { token, hostToken, timeoutMs: timeouts.config },
+        { token, hostToken, timeoutMs: timeouts.config, desktopTransport: options?.desktopTransport },
       ),
 
     getUserEnvStatus: (runtimeKey?: string | null) => {

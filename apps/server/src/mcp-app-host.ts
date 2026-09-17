@@ -334,6 +334,15 @@ async function withRemoteClient<T>(
       connected = true;
       return await run(client);
     } catch (error) {
+      // Authentication and access failures need human action, not another
+      // transport or a transient discovery retry. Never relay provider text.
+      if (error instanceof UnauthorizedError
+        || ((error instanceof StreamableHTTPError || error instanceof SseError) && error.code === 401)) {
+        throw new McpAppHostError("mcp_auth_required", "This App's connection needs authentication. Check its sign-in in connection settings before reopening the App.");
+      }
+      if ((error instanceof StreamableHTTPError || error instanceof SseError) && error.code === 403) {
+        throw new McpAppHostError("mcp_access_denied", "Access to this App's connection was denied. Ask your connection administrator to review your access before reopening the App.");
+      }
       if (connected) throw error;
       failures.push(`${index === 0 ? "Streamable HTTP POST" : "Legacy SSE fallback"}: ${connectionFailure(error)}`);
       // MCP 2025-11-25 backwards compatibility applies only to a rejected

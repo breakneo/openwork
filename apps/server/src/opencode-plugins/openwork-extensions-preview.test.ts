@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { openworkCatalogModels, openworkEngineProviderCatalogSchema, openworkSessionActivityInventorySchema } from "@openwork/types/openwork-affordance";
+import { openworkCatalogModels, openworkEngineProviderCatalogSchema, openworkSessionActivityInventorySchema, openworkSessionModelPreflightArgsSchema, resolveOpenworkModel } from "@openwork/types/openwork-affordance";
 
 import { OpenWorkExtensionsPreview } from "./openwork-extensions-preview.js";
 import * as OpenWorkExtensionsPreviewEntry from "./openwork-extensions-preview.js";
@@ -65,7 +65,8 @@ const createResultSchema = z.object({
     sessionId: z.string(),
     title: z.string(),
     titleTruncated: z.boolean(),
-    started: z.boolean(),
+    accepted: z.literal(true),
+    started: z.never().optional(),
     model: sessionModelSchema.nullable(),
     route: z.string(),
   })),
@@ -135,6 +136,8 @@ async function transformedSystem(plugin: Awaited<ReturnType<typeof OpenWorkExten
 
 function startFakeOpenWorkServer(options: {
   failPromptText?: string;
+  failCreateTitle?: string;
+  rejectModelId?: string;
   failSessionListWorkspaceId?: string;
   activityResponses?: Record<string, unknown>;
   failedActivityPaths?: string[];
@@ -194,6 +197,15 @@ function startFakeOpenWorkServer(options: {
           const models = options.policyDenied ? [] : openworkCatalogModels(openworkEngineProviderCatalogSchema.parse(providerCatalog(workspace.id)));
           return Response.json({ ok: true, id: "models.list", effects: { data: "read", ui: "none", external: false },
             result: { ok: true, workspaceId: workspace.id, models: models.map((model) => ({ ...model, available: true })) } });
+        }
+        const preflight = z.object({ kind: z.literal("query"), input: z.object({ id: z.literal("session.model_preflight"), args: openworkSessionModelPreflightArgsSchema }) }).safeParse(record.body);
+        if (preflight.success) {
+          const args = preflight.data.input.args;
+          if (!args.model || options.failProviderCatalog) return Response.json({ ok: false, id: "session.model_preflight", code: "unavailable", error: "Model unavailable" });
+          return Response.json({ ok: true, id: "session.model_preflight", effects: { data: "read", ui: "none", external: false }, result: {
+            ok: true, sessionId: args.sessionId, workspaceId: args.workspaceId,
+            model: resolveOpenworkModel(args.model, openworkCatalogModels(openworkEngineProviderCatalogSchema.parse(providerCatalog(args.workspaceId)))),
+          } });
         }
         return Response.json({ ok: true });
       }
@@ -255,6 +267,7 @@ function startFakeOpenWorkServer(options: {
             title: z.string(),
             model: z.object({ id: z.string(), providerID: z.string(), variant: z.string().optional() }).strict().optional(),
           }).strict().parse(record.body);
+          if (body.title === options.failCreateTitle) return Response.json({ message: "Creation rejected" }, { status: 503 });
           createdCount += 1;
           return Response.json({
             id: `ses_created_${createdCount}`,
@@ -339,6 +352,8 @@ function startFakeOpenWorkServer(options: {
       if (/^\/workspace\/ws_[12]\/opencode\/session\/ses_(alpha|beta|archive|foreign)\/prompt_async$/.test(url.pathname)) {
         z.object({
           messageID: z.string().regex(/^msg_[0-9a-f]{12}[0-9a-f]{14}$/),
+          model: z.object({ providerID: z.string(), modelID: z.string() }).strict(),
+          variant: z.string(),
           parts: z.array(z.object({ type: z.literal("text"), text: z.string() }).strict()).length(1),
         }).strict().parse(record.body);
         return new Response(null, { status: 204 });
@@ -352,6 +367,9 @@ function startFakeOpenWorkServer(options: {
         }).strict().parse(record.body);
         if (body.parts[0]?.text === options.failPromptText) {
           return Response.json({ message: "Prompt failed" }, { status: 503 });
+        }
+        if (options.rejectModelId && body.model?.modelID === options.rejectModelId) {
+          return Response.json({ name: "UnknownError", data: { message: `Model unavailable: ${body.model.modelID}` } }, { status: 400 });
         }
         return new Response(null, { status: 204 });
       }
@@ -1397,10 +1415,13 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     const fake = startFakeOpenWorkServer();
     const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
 
-    await expect(plugin.tool.openwork_execute.execute({
+    const output = argumentErrorSchema.parse(JSON.parse(await plugin.tool.openwork_execute.execute({
       id: "session.create",
       args: { workspaceId: "ws_missing", sessions: [{ title: "Nowhere", prompt: "Research nothing." }] },
-    }, { sessionID: "ses_origin" })).rejects.toThrow("No workspace matched ws_missing");
+    }, { sessionID: "ses_origin" })));
+    expect(output).toEqual({ ok: false, error: "No workspace matched ws_missing", issues: [
+      { path: "workspaceId", message: "No workspace matched ws_missing" },
+    ] });
 
     expect(fake.requests.filter((request) => request.method === "POST" && !isHostCatalogQuery(request.body))).toEqual([]);
     expect(fake.uiControlRequests).toEqual([]);
@@ -1434,35 +1455,35 @@ describe("OpenWorkExtensionsPreview session tools", () => {
 
   test("session.send appends a prompt to an existing session by id without touching the UI", async () => {
     const fake = startFakeOpenWorkServer();
-    const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/main" });
+    const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
 
-    // The target lives in a workspace other than the caller's: resolution is
-    // by id across workspaces, never by what the person has selected.
     const output = await plugin.tool.openwork_execute.execute({
       id: "session.send",
-      args: { sessionId: "ses_archive", text: "Status update: the importer shipped." },
-    }, { sessionID: "ses_origin", workspaceId: "ws_1" });
+      args: { sessionId: "ses_beta", text: "Status update: the importer shipped." },
+    }, { sessionID: "ses_origin", workspaceId: "ws_2" });
     const parsed = affordanceResultSchema("session.send", sendResultSchema).parse(JSON.parse(output));
 
     expect(parsed.effects).toEqual({ data: "write", ui: "none", external: false });
     expect(parsed.result).toMatchObject({
       ok: true,
       accepted: true,
-      sessionId: "ses_archive",
-      workspaceId: "ws_2",
-      workspace: "Archive",
-      title: "Archive decisions",
+      sessionId: "ses_beta",
+      workspaceId: "ws_1",
+      workspace: "Main",
+      title: "Neon backlog",
     });
     expect(parsed.result.revealed).toBeUndefined();
     const prompts = fake.requests.filter((request) => request.pathname.endsWith("/prompt_async") && request.method === "POST");
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]?.pathname).toBe("/workspace/ws_2/opencode/session/ses_archive/prompt_async");
+    expect(prompts[0]?.pathname).toBe("/workspace/ws_1/opencode/session/ses_beta/prompt_async");
     expect(prompts[0]?.body).toEqual({
       messageID: parsed.result.messageId,
+      model: { providerID: "openai", modelID: "gpt-6-astra" }, variant: "default",
       parts: [{ type: "text", text: "Status update: the importer shipped." }],
     });
-    // Headless by default: no session.open, no composer, no reload.
-    expect(fake.uiControlRequests).toEqual([]);
+    expect(fake.uiControlRequests).toEqual([{ authorization: "Bearer test-token", body: { kind: "query", input: {
+      id: "session.model_preflight", args: { sessionId: "ses_beta", workspaceId: "ws_1", model: { providerId: "openai", modelId: "gpt-6-astra", variant: null } },
+    } } }]);
     // No new session is created; the existing one receives the message.
     expect(fake.requests.filter((request) => request.pathname === "/workspace/ws_2/opencode/session" && request.method === "POST")).toEqual([]);
   });
@@ -1480,10 +1501,13 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     expect(parsed.effects).toEqual({ data: "write", ui: "navigate", external: false });
     expect(parsed.result.revealed).toBe(true);
     const promptIndex = fake.requests.findIndex((request) => request.pathname === "/workspace/ws_1/opencode/session/ses_alpha/prompt_async");
-    const openIndex = fake.requests.findIndex((request) => request.pathname === "/experimental/ui-control/request");
+    const openIndex = fake.requests.findIndex((request) => request.pathname === "/experimental/ui-control/request" && z.object({ kind: z.literal("command") }).safeParse(request.body).success);
     expect(promptIndex).toBeGreaterThanOrEqual(0);
     expect(openIndex).toBeGreaterThan(promptIndex);
     expect(fake.uiControlRequests).toEqual([
+      { authorization: "Bearer test-token", body: { kind: "query", input: { id: "session.model_preflight", args: {
+        workspaceId: "ws_1", sessionId: "ses_alpha", model: { providerId: "lpr_test", modelId: "claude-fable-5-1", variant: "high" },
+      } } } },
       {
         authorization: "Bearer test-token",
         body: {
@@ -1538,9 +1562,50 @@ describe("OpenWorkExtensionsPreview session tools", () => {
       code: z.literal("failed"),
     }).parse(JSON.parse(output));
 
-    expect(parsed.error).toBe("session.create failed");
+    expect(parsed.error).toBe("sessions[0].prompt: Prompt failed");
     expect(fake.requests.filter((request) => request.pathname === "/workspace/ws_2/opencode/session" && request.method === "POST")).toHaveLength(1);
     expect(fake.requests.filter((request) => request.pathname.endsWith("/prompt_async") && request.method === "POST")).toHaveLength(1);
+  });
+
+  test("preserves indexed rejection issues and accepted siblings without claiming a model started", async () => {
+    const fake = startFakeOpenWorkServer({ rejectModelId: "unavailable-model", failCreateTitle: "Reject creation", providerCatalogByWorkspace: {
+      ws_2: { connected: ["test-provider"], all: [{ id: "test-provider", name: "Fixture Provider", models: {
+        "unavailable-model": { name: "Stale after preflight" }, "available-model": { name: "Available" },
+      } }] },
+    } });
+    const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
+    const output = z.object({
+      ok: z.literal(false),
+      error: z.string(),
+      issues: z.array(z.object({ path: z.string(), message: z.string(), sessionId: z.string().optional() })),
+      result: createResultSchema.extend({
+        failures: z.array(z.object({ path: z.string(), sessionId: z.string().optional(), error: z.string() })),
+      }),
+    }).parse(JSON.parse(await plugin.tool.openwork_execute.execute({
+      id: "session.create",
+      args: {
+        model: { providerId: "test-provider", modelId: "unavailable-model" },
+        sessions: [
+          { title: "Rejected prompt", prompt: "Do not retry this prompt." },
+          { title: "Reject creation", prompt: "Never submitted." },
+          { title: "Accepted sibling", prompt: "Queued only.", model: { providerId: "test-provider", modelId: "available-model" } },
+        ],
+      },
+    }, {})));
+    expect(output.issues).toEqual([
+      { path: "sessions[0].prompt", message: "sessions[0].prompt: Model unavailable: unavailable-model", sessionId: "ses_created_1" },
+      { path: "sessions[1]", message: "sessions[1]: Creation rejected" },
+    ]);
+    expect(output.error).toBe(output.issues.map((issue) => issue.message).join("; "));
+    expect(output.result.created).toHaveLength(1);
+    expect(output.result.created[0]).toMatchObject({ accepted: true, sessionId: "ses_created_2", model: { providerId: "test-provider", modelId: "available-model", variant: null } });
+    expect(output.result.failures).toEqual([
+      { path: "sessions[0].prompt", sessionId: "ses_created_1", error: "Model unavailable: unavailable-model" },
+      { path: "sessions[1]", error: "Creation rejected" },
+    ]);
+    expect(fake.requests.filter((request) => request.pathname.endsWith("/prompt_async"))).toHaveLength(2);
+    expect(fake.requests.filter((request) => request.pathname.endsWith("/session") && request.method === "POST")).toHaveLength(3);
+    expect(fake.uiControlRequests).toHaveLength(2);
   });
 
   test("creates more than twenty sessions in one tool call", async () => {

@@ -23,6 +23,8 @@ import {
   type RolloverReason,
 } from "./engine-pool.js";
 import { withEngineDirectoryFence } from "./engine-directory-fence.js";
+import { PromptAdmissionLedger, type PromptAdmissionScope } from "./prompt-admission.js";
+
 import {
   clearEngineInstanceReaperForConfig,
   EngineInstanceReaper,
@@ -173,6 +175,15 @@ let desktopCloudSyncQueue: Promise<void> = Promise.resolve();
 const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, number>>();
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
+const promptAdmissions = new WeakMap<ServerConfig, PromptAdmissionLedger>();
+function promptAdmissionLedger(config: ServerConfig) {
+  let ledger = promptAdmissions.get(config);
+  if (!ledger) {
+    ledger = new PromptAdmissionLedger();
+    promptAdmissions.set(config, ledger);
+  }
+  return ledger;
+}
 const AGENT_DIAGNOSTICS_RATE_LIMIT_CAPACITY = 1_000;
 const AGENT_DIAGNOSTICS_MAX_IN_FLIGHT_PER_SERVER = 16;
 const AGENT_DIAGNOSTICS_MAX_REQUEST_BYTES = 256 * 1024;
@@ -183,7 +194,11 @@ const COMMAND_ADMISSION_TTL_MS = 24 * 60 * 60 * 1_000;
 
 function rethrowMcpAppHostError(error: unknown): never {
   if (!(error instanceof McpAppHostError)) throw error;
-  const status = error.code === "invalid_tool_name" || error.code.startsWith("invalid_resource")
+  const status = error.code === "mcp_auth_required"
+    ? 401
+    : error.code === "mcp_access_denied"
+      ? 403
+      : error.code === "invalid_tool_name" || error.code.startsWith("invalid_resource")
     ? 400
     : error.code === "tool_not_found" || error.code === "server_unavailable"
       ? 404
@@ -660,6 +675,31 @@ async function assertWorkspaceOwnsProxiedSessionRead(
   }
 }
 
+/**
+ * Session-scoped reads prove workspace ownership through a separate metadata
+ * read. Running that proof beside the requested read, rather than ahead of it,
+ * removes one serialized engine round trip from every conversation open. The
+ * upstream response is released only after the proof passes; a failed proof
+ * rejects immediately and discards whatever the engine eventually returns.
+ */
+export async function sendWithOwnershipProof(proof: Promise<void>, send: () => Promise<Response>): Promise<Response> {
+  type SendResult = { ok: true; response: Response } | { ok: false; error: unknown };
+  // Observe failures immediately, even while the ownership proof is pending.
+  const sending = send().then<SendResult, SendResult>(
+    (response) => ({ ok: true, response }),
+    (error: unknown) => ({ ok: false, error }),
+  );
+  try {
+    await proof;
+  } catch (error) {
+    void sending.then((result) => result.ok ? result.response.body?.cancel().catch(() => undefined) : undefined);
+    throw error;
+  }
+  const result = await sending;
+  if (!result.ok) throw result.error;
+  return result.response;
+}
+
 export function assertOpencodeProxyAllowed(actor: Actor, method: string, proxyPath: string) {
   const m = method.toUpperCase();
   const scope = actor.scope ?? "viewer";
@@ -729,6 +769,9 @@ function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
 }
 
 export async function startServer(config: ServerConfig): Promise<ServeResult> {
+  promptAdmissions.get(config)?.close();
+  const admissionLedger = new PromptAdmissionLedger();
+  promptAdmissions.set(config, admissionLedger);
   let taskRecovery: Awaited<ReturnType<typeof createTaskRecovery>> | undefined;
   const approvals = new ApprovalService(config.approval);
   const uiControl = new UiControlMailbox();
@@ -770,6 +813,9 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const cloudProviderSync = new CloudProviderSync({
     config,
     env,
+    onModelsRemoved: (impact) => {
+      reloadEvents.record(impact.workspaceId, "config", { type: "config", action: "removed", name: "models", modelRemoval: impact });
+    },
     reloadEngine: () => reloadOpencodeEngine(
       config,
       resolveEngineRuntimeWorkspace(config),
@@ -852,20 +898,51 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 
       const proxyWorkspaceOpencodeMount = async (mount: { workspaceId: string; restPath: string }) => {
         authMode = "client";
+        let admissionScope: PromptAdmissionScope | undefined;
         try {
           const actor = await requireClient(request, config, tokens);
+          // Never share a fallback credential namespace. requireClient supplies
+          // the verified bearer hash; a missing hash cannot authorize a ticket.
+          if (!actor.tokenHash) throw new ApiError(401, "unauthorized", "Invalid bearer token");
+          const admissionPath = normalizeOpencodeProxyPath(mount.restPath);
+          const requestedWorkspace = mount.workspaceId.trim();
+          const admissionWorkspace = config.workspaces.find((entry) => entry.id === requestedWorkspace)
+            ?? (requestedWorkspace.startsWith("rem_") ? config.workspaces.find((entry) => entry.id === requestedWorkspace.slice(4)) : undefined);
+          admissionScope = { credential: actor.tokenHash, workspace: admissionWorkspace?.id ?? requestedWorkspace,
+            session: decodeURIComponent(admissionPath.match(/^\/session\/([^/]+)/)?.[1] ?? "") };
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
-          await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, mount.restPath, false,
+          const admissionRoute = admissionPath.match(/^\/session\/[^/]+\/prompt-admission(?:\/([^/]+))?$/);
+          if (admissionRoute) {
+            if (request.method !== "GET") ensureWritable(config);
+            const ledger = promptAdmissionLedger(config);
+            if (request.method === "POST" && !admissionRoute[1]) {
+              return finalize(ledger.prepare(admissionScope, await request.text()));
+            }
+            if ((request.method === "GET" || request.method === "DELETE") && admissionRoute[1]) {
+              return finalize(ledger.inspect(admissionScope, decodeURIComponent(admissionRoute[1]), request.method === "DELETE"));
+            }
+            return finalize(jsonResponse({ message: "Method not allowed" }, 405));
+          }
+          const ownership = assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, mount.restPath, false,
             request.method === "GET" ? request.signal : undefined);
           proxyService = "opencode";
           proxyBaseUrl = workspace.baseUrl?.trim() || undefined;
           const send = () => proxyOpencodeRequest({ config, request, url, workspace, proxyPath: mount.restPath,
+            admissionScope,
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined });
-          const response = taskRecovery ? await taskRecovery.forward(workspace, "v1", mount.restPath, request, send) : await send();
+          const response = await sendWithOwnershipProof(ownership,
+            () => taskRecovery ? taskRecovery.forward(workspace, "v1", mount.restPath, request, send) : send());
           return finalize(response);
         } catch (error) {
+          const ticket = request.headers.get("x-openwork-prompt-ticket");
+          if (admissionScope && ticket && isPromptAsyncProxyRequest(request.method, mount.restPath)
+            && error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) {
+            try {
+              promptAdmissionLedger(config).rejectQueued(admissionScope, ticket, await request.clone().text());
+            } catch { /* A consumed body is already owned by native forwarding. */ }
+          }
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
             captureServerException(error, { method: request.method, route: "/workspace/:id/opencode/*", requestSignal: request.signal });
@@ -975,12 +1052,13 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           await managedDesktopPolicy(config).assertRequest(request, url.pathname, true);
           proxyService = "opencode";
           const workspace = config.workspaces[0];
-          if (workspace) {
-            await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, url.pathname, false,
-              request.method === "GET" ? request.signal : undefined);
-          }
+          const ownership = workspace
+            ? assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, url.pathname, false,
+              request.method === "GET" ? request.signal : undefined)
+            : Promise.resolve();
           const send = () => proxyOpencodeRequest({ config, request, url, workspace });
-          const response = taskRecovery && workspace ? await taskRecovery.forward(workspace, "v1", url.pathname, request, send) : await send();
+          const response = await sendWithOwnershipProof(ownership,
+            () => taskRecovery && workspace ? taskRecovery.forward(workspace, "v1", url.pathname, request, send) : send());
           return finalize(response);
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
@@ -1074,6 +1152,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
   } catch (error) {
     await taskRecovery?.stop().catch(() => undefined);
+    admissionLedger.close();
     captureServerException(error, { method: "START", route: "startServer" });
     cloudProviderSync.stop();
     await engineV2Preview.stop().catch(() => undefined);
@@ -1119,6 +1198,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   return {
     ...server,
     stop: async () => {
+      admissionLedger.close();
       let recoveryError: unknown;
       try { await taskRecovery?.stop(); } catch (error) { recoveryError = error; }
       managedDesktopPolicy(config).onChange = undefined;
@@ -1543,6 +1623,7 @@ export async function proxyOpencodeRequest(input: {
   workspace?: WorkspaceInfo;
   proxyPath?: string;
   recoverySignal?: AbortSignal;
+  admissionScope?: PromptAdmissionScope;
 }) {
   const workspace = input.workspace;
   const proxyPath = input.proxyPath ?? input.url.pathname;
@@ -1569,6 +1650,7 @@ export async function proxyOpencodeRequest(input: {
   headers.delete("authorization");
   headers.delete("x-openwork-host-token");
   headers.delete("x-openwork-client-id");
+  headers.delete("x-openwork-prompt-ticket");
   headers.delete("host");
   headers.delete("origin");
 
@@ -1701,8 +1783,16 @@ export async function proxyOpencodeRequest(input: {
     return sanitizeProxyResponse(response);
   };
 
-  if (workspace && workspace.workspaceType !== "remote" && isPromptAsyncProxyRequest(method, proxyPath)) {
-    return withEngineDirectoryFence(input.config, workspace, forward);
+  if (isPromptAsyncProxyRequest(method, proxyPath)) {
+    const schedule = (operation: () => Promise<Response>) => workspace && workspace.workspaceType !== "remote"
+      ? withEngineDirectoryFence(input.config, workspace, operation) : operation();
+    const ticket = input.request.headers.get("x-openwork-prompt-ticket");
+    if (ticket) {
+      if (!input.admissionScope) return jsonResponse({ protocol: "openwork-prompt-admission-v1", state: "unknown" }, 409);
+      return promptAdmissionLedger(input.config).dispatch(input.admissionScope, ticket,
+        body ? new TextDecoder().decode(body) : "", schedule, forward);
+    }
+    return schedule(forward);
   }
   return forward();
 }
@@ -1854,9 +1944,14 @@ function mergedEventBody(input: {
             const chunk = await entry.reader.read();
             if (chunk.done) break;
             const parsed = frameBuffer.push(chunk.value);
-            for (const frame of parsed.frames) {
-              if (input.pool.shouldForwardEvent(entry.connection.generationId, parseSsePayload(frame))) {
-                controller.enqueue(encoder.encode(`${frame}\n\n`));
+            if (parsed.frames.length > 0) {
+              // Parsing every event on the main event loop competes with the
+              // history reads it also serves; only a rollover needs the payload.
+              const mode = input.pool.eventForwardMode(entry.connection.generationId);
+              for (const frame of parsed.frames) {
+                const forward = mode === "forward"
+                  || (mode === "filter" && input.pool.shouldForwardEvent(entry.connection.generationId, parseSsePayload(frame)));
+                if (forward) controller.enqueue(encoder.encode(`${frame}\n\n`));
               }
             }
             if (parsed.overflow) {
@@ -2027,9 +2122,11 @@ function withCors(response: Response, request: Request, config: ServerConfig) {
   headers.set("Access-Control-Allow-Origin", allowOrigin);
   headers.set(
     "Access-Control-Allow-Headers",
-    "Authorization, Content-Type, X-OpenWork-Host-Token, X-OpenWork-Client-Id, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
+    "Authorization, Content-Type, X-OpenWork-Host-Token, X-OpenWork-Client-Id, X-OpenWork-Prompt-Ticket, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
   );
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  const exposed = headers.get("Access-Control-Expose-Headers");
+  headers.set("Access-Control-Expose-Headers", [exposed, "X-Next-Cursor", "Link"].filter(Boolean).join(", "));
   headers.set("Vary", "Origin");
   return new Response(response.body, { status: response.status, headers });
 }

@@ -84,6 +84,21 @@ describe("OpenWork provider adapters", () => {
     }
   });
 
+  test("bulk repick requires a confirmed set for mutations but allows an unconfirmed dry-run", () => {
+    const schema = sessionAffordanceArgsSchemas["session.rebind_model"];
+    const args = { workspaceId: "workspace_fixture", from: { providerId: "provider_fixture", modelId: "removed_fixture" }, to: { alias: "Available fixture" } };
+    for (const dryRun of [undefined, false]) {
+      const rejected = schema.safeParse({ ...args, dryRun });
+      expect(rejected.success).toBe(false);
+      if (rejected.success) throw new Error("Unconfirmed mutation was accepted");
+      expect(rejected.error.issues).toContainEqual(expect.objectContaining({ path: ["expectedSessionIds"] }));
+      expect(schema.safeParse({ ...args, dryRun, expectedSessionIds: ["session_fixture"] }).success).toBe(true);
+    }
+    expect(schema.safeParse({ ...args, dryRun: true }).success).toBe(true);
+    expect(schema.safeParse({ ...args, expectedSessionIds: [] }).success).toBe(true);
+    expect(schema.safeParse({ ...args, expectedSessionIds: null }).success).toBe(false);
+  });
+
   test("the bound walker reaches nested and optional strings, including transformed inputs", () => {
     expect(stringMaxima(sessionAffordanceArgsSchemas["session.create"].shape.sessions)).toEqual([100_000, 60]);
     expect(stringMaxima(z.object({ entries: z.array(z.object({ label: z.string().max(17).transform((value) => value).optional() })) }))).toEqual([17]);
@@ -146,7 +161,14 @@ describe("OpenWork provider adapters", () => {
       ["model", "object", false],
     ]);
     expect(create?.arguments.find((argument) => argument.name === "model")?.description).toContain("variant");
+    expect(create?.description).toContain("accepted: true");
+    expect(create?.description).toContain("not proof that inference started or succeeded");
+    expect(create?.description).toContain("unavailable model can fail afterward");
+    expect(create?.description).toContain("`issues`");
+    expect(create?.description).toContain("before retrying to avoid duplicates");
     expect(create?.description).toContain("existing renderer host");
+    expect(create?.description).toContain("without a renderer catalog");
+    expect(create?.description).toContain("Sidebar visibility is not guaranteed");
     expect(affordances.find((entry) => entry.id === "models.list")?.description).toContain("including headless callers");
   });
 
