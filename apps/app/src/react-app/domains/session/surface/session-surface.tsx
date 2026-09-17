@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
 import { captureAnalyticsEvent } from "@/app/lib/analytics";
+import { observeSendStep } from "@/app/lib/send-step-diagnostics";
 import { hasTerminalSessionReply, interruptSessionTurn, sessionHasPendingSubmission, sessionNeedsStop, sessionWorkHeld, submitAfterInterruption, submitImmediateSessionTurn, subscribeSessionInterruption } from "@/app/lib/opencode-interruption";
 import { createClient, createPromptMessageID, isPromptAdmissionUnknown, promptAdmissionFailure, readPromptAdmission, unwrap } from "@/app/lib/opencode";
 import { createClientV2, isOpencodeV2BaseUrl, v2PromptText } from "@/app/lib/opencode-v2-adapter";
@@ -2167,7 +2168,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       // The reading preview can omit the current delegated turn. Decide whether
       // this follow-up must interrupt it from cached complete history or one
       // bounded newest read; never wait on the uncapped read.
-      const sendMessages = await openingHistory.readSendHistory({ revealLatest: true });
+      const sendMessages = await observeSendStep("history", () => openingHistory.readSendHistory({ revealLatest: true }));
       if (getQueuedSendGeneration(props.sessionId) !== generation) throw new Error("Send cancelled by Stop.");
       const result = await submitImmediateSessionTurn<CloudMcpSubmissionResult>(props.opencodeBaseUrl, opencodeClient, props.sessionId,
         sendMessages, async () => {
