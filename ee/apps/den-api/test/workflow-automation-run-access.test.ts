@@ -39,6 +39,7 @@ function seedRequiredEnv() {
   process.env.BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET ?? "y".repeat(32)
   process.env.BETTER_AUTH_URL = process.env.BETTER_AUTH_URL ?? "http://127.0.0.1:8790"
   process.env.CORS_ORIGINS = process.env.CORS_ORIGINS ?? "http://127.0.0.1:8790"
+  process.env.DEN_DASHBOARD_ADMIN_ONLY_ENABLED = "true"
 }
 
 type Db = typeof import("../src/db.js").db
@@ -631,6 +632,32 @@ test("detached parents remain manageable but restoring app access still requires
     .rejects.toThrow("Config object not found")
   await expect(pluginStore.createResourceAccessGrant({ context: foreign.ownerContext, resourceKind: "plugin", resourceId: seeded.pluginId,
     value: { orgMembershipId: foreign.viewerMemberId, role: "viewer" } })).rejects.toThrow("Plugin not found")
+})
+
+test("with administrator-only management switched off, workflow managers keep every app-bound permission published clients expect", async () => {
+  const { env } = await import("../src/env.js")
+  const savedApps = await import("../src/saved-apps.js")
+  const seeded = await seedWorkflowWithViewer()
+  await grantAppManager(seeded)
+  const view = await bindApp(seeded, "active")
+  await expect(pluginStore.createConfigObjectVersion({ context: seeded.viewerContext, configObjectId: seeded.configObjectId, value: changedWorkflow }))
+    .rejects.toThrow("Only organization owners and admins")
+  env.dashboardAdminOnlyEnabled = false
+  try {
+    await pluginStore.createConfigObjectVersion({ context: seeded.viewerContext, configObjectId: seeded.configObjectId, value: changedWorkflow })
+    for (const resource of appResources(seeded)) {
+      await pluginStore.createResourceAccessGrant({ ...resource, value: { orgMembershipId: seeded.ownerMemberId, role: "viewer" } })
+    }
+    await savedApps.setAppOnDashboard(seeded.viewerContext, view.id, true)
+    const listed = await savedApps.listSavedApps(seeded.viewerContext)
+    expect(listed.find((entry) => entry.view.id === view.id)).toMatchObject({ canManage: true, onDashboard: true })
+    const views = await import("../src/artifact-views.js")
+    expect((await views.retireArtifactView({ context: seeded.viewerContext, artifactViewId: view.id })).status).toBe("retired")
+  } finally {
+    env.dashboardAdminOnlyEnabled = true
+  }
+  await expect(pluginStore.createConfigObjectVersion({ context: seeded.viewerContext, configObjectId: seeded.configObjectId, value: changedWorkflow }))
+    .rejects.toThrow("Only organization owners and admins")
 })
 
 test.each([false, true])("connector cleanup preserves admin-only app bindings (bound: %s)", async (bound) => {

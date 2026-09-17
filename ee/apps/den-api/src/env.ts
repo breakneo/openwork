@@ -151,6 +151,7 @@ const EnvSchema = z.object({
   DEN_CONNECT_LINK_KEY_ID: z.string().max(64).optional(),
   DEN_MCP_CONNECTIONS_GATING_ENABLED: z.string().optional(),
   DEN_GENERATED_ARTIFACT_VIEWS_ENABLED: z.string().optional(),
+  DEN_DASHBOARD_ADMIN_ONLY_ENABLED: z.string().optional(),
   SCIM_MAINTENANCE_INTERVAL_MS: z.string().optional(),
   POLAR_FEATURE_GATE_ENABLED: z.string().optional(),
   POLAR_API_BASE: z.string().optional(),
@@ -537,6 +538,11 @@ const mcpConnectionsGatingEnabled =
 // bridge-dependent resources to older published desktop builds.
 const generatedArtifactViewsEnabled =
   (parsed.DEN_GENERATED_ARTIFACT_VIEWS_ENABLED ?? "false").trim().toLowerCase() === "true"
+// Administrator-only app management ships dark. Published desktop builds that
+// predate the matching controls still offer app management to Workflow managers,
+// so a Den deployment must not start answering 403 until a compatible desktop is
+// released and this switch is turned on for that deployment.
+const dashboardAdminOnlyEnabled = parseBooleanFlag(parsed.DEN_DASHBOARD_ADMIN_ONLY_ENABLED ?? "false")
 
 // Desktop availability stays fail-closed, while an entirely unconfigured
 // server preserves the published-client runtime. An explicit availability
@@ -697,6 +703,7 @@ export const env = {
   connectLink,
   mcpConnectionsGatingEnabled,
   generatedArtifactViewsEnabled,
+  dashboardAdminOnlyEnabled,
   scimMaintenanceIntervalMs: Number(parsed.SCIM_MAINTENANCE_INTERVAL_MS ?? "300000"),
   requireEmailVerification,
   passwordBreachScreeningEnabled,

@@ -5,14 +5,10 @@ import type { GeneratedArtifactView, GeneratedArtifactViewRevision } from "@open
 import { db } from "./db.js"
 import { getWorkflowAccess, getWorkflowDetail } from "./workflows.js"
 import { buildGeneratedArtifactView } from "./generated-artifact-view-builder.js"
-import { isPluginArchOrgAdmin, PluginArchAuthorizationError, type PluginArchActorContext } from "./routes/org/plugin-system/access.js"
+import { requireDashboardAdmin, type PluginArchActorContext } from "./routes/org/plugin-system/access.js"
 import { artifactViewResourceUri } from "./artifact-view-resource.js"
 
-export function requireDashboardAdmin(context: PluginArchActorContext) {
-  if (!isPluginArchOrgAdmin(context)) {
-    throw new PluginArchAuthorizationError(403, "forbidden", "Only organization owners and admins can manage dashboards and apps.")
-  }
-}
+export { requireDashboardAdmin } from "./routes/org/plugin-system/access.js"
 
 const ARTIFACT_VIEW_LIST_LIMIT = 50
 const ARTIFACT_VIEW_REVISION_LIST_LIMIT = 50

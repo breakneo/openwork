@@ -21,6 +21,7 @@ process.env.DEN_DB_ENCRYPTION_KEY ??= "dashboards-test-encryption-key-1234567890
 process.env.BETTER_AUTH_SECRET ??= "dashboards-test-secret-123456789012"
 process.env.BETTER_AUTH_URL ??= API_ORIGIN
 process.env.CORS_ORIGINS ??= API_ORIGIN
+process.env.DEN_DASHBOARD_ADMIN_ONLY_ENABLED = "true"
 
 let app: Hono<{ Variables: OrgRouteVariables }>
 let db: typeof import("../src/db.js").db

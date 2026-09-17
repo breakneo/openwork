@@ -144,6 +144,7 @@ const database = {
 
 beforeAll(async () => {
   process.env.DEN_GENERATED_ARTIFACT_VIEWS_ENABLED = "true"
+  process.env.DEN_DASHBOARD_ADMIN_ONLY_ENABLED = "true"
   process.env.DATABASE_URL ??= "mysql://fixture:fixture@127.0.0.1:3306/not_connected"
   process.env.DEN_DB_ENCRYPTION_KEY ??= "x".repeat(32)
   process.env.BETTER_AUTH_SECRET ??= "y".repeat(32)

@@ -423,7 +423,7 @@ export async function cloudDraftRouting(seed: Seed) {
 
 export async function savedAppCreation(seed: Seed) {
   const den = await seed.den({
-    env: { DEN_GENERATED_ARTIFACT_VIEWS_ENABLED: "true", DEN_DASHBOARDS_ENABLED: "true", DEN_BETTER_AUTH_COOKIE_DOMAIN: "daytonaproxy01.net" },
+    env: { DEN_GENERATED_ARTIFACT_VIEWS_ENABLED: "true", DEN_DASHBOARDS_ENABLED: "true", DEN_DASHBOARD_ADMIN_ONLY_ENABLED: "true", DEN_BETTER_AUTH_COOKIE_DOMAIN: "daytonaproxy01.net" },
     org: { name: `Saved Apps ${Date.now()}`, members: { colleague: { name: "Colleague" }, browserRecipient: { name: "Browser recipient" } } },
     mocks: {
       tracker: seed.mock({ allowUnauthenticatedMcp: true, appToolName: "search_issues_using_jql" }),
