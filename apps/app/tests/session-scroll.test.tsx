@@ -171,6 +171,47 @@ function fixture(geometryOwner?: string, pagination: Pick<Parameters<typeof useS
 }
 
 describe("session reading position", () => {
+  test.each(["keyboard", "wheel", "pointer"])("a padded page prepend preserves its boundary anchor until the next %s gesture", async (gesture) => {
+    let finish = () => {};
+    const load = mock(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const newest = { before: null, limit: 24, lineage: [null] };
+    const older = { before: "older-page", limit: 24, lineage: [null, "older-page"] };
+    const pages = { version: {}, hasOlder: true, hasNewer: false, loading: false, failed: false, load };
+    const view = fixture("owner-a", { historyPages: pages, windowReady: true,
+      pageForAnchor: (id) => id === "126" ? older : newest });
+    view.layout.virtualized = true;
+    view.layout.complete = false;
+    view.layout.viewportHeight = 612;
+    view.layout.height = 2232;
+    view.layout.messages = [{ id: "127", top: 16, height: 84 }, { id: "150", top: 2132, height: 84 }];
+    await view.render();
+    view.container.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    view.scroll(0);
+    expect(load.mock.calls).toEqual([["older"]]);
+    expect(state("a", "owner-a")).toMatchObject({ anchor: { messageId: "127", offset: 16 }, geometry: { page: newest } });
+    view.layout.messages = [{ id: "126", top: 16 + 2208 - 92, height: 84 },
+      { id: "127", top: 16 + 2208, height: 84 }, { id: "150", top: 2132 + 2208, height: 84 }];
+    view.layout.height += 2208;
+    pages.version = {};
+    await view.render();
+    await act(async () => finish());
+    expect(view.container.scrollTop).toBe(2208);
+    expect(state("a", "owner-a")).toMatchObject({ anchor: { messageId: "127", offset: 16 }, geometry: { page: newest } });
+    for (const message of view.layout.messages) message.top += 120;
+    view.layout.height += 120;
+    view.container.scrollTop += 120;
+    view.resize();
+    view.scroll(view.container.scrollTop);
+    expect(state("a", "owner-a")).toMatchObject({ scrollTop: 2328, anchor: { messageId: "127", offset: 16 }, geometry: { page: newest } });
+    pages.hasOlder = false;
+    if (gesture === "keyboard") view.container.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+    if (gesture === "pointer") view.container.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, isPrimary: true, button: 0, bubbles: true }));
+    if (gesture === "wheel") view.wheel(view.container.scrollTop - 92);
+    else view.scroll(view.container.scrollTop - 92);
+    if (gesture === "pointer") window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, isPrimary: true, button: 0 }));
+    expect(state("a", "owner-a")).toMatchObject({ anchor: { messageId: "126", offset: 16 }, geometry: { page: older } });
+  });
+
   test("virtual geometry saves only the contiguous reading window, excluding the pinned tail", async () => {
     const view = fixture("owner-a");
     view.layout.virtualized = true;

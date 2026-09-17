@@ -209,7 +209,8 @@ for (const selector of [{ alias: " fixture luna ", variant: "high" }, { displayN
     const result = resultOf(await fake.create({ workspaceId: "ws_one", model: selector, sessions: [{ title: "Named model", prompt: "Reply OK" }] }), "session.create");
     const created = records(result.created);
     expect(created).toHaveLength(1);
-    expect(created[0]).toMatchObject({ started: true, model: { providerId: PROVIDER, modelId: MODEL, variant: selector.variant, displayName: NAME, providerName: "Fixture Managed" } });
+    expect(created[0]).not.toHaveProperty("started");
+    expect(created[0]).toMatchObject({ accepted: true, model: { providerId: PROVIDER, modelId: MODEL, variant: selector.variant, displayName: NAME, providerName: "Fixture Managed" } });
     expect(result.failures).toEqual([]);
     const writes = fake.writes();
     expect(writes).toEqual([
