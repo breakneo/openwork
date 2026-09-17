@@ -213,6 +213,65 @@ describe("session reading position", () => {
     expect(load.mock.calls).toEqual([["older"]]);
   });
 
+  test.each([false, true])("older paging reaches the loaded boundary while its first groups are virtualized (reserved prefix: %s)", async (reserved) => {
+    const load = mock(async () => {});
+    const pages = { version: {}, hasOlder: true, hasNewer: false, loading: false, failed: false, load };
+    const view = fixture("owner-a", { historyPages: pages, windowReady: true });
+    view.layout.virtualized = true;
+    view.layout.complete = false;
+    view.layout.height = 5000;
+    view.layout.messages = [{ id: "latest", top: 4600, height: 400 }];
+    view.layout.placeholders = [
+      ...(reserved ? [{ id: "history-prefix", before: "latest", top: 0, height: 1000 }] : []),
+      { id: "placeholder:loaded", before: "latest", top: reserved ? 1000 : 0, height: reserved ? 3600 : 4600 },
+    ];
+    await view.render();
+    view.wheel(2000);
+    runFrames();
+    expect(load).not.toHaveBeenCalled();
+    view.wheel(0);
+    runFrames();
+    if (!reserved) {
+      expect(load).not.toHaveBeenCalled();
+      view.layout.messages.unshift({ id: "first", top: 0, height: 300 });
+      view.layout.placeholders[0] = { id: "placeholder:loaded", before: "latest", top: 300, height: 4300 };
+      await view.render();
+    }
+    expect(load.mock.calls).toEqual([["older"]]);
+    if (!reserved) {
+      view.layout.messages.unshift({ id: "older", top: 0, height: 300 });
+      for (const message of view.layout.messages.slice(1)) message.top += 300;
+      view.layout.placeholders[0].top += 300;
+      view.layout.height += 300;
+      pages.version = {};
+      await view.render();
+      expect(state("a", "owner-a")).toMatchObject({ scrollTop: 300, anchor: { messageId: "first", offset: 0 } });
+      expect(load).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  test("top navigation completes only after the virtual destination mounts and saves its anchor", async () => {
+    const view = fixture("owner-a", { historyComplete: true });
+    view.layout.virtualized = true;
+    view.layout.height = 5000;
+    view.layout.messages = [{ id: "latest", top: 4600, height: 400 }];
+    view.layout.placeholders = [{ id: "placeholder:first", before: "latest", top: 0, height: 4600 }];
+    await view.render();
+    let completed = false;
+    let navigation: Promise<boolean> = Promise.resolve(false);
+    await act(async () => {
+      navigation = view.controls.scrollToTop();
+      void navigation.then(() => { completed = true; });
+    });
+    expect(view.container.scrollTop).toBe(0);
+    expect(completed).toBe(false);
+    view.layout.messages.unshift({ id: "first", top: 0, height: 300 });
+    view.layout.placeholders[0] = { id: "placeholder:middle", before: "latest", top: 300, height: 4300 };
+    await view.render();
+    expect(await navigation).toBe(true);
+    expect(state("a", "owner-a")).toMatchObject({ mode: "manual", scrollTop: 0, anchor: { messageId: "first", offset: 0 } });
+  });
+
   test("explicit first-message navigation waits for complete history and the corresponding DOM commit", async () => {
     let finish = () => {};
     const full = mock(() => new Promise<void>((resolve) => { finish = resolve; }));

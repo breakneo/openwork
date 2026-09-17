@@ -114,6 +114,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     let pageVersion: unknown;
     let pageAnchor: SessionScrollAnchor | undefined;
     let pagePending = false;
+    let pendingHistoryDemand: "older" | "newer" | null = null;
     let pendingTop: ((completed: boolean) => void) | null = null;
     let topLoadReady = false;
     const cancelTop = () => { pendingTop?.(false); pendingTop = null; };
@@ -217,12 +218,20 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       const first = messages[0];
       const last = messages.at(-1);
       const viewport = container.getBoundingClientRect();
-      const prefix = first?.closest("[data-thread-group]")?.previousElementSibling?.getAttribute("data-thread-placeholder");
-      const older = pages.hasOlder && (!prefix || prefix === "history-prefix")
-        && (!first || first.getBoundingClientRect().top >= viewport.top - 240);
+      const prefix = content.querySelector<HTMLElement>('[data-thread-placeholder="history-prefix"]');
+      const skipped = first?.closest("[data-thread-group]")?.previousElementSibling;
+      const olderBoundary = prefix ? prefix.getBoundingClientRect().bottom
+        : skipped?.hasAttribute("data-thread-placeholder") ? skipped.getBoundingClientRect().top
+        : first?.getBoundingClientRect().top;
+      const older = pages.hasOlder && (olderBoundary === undefined || olderBoundary >= viewport.top - 240);
       const newer = pages.hasNewer && (!last || last.getBoundingClientRect().bottom <= viewport.bottom + 240);
       const next = direction === "newer" ? newer ? "newer" : undefined : older ? "older" : newer ? "newer" : undefined;
       if (!next) return;
+      if (hasPendingPlaceholders()) {
+        pendingHistoryDemand = next;
+        return;
+      }
+      pendingHistoryDemand = null;
       pageAnchor = readingAnchor(container);
       pagePending = true;
       void pages.load(next).catch(() => undefined).finally(() => { pagePending = false; });
@@ -234,9 +243,10 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         container.scrollTo({ top: 0, behavior: "instant" });
         lastKnownScrollTop = container.scrollTop;
         store.setManualScroll(scrollKey, container.scrollTop, latestMessageTopClippedId(container), readingAnchor(container));
+        container.dispatchEvent(new Event("scroll"));
+        if (hasPendingPlaceholders()) return;
         const finish = pendingTop;
         pendingTop = null;
-        container.dispatchEvent(new Event("scroll"));
         finish(true);
         return;
       }
@@ -317,6 +327,11 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         }
       }
       rememberGeometry();
+      if (pendingHistoryDemand) {
+        const direction = pendingHistoryDemand;
+        pendingHistoryDemand = null;
+        if (hasScrollGesture()) demandHistory(direction);
+      }
     };
     const scrollToTop = async () => {
       if (!active) return false;
