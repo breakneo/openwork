@@ -34,7 +34,7 @@ function parseStableVersion(value: string): [number, number, number] | null {
   return [major, minor, patch]
 }
 
-function compareStableVersions(left: string, right: string) {
+export function compareStableVersions(left: string, right: string) {
   const leftParts = parseStableVersion(left)
   const rightParts = parseStableVersion(right)
   if (!leftParts || !rightParts) {

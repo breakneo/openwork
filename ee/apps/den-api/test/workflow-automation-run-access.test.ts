@@ -39,7 +39,7 @@ function seedRequiredEnv() {
   process.env.BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET ?? "y".repeat(32)
   process.env.BETTER_AUTH_URL = process.env.BETTER_AUTH_URL ?? "http://127.0.0.1:8790"
   process.env.CORS_ORIGINS = process.env.CORS_ORIGINS ?? "http://127.0.0.1:8790"
-  process.env.DEN_DASHBOARD_ADMIN_ONLY_ENABLED = "true"
+  process.env.DEN_DASHBOARD_ADMIN_ONLY_FROM_DESKTOP_VERSION = "0.17.0"
 }
 
 type Db = typeof import("../src/db.js").db
@@ -634,15 +634,19 @@ test("detached parents remain manageable but restoring app access still requires
     value: { orgMembershipId: foreign.viewerMemberId, role: "viewer" } })).rejects.toThrow("Plugin not found")
 })
 
-test("with administrator-only management switched off, workflow managers keep every app-bound permission published clients expect", async () => {
+test("until the desktop support floor reaches the compatible release, workflow managers keep every app-bound permission published clients expect", async () => {
   const { env } = await import("../src/env.js")
+  const { dashboardAdminOnlyEnforcedFor } = await import("../src/dashboard-admin-policy.js")
+  expect(dashboardAdminOnlyEnforcedFor({ fromDesktopVersion: "0.18.49", minSupportedDesktopVersion: "0.17.0" })).toBe(false)
+  expect(dashboardAdminOnlyEnforcedFor({ fromDesktopVersion: "0.18.49", minSupportedDesktopVersion: "0.18.49" })).toBe(true)
+  expect(dashboardAdminOnlyEnforcedFor({ fromDesktopVersion: null, minSupportedDesktopVersion: "0.19.0" })).toBe(false)
   const savedApps = await import("../src/saved-apps.js")
   const seeded = await seedWorkflowWithViewer()
   await grantAppManager(seeded)
   const view = await bindApp(seeded, "active")
   await expect(pluginStore.createConfigObjectVersion({ context: seeded.viewerContext, configObjectId: seeded.configObjectId, value: changedWorkflow }))
     .rejects.toThrow("Only organization owners and admins")
-  env.dashboardAdminOnlyEnabled = false
+  env.dashboardAdminOnlyFromDesktopVersion = "0.18.49"
   try {
     await pluginStore.createConfigObjectVersion({ context: seeded.viewerContext, configObjectId: seeded.configObjectId, value: changedWorkflow })
     for (const resource of appResources(seeded)) {
@@ -654,7 +658,7 @@ test("with administrator-only management switched off, workflow managers keep ev
     const views = await import("../src/artifact-views.js")
     expect((await views.retireArtifactView({ context: seeded.viewerContext, artifactViewId: view.id })).status).toBe("retired")
   } finally {
-    env.dashboardAdminOnlyEnabled = true
+    env.dashboardAdminOnlyFromDesktopVersion = "0.17.0"
   }
   await expect(pluginStore.createConfigObjectVersion({ context: seeded.viewerContext, configObjectId: seeded.configObjectId, value: changedWorkflow }))
     .rejects.toThrow("Only organization owners and admins")

@@ -151,7 +151,7 @@ const EnvSchema = z.object({
   DEN_CONNECT_LINK_KEY_ID: z.string().max(64).optional(),
   DEN_MCP_CONNECTIONS_GATING_ENABLED: z.string().optional(),
   DEN_GENERATED_ARTIFACT_VIEWS_ENABLED: z.string().optional(),
-  DEN_DASHBOARD_ADMIN_ONLY_ENABLED: z.string().optional(),
+  DEN_DASHBOARD_ADMIN_ONLY_FROM_DESKTOP_VERSION: z.string().optional(),
   SCIM_MAINTENANCE_INTERVAL_MS: z.string().optional(),
   POLAR_FEATURE_GATE_ENABLED: z.string().optional(),
   POLAR_API_BASE: z.string().optional(),
@@ -375,6 +375,15 @@ function isLocalRedisHost(hostname: string) {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1"
 }
 
+function normalizeStableDesktopVersion(value: string | undefined): string | null {
+  const trimmed = (value ?? "").trim().replace(/^v/, "")
+  if (!trimmed) return null
+  if (!/^\d+\.\d+\.\d+$/.test(trimmed)) {
+    throw new Error(`DEN_DASHBOARD_ADMIN_ONLY_FROM_DESKTOP_VERSION must be a stable desktop version like 0.18.49, received "${value}"`)
+  }
+  return trimmed
+}
+
 function parseBooleanFlag(value: string | undefined) {
   const normalized = value?.trim().toLowerCase()
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on"
@@ -540,9 +549,11 @@ const generatedArtifactViewsEnabled =
   (parsed.DEN_GENERATED_ARTIFACT_VIEWS_ENABLED ?? "false").trim().toLowerCase() === "true"
 // Administrator-only app management ships dark. Published desktop builds that
 // predate the matching controls still offer app management to Workflow managers,
-// so a Den deployment must not start answering 403 until a compatible desktop is
-// released and this switch is turned on for that deployment.
-const dashboardAdminOnlyEnabled = parseBooleanFlag(parsed.DEN_DASHBOARD_ADMIN_ONLY_ENABLED ?? "false")
+// so a deployment names the first compatible desktop release here and Den only
+// enforces the policy once its own minimum supported desktop version has reached
+// that release (see dashboard-admin-policy.ts). Unset means the previous
+// manager-based rules apply.
+const dashboardAdminOnlyFromDesktopVersion = normalizeStableDesktopVersion(parsed.DEN_DASHBOARD_ADMIN_ONLY_FROM_DESKTOP_VERSION)
 
 // Desktop availability stays fail-closed, while an entirely unconfigured
 // server preserves the published-client runtime. An explicit availability
@@ -703,7 +714,7 @@ export const env = {
   connectLink,
   mcpConnectionsGatingEnabled,
   generatedArtifactViewsEnabled,
-  dashboardAdminOnlyEnabled,
+  dashboardAdminOnlyFromDesktopVersion,
   scimMaintenanceIntervalMs: Number(parsed.SCIM_MAINTENANCE_INTERVAL_MS ?? "300000"),
   requireEmailVerification,
   passwordBreachScreeningEnabled,

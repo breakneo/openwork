@@ -14,7 +14,7 @@ import {
 } from "@openwork-ee/den-db/schema"
 import type { MemberTeamSummary, OrganizationContext } from "../../../orgs.js"
 import { db } from "../../../db.js"
-import { env } from "../../../env.js"
+import { dashboardAdminOnlyEnforced } from "../../../dashboard-admin-policy.js"
 import { getFreshPrivilegedSessionRequiredResponse, hasFreshPrivilegedSession, memberHasRole } from "../shared.js"
 
 export type PluginArchResourceKind = "config_object" | "connector_instance" | "marketplace" | "plugin"
@@ -110,14 +110,13 @@ export function isPluginArchOrgAdmin(context: PluginArchActorContext) {
 
 /**
  * Whether generated apps, and the Workflows and access that back them, may be
- * managed by this member. Administrator-only management is a deployment switch
- * (`DEN_DASHBOARD_ADMIN_ONLY_ENABLED`) so a Den can keep serving published
- * desktop builds that still offer these actions to Workflow managers until a
- * compatible desktop release is available. Off means the previous
- * manager-based rules apply unchanged.
+ * managed by this member. Administrator-only management activates only once
+ * every supported desktop release carries the matching controls (see
+ * dashboard-admin-policy.ts); until then the previous manager-based rules
+ * apply unchanged.
  */
 export function canManageDashboardApps(context: PluginArchActorContext) {
-  return !env.dashboardAdminOnlyEnabled || isPluginArchOrgAdmin(context)
+  return !dashboardAdminOnlyEnforced() || isPluginArchOrgAdmin(context)
 }
 
 export function requireDashboardAdmin(context: PluginArchActorContext) {
