@@ -189,12 +189,17 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
     synthetic(43),
   ].join(".");
   const opaqueCredential = "opaque-key-fixture-private-7p9";
-  const benignKeys = { monkey: "useful-control", statusCode: 422, exitCode: 1, tokenCount: 3, client_assertion_type: "jwt-bearer", code_challenge: "public-challenge", code_challenge_method: "S256", assertionCount: 2, codeVerifierLength: 43 };
-  const credentialKeys = ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "code_verifier", "codeVerifier", "pkce_verifier", "client_assertion", "clientAssertion", "jwt_assertion", "saml_assertion", "SAMLResponse"];
+  const rawCredential = "opaque7";
+  const benignKeys = { monkey: "useful-control", statusCode: 422, exitCode: 1, tokenCount: 3, client_assertion_type: "jwt-bearer", code_challenge: "public-challenge", code_challenge_method: "S256", assertionCount: 2, codeVerifierLength: 43, access_token_value_count: 2, client_secret_value_type: "string", code_verifier_value_length: 43, signing_key_method: "RSA", primary_key_value: "row-7", tokenizer_value: "word" };
+  const credentialKeys = ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "code_verifier", "codeVerifier", "pkce_verifier", "client_assertion", "clientAssertion", "jwt_assertion", "saml_assertion", "SAMLResponse", "access_token_value", "client_secret_value", "SecretAccessKeyValue", "code_verifier_value", "custom_token_payload", "signing_key_material"];
   const fixtures = [
     ...credentialKeys.map((key) => ({
       source: JSON.stringify({ nested: [{ [key]: opaqueCredential }], encoded: JSON.stringify({ [key]: opaqueCredential }), ...benignKeys }),
       marker: JSON.stringify({ nested: [{ [key]: "[redacted]" }], encoded: JSON.stringify({ [key]: "[redacted]" }), ...benignKeys }),
+    })),
+    ...credentialKeys.filter((key) => key.endsWith("_value") || key.endsWith("Value")).map((key) => ({
+      source: "log " + JSON.stringify({ nested: [{ [key]: rawCredential }], ...benignKeys }),
+      marker: "log " + JSON.stringify({ nested: [{ [key]: "[redacted]" }], ...benignKeys }),
     })),
     { source: "AKIA" + "BCDEFGHIJKLM2345", marker: "[redacted:aws-access-token]" },
     { source: `-----BEGIN PRIVATE KEY-----\n${synthetic(128)}\n-----END PRIVATE KEY-----`, marker: "[redacted:private-key]" },
@@ -276,14 +281,16 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
       expect((await query("session.search", { query: JSON.stringify(source).slice(1, -1), in: ["tool"], match: "phrase" })).results).toEqual([]);
       expect(records((await query("session.search", { query: JSON.stringify(marker).slice(1, -1), in: ["tool"], match: "phrase" })).results)).toHaveLength(1);
     }
-    expect(JSON.stringify(read)).not.toContain(opaqueCredential);
-    expect((await query("session.search", { query: opaqueCredential, in: ["tool"] })).results).toEqual([]);
+    for (const secret of [opaqueCredential, rawCredential]) {
+      expect(JSON.stringify(read)).not.toContain(secret);
+      expect((await query("session.search", { query: secret, in: ["tool"] })).results).toEqual([]);
+    }
     expect(records((await query("session.search", { query: "useful-control", in: ["tool"] })).results)).toHaveLength(1);
     for (let index = 0; index < credentialKeys.length; index += 1) {
       const projected = record(JSON.parse(text(JSON.parse(text(tools[index * 2]?.output)))));
       expect(projected).toMatchObject(benignKeys);
     }
-    evidence.recordAssertionEvidence("Opaque cloud credentials are removed by key context", "AWS keys, SessionToken, PKCE code_verifier and client/JWT/SAML assertions were redacted in nested objects and encoded JSON strings through tool input/output/error. Searching the opaque value returned no result; benign keys, assertion-type metadata, public code challenges and length/count fields survived byte-for-byte and remained searchable.", true);
+    evidence.recordAssertionEvidence("Opaque cloud credentials are removed by key context", "Credential segments and pairs, including access_token_value, client_secret_value, SecretAccessKeyValue, code_verifier_value and arbitrary payload/material suffixes, were redacted in nested objects and encoded JSON strings through tool input/output/error. Searching the opaque value returned no result; benign keys, assertion-type metadata, public code challenges and length/count fields survived byte-for-byte and remained searchable.", true);
     evidence.recordAssertionEvidence("Pinned Gitleaks rules redact credentials across production read, search and activity", "A test-owned read-only HTTP witness supplied one synthetic positive for each of the 17 selected Gitleaks rule IDs at b58d3f102cf3a2c84cb7f923d05c25c9b1aed84b. Exact rule-ID markers replaced secrets in output, nested input, JSON-encoded nested strings and tool errors; generic-api-key preserved assignment context. Activity emitted only fixed failure labels with no credential payload; negative secret searches and positive marker searches agreed. No live credentials or inference were used.", true);
     const capped = tools.find((tool) => tool.callId === "call_cap");
     expect(JSON.stringify(prefix).length - 1).toBe(1975);

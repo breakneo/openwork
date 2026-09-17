@@ -904,14 +904,17 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     expect(fake.requests).toHaveLength(0);
   });
 
-  test.each(["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "aws.secret.access.key", "code_verifier", "codeVerifier", "pkce_verifier", "client_assertion", "clientAssertion", "jwt_assertion", "saml_assertion", "SAMLResponse"])("credential key %s is redacted in nested tool objects and JSON strings before search", async (key) => {
-    const secret = "opaque-fixture-credential-7p9";
-    const benign = { monkey: "useful", statusCode: 422, exitCode: 1, tokenCount: 3, client_assertion_type: "jwt-bearer", code_challenge: "public-challenge", code_challenge_method: "S256", assertionCount: 2, codeVerifierLength: 43 };
+  test.each(["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "aws.secret.access.key", "code_verifier", "codeVerifier", "pkce_verifier", "client_assertion", "clientAssertion", "jwt_assertion", "saml_assertion", "SAMLResponse", "access_token_value", "client_secret_value", "SecretAccessKeyValue", "code_verifier_value", "custom_token_payload", "signing_key_material"])("credential key %s is redacted in nested tool objects and JSON strings before search", async (key) => {
+    const secret = "opaque7";
+    const benign = { monkey: "useful", statusCode: 422, exitCode: 1, tokenCount: 3, client_assertion_type: "jwt-bearer", code_challenge: "public-challenge", code_challenge_method: "S256", assertionCount: 2, codeVerifierLength: 43, access_token_value_count: 2, client_secret_value_type: "string", code_verifier_value_length: 43, signing_key_method: "RSA", primary_key_value: "row-7", tokenizer_value: "word" };
     const payload = { credentials: { [key]: secret }, encoded: JSON.stringify({ nested: [{ [key]: secret }] }), ...benign };
     const expected = { credentials: { [key]: "[redacted]" }, encoded: JSON.stringify({ nested: [{ [key]: "[redacted]" }] }), ...benign };
+    const rawJson = "log " + JSON.stringify({ nested: [{ [key]: secret }], ...benign });
+    const rawExpected = "log " + JSON.stringify({ nested: [{ [key]: "[redacted]" }], ...benign });
     startFakeOpenWorkServer({ messages: [{ info: { id: "msg_credentials", role: "assistant" }, parts: [
       completedTool("call_credentials", payload, JSON.stringify(payload)),
       { ...completedTool("call_error", payload, ""), state: { status: "error", input: payload, error: JSON.stringify(payload), time: { start: 310, end: 311 } } },
+      completedTool("call_raw", { diagnostic: rawJson }, rawJson),
     ] }] });
     const plugin = await OpenWorkExtensionsPreview();
     const raw = await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: "ses_alpha", parts: ["tool"] } });
@@ -920,6 +923,8 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     expect(tools[0].input).toBe(JSON.stringify(expected));
     expect(tools[0].output).toBe(JSON.stringify(JSON.stringify(expected)));
     expect(tools[1].error).toBe(JSON.stringify(JSON.stringify(expected)));
+    expect(tools[2].input).toBe(JSON.stringify({ diagnostic: rawExpected }));
+    expect(tools[2].output).toBe(JSON.stringify(rawExpected));
     expect(raw).not.toContain(secret);
     const search = async (query: string) => affordanceResultSchema("session.search", searchResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.search", args: { query, in: ["tool"] } }))).result;
     expect((await search(secret)).results).toEqual([]);

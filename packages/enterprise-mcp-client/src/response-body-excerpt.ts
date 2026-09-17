@@ -34,13 +34,18 @@ function normalizeCredentialKey(key: string): string {
   return normalized.join("").toLowerCase()
 }
 
+const CREDENTIAL_SEGMENTS = new Set(["token", "grant", "secret", "password", "passwd", "authorization", "cookie", "assertion"])
+const CREDENTIAL_PAIRS = new Set(["api_key", "access_key", "private_key", "signing_key", "encryption_key", "authorization_code", "auth_code", "code_verifier", "pkce_verifier", "saml_response"])
+const CREDENTIAL_METADATA_SUFFIXES = new Set(["count", "length", "type", "method", "status"])
+
 export function isSensitiveCredentialKey(key: string): boolean {
   const normalized = normalizeCredentialKey(key)
-  return /(?:^|_)(?:token|grant|secret|password|passwd|authorization|cookie|assertion)$/.test(normalized)
-    || /(?:^|_)(?:api|access|private|signing|encryption)_key(?:_id)?$/.test(normalized)
-    || /(?:^|_)(?:authorization|auth)_code$/.test(normalized)
-    || /(?:^|_)(?:(?:code|pkce)_verifier|saml_response)$/.test(normalized)
-    || /^(?:key|code|codeverifier|pkceverifier|samlresponse|clientassertion|(?:api|access|refresh|session|client)(?:key|token|secret))$/.test(normalized)
+  const segments = normalized.split("_").filter(Boolean)
+  if (CREDENTIAL_METADATA_SUFFIXES.has(segments.at(-1) ?? "")) return false
+  return normalized === "key" || normalized === "code" || segments.some((segment, index) =>
+    CREDENTIAL_SEGMENTS.has(segment)
+    || (index + 1 < segments.length && CREDENTIAL_PAIRS.has(`${segment}_${segments[index + 1]}`))
+    || /^(?:codeverifier|pkceverifier|samlresponse|clientassertion|(?:api|access|refresh|session|client)(?:key|token|secret))$/.test(segment))
 }
 
 function credentialKey(key: string, policy: CredentialPolicy): boolean {
