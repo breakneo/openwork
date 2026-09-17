@@ -14,7 +14,7 @@ client = importlib.import_module('mcp-put-release-client')
 ROOT = client.ROOT
 request = client.request
 PROJECT = 'mcp-put-proof-release-tenant'
-ORIGINAL_SHA = 'c5f6ca7feb2abf0ec2229630cb78f981dec0b0fe5ee06e5998a21fd6d131f6bc'
+ORIGINAL_SHA = '06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8'
 ORIGINAL = pathlib.Path('reports/mcp-put-by-key-transcript-2026-09-14.json')
 
 

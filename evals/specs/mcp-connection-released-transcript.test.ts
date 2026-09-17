@@ -174,8 +174,8 @@ test("original single-org provisioning refusal remains a configuration boundary,
 
 test("supplemental released tenant receipts preserve original evidence and use distinct legitimate owners", async ({ evidence }) => {
   expect(receipts).toHaveLength(51);
-  expect(createHash("sha256").update(originalText).digest("hex")).toBe("c5f6ca7feb2abf0ec2229630cb78f981dec0b0fe5ee06e5998a21fd6d131f6bc");
-  expect(tenantTranscript.originalTranscriptSha256).toBe("c5f6ca7feb2abf0ec2229630cb78f981dec0b0fe5ee06e5998a21fd6d131f6bc");
+  expect(createHash("sha256").update(originalText).digest("hex")).toBe("06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8");
+  expect(tenantTranscript.originalTranscriptSha256).toBe("06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8");
   expect(tenantTranscript.kind).toBe("recorded-release-tenant-blackbox");
   expect(tenantTranscript.project).toBe("mcp-put-proof-release-tenant");
   const inspection = record(tenantTranscript.inspection);
@@ -206,7 +206,7 @@ test("supplemental released tenant receipts preserve original evidence and use d
     if (text(row.label).startsWith("tenant-missing-key-")) expect(headers).not.toHaveProperty("x-api-key");
     else expect(headers["x-api-key"]).toBe("[REDACTED]");
   }
-  evidence.recordAssertionEvidence("Supplemental release tenant provenance", "Same pinned release, legitimate multi_org configuration, two different signup users/owner organizations/issued keys; original 51 receipts remain byte-identical and proof carries no sessions.", true);
+  evidence.recordAssertionEvidence("Supplemental release tenant provenance", "Same pinned release, legitimate multi_org configuration, two different signup users/owner organizations/issued keys; sanitized copies retain the original 51 receipt outcomes and proof carries no sessions.", true);
 });
 
 test("released case 8 denies foreign IDs even with spoofed org headers and keeps same-key resources disjoint", async ({ evidence }) => {

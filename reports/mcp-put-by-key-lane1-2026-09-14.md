@@ -1,5 +1,7 @@
 # Lane1 — released MCP keyed PUT black-box receipts
 
+Public-copy notice: retired witness hosts in the associated transcripts now use reserved example domains; linked integrity checks use the sanitized copies. Historical byte-identity statements and hashes below refer to the original recording, not the current public bytes. No request outcomes were changed or rerun. See the consolidated report's explicit synthetic allowlist and confidentiality boundary. Prior Git objects and external media have not been erased.
+
 Date: 2026-09-14. **Requested runtime coverage is complete:** cases 1–8 and the exact HTTPS recipe executed with expected results. The original single-org provisioning refusal was a configuration boundary, not a product authentication failure. After explicit scope expansion, an isolated supplemental multi-org stack running the identical pinned release verified the foreign-org case. Formal testkit verification remains **Incomplete/pending the orchestrator's narrow run**; broader static-check failures are noted below. The original 51-receipt transcript remains byte-identical.
 
 ## Isolation and release actually executed

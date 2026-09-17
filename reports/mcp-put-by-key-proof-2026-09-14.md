@@ -1,5 +1,11 @@
 # Released MCP keyed PUT and post-deploy proof
 
+## Public-copy confidentiality boundary
+
+This closed engagement proof is retained only as historical reference; it is not for merge or rehoming. The public copies replace retired witness hostnames with reserved example domains and normalize the job filename and recorded path. Linked checksums now identify these sanitized copies. Request outcomes, timestamps, synthetic identity relationships, and script bytes are unchanged; no runtime observation was rerun or invented by this cleanup. Earlier byte-identity statements and report hashes below describe the historical recording, not the current sanitized copies. Removing links does not erase prior Git objects, external media, caches, or earlier comment revisions.
+
+Explicit synthetic allowlist: the Release Administrator and Release Tenant A/B role identities; their three `example.com` email addresses; the disposable Release Proof organizations and their recorded resource/user/member/team/key IDs; `rs-proof-*`, `lane3-*`, and `platform-tools` fixture keys; reserved example domains and loopback endpoints; the deliberately public disposable database credential identified below; random test sentinels and non-reversible witness fingerprints. These are test fixtures, not real people or customer accounts. Public upstream project/image provenance and parameterized API paths are not personal repository or filesystem identifiers. No other real-world identifier is allowlisted by this paragraph.
+
 Date: 2026-09-14. Source/harness base: `d203b574150c06a14b86443b1d8cb32c451a1b45`.
 Branch: `test/mcp-connections-by-key-proof`; isolated worktree: `openwork-mcp-put-proof`.
 
@@ -41,7 +47,7 @@ Local Docker was explicitly requested and available. Lane1 and Lane3 ran the pub
 
 ## Lane3 — whole job twice
 
-Executable: `examples/declarative-org/rs-post-deploy-job.sh` (Bash, curl, jq; no embedded secrets). Final fail-closed script was executed twice consecutively, with execution-time hashes, argv, timestamps and exits in `jobInvocations`. Both exits **0**; source SHA-256 `747d64f4ae6b70c64e5c79429efc2d933687c0da12066044609abf6492814158`.
+Executable: `examples/declarative-org/post-deploy-job.sh` (Bash, curl, jq; no embedded secrets). Final fail-closed script was executed twice consecutively, with execution-time hashes, argv, timestamps and exits in `jobInvocations`. Both exits **0**; source SHA-256 `747d64f4ae6b70c64e5c79429efc2d933687c0da12066044609abf6492814158`.
 
 | Mutation | Run 1 | Run 2 | Identity |
 | --- | --- | --- | --- |

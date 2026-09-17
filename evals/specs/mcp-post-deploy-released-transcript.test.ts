@@ -110,7 +110,7 @@ test("Lane3 recorded job uses the pinned release and preserves both prior transc
     const bytes = await readFile(new URL(`../../reports/${filename}`, import.meta.url));
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(hex(expected, 64));
   }
-  const job = await readFile(new URL("../../examples/declarative-org/rs-post-deploy-job.sh", import.meta.url));
+  const job = await readFile(new URL("../../examples/declarative-org/post-deploy-job.sh", import.meta.url));
   expect(createHash("sha256").update(job).digest("hex")).toBe(hex(transcript.jobSha256, 64));
   for (const run of ["run1", "run2"]) {
     const api = body(`${run}-openapi`);
@@ -124,7 +124,7 @@ test("Lane3 recorded job uses the pinned release and preserves both prior transc
     expect(record(request.headers)).not.toHaveProperty("Authorization");
     expect(record(request.headers)).not.toHaveProperty("Cookie");
   }
-  evidence.recordAssertionEvidence("Released API-key job provenance", "Pinned 0.18.46 container, unchanged Compose and prior evidence; OpenAPI reports dev, while the actual release is established by the image digest. No Den session headers.", true);
+  evidence.recordAssertionEvidence("Released API-key job provenance", "Pinned 0.18.46 container, unchanged Compose and checksum-linked sanitized prior receipts; OpenAPI reports dev, while the actual release is established by the image digest. No Den session headers.", true);
 });
 
 test("final producer records exactly two real applies with execution-time arguments, timestamps, exits and digests", async ({ evidence }) => {
@@ -134,8 +134,8 @@ test("final producer records exactly two real applies with execution-time argume
   const invocations = records(transcript.jobInvocations);
   expect(invocations).toHaveLength(2);
   expect(invocations.map((row) => row.argv)).toEqual([
-    ["bash", "examples/declarative-org/rs-post-deploy-job.sh", "apply", "run1"],
-    ["bash", "examples/declarative-org/rs-post-deploy-job.sh", "apply", "run2"],
+    ["bash", "examples/declarative-org/post-deploy-job.sh", "apply", "run1"],
+    ["bash", "examples/declarative-org/post-deploy-job.sh", "apply", "run2"],
   ]);
   let previousEnd = 0;
   for (const invocation of invocations) {
@@ -178,7 +178,7 @@ test("recipe rerun observes actual incoming headers without backfilling historic
   const supplemental = record(JSON.parse(await readFile(new URL("../../reports/mcp-put-by-key-recipe-headers-transcript-2026-09-14.json", import.meta.url), "utf8")));
   expect(supplemental.kind).toBe("released-recipe-observed-headers-rerun");
   expect(supplemental.historicalHeadersBackfilled).toBe(false);
-  expect(supplemental.originalTranscriptSha256).toBe("c5f6ca7feb2abf0ec2229630cb78f981dec0b0fe5ee06e5998a21fd6d131f6bc");
+  expect(supplemental.originalTranscriptSha256).toBe("06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8");
   expect(supplemental.containerImage).toBe(record(transcript.inspection).containerImage);
   const rows = records(supplemental.requests);
   expect(rows).toHaveLength(5);

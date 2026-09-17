@@ -91,7 +91,7 @@ def run():
         env['OMIT_OAUTH_CLIENT_SECRET'] = '1'
     else:
         env['OMIT_OAUTH_CLIENT_SECRET'] = '0'
-    script = pathlib.Path('examples/declarative-org/rs-post-deploy-job.sh')
+    script = pathlib.Path('examples/declarative-org/post-deploy-job.sh')
     args = ['bash', str(script), *sys.argv[2:]]
     invocation = {'argv': args, 'mode': args[2], 'runLabel': args[3] if len(args) > 3 else None, 'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'scriptSha256': hashlib.sha256(script.read_bytes()).hexdigest(), 'exitCode': None, 'curlExecutable': shutil.which('curl', path=env['PATH']), 'jqExecutable': shutil.which('jq', path=env['PATH'])}
     index = len(list(ROOT.glob('invocation-*.json')))
@@ -186,7 +186,7 @@ def export():
         provider = receipt['response']['body']['llmProvider']
         checks.append({'label': label, 'storedCredentialPresent': bool(provider.get('apiKey')), 'storedCredentialMatchesConfigured': provider.get('apiKey') == state['providerSecret']})
     immutable = {}
-    for name, expected in [('mcp-put-by-key-transcript-2026-09-14.json', 'c5f6ca7feb2abf0ec2229630cb78f981dec0b0fe5ee06e5998a21fd6d131f6bc'), ('mcp-put-by-key-tenant-transcript-2026-09-14.json', '8df72de0df9edc56606aa0f72e5d40f448ea26afd726da503327787682d7ca0e')]:
+    for name, expected in [('mcp-put-by-key-transcript-2026-09-14.json', '06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8'), ('mcp-put-by-key-tenant-transcript-2026-09-14.json', '786d2040ed1c95eee723e6f81c25d61a4dbdc536f88a4c9718ef7e78837dd196')]:
         digest = hashlib.sha256((pathlib.Path('reports') / name).read_bytes()).hexdigest()
         if digest != expected:
             raise RuntimeError('Prior lane transcript changed')

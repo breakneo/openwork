@@ -1,5 +1,7 @@
 # Lane3 — released post-deploy job, two-run convergence and usability
 
+Public-copy notice: retired witness hosts now use reserved example domains, and the job filename and recorded path are normalized. Linked integrity checks use the sanitized copies. Historical byte-identity statements and hashes below refer to the original recording, not the current public bytes. Script bytes and request outcomes are unchanged; this cleanup did not rerun the release. See the consolidated report's explicit synthetic allowlist and confidentiality boundary. Prior Git objects and external media have not been erased.
+
 Date: 2026-09-14. **Final audit rerun, recording revision 2.** The fail-closed script was actually executed twice at 16:31 UTC after its bytes changed. Both complete apply invocations exited 0; all seven convergent mutations in run 2 returned 200, and the independently fetched resource counts and IDs were identical. `jobInvocations` now records actual argv, UTC start/end, exit, resolved curl/jq paths and script SHA-256 captured at execution (also checked afterwards), rather than an export-time source hash alone. This rerun replaces the previous Lane3 artifact SHA-256 `7c341e0250954711616dbf24afede97d6d95f8ce6782a5064950c0aab466e63e`; the superseded artifact is archived privately. Destructive lifecycle and negative/protocol controls remain separate. Formal testkit verification/publication remains pending the orchestrator; no testkit Passed verdict or product fix is claimed.
 
 ## Three requested verdicts
@@ -24,7 +26,7 @@ The missing-provider-credential negative returned an HTTP **200 diagnostic envel
 
 ## Actual job and contract compatibility
 
-Executable script: `examples/declarative-org/rs-post-deploy-job.sh`. It is Bash + **curl/jq only** for the job, with secret references supplied through environment variables and owner-only private output. It disables shell tracing, never prints secret bodies, and does not automatically retry uncertain writes. The producer now fails nonzero immediately on curl failure or any unexpected HTTP status, with an explicit expected status recorded per request. Only literal GET `/v1/members` and `/v1/teams` may expect diagnostic 404. Provider connect requires a nonempty stored credential; usability requires `result.ok:true`, upstream status 200 and exactly the requested model verified as `ok`. Lifecycle requires delete 200/`deleted:true`, recreate 201 with a different nonempty ID, and matching verification GET; cleanup requires each expected HTTP 200 and `ok:true`. Separate Python helpers only prepare private environment, orchestrate the runs/controls, provide the synthetic server, and sanitize evidence.
+Executable script: `examples/declarative-org/post-deploy-job.sh`. It is Bash + **curl/jq only** for the job, with secret references supplied through environment variables and owner-only private output. It disables shell tracing, never prints secret bodies, and does not automatically retry uncertain writes. The producer now fails nonzero immediately on curl failure or any unexpected HTTP status, with an explicit expected status recorded per request. Only literal GET `/v1/members` and `/v1/teams` may expect diagnostic 404. Provider connect requires a nonempty stored credential; usability requires `result.ok:true`, upstream status 200 and exactly the requested model verified as `ok`. Lifecycle requires delete 200/`deleted:true`, recreate 201 with a different nonempty ID, and matching verification GET; cleanup requires each expected HTTP 200 and `ok:true`. Separate Python helpers only prepare private environment, orchestrate the runs/controls, provide the synthetic server, and sanitize evidence.
 
 The live release OpenAPI was fetched before implementation and at the beginning of **both jobs**. Every fetch returned 200; the keyed MCP PUT route was present. **`info.version` was `dev`**, and the job logged that actual value. The inspected image digest/labels, not that generic OpenAPI version string, establish the release.
 
@@ -85,7 +87,7 @@ The synthetic OAuth fixture checks client ID/secret, redirect URI and PKCE. Its 
 
 New Lane3 files only:
 
-- `examples/declarative-org/rs-post-deploy-job.sh` — executable job; SHA-256 `747d64f4ae6b70c64e5c79429efc2d933687c0da12066044609abf6492814158`.
+- `examples/declarative-org/post-deploy-job.sh` — executable job; SHA-256 `747d64f4ae6b70c64e5c79429efc2d933687c0da12066044609abf6492814158`.
 - `evals/fixtures/mcp-post-deploy-release.py` — private-state orchestration, live-contract discovery, controls, comparison and redaction.
 - `evals/fixtures/mcp-post-deploy-witness.py` — enforcing synthetic OpenAI-compatible/OAuth/MCP server.
 - `reports/mcp-put-by-key-job-transcript-2026-09-14.json` — revision 2: **71 complete client request/response receipts**, **27 sanitized upstream witness receipts**, exactly **two actual applies in `jobInvocations`**, three separate setup/lifecycle/cleanup invocation receipts, image/job provenance, pre-redaction credential checks and full stable snapshots. All three full OpenAPI responses are retained. Final sanitized SHA-256: `8a3f1df51be19ab43eebfbfb17b4cc8acfd069f5c6eb296b380ee8e3487c1196`.
@@ -97,7 +99,7 @@ Credential fields, API/session/token headers, signed OAuth state/code and actual
 
 Executed checks:
 
-- `bash -n examples/declarative-org/rs-post-deploy-job.sh` and executable-bit check: completed.
+- `bash -n examples/declarative-org/post-deploy-job.sh` and executable-bit check: completed.
 - Python compilation for both Lane3 fixtures: completed; cache stored outside git.
 - Focused dependency lint for the new spec: **no violations**, 5 modules / 4 dependencies.
 - `pnpm --dir evals typecheck`: **2 errors in 451 files**, both outside Lane3: `evals/packages/env/test/app-web-runtime.test.ts:64` (TS2339, `OPENWORK_TOKEN`) and `evals/specs/session-attention-rollup.test.ts:27` (TS2345). No Lane3 error. Script reports lifecycle exit 1.
@@ -107,7 +109,7 @@ Executed checks:
 
 ## Final invocation receipts and fail-closed checks
 
-Both actual applies used `bash examples/declarative-org/rs-post-deploy-job.sh apply <run>` and the same script SHA-256 `747d64f4ae6b70c64e5c79429efc2d933687c0da12066044609abf6492814158`. Before/after hashes matched for all five real invocations. The wrapper recorded the installed real executables `/run/current-system/sw/bin/curl` and `/run/current-system/sw/bin/jq`, not the isolated failure fixture.
+Both actual applies used `bash examples/declarative-org/post-deploy-job.sh apply <run>` and the same script SHA-256 `747d64f4ae6b70c64e5c79429efc2d933687c0da12066044609abf6492814158`. Before/after hashes matched for all five real invocations. The wrapper recorded the installed real executables `/run/current-system/sw/bin/curl` and `/run/current-system/sw/bin/jq`, not the isolated failure fixture.
 
 | Actual arguments after script path | Started UTC | Ended UTC | Exit |
 | --- | --- | --- | ---: |

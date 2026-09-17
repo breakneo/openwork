@@ -645,7 +645,7 @@
       "at": "2026-09-14T15:09:24.062481+00:00",
       "request": {
         "method": "POST",
-        "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+        "url": "https://release-witness.example.com/bearer",
         "headers": {
           "Content-Type": "application/json"
         },
@@ -674,7 +674,7 @@
       "at": "2026-09-14T15:09:24.382732+00:00",
       "request": {
         "method": "POST",
-        "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+        "url": "https://release-witness.example.com/public",
         "headers": {
           "Content-Type": "application/json"
         },
@@ -725,7 +725,7 @@
         },
         "body": {
           "name": "Release proof public",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -743,7 +743,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof public",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -803,7 +803,7 @@
         },
         "body": {
           "name": "Release proof public",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -821,7 +821,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof public",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -888,7 +888,7 @@
               "id": "emc_01m2g7f566efnvzdp35rq95cky",
               "name": "Release proof public",
               "externalKey": "rs-proof-1",
-              "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+              "url": "https://release-witness.example.com/public",
               "authType": "none",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -981,7 +981,7 @@
         },
         "body": {
           "name": "Release proof team scoped",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1001,7 +1001,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof team scoped",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1068,7 +1068,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof team scoped",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1126,7 +1126,7 @@
         },
         "body": {
           "name": "Release proof omitted access",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false
@@ -1139,7 +1139,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof omitted access",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1204,7 +1204,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof omitted access",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1260,7 +1260,7 @@
         },
         "body": {
           "name": "Release proof public",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1302,7 +1302,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof omitted access",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1359,7 +1359,7 @@
         "body": {
           "expectedUpdatedAt": "2026-09-14T15:09:49.025Z",
           "name": "Release proof ID rename",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1377,7 +1377,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof ID rename",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1436,7 +1436,7 @@
         "body": {
           "expectedUpdatedAt": "2026-09-14T15:09:49.025Z",
           "name": "Release proof stale rejected",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1477,7 +1477,7 @@
           "id": "emc_01m2g7f566efnvzdp35rq95cky",
           "name": "Release proof ID rename",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1533,7 +1533,7 @@
         },
         "body": {
           "name": "Release proof bearer",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+          "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1552,7 +1552,7 @@
           "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
           "name": "Release proof bearer",
           "externalKey": "rs-proof-auth",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+          "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1619,7 +1619,7 @@
           "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
           "name": "Release proof bearer",
           "externalKey": "rs-proof-auth",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+          "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1698,7 +1698,7 @@
           "inspection": {
             "request": {
               "method": "POST",
-              "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+              "url": "https://release-witness.example.com/bearer",
               "startedAt": "2026-09-14T15:09:49.838Z",
               "headers": [
                 {
@@ -1803,7 +1803,7 @@
         },
         "body": {
           "name": "Release proof bearer retained",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+          "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1821,7 +1821,7 @@
           "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
           "name": "Release proof bearer retained",
           "externalKey": "rs-proof-auth",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+          "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1886,7 +1886,7 @@
           "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
           "name": "Release proof bearer retained",
           "externalKey": "rs-proof-auth",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+          "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -1965,7 +1965,7 @@
           "inspection": {
             "request": {
               "method": "POST",
-              "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+              "url": "https://release-witness.example.com/bearer",
               "startedAt": "2026-09-14T15:09:50.205Z",
               "headers": [
                 {
@@ -2116,7 +2116,7 @@
         },
         "body": {
           "name": "Release proof public",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -2134,7 +2134,7 @@
           "id": "emc_01m2g7f8ypedev7g18x76ns91h",
           "name": "Release proof public",
           "externalKey": "rs-proof-1",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -2193,7 +2193,7 @@
         },
         "body": {
           "name": "Release proof public",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -2256,7 +2256,7 @@
               "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
               "name": "Release proof bearer retained",
               "externalKey": "rs-proof-auth",
-              "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/bearer",
+              "url": "https://release-witness.example.com/bearer",
               "authType": "apikey",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -2300,7 +2300,7 @@
               "id": "emc_01m2g7f8ypedev7g18x76ns91h",
               "name": "Release proof public",
               "externalKey": "rs-proof-1",
-              "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+              "url": "https://release-witness.example.com/public",
               "authType": "none",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -2371,7 +2371,7 @@
         "method": "PUT",
         "body": {
           "name": "Release exact recipe",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -2405,7 +2405,7 @@
           "id": "emc_01m2g7h91eemn8g9kye3bmn0s7",
           "name": "Release exact recipe",
           "externalKey": "platform-tools",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -2472,7 +2472,7 @@
         "method": "PUT",
         "body": {
           "name": "Release exact recipe",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -2506,7 +2506,7 @@
           "id": "emc_01m2g7h91eemn8g9kye3bmn0s7",
           "name": "Release exact recipe",
           "externalKey": "platform-tools",
-          "url": "https://cook-passenger-jokes-wishing.trycloudflare.com/public",
+          "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,

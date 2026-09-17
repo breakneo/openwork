@@ -29,7 +29,7 @@
     {
       "argv": [
         "bash",
-        "examples/declarative-org/rs-post-deploy-job.sh",
+        "examples/declarative-org/post-deploy-job.sh",
         "apply",
         "run1"
       ],
@@ -47,7 +47,7 @@
     {
       "argv": [
         "bash",
-        "examples/declarative-org/rs-post-deploy-job.sh",
+        "examples/declarative-org/post-deploy-job.sh",
         "apply",
         "run2"
       ],
@@ -67,7 +67,7 @@
     {
       "argv": [
         "bash",
-        "examples/declarative-org/rs-post-deploy-job.sh",
+        "examples/declarative-org/post-deploy-job.sh",
         "prepare"
       ],
       "mode": "prepare",
@@ -84,7 +84,7 @@
     {
       "argv": [
         "bash",
-        "examples/declarative-org/rs-post-deploy-job.sh",
+        "examples/declarative-org/post-deploy-job.sh",
         "lifecycle"
       ],
       "mode": "lifecycle",
@@ -101,7 +101,7 @@
     {
       "argv": [
         "bash",
-        "examples/declarative-org/rs-post-deploy-job.sh",
+        "examples/declarative-org/post-deploy-job.sh",
         "cleanup"
       ],
       "mode": "cleanup",
@@ -117,8 +117,8 @@
     }
   ],
   "priorTranscripts": {
-    "mcp-put-by-key-transcript-2026-09-14.json": "c5f6ca7feb2abf0ec2229630cb78f981dec0b0fe5ee06e5998a21fd6d131f6bc",
-    "mcp-put-by-key-tenant-transcript-2026-09-14.json": "8df72de0df9edc56606aa0f72e5d40f448ea26afd726da503327787682d7ca0e"
+    "mcp-put-by-key-transcript-2026-09-14.json": "06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8",
+    "mcp-put-by-key-tenant-transcript-2026-09-14.json": "786d2040ed1c95eee723e6f81c25d61a4dbdc536f88a4c9718ef7e78837dd196"
   },
   "comparison": {
     "countsAndIdsIdentical": true,
@@ -607,9 +607,9 @@
       "response": {
         "status": 200,
         "body": {
-          "issuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
-          "authorization_endpoint": "https://sand-chart-antivirus-rangers.trycloudflare.com/authorize",
-          "token_endpoint": "https://sand-chart-antivirus-rangers.trycloudflare.com/token",
+          "issuer": "https://job-witness.example.com",
+          "authorization_endpoint": "https://job-witness.example.com/authorize",
+          "token_endpoint": "https://job-witness.example.com/token",
           "response_types_supported": [
             "code"
           ],
@@ -640,9 +640,9 @@
       "response": {
         "status": 200,
         "body": {
-          "resource": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "resource": "https://job-witness.example.com/oauth/mcp",
           "authorization_servers": [
-            "https://sand-chart-antivirus-rangers.trycloudflare.com"
+            "https://job-witness.example.com"
           ],
           "scopes_supported": [
             "lane3.read"
@@ -716,7 +716,7 @@
         "body": {
           "grant_type": "authorization_code",
           "redirect_uri": "http://localhost:18788/v1/mcp-connections/oauth/callback",
-          "resource": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "resource": "https://job-witness.example.com/oauth/mcp",
           "client_id": "lane3-client"
         },
         "secretFingerprint": "fc4e849ecabb438d"
@@ -66831,7 +66831,7 @@
         },
         "body": {
           "name": "Lane3 existing MCP",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -66849,7 +66849,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -132257,7 +132257,7 @@
             "env": [
               "LANE3_PROVIDER_API_KEY"
             ],
-            "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+            "api": "https://job-witness.example.com/v1",
             "models": [
               {
                 "id": "lane3-model",
@@ -132304,7 +132304,7 @@
               "env": [
                 "LANE3_PROVIDER_API_KEY"
               ],
-              "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1"
+              "api": "https://job-witness.example.com/v1"
             },
             "credentialMode": "shared",
             "hasApiKey": true,
@@ -132349,7 +132349,7 @@
             "name": "Lane3 OpenAI-compatible",
             "providerConfig": {
               "id": "lane3-provider",
-              "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+              "api": "https://job-witness.example.com/v1",
               "env": [
                 "LANE3_PROVIDER_API_KEY"
               ],
@@ -132408,7 +132408,7 @@
           "Content-Type": "application/json"
         },
         "body": {
-          "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+          "api": "https://job-witness.example.com/v1",
           "apiKey": "[REDACTED]",
           "modelIds": [
             "lane3-model"
@@ -132422,9 +132422,9 @@
           "result": {
             "ok": true,
             "vendor": "openai-compatible",
-            "normalizedApi": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+            "normalizedApi": "https://job-witness.example.com/v1",
             "attempted": [
-              "https://sand-chart-antivirus-rangers.trycloudflare.com/v1"
+              "https://job-witness.example.com/v1"
             ],
             "models": [
               {
@@ -132778,7 +132778,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -132836,7 +132836,7 @@
         "body": {
           "expectedUpdatedAt": "2026-09-14T16:31:20.632Z",
           "name": "Lane3 managed existing MCP",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -132854,7 +132854,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -132913,7 +132913,7 @@
         },
         "body": {
           "name": "Lane3 OAuth MCP",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "url": "https://job-witness.example.com/oauth/mcp",
           "authType": "oauth",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -132929,7 +132929,7 @@
             "tokenEndpointAuthMethod": "client_secret_post",
             "clientSecret": "[REDACTED]"
           },
-          "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+          "authorizationServerIssuer": "https://job-witness.example.com",
           "requestedScopes": [
             "lane3.read"
           ]
@@ -132942,7 +132942,7 @@
           "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "url": "https://job-witness.example.com/oauth/mcp",
           "authType": "oauth",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -132980,7 +132980,7 @@
           "oauthClientMetadataUrl": "http://localhost:18788/oauth/client-metadata.json",
           "oauthCallbackMode": "shared-v1",
           "oauthRegistrationSource": "pre-registered",
-          "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+          "authorizationServerIssuer": "https://job-witness.example.com",
           "requestedScopes": [
             "lane3.read"
           ],
@@ -133034,7 +133034,7 @@
                 "rm -rf"
               ],
               "browserOrigins": [
-                "https://sand-chart-antivirus-rangers.trycloudflare.com"
+                "https://job-witness.example.com"
               ],
               "blockBrowserUploads": true
             }
@@ -133073,7 +133073,7 @@
                   "rm -rf"
                 ],
                 "browserOrigins": [
-                  "https://sand-chart-antivirus-rangers.trycloudflare.com"
+                  "https://job-witness.example.com"
                 ],
                 "blockBrowserUploads": true
               }
@@ -133167,7 +133167,7 @@
               "name": "Lane3 OpenAI-compatible",
               "providerConfig": {
                 "id": "lane3-provider",
-                "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+                "api": "https://job-witness.example.com/v1",
                 "env": [
                   "LANE3_PROVIDER_API_KEY"
                 ],
@@ -133516,7 +133516,7 @@
               "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
               "name": "Lane3 managed existing MCP",
               "externalKey": null,
-              "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+              "url": "https://job-witness.example.com/public",
               "authType": "none",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -133560,7 +133560,7 @@
               "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
               "name": "Lane3 OAuth MCP",
               "externalKey": "lane3-oauth",
-              "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+              "url": "https://job-witness.example.com/oauth/mcp",
               "authType": "oauth",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -133598,7 +133598,7 @@
               "oauthClientMetadataUrl": "http://localhost:18788/oauth/client-metadata.json",
               "oauthCallbackMode": "shared-v1",
               "oauthRegistrationSource": "pre-registered",
-              "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+              "authorizationServerIssuer": "https://job-witness.example.com",
               "requestedScopes": [
                 "lane3.read"
               ],
@@ -133763,7 +133763,7 @@
                     "rm -rf"
                   ],
                   "browserOrigins": [
-                    "https://sand-chart-antivirus-rangers.trycloudflare.com"
+                    "https://job-witness.example.com"
                   ],
                   "blockBrowserUploads": true
                 }
@@ -199216,7 +199216,7 @@
             "env": [
               "LANE3_PROVIDER_API_KEY"
             ],
-            "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+            "api": "https://job-witness.example.com/v1",
             "models": [
               {
                 "id": "lane3-model",
@@ -199263,7 +199263,7 @@
               "env": [
                 "LANE3_PROVIDER_API_KEY"
               ],
-              "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1"
+              "api": "https://job-witness.example.com/v1"
             },
             "credentialMode": "shared",
             "createdAt": "2026-09-14T16:31:20.857Z",
@@ -199308,7 +199308,7 @@
             "name": "Lane3 OpenAI-compatible",
             "providerConfig": {
               "id": "lane3-provider",
-              "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+              "api": "https://job-witness.example.com/v1",
               "env": [
                 "LANE3_PROVIDER_API_KEY"
               ],
@@ -199367,7 +199367,7 @@
           "Content-Type": "application/json"
         },
         "body": {
-          "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+          "api": "https://job-witness.example.com/v1",
           "apiKey": "[REDACTED]",
           "modelIds": [
             "lane3-model"
@@ -199381,9 +199381,9 @@
           "result": {
             "ok": true,
             "vendor": "openai-compatible",
-            "normalizedApi": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+            "normalizedApi": "https://job-witness.example.com/v1",
             "attempted": [
-              "https://sand-chart-antivirus-rangers.trycloudflare.com/v1"
+              "https://job-witness.example.com/v1"
             ],
             "models": [
               {
@@ -199758,7 +199758,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -199816,7 +199816,7 @@
         "body": {
           "expectedUpdatedAt": "2026-09-14T16:31:21.575Z",
           "name": "Lane3 managed existing MCP",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -199834,7 +199834,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -199893,7 +199893,7 @@
         },
         "body": {
           "name": "Lane3 OAuth MCP",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "url": "https://job-witness.example.com/oauth/mcp",
           "authType": "oauth",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -199908,7 +199908,7 @@
             "clientId": "lane3-client",
             "tokenEndpointAuthMethod": "client_secret_post"
           },
-          "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+          "authorizationServerIssuer": "https://job-witness.example.com",
           "requestedScopes": [
             "lane3.read"
           ]
@@ -199921,7 +199921,7 @@
           "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "url": "https://job-witness.example.com/oauth/mcp",
           "authType": "oauth",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -199959,7 +199959,7 @@
           "oauthClientMetadataUrl": "http://localhost:18788/oauth/client-metadata.json",
           "oauthCallbackMode": "shared-v1",
           "oauthRegistrationSource": "pre-registered",
-          "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+          "authorizationServerIssuer": "https://job-witness.example.com",
           "requestedScopes": [
             "lane3.read"
           ],
@@ -200011,7 +200011,7 @@
                 "rm -rf"
               ],
               "browserOrigins": [
-                "https://sand-chart-antivirus-rangers.trycloudflare.com"
+                "https://job-witness.example.com"
               ],
               "blockBrowserUploads": true
             }
@@ -200050,7 +200050,7 @@
                   "rm -rf"
                 ],
                 "browserOrigins": [
-                  "https://sand-chart-antivirus-rangers.trycloudflare.com"
+                  "https://job-witness.example.com"
                 ],
                 "blockBrowserUploads": true
               }
@@ -200144,7 +200144,7 @@
               "name": "Lane3 OpenAI-compatible",
               "providerConfig": {
                 "id": "lane3-provider",
-                "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+                "api": "https://job-witness.example.com/v1",
                 "env": [
                   "LANE3_PROVIDER_API_KEY"
                 ],
@@ -200493,7 +200493,7 @@
               "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
               "name": "Lane3 managed existing MCP",
               "externalKey": null,
-              "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+              "url": "https://job-witness.example.com/public",
               "authType": "none",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -200537,7 +200537,7 @@
               "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
               "name": "Lane3 OAuth MCP",
               "externalKey": "lane3-oauth",
-              "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+              "url": "https://job-witness.example.com/oauth/mcp",
               "authType": "oauth",
               "credentialMode": "shared",
               "exposeDirectly": false,
@@ -200575,7 +200575,7 @@
               "oauthClientMetadataUrl": "http://localhost:18788/oauth/client-metadata.json",
               "oauthCallbackMode": "shared-v1",
               "oauthRegistrationSource": "pre-registered",
-              "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+              "authorizationServerIssuer": "https://job-witness.example.com",
               "requestedScopes": [
                 "lane3.read"
               ],
@@ -200740,7 +200740,7 @@
                     "rm -rf"
                   ],
                   "browserOrigins": [
-                    "https://sand-chart-antivirus-rangers.trycloudflare.com"
+                    "https://job-witness.example.com"
                   ],
                   "blockBrowserUploads": true
                 }
@@ -200852,7 +200852,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -200909,7 +200909,7 @@
         "body": {
           "expectedUpdatedAt": "2026-09-14T16:31:20.632Z",
           "name": "Lane3 stale control",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -200950,7 +200950,7 @@
           "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/public",
+          "url": "https://job-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -201005,7 +201005,7 @@
           "x-api-key": "[REDACTED]"
         },
         "body": {
-          "api": "https://sand-chart-antivirus-rangers.trycloudflare.com/v1",
+          "api": "https://job-witness.example.com/v1",
           "modelIds": [
             "lane3-model"
           ]
@@ -201020,7 +201020,7 @@
             "vendor": "openai-compatible",
             "normalizedApi": null,
             "attempted": [
-              "https://sand-chart-antivirus-rangers.trycloudflare.com/v1"
+              "https://job-witness.example.com/v1"
             ],
             "models": [],
             "hint": "The endpoint rejected the key. Double-check the credential for this endpoint.",
@@ -201050,7 +201050,7 @@
           "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "url": "https://job-witness.example.com/oauth/mcp",
           "authType": "oauth",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -201088,7 +201088,7 @@
           "oauthClientMetadataUrl": "http://localhost:18788/oauth/client-metadata.json",
           "oauthCallbackMode": "shared-v1",
           "oauthRegistrationSource": "pre-registered",
-          "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+          "authorizationServerIssuer": "https://job-witness.example.com",
           "requestedScopes": [
             "lane3.read"
           ],
@@ -201115,7 +201115,7 @@
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1074\nDate: Mon, 14 Sep 2026 16:31:40 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
           "status": "needs_auth",
-          "authorizeUrl": "https://sand-chart-antivirus-rangers.trycloudflare.com/authorize?response_type=code&client_id=lane3-client&code_challenge=Rq6HJCnljNbC8O98EmLh-Nqq1enD6DV4YwABjNsZmJA&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A18788%2Fv1%2Fmcp-connections%2Foauth%2Fcallback&state=[REDACTED]&scope=lane3.read&resource=https%3A%2F%2Fsand-chart-antivirus-rangers.trycloudflare.com%2Foauth%2Fmcp"
+          "authorizeUrl": "https://job-witness.example.com/authorize?response_type=code&client_id=lane3-client&code_challenge=Rq6HJCnljNbC8O98EmLh-Nqq1enD6DV4YwABjNsZmJA&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A18788%2Fv1%2Fmcp-connections%2Foauth%2Fcallback&state=[REDACTED]&scope=lane3.read&resource=https%3A%2F%2Fjob-witness.example.com%2Foauth%2Fmcp"
         }
       },
       "curlExit": 0,
@@ -201126,7 +201126,7 @@
       "at": "2026-09-14T16:31:40.703045+00:00",
       "request": {
         "method": "GET",
-        "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/authorize?response_type=code&client_id=lane3-client&code_challenge=Rq6HJCnljNbC8O98EmLh-Nqq1enD6DV4YwABjNsZmJA&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A18788%2Fv1%2Fmcp-connections%2Foauth%2Fcallback&state=[REDACTED]&scope=lane3.read&resource=https%3A%2F%2Fsand-chart-antivirus-rangers.trycloudflare.com%2Foauth%2Fmcp",
+        "url": "https://job-witness.example.com/authorize?response_type=code&client_id=lane3-client&code_challenge=Rq6HJCnljNbC8O98EmLh-Nqq1enD6DV4YwABjNsZmJA&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A18788%2Fv1%2Fmcp-connections%2Foauth%2Fcallback&state=[REDACTED]&scope=lane3.read&resource=https%3A%2F%2Fjob-witness.example.com%2Foauth%2Fmcp",
         "headers": {
           "Content-Type": "application/json"
         },
@@ -201134,7 +201134,7 @@
       },
       "response": {
         "status": 302,
-        "headers": "HTTP/2 302 \ndate: Mon, 14 Sep 2026 16:31:40 GMT\ncontent-type: application/json\ncontent-length: 31\nlocation: http://localhost:18788/v1/mcp-connections/oauth/callback?code=[REDACTED]&state=[REDACTED]&iss=https%3A%2F%2Fsand-chart-antivirus-rangers.trycloudflare.com\ncf-ray: a3b0c887ed0ee5e9-IAD\ncf-cache-status: DYNAMIC\nserver: cloudflare\n\n",
+        "headers": "HTTP/2 302 \ndate: Mon, 14 Sep 2026 16:31:40 GMT\ncontent-type: application/json\ncontent-length: 31\nlocation: http://localhost:18788/v1/mcp-connections/oauth/callback?code=[REDACTED]&state=[REDACTED]&iss=https%3A%2F%2Fjob-witness.example.com\ncf-ray: a3b0c887ed0ee5e9-IAD\ncf-cache-status: DYNAMIC\nserver: cloudflare\n\n",
         "body": {
           "syntheticConsent": "granted"
         }
@@ -201147,7 +201147,7 @@
       "at": "2026-09-14T16:31:40.944842+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/oauth/callback?code=[REDACTED]&state=[REDACTED]&iss=https%3A%2F%2Fsand-chart-antivirus-rangers.trycloudflare.com",
+        "url": "http://localhost:18788/v1/mcp-connections/oauth/callback?code=[REDACTED]&state=[REDACTED]&iss=https%3A%2F%2Fjob-witness.example.com",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -201181,7 +201181,7 @@
           "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
-          "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+          "url": "https://job-witness.example.com/oauth/mcp",
           "authType": "oauth",
           "credentialMode": "shared",
           "exposeDirectly": false,
@@ -201219,7 +201219,7 @@
           "oauthClientMetadataUrl": "http://localhost:18788/oauth/client-metadata.json",
           "oauthCallbackMode": "shared-v1",
           "oauthRegistrationSource": "pre-registered",
-          "authorizationServerIssuer": "https://sand-chart-antivirus-rangers.trycloudflare.com",
+          "authorizationServerIssuer": "https://job-witness.example.com",
           "requestedScopes": [
             "lane3.read"
           ],
@@ -201266,7 +201266,7 @@
           "inspection": {
             "request": {
               "method": "POST",
-              "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/oauth/mcp",
+              "url": "https://job-witness.example.com/oauth/mcp",
               "startedAt": "2026-09-14T16:31:41.604Z",
               "headers": [
                 {
@@ -201501,7 +201501,7 @@
       "at": "2026-09-14T16:31:41.898610+00:00",
       "request": {
         "method": "POST",
-        "url": "https://sand-chart-antivirus-rangers.trycloudflare.com/token",
+        "url": "https://job-witness.example.com/token",
         "headers": {
           "Content-Type": "application/json"
         },
