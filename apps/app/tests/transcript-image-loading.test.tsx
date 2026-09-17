@@ -27,7 +27,7 @@ let nextFrame = 0;
 
 class TestObserver {
   targets = new Set<Element>();
-  constructor(readonly callback: IntersectionObserverCallback) { observers.push(this); }
+  constructor(readonly callback: IntersectionObserverCallback, readonly options?: IntersectionObserverInit) { observers.push(this); }
   observe(target: Element) { this.targets.add(target); }
   unobserve(target: Element) { this.targets.delete(target); }
   disconnect() { this.targets.clear(); }
@@ -113,6 +113,33 @@ test("data URLs stay absent until intersecting images have two frame opportuniti
   await frame();
   expect(visible.image.getAttribute("src")).toBe(source);
   expect(distant.image.hasAttribute("src")).toBe(false);
+});
+
+test("transcript scroll roots share observers locally and a load limit across panes", async () => {
+  const panes = Array.from({ length: 2 }, () => {
+    const pane = document.createElement("div");
+    pane.setAttribute("data-thread-scroll", "");
+    document.body.append(pane);
+    return pane;
+  });
+  const images = panes.flatMap((pane) => Array.from({ length: 3 }, () => {
+    const image = document.createElement("img");
+    pane.append(image);
+    cleanups.push(deferTranscriptImage(image, remoteSource));
+    return image;
+  }));
+  expect(observers).toHaveLength(2);
+  expect(observers.every((observer, index) => observer.options?.root === panes[index])).toBe(true);
+  expect(observers.every((observer) => observer.options?.rootMargin === "320px 0px")).toBe(true);
+  expect(observers.every((observer) => observer.targets.size === 3)).toBe(true);
+  images.forEach((image) => near(image));
+  await frame();
+  await frame();
+  expect(images.filter((image) => image.hasAttribute("src"))).toHaveLength(4);
+  images[0]!.dispatchEvent(new Event("load"));
+  await Promise.resolve();
+  expect(images[4]!.getAttribute("src")).toBe(remoteSource);
+  expect(images[5]!.hasAttribute("src")).toBe(false);
 });
 
 test("four active images bound work; load and error each release a slot", async () => {
@@ -217,6 +244,47 @@ test("Strict Mode and queued source replacement keep the same badge without show
   expect(image.hasAttribute("src")).toBe(false);
 });
 
+test.each([false, true])("disabling deferral restores the source after queued or active cleanup: %s", async (active) => {
+  const view = await mounted(<><ImageAttachmentBadge src={source} alt="Badge" deferPreview /><Image src={source} alt="Answer" deferPreview /></>);
+  const images = [...view.container.querySelectorAll("img")];
+  if (active) {
+    images.forEach((image) => near(image));
+    await frame();
+    await frame();
+  }
+  await view.render(<><ImageAttachmentBadge src={remoteSource} alt="Badge" /><Image src={remoteSource} alt="Answer" /></>);
+  expect([...view.container.querySelectorAll("img")].every((image, index) => image === images[index])).toBe(true);
+  expect(images.every((image) => image.getAttribute("src") === remoteSource)).toBe(true);
+  expect(images.every((image) => !image.hasAttribute("data-transcript-image"))).toBe(true);
+  await frame();
+  expect(images.every((image) => image.getAttribute("src") === remoteSource)).toBe(true);
+});
+
+test("ready queued jobs stop requesting frames and skip images that have scrolled away", async () => {
+  const images = Array.from({ length: 7 }, () => enqueue(remoteSource).image);
+  images.forEach((image) => near(image));
+  await frame();
+  await frame();
+  expect(frames.size).toBe(0);
+  near(images[4]!, false);
+  images[0]!.dispatchEvent(new Event("load"));
+  await Promise.resolve();
+  expect(images[4]!.hasAttribute("src")).toBe(false);
+  expect(images[5]!.getAttribute("src")).toBe(remoteSource);
+  expect(frames.size).toBe(0);
+  near(images[4]!);
+  await frame();
+  images[1]!.dispatchEvent(new Event("error"));
+  await Promise.resolve();
+  expect(images[4]!.hasAttribute("src")).toBe(false);
+  expect(images[6]!.getAttribute("src")).toBe(remoteSource);
+  await frame();
+  expect(frames.size).toBe(0);
+  images[2]!.dispatchEvent(new Event("load"));
+  await Promise.resolve();
+  expect(images[4]!.getAttribute("src")).toBe(remoteSource);
+});
+
 test("composer and generic images remain immediate while transcript expansion bypasses the queue", async () => {
   const view = await mounted(<><ImageAttachmentBadge src={source} alt="Draft" /><Image src={source} alt="Standalone" /><ImageAttachmentBadge src={source} alt="History" deferPreview /><Image src={source} alt="Answer" deferPreview /></>);
   const images = [...view.container.querySelectorAll("img")];
@@ -286,6 +354,62 @@ test("streaming keeps an activated settled image node and does not restart its l
   expect(imageIn(view.container) === image).toBe(true);
   expect(image.getAttribute("src")).toBe(remoteSource);
   expect(image.dataset.transcriptImage).toBe("ready");
+});
+
+test.each([
+  remoteSource,
+  "/photo.png?width=280&height=160",
+  "file:///pictures/photo%20one.png",
+  "blob:http://localhost/preview",
+  source,
+  "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E",
+])("validated deferred URLs preserve supported image sources: %s", (src) => {
+  const image = document.createElement("img");
+  image.setAttribute(DEFERRED_IMAGE_SOURCE, src);
+  expect(deferredMarkdownImageSource(image)).toBe(src);
+});
+
+test("deferred URL extraction encodes decoded HTML metacharacters without changing URL semantics", () => {
+  const src = `https://example.com/photo.png?caption=\"'><svg/onload=alert(1)>&other=%22kept%22`;
+  const image = document.createElement("img");
+  image.setAttribute(DEFERRED_IMAGE_SOURCE, src);
+  const extracted = deferredMarkdownImageSource(image);
+  expect(extracted).toBe("https://example.com/photo.png?caption=%22%27%3E%3Csvg/onload=alert(1)%3E&other=%22kept%22");
+  expect(new URL(extracted!).searchParams.get("caption")).toBe(new URL(src).searchParams.get("caption"));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg"><text>'hello'</text></svg>`;
+  image.setAttribute(DEFERRED_IMAGE_SOURCE, `data:image/svg+xml,${svg}`);
+  const data = deferredMarkdownImageSource(image);
+  expect(data).not.toMatch(/[<>"']/);
+  expect(decodeURIComponent(data!.slice(data!.indexOf(",") + 1))).toBe(svg);
+});
+
+test.each([false, true])("encoded raw-HTML URL payloads remain inert through dialog expansion with deferral: %s", async (deferImages) => {
+  const encoded = "https://example.com/photo.png?caption=&quot;&gt;&lt;img src=x onerror=alert(1)&gt;&amp;kept=1";
+  const expected = "https://example.com/photo.png?caption=%22%3E%3Cimg src=x onerror=alert(1)%3E&kept=1";
+  const view = await mounted(<MarkdownBlock text={`<button data-openwork-image-preview><img src="${encoded}"></button>`} deferImages={deferImages} />);
+  const image = imageIn(view.container);
+  if (deferImages) {
+    expect(image.hasAttribute("src")).toBe(false);
+    near(image);
+    await frame();
+    await frame();
+    expect(image.getAttribute("src")).toBe(expected);
+  }
+  await act(async () => view.container.querySelector<HTMLButtonElement>("[data-openwork-image-preview]")?.click());
+  const dialog = document.querySelector('[role="dialog"]');
+  expect(dialog?.querySelectorAll("img")).toHaveLength(1);
+  expect(dialog?.querySelector("img")?.getAttribute("src")).toBe(expected);
+  expect(document.querySelector("[onerror], svg[onload], script")).toBeNull();
+});
+
+test.each([false, true])("dialog activation revalidates unsafe DOM URLs with deferral: %s", async (deferImages) => {
+  const view = await mounted(<MarkdownBlock text={`![Photo](${remoteSource})`} deferImages={deferImages} />);
+  const image = imageIn(view.container);
+  for (const unsafe of ["javascript:alert(1)", "java\tscript:alert(1)", "data:text/html,<script>alert(1)</script>", "vbscript:msgbox(1)"]) {
+    image.setAttribute(deferImages ? DEFERRED_IMAGE_SOURCE : "src", unsafe);
+    await act(async () => view.container.querySelector<HTMLButtonElement>("[data-openwork-image-preview]")?.click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  }
 });
 
 test("forged deferred attributes cannot supply or override a sanitized source", () => {

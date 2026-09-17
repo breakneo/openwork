@@ -2,17 +2,21 @@ import { deferTranscriptImage } from "../chat/transcript-image-loading";
 
 export const DEFERRED_IMAGE_SOURCE = "data-openwork-deferred-image-src";
 
-export function deferredMarkdownImageSource(image: HTMLImageElement) {
-  const src = image.getAttribute(DEFERRED_IMAGE_SOURCE)?.trim();
+export function markdownImageSource(image: HTMLImageElement, deferred = false) {
+  const src = image.getAttribute(deferred ? DEFERRED_IMAGE_SOURCE : "src")?.trim();
   if (!src || /[\u0000-\u001f\u007f]/.test(src)) return undefined;
   try {
     const protocol = new URL(src, image.ownerDocument.baseURI).protocol;
-    if (["http:", "https:", "file:", "blob:"].includes(protocol)) return src;
-    if (protocol === "data:" && /^data:image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml|x-icon)(?:;|,)/i.test(src)) return src;
+    const imageData = protocol === "data:" && /^data:image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml|x-icon)(?:;|,)/i.test(src);
+    if (!["http:", "https:", "file:", "blob:"].includes(protocol) && !imageData) return undefined;
+    return src.replace(/[<>"'`]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
   } catch {
     return undefined;
   }
-  return undefined;
+}
+
+export function deferredMarkdownImageSource(image: HTMLImageElement) {
+  return markdownImageSource(image, true);
 }
 
 export function deferSanitizedMarkdownImages(html: string) {

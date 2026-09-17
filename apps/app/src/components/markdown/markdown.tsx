@@ -27,7 +27,7 @@ import { LinkActionMenu } from "./link-action-menu";
 import { useMermaidEnhancer } from "./mermaid";
 import { useSelectionStableValue } from "./selection-stability";
 import { enhanceNearViewport } from "./near-viewport";
-import { deferredMarkdownImageSource, syncDeferredMarkdownImages } from "./deferred-images";
+import { markdownImageSource, syncDeferredMarkdownImages } from "./deferred-images";
 
 export { renderHighlightedMarkdownHtml, renderMarkdownHtml } from "./markdown-primitive";
 
@@ -422,7 +422,7 @@ function MarkdownBlockInner({
       event.stopPropagation();
       const image = preview.querySelector("img");
       if (!(image instanceof HTMLImageElement)) return;
-      const src = deferImages ? deferredMarkdownImageSource(image) : image.getAttribute("src");
+      const src = markdownImageSource(image, deferImages);
       if (!src) return;
       setImagePreview({ src, alt: image.alt || "Image" });
     };
