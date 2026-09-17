@@ -4,7 +4,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, useEffect } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { notifyManager, onlineManager, QueryClientProvider, skipToken, useQuery } from "@tanstack/react-query";
+import { focusManager, notifyManager, onlineManager, QueryClientProvider, skipToken, useQuery } from "@tanstack/react-query";
 import type { UIMessage } from "ai";
 import type { OpenworkSessionHistory } from "../src/app/lib/openwork-server";
 import { latestConfirmsFullHistory, openingHistoryWindow, openingSessionHistoryOptions, prefetchOpeningSessionHistory, sessionHistoryIdentity, SessionHistoryBoundary, SessionHistoryStatus, useOpeningSessionHistory, useSessionPrefetchIntent, type OpeningHistoryWindow } from "../src/react-app/domains/session/surface/session-history";
@@ -1273,11 +1273,22 @@ describe("opening a thread", () => {
     const ids = ["first", "second", ...fullWindow];
     const cached = snapshot("a", "Cached history", ids);
     const key = snapshotKey("workspace", "a");
+    const tail = (history: OpenworkSessionHistory) => ({ session: history.session, messages: history.messages.slice(-24) });
+    const refocus = async () => {
+      await act(async () => { focusManager.setFocused(false); focusManager.setFocused(true); });
+      await settle();
+    };
+    // Every fresh newest read re-judges the cache; drive one without touching the full query.
+    const rejudge = async () => {
+      await act(async () => { void view.client.refetchQueries({ queryKey: ["react-session-latest", ...key] }); });
+      await settle();
+    };
+    // Backdated well past the default freshness window: without confirmation this would refetch.
     view.client.setQueryData(key, cached, { updatedAt: Date.now() - 60_000 });
     await view.render();
     expect(view.latestReads).toHaveLength(1);
     expect(view.reads).toHaveLength(0);
-    await view.resolveLatest(0, { session: cached.session, messages: cached.messages.slice(-24) });
+    await view.resolveLatest(0, tail(cached));
     await paint();
     await settle();
     expect(view.reads).toHaveLength(0);
@@ -1285,19 +1296,37 @@ describe("opening a thread", () => {
     expect(visibleIds(view)).toEqual(ids);
     expect(view.host.querySelector("[data-thread-loading]")).toBeNull();
     expect(view.host.querySelector("[data-thread-history-status]")).toBeNull();
-    // Every fresh newest read re-judges the cache; a reconnect issues one.
-    await act(async () => { onlineManager.setOnline(false); onlineManager.setOnline(true); });
+    // Confirmed history stays current through focus changes.
+    await refocus();
+    expect(view.reads).toHaveLength(0);
+    // A cache object the newest read never judged returns to the default policy.
+    const replaced = snapshot("a", "Cached history", [...ids, "appended"]);
+    await act(async () => { view.client.setQueryData(key, replaced, { updatedAt: Date.now() - 60_000 }); });
     await settle();
+    await refocus();
+    expect(view.reads).toHaveLength(1);
+    expect(view.reads[0].window).toBeUndefined();
+    await view.resolve(0, replaced);
+    expect(visibleIds(view)).toEqual([...ids, "appended"]);
+    await act(async () => { view.client.setQueryData(key, replaced, { updatedAt: Date.now() - 60_000 }); });
+    // A fresh newest read that matches the replacement confirms it again.
+    await rejudge();
     expect(view.latestReads).toHaveLength(2);
-    const uncappedReads = () => view.reads.filter((read) => read.owner === "a" && read.window === undefined);
-    expect(uncappedReads()).toHaveLength(0);
-    const changed = snapshot("a", "Cached history", ids);
-    // Same length as "w23": content changes count even when size does not.
-    changed.messages.at(-1)!.parts[0] = { ...changed.messages.at(-1)!.parts[0], type: "text", text: "w2x" };
-    await view.resolveLatest(1, { session: changed.session, messages: changed.messages.slice(-24) });
+    await view.resolveLatest(1, tail(replaced));
     await paint();
     await settle();
-    expect(uncappedReads()).toHaveLength(1);
+    await refocus();
+    expect(view.reads).toHaveLength(1);
+    // Same length as "appended": content changes count even when size does not.
+    const changed = snapshot("a", "Cached history", [...ids, "appended"]);
+    changed.messages.at(-1)!.parts[0] = { ...changed.messages.at(-1)!.parts[0], type: "text", text: "appendix" };
+    await rejudge();
+    expect(view.latestReads).toHaveLength(3);
+    await view.resolveLatest(2, tail(changed));
+    await paint();
+    await settle();
+    expect(view.reads).toHaveLength(2);
+    expect(view.reads[1].window).toBeUndefined();
   });
 
   test("latestConfirmsFullHistory accepts only an identical tail and compares inline images by size", () => {
