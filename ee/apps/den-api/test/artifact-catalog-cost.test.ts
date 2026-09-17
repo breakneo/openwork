@@ -122,10 +122,12 @@ test("catalog deduplicates workflow checks, batches revision metadata and saved 
   const revisionBatches = revisions.map((entry) => sqlDb.select().from(ArtifactViewRevisionTable).where(entry.conditions[0]).toSQL().params.length)
   expect(revisionBatches).toEqual([10, 10, 1])
   const rankedQueries = queries.filter((entry) => typeof entry.table === "object" && entry.table !== null && "catalogSubquery" in entry.table)
-  for (const query of rankedQueries) {
+  for (const [index, query] of rankedQueries.entries()) {
     const filter = sqlDb.select().from(ArtifactViewRevisionTable).where(query.conditions[0]).toSQL()
     expect(filter.sql).toContain("`revision_rank` <= ?")
-    expect(filter.params).toEqual([50])
+    const batch = views.slice(index * 10, index * 10 + 10)
+    expect(filter.params).toEqual([50, ...batch.flatMap((view) => [view.id, view.active_revision_id])])
+    expect(filter.sql).toContain(" or ")
     expect(query.limit).toBeUndefined() // Never apply a global limit across views.
   }
   expect(requiredRoles).toHaveLength(1)

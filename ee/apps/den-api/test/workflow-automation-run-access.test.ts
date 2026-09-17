@@ -272,6 +272,7 @@ describe("pinning a Workflow to a Cloud Automation", () => {
 
 test("artifact catalog SQL bounds each view independently and keeps exact old revisions readable", async () => {
   const seeded = await seedWorkflowWithViewer()
+  await prepareLiveWorkflow(seeded)
   const catalog = await import("../src/artifact-views.js")
   const savedApps = await import("../src/saved-apps.js")
   const expected = new Map<string, string[]>()
@@ -294,6 +295,7 @@ test("artifact catalog SQL bounds each view independently and keeps exact old re
     await db.insert(ArtifactViewTable).values({
       id, organization_id: seeded.organizationId, config_object_id: seeded.configObjectId,
       owner_member_id: seeded.ownerMemberId, title: `Synthetic app ${viewIndex}`, active_revision_id: ids[0],
+      data_mode: viewIndex % 2 === 0 ? "live" : "snapshot",
     })
     await db.insert(ArtifactViewRevisionTable).values(revisions)
   }
@@ -310,6 +312,55 @@ test("artifact catalog SQL bounds each view independently and keeps exact old re
   }
   expect(await savedApps.listSavedApps(seeded.viewerContext)).toHaveLength(11)
   expect(await catalog.listArtifactViewsForScript({ context: seeded.viewerContext, configObjectId: seeded.configObjectId })).toHaveLength(11)
+
+  const { executeWorkflow } = await import("../src/mcp/workflow-service.js")
+  const snapshot = await executeWorkflow({
+    database: db, organizationId: seeded.organizationId, orgMembershipId: seeded.ownerMemberId,
+    pluginId: seeded.pluginId, configObjectId: seeded.configObjectId, configObjectVersionId: seeded.configObjectVersionId,
+    normalizedPayloadJson: { language: "codemode-js", requiredCapabilities: [], outputSchema: liveOutputSchema },
+    code: 'return { report: "rollback snapshot" }', validateOutput: true,
+    buildTools: async () => ({ tools: {}, manifest: [] }),
+  })
+  if (!snapshot.ok || !snapshot.receiptId) throw new Error("Expected snapshot")
+  for (const view of views) {
+    const oldId = expected.get(view.id)?.[54]
+    if (!oldId) throw new Error("Missing rollback revision")
+    const activated = await catalog.activateArtifactViewRevision({ context: seeded.ownerContext, artifactViewId: view.id, revisionId: oldId })
+    expect(activated.revisions).toHaveLength(51)
+    expect(activated.revisions.find((revision) => revision.id === activated.activeRevisionId)?.id).toBe(oldId)
+    const detail = await catalog.getArtifactView({ context: seeded.viewerContext, artifactViewId: view.id })
+    expect(detail.revisions.map((revision) => revision.id)).toEqual([...expected.get(view.id)!.slice(0, 50), oldId])
+    const app = await savedApps.getSavedApp({ context: seeded.viewerContext, appId: view.id,
+      ...(view.dataMode === "snapshot" ? { receiptId: snapshot.receiptId } : {}),
+      buildTools: async () => actorTools(seeded.viewerMemberId),
+    })
+    expect(app.revision?.id).toBe(oldId)
+    expect(app.html).toContain("<html>")
+    expect(app.previewNotice).toBeNull()
+    expect(app.payload?.data).toMatchObject(view.dataMode === "live" ? { actor: seeded.viewerMemberId } : { report: "rollback snapshot" })
+  }
+  for (const listed of [
+    await catalog.listArtifactViews({ context: seeded.viewerContext }),
+    await catalog.listArtifactViewsForScript({ context: seeded.viewerContext, configObjectId: seeded.configObjectId }),
+    (await savedApps.listSavedApps(seeded.viewerContext)).map((app) => app.view),
+  ]) {
+    for (const view of listed) {
+      expect(view.revisions).toHaveLength(51)
+      expect(view.revisions.find((revision) => revision.id === view.activeRevisionId)?.id).toBe(expected.get(view.id)?.[54])
+      expect(JSON.stringify(view)).not.toContain("<html>")
+      expect(JSON.stringify(view)).not.toContain("export default")
+    }
+  }
+  const [first, second] = views
+  if (!first || !second) throw new Error("Expected multiple views")
+  const [foreignRevision] = await db.select().from(ArtifactViewRevisionTable).where(eq(ArtifactViewRevisionTable.artifact_view_id, second.id)).limit(1)
+  if (!foreignRevision) throw new Error("Expected foreign revision")
+  await db.update(ArtifactViewTable).set({ active_revision_id: foreignRevision.id }).where(eq(ArtifactViewTable.id, first.id))
+  const corrupted = await catalog.getArtifactView({ context: seeded.viewerContext, artifactViewId: first.id })
+  expect(corrupted.revisions).toHaveLength(50)
+  expect(corrupted.revisions.some((revision) => revision.id === foreignRevision.id)).toBe(false)
+  const batched = await catalog.listArtifactViews({ context: seeded.viewerContext })
+  expect(batched.find((view) => view.id === first.id)?.revisions.map((revision) => revision.id)).toEqual(expected.get(first.id)?.slice(0, 50))
 })
 
 test("catalog access matches detail for direct grants, revocation, invalid versions and removed memberships", async () => {
