@@ -678,15 +678,22 @@ async function assertWorkspaceOwnsProxiedSessionRead(
  * upstream response is released only after the proof passes; a failed proof
  * rejects immediately and discards whatever the engine eventually returns.
  */
-async function sendWithOwnershipProof(proof: Promise<void>, send: () => Promise<Response>): Promise<Response> {
-  const sending = send();
+export async function sendWithOwnershipProof(proof: Promise<void>, send: () => Promise<Response>): Promise<Response> {
+  type SendResult = { ok: true; response: Response } | { ok: false; error: unknown };
+  // Observe failures immediately, even while the ownership proof is pending.
+  const sending = send().then<SendResult, SendResult>(
+    (response) => ({ ok: true, response }),
+    (error: unknown) => ({ ok: false, error }),
+  );
   try {
     await proof;
   } catch (error) {
-    void sending.then((response) => response.body?.cancel().catch(() => undefined), () => undefined);
+    void sending.then((result) => result.ok ? result.response.body?.cancel().catch(() => undefined) : undefined);
     throw error;
   }
-  return sending;
+  const result = await sending;
+  if (!result.ok) throw result.error;
+  return result.response;
 }
 
 export function assertOpencodeProxyAllowed(actor: Actor, method: string, proxyPath: string) {
