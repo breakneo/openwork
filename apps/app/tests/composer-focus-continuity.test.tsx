@@ -11,7 +11,7 @@ import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
 import type { OpenworkSessionSnapshot } from "../src/app/lib/openwork-server";
 import type { NativeContextMenuRequest } from "../src/app/lib/desktop-types";
 import type { ComposerAttachment, ComposerDraft, PendingPermission, PendingQuestion } from "../src/app/types";
-import type { CloudMcpSubmissionResult } from "../src/react-app/domains/connections/cloud-mcp-submit-readiness";
+import type { CloudMcpSubmissionGateState, CloudMcpSubmissionResult } from "../src/react-app/domains/connections/cloud-mcp-submit-readiness";
 import type { ArchiveSessionOutcome } from "../src/react-app/domains/session/sidebar/use-session-archive";
 import type {
   NewTaskComposerContext,
@@ -91,8 +91,16 @@ test.each([
   { name: "new thread keeps the prompt before early assistant output through late native acknowledgement and settlement", orderingRegression: "empty" },
   { name: "follow-up keeps history before the prompt and early assistant output through settlement", orderingRegression: "history" },
   { name: "multiple identical pending prompts keep submission order as native siblings settle", orderingRegression: "siblings" },
-])("$name", async ({ queueRegression, modeRegression, orderingRegression }) => {
-  const sessionId = `session-focus-continuity${orderingRegression ? `-${orderingRegression}` : ""}`;
+  { name: "Starting follow-ups dispatch after acceptance, before busy, across remount", startingRegression: "accepted" },
+  { name: "Starting follow-ups wait for unknown admission reconciliation", startingRegression: "unknown" },
+  { name: "Stop drops Starting follow-ups without replay after late admission", startingRegression: "stop" },
+  { name: "Failed Starting admission retains follow-ups and newer drafts", startingRegression: "failed" },
+  { name: "Cancelled Starting admission retains follow-ups without dispatch", startingRegression: "cancelled" },
+  { name: "Starting stale steers preserve unsent drafts without blocking eligible steers or queued items", startingRegression: "stale" },
+  { name: "Starting blocked steer retries explicitly with an empty composer", startingRegression: "retry" },
+  { name: "Starting blocked steer retries explicitly after automatic gate clearing", startingRegression: "retry-cleared" },
+])("$name", async ({ queueRegression, modeRegression, orderingRegression, startingRegression }) => {
+  const sessionId = `session-focus-continuity${startingRegression ? `-${startingRegression}` : orderingRegression ? `-${orderingRegression}` : ""}`;
   window.localStorage.clear();
   const require = createRequire(import.meta.url);
   // Bun's isolated test loader cycles Lexical's ESM entries; use their real CJS entries before the app imports the editor.
@@ -228,6 +236,7 @@ test.each([
   const draft = "Keep this draft while the task finishes";
   let submission = Promise.withResolvers<CloudMcpSubmissionResult>();
   const sentDrafts: ComposerDraft[] = [];
+  const sentAgents: (string | null | undefined)[] = [];
   let prepareSubmission: ((text?: string) => void) | undefined;
   const revokePreview = spyOn(URL, "revokeObjectURL");
   const copyText = spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
@@ -290,6 +299,7 @@ test.each([
     return children(archived);
   }
 
+  let cloudSubmissionState: CloudMcpSubmissionGateState = IDLE_CLOUD_MCP_SUBMISSION_GATE_STATE;
   let activePermission: PendingPermission | null = null;
   let activeQuestion: PendingQuestion | null = null;
   const renderSurface = (opencodeBaseUrl = "http://127.0.0.1:1/opencode", activeSessionId = sessionId, isControlTarget = false) => root.render(
@@ -321,12 +331,13 @@ test.each([
                 onModelChange={() => {}}
                 onForkAtMessage={forkAtMessage}
                 onRevertToMessage={revertToMessage}
-                onSendDraft={(value, _sessionId, onPrepared) => {
+                onSendDraft={(value, _sessionId, onPrepared, agent) => {
                   sentDrafts.push(value);
+                  sentAgents.push(agent);
                   prepareSubmission = onPrepared;
                   return submission.promise;
                 }}
-                cloudMcpSubmissionState={IDLE_CLOUD_MCP_SUBMISSION_GATE_STATE}
+                cloudMcpSubmissionState={cloudSubmissionState}
                 onOpenConnect={() => {}}
                 onDraftChange={() => {}}
                 attachmentsEnabled={false}
@@ -358,6 +369,196 @@ test.each([
   );
   const renderSession = (activeSessionId = sessionId) => renderSurface(undefined, activeSessionId);
   try {
+    if (startingRegression) {
+      const { composerAutoSendScopeKey, markComposerAutoSend } = await import("../src/react-app/domains/session/surface/composer-auto-send");
+      const { getSessionDraft } = await import("../src/react-app/domains/session/sync/draft-store");
+      const { startQueuedDraftPersistence } = await import("../src/react-app/domains/session/sync/queued-draft-persistence");
+      const { $getRoot, getNearestEditorFromDOMNode } = await import("lexical");
+      const owner = composerAutoSendScopeKey({ draftScope: "local", opencodeBaseUrl: "http://127.0.0.1:1/opencode", workspaceId, sessionId });
+      const stopPersistence = startQueuedDraftPersistence();
+      resetQueuedDrainForTests();
+      fetchedSnapshot = createSnapshot({ type: "idle" }, 2, sessionId);
+      queryClient.setQueryData(snapshotKey(workspaceId, sessionId), fetchedSnapshot);
+      queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" });
+      try {
+        await act(async () => {
+          markComposerAutoSend(sessionId, { scopeKey: owner, composer: {
+            draft: "Initial admission", attachments: [], mentions: {}, pasteParts: [], revertMessageId: null,
+          } });
+          useComposerStateStore.getState().setDraft(sessionId, "Continuation");
+          renderSurface();
+        });
+        await waitFor(() => sentDrafts.length === 1, "the initial admission");
+        expectStarting();
+        const initial = submission;
+        const initialId = sentDrafts[0]?.messageId;
+        if (!initialId) throw new Error("Expected the initial message ID");
+        const editor = () => {
+          const element = container.querySelector<HTMLElement>('[contenteditable="true"][data-lexical-editor="true"]');
+          if (!element) throw new Error("Expected the Starting composer");
+          return element;
+        };
+        const enter = async (steer = false) => {
+          const element = editor();
+          const lexicalEditor = getNearestEditorFromDOMNode(element);
+          if (!lexicalEditor) throw new Error("Expected the mounted editor");
+          element.focus();
+          await act(async () => lexicalEditor.update(() => { $getRoot().selectEnd(); }, { discrete: true }));
+          await act(async () => {
+            element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: steer, bubbles: true, cancelable: true }));
+            element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: steer, bubbles: true, cancelable: true }));
+          });
+        };
+        await act(async () => useComposerStateStore.getState().setDraft(sessionId, "After the run"));
+        await enter();
+        expect(sentDrafts).toHaveLength(1);
+        expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toHaveLength(1);
+        expect(getSessionDraft("local", workspaceId, sessionId)?.text).toBe("");
+        const file = new File(["steer image"], "steer.png", { type: "image/png" });
+        const attachment: ComposerAttachment = { id: "steer-image", name: file.name, file, kind: "image", mimeType: file.type, size: file.size, previewUrl: URL.createObjectURL(file) };
+        await act(async () => {
+          useComposerStateStore.getState().setPasteParts(sessionId, [{ id: "paste", label: "body", text: "snapshotted body", lines: 1 }]);
+          useComposerStateStore.getState().setMentions(sessionId, { "notes.txt": "file" });
+          useComposerStateStore.getState().setAttachments(sessionId, [attachment]);
+          useComposerStateStore.getState().replaceDraft(sessionId, "Steer [pasted text body][attachment steer-image] @notes.txt", "old-revert");
+        });
+        await enter(true);
+        const queued = useComposerStateStore.getState().queuedDrafts[sessionId];
+        expect(queued).toHaveLength(2);
+        const steer = queued?.[1];
+        expect(steer?.steer).toMatchObject({ owner, agent: "build" });
+        expect(steer?.draft.resolvedText).toBe("Steer snapshotted body @notes.txt");
+        expect(steer?.draft.parts).toContainEqual({ type: "file", path: "notes.txt", label: "notes.txt" });
+        expect(steer?.draft.revertMessageId).toBeUndefined();
+        expect(steer?.draft.attachments[0]).not.toBe(attachment);
+        expect(steer?.draft.attachments[0]?.file).toBe(file);
+        expect(editor().textContent).toBe("");
+        expect(sentDrafts).toHaveLength(1);
+        expect(revokePreview).not.toHaveBeenCalledWith(attachment.previewUrl);
+        await act(async () => useComposerStateStore.getState().setDraft(sessionId, "Newer draft"));
+        const picker = container.querySelector<HTMLButtonElement>('[data-composer-settings] button[title="Agent"]');
+        await act(async () => picker?.click());
+        const plan = () => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Plan" && button !== picker);
+        await waitFor(() => plan() !== undefined, "the Plan option");
+        await act(async () => plan()?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true })));
+        await act(async () => root.render(null));
+        await act(async () => renderSurface());
+        expectStarting();
+        expect(editor().textContent).toBe("Newer draft");
+        expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBe(queued);
+        expect(sentDrafts).toHaveLength(1);
+        submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+        if (startingRegression === "stop") {
+          await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.click());
+          expect(interrupt).toHaveBeenCalledTimes(1);
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
+          await act(async () => { initial.resolve({ outcome: "accepted" }); interruption.resolve(); });
+          expect(sentDrafts).toHaveLength(1);
+          expect(editor().textContent).toBe("Newer draft");
+          return;
+        }
+        if (startingRegression === "failed" || startingRegression === "cancelled") {
+          await act(async () => {
+            if (startingRegression === "failed") initial.reject(new Error("Initial admission failed"));
+            else initial.resolve({ outcome: "cancelled", reason: "context_changed" });
+          });
+          expect(sentDrafts).toHaveLength(1);
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBe(queued);
+          expect(useComposerStateStore.getState().failedDrafts[owner]?.[0]?.draft).toBe("Initial admission");
+          expect(editor().textContent).toBe("Newer draft");
+          return;
+        }
+        if (startingRegression === "stale") {
+          if (!steer?.steer) throw new Error("Expected the snapshotted steer");
+          const staleItems = [
+            { ...steer, id: "stale-owner", steer: { ...steer.steer, owner: "other-owner" } },
+            { ...steer, id: "stale-generation", steer: { ...steer.steer, generation: steer.steer.generation - 1 } },
+          ];
+          await act(async () => useComposerStateStore.getState().prependQueuedDrafts(sessionId, staleItems));
+        }
+        if (startingRegression === "unknown") {
+          const { PromptAdmissionUnknownError } = await import("../src/app/lib/opencode");
+          await act(async () => initial.reject(new PromptAdmissionUnknownError({ messageID: initialId })));
+          expect(getQueuedDrainState(sessionId).phase.kind).toBe("admission_unknown");
+          await enter(true);
+          expect(sentDrafts).toHaveLength(1);
+          expect(editor().textContent).toBe("Newer draft");
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBe(queued);
+          acceptedMessageId = initialId;
+          await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Check acceptance")?.click());
+        } else {
+          await act(async () => initial.resolve({ outcome: "accepted" }));
+        }
+        await waitFor(() => sentDrafts.length === 2, "the deferred steer before any busy observation");
+        expect(sentDrafts[1]?.messageId).toBe(steer?.draft.messageId);
+        expect(sentDrafts[1]?.resolvedText).toBe("Steer snapshotted body @notes.txt");
+        expect(sentAgents[1]).toBe("build");
+        expect(editor().textContent).toBe("Newer draft");
+        expect(interrupt).not.toHaveBeenCalled();
+        const steered = submission;
+        submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+        if (startingRegression.startsWith("retry")) {
+          const issue = { code: "tools_unavailable", stage: "engine_delivery", message: "Tools unavailable", retryable: true, recommendedAction: "Retry connected tools." } satisfies NonNullable<CloudMcpSubmissionGateState["issue"]>;
+          cloudSubmissionState = { ...IDLE_CLOUD_MCP_SUBMISSION_GATE_STATE, status: "failed", issue };
+          await act(async () => {
+            useComposerStateStore.getState().setDraft(sessionId, "");
+            renderSurface();
+            steered.resolve({ outcome: "blocked", issue });
+          });
+          expect(getQueuedDrainState(sessionId).phase.kind).toBe("halted");
+          if (startingRegression === "retry-cleared") {
+            await act(async () => { cloudSubmissionState = IDLE_CLOUD_MCP_SUBMISSION_GATE_STATE; renderSurface(); });
+            expect(getQueuedDrainState(sessionId).phase.kind).toBe("ready");
+            await act(async () => { cloudSubmissionState = { ...cloudSubmissionState, status: "failed", issue }; renderSurface(); });
+          }
+          expect(sentDrafts).toHaveLength(2);
+          expect(editor().textContent).toBe("");
+          const retry = container.querySelector<HTMLButtonElement>('[data-testid="cloud-mcp-submission-failure"] button');
+          expect(retry?.textContent).toBe("Retry");
+          await act(async () => { retry?.click(); retry?.click(); });
+          await waitFor(() => sentDrafts.length === 3, "the explicitly retried blocked steer");
+          expect(sentDrafts[2]?.messageId).toBe(steer?.draft.messageId);
+          expect(sentAgents[2]).toBe("build");
+          await act(async () => useComposerStateStore.getState().setDraft(sessionId, "Typing during retry"));
+          await act(async () => submission.resolve({ outcome: "accepted" }));
+          expect(sentDrafts).toHaveLength(3);
+          expect(editor().textContent).toBe("Typing during retry");
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]?.map((item) => item.draft.text)).toEqual(["After the run"]);
+          return;
+        }
+        if (startingRegression === "stale") {
+          const staleItems = useComposerStateStore.getState().queuedDrafts[sessionId]?.filter((item) => item.id.startsWith("stale-"));
+          await act(async () => steered.resolve({ outcome: "accepted" }));
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]?.slice(0, 2)).toEqual(staleItems);
+          await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "busy" }));
+          await waitFor(() => getQueuedDrainState(sessionId).phase.kind === "running", "the observed steer run");
+          await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" }));
+          await waitFor(() => sentDrafts.length === 3, "the ordinary queued item past stale steers");
+          expect(sentDrafts[2]?.text).toBe("After the run");
+          await act(async () => submission.resolve({ outcome: "accepted" }));
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toEqual(staleItems);
+          expect(editor().textContent).toBe("Newer draft");
+          return;
+        }
+        await act(async () => steered.resolve({ outcome: "accepted" }));
+        expect(useComposerStateStore.getState().queuedDrafts[sessionId]?.map((item) => item.draft.text)).toEqual(["After the run"]);
+        expectStarting();
+        await act(async () => useComposerStateStore.getState().setDraft(sessionId, "Queued after acceptance"));
+        await enter();
+        expect(sentDrafts).toHaveLength(2);
+        expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toHaveLength(2);
+        await act(async () => useComposerStateStore.getState().setDraft(sessionId, "Steer after acceptance"));
+        await enter(true);
+        await waitFor(() => sentDrafts.length === 3, "steering an accepted Starting admission");
+        expect(sentDrafts[2]?.text).toBe("Steer after acceptance");
+        await act(async () => submission.resolve({ outcome: "accepted" }));
+        expect(sentDrafts.filter((item) => item.text === "Initial admission")).toHaveLength(1);
+        expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toHaveLength(2);
+      } finally {
+        stopPersistence();
+      }
+      return;
+    }
     if (orderingRegression) {
       const { __applySessionSyncEventForTest, __createWorkspaceSessionSyncForTest, trackWorkspaceSessionSync } = await import("../src/react-app/domains/session/sync/session-sync");
       const { createV2EventTranslationState, translateV2Event } = await import("../src/app/lib/opencode-v2-adapter");
@@ -883,6 +1084,11 @@ test.each([
 
     const send = () => {
       const button = container.querySelector<HTMLButtonElement>('button[aria-label="Run task"]');
+      if (!button && container.querySelector('[data-loading-message="starting"]')) {
+        editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+        editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+        return;
+      }
       if (!button || button.disabled) throw new Error(`Expected an enabled send button: ${container.textContent}`);
       button.click();
       button.click();
