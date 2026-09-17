@@ -28,7 +28,7 @@ import {
   type McpAppDiagnosticStage,
 } from "./mcp-app-diagnostics"
 
-const MIN_HEIGHT = 160
+const MIN_HEIGHT = 1
 const MAX_HEIGHT = 800
 const DEFAULT_HEIGHT = 320
 const SIZE_EVENT_INTERVAL_MS = 100
@@ -332,7 +332,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
   const workspaceId = origin.workspaceId
   const readOnly = origin.readOnly
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [height, setHeightState] = useState(() => normalizeMcpAppHeight(initialHeight ?? DEFAULT_HEIGHT, presentation === "dashboard" ? 1 : MIN_HEIGHT))
+  const [height, setHeightState] = useState(() => normalizeMcpAppHeight(initialHeight ?? DEFAULT_HEIGHT, MIN_HEIGHT))
   const heightRef = useRef(height)
   const reportedHeightRef = useRef<number | null>(null)
   const [error, setError] = useState<McpAppDiagnostic | null>(null)
@@ -469,11 +469,11 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
       sizeSettleTimer = undefined
       pendingHeight = null
       lastSizeEventAt = Date.now()
-      setHeight(normalizeMcpAppHeight(requestedHeight, presentation === "dashboard" ? 1 : MIN_HEIGHT))
+      setHeight(normalizeMcpAppHeight(requestedHeight, MIN_HEIGHT))
     }
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (disposed || failed) return
-      if (!Number.isFinite(requestedHeight) || requestedHeight === undefined) return
+      if (!Number.isFinite(requestedHeight) || requestedHeight === undefined || requestedHeight <= 0) return
       // Before the app initializes, the guest is measuring an empty shell.
       // Keep the remembered height rather than collapsing to the shell size
       // and growing back a moment later; growth is still honored.
@@ -746,7 +746,7 @@ export function McpAppSandboxView({ origin, app, toolName, inputArguments, resul
         sandbox="allow-scripts"
         referrerPolicy="no-referrer"
         className="block w-full border-0 bg-transparent"
-        style={{ height: normalizeMcpAppHeight(height, presentation === "dashboard" ? 1 : MIN_HEIGHT) }}
+        style={{ height: normalizeMcpAppHeight(height, MIN_HEIGHT) }}
       />
     </div>
   )

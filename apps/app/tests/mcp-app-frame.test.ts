@@ -790,7 +790,7 @@ describe("MCP App data continuity", () => {
 
 describe("MCP App sandbox presentation", () => {
   test.each([undefined, "dashboard"] satisfies Array<McpAppSandboxViewProps["presentation"]>)("normalizes malformed and out-of-bounds initial heights for %s without reporting an unmeasured height", async presentation => {
-    const minimum = presentation === "dashboard" ? 1 : 160
+    const minimum = 1
     const cases: Array<[unknown, number]> = [
       [undefined, 320], [null, 320], [NaN, 320], [Infinity, 320], [-Infinity, 320],
       ["240", 320], [true, 320], [{ height: 240 }, 320],
@@ -809,7 +809,7 @@ describe("MCP App sandbox presentation", () => {
     }
   })
 
-  test("bounds a retained height after a presentation change without reporting an invented measurement", async () => {
+  test("preserves a short measured height across presentation changes without inventing a measurement", async () => {
     const host = await startupFixture({ presentation: "dashboard", initialHeight: 73, updateMode: "notify" })
     try {
       await host.renderView()
@@ -818,12 +818,30 @@ describe("MCP App sandbox presentation", () => {
       expect(host.frame(0).style.height).toBe("73px")
       expect(host.heightChanges).toEqual([{ id: 0, height: 73 }])
       await host.renderView({ presentation: "inline" })
-      expect(host.frame(0).style.height).toBe("160px")
+      expect(host.frame(0).style.height).toBe("73px")
       expect(host.heightChanges).toEqual([{ id: 0, height: 73 }])
       expect(host.srcAssignments).toHaveLength(2)
       await host.notify(0, "ui/notifications/sandbox-proxy-ready")
       await act(async () => { host.bridges[1].oninitialized?.(); host.bridges[1].onsizechange?.({ height: 73 }) })
-      expect(host.heightChanges).toEqual([{ id: 0, height: 73 }, { id: 0, height: 160 }])
+      expect(host.heightChanges).toEqual([{ id: 0, height: 73 }])
+    } finally { await host.dispose() }
+  })
+
+  test("fits an inline App to its content as details expand and collapse", async () => {
+    const host = await startupFixture({ initialHeight: 320 })
+    try {
+      await host.render([0])
+      await host.notify(0, "ui/notifications/sandbox-proxy-ready")
+      const bridge = host.bridges[0]
+      await act(async () => { bridge.oninitialized?.(); bridge.onsizechange?.({ height: 104 }) })
+      expect(host.frame(0).style.height).toBe("104px")
+      for (const height of [220, 104, 72]) {
+        await host.advance(100)
+        await act(async () => { bridge.onsizechange?.({ height }) })
+        expect(host.frame(0).style.height).toBe(`${height}px`)
+      }
+      expect(host.heightChanges.map(change => change.height)).toEqual([104, 220, 104, 72])
+      expect(host.connectSpy).toHaveBeenCalledTimes(1)
     } finally { await host.dispose() }
   })
 
@@ -931,7 +949,7 @@ describe("MCP App sandbox presentation", () => {
       await host.notify(0, "ui/notifications/sandbox-proxy-ready");
       const bridge = host.bridges[0];
       await act(async () => { bridge.oninitialized?.(); });
-      const shortHeight = presentation === "dashboard" ? 73 : 160;
+      const shortHeight = 73;
       await act(async () => { bridge.onsizechange?.({ height: 72.25 }); });
       expect(iframe.style.height).toBe(`${shortHeight}px`);
       expect(host.heightChanges).toEqual([{ id: 0, height: shortHeight }]);
@@ -945,8 +963,8 @@ describe("MCP App sandbox presentation", () => {
       await host.advance(1);
       expect(iframe.style.height).toBe("451px");
       expect(host.heightChanges).toEqual([{ id: 0, height: shortHeight }, { id: 0, height: 451 }]);
-      const minimum = presentation === "dashboard" ? 1 : 160;
-      const sizes = [[0, minimum], [-20, minimum], [0.25, minimum], [799.25, 800], [1_200, 800]];
+      const minimum = 1;
+      const sizes = [[0.25, minimum], [799.25, 800], [1_200, 800]];
       for (const [height, expected] of sizes) {
         await host.advance(100);
         await act(async () => { bridge.onsizechange?.({ height }); });
@@ -957,7 +975,7 @@ describe("MCP App sandbox presentation", () => {
         { id: 0, height: shortHeight }, { id: 0, height: 451 },
         { id: 0, height: minimum }, { id: 0, height: 800 },
       ]);
-      for (const height of [undefined, NaN, Infinity, -Infinity]) {
+      for (const height of [undefined, NaN, Infinity, -Infinity, 0, -20]) {
         await act(async () => { bridge.onsizechange?.({ height }); });
       }
       await host.advance(100);

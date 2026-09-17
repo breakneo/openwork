@@ -7,8 +7,9 @@
   background: transparent;
   --app-muted: var(--color-text-secondary, GrayText);
   --app-radius: var(--border-radius-md, 0.45rem);
+  --app-padding: 16px;
 }
-body { margin: 0; padding: 12px; }
+body { margin: 0; padding: var(--app-padding); }
 p, h1 { margin: 0; font-size: inherit; overflow-wrap: anywhere; }
 h1 { font-weight: 500; flex: 1; }
 .connection { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-height: 40px; }
