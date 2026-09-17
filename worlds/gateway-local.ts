@@ -114,10 +114,10 @@ export async function main(): Promise<void> {
   };
   const mysql = await startContainer(`openwork-gateway-mysql-${nonce}`, [
     "--publish", "127.0.0.1::3306", "--tmpfs", "/var/lib/mysql",
-    "--env", "MYSQL_ROOT_PASSWORD", "mysql:8.4",
+    "--env", "MYSQL_ROOT_PASSWORD", "mysql:8.4@sha256:c592c15aaf4a1961e15d82eb31ea5987dda862d1c4b1e93424438c0e91dc1f8d",
   ], { MYSQL_ROOT_PASSWORD: password });
   const redis = await startContainer(`openwork-gateway-redis-${nonce}`, [
-    "--publish", "127.0.0.1::6379", "--tmpfs", "/data", "redis:7-alpine",
+    "--publish", "127.0.0.1::6379", "--tmpfs", "/data", "redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
     "redis-server", "--save", "", "--appendonly", "no",
   ]);
   const mappedPort = async (id: string, port: number) => {

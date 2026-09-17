@@ -44,8 +44,11 @@ export async function gatewayUsagePolicy(seed: Seed, { place }: { place: Place }
     },
     org: {
       name: `Gateway Usage Journey ${Date.now()}`,
-      admin: { name: "Usage Admin" },
-      members: { member: { name: "Usage Member" }, control: { name: "Usage Control" } },
+      admin: { name: "Usage Admin", email: "usage-admin@example.test" },
+      members: {
+        member: { name: "Usage Member", email: "usage-member@example.test" },
+        control: { name: "Usage Control", email: "usage-control@example.test" },
+      },
     },
   });
   const databaseUrl = den.database?.url;
@@ -110,7 +113,12 @@ export async function gatewayUsagePolicy(seed: Seed, { place }: { place: Place }
   const modelId = usageString(usageRecords(connected.models)[0]?.id);
   const baseUrl = usageString(usageRecord(connected.providerConfig).api);
   if (new URL(baseUrl).origin !== gatewayUrl) throw new Error("Gateway connect escaped the owned loopback origin");
-  const admin = await seed.web({ den, signedInAs: den.admin, startPath: "/dashboard/gateway-providers", headless: true, viewport: { width: 1440, height: 1200 } });
+  const admin = await seed.web({ den, signedInAs: den.admin, startPath: "/dashboard/gateway-providers", headless: true, viewport: { width: 1440, height: 1200 } }).catch((error: unknown) => {
+    if (error instanceof Error && "error" in error && "suppressed" in error) {
+      throw new AggregateError([error.suppressed, error.error], "Den browser setup and disposal failed");
+    }
+    throw error;
+  });
   const desktop = await seed.desktop({ den, as: "member", name: "gateway-usage-member", model: `${providerId}/${modelId}` });
   const engine = resolveEvalEngine();
   const native = engineSessionProbe({ engine, surface: desktop, workspaceId: desktop.workspaceId });
@@ -122,8 +130,13 @@ export async function gatewayUsagePolicy(seed: Seed, { place }: { place: Place }
     async rejectedCalls() {
       return usageRecords(await queryDenDatabase(databaseUrl, "SELECT id, status, error_code, org_membership_id, requested_model FROM gateway_request_logs WHERE gateway_provider_id = ? AND org_membership_id = ? AND error_code = 'openwork_gateway_usage_limit_exceeded' AND completed_at IS NOT NULL", [providerId, memberId]));
     },
+    streamSuccess: () => witness.mode("success"),
     upstreamCount: () => witness.requests.length,
     upstreamModel: () => witness.requests.at(-1)?.body.model,
+    upstreamStreamed: () => witness.requests.at(-1)?.body.stream === true,
+    async successfulCalls() {
+      return usageRecords(await queryDenDatabase(databaseUrl, "SELECT status, outcome, cost_micro_usd, stream, org_membership_id, requested_model FROM gateway_request_logs WHERE gateway_provider_id = ? AND org_membership_id = ? AND outcome = 'ok' AND completed_at IS NOT NULL", [providerId, memberId]));
+    },
     upstreamUsesOnlyOrgKey: () => witness.requests.every((request) => request.credential === `Bearer ${upstreamSecret}` && !JSON.stringify(request.body).includes(apiKey)),
     async generate() {
       const response = await fetch(`${baseUrl}/chat/completions`, {

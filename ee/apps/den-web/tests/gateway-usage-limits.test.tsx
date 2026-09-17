@@ -110,6 +110,11 @@ async function choose(label: string, option: string) {
   await act(async () => { item.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); item.click(); });
   await tick();
 }
+function expectField(scope: ParentNode, label: string, value: string) {
+  const term = [...scope.querySelectorAll("dt")].find((element) => element.textContent === label);
+  expect(term?.nextElementSibling?.tagName).toBe("DD");
+  expect(term?.nextElementSibling?.textContent).toBe(value);
+}
 const section = () => <GatewayUsageLimitsSection orgId={orgId} teams={[team]} members={[member]} />;
 
 test("shared validation defaults, unique frames, exact precision, zero and overflow", () => {
@@ -136,7 +141,20 @@ test("policy form defaults, duplicate frames and precision validate before a rea
     expect(document.querySelector<HTMLInputElement>('[aria-label="Timeframe 1"]')?.value).toBe("1 month");
     expect(document.querySelector<HTMLInputElement>('[aria-label="USD Amount 1"]')?.value).toBe("");
     const dialog = document.querySelector('[role="dialog"]');
-    expect(dialog?.textContent).toContain("USD Amount");
+    if (!dialog) throw new Error("Missing policy editor");
+    expect(dialog.classList.contains("border")).toBe(true);
+    expect(dialog.classList.contains("border-[var(--ow-line)]/60")).toBe(true);
+    expect([...dialog.classList].some((name) => name.startsWith("shadow"))).toBe(false);
+    expect(document.getElementById(dialog.getAttribute("aria-labelledby") ?? "")?.textContent).toBe("Create usage limit policy");
+    expect(dialog.hasAttribute("aria-describedby")).toBe(false);
+    for (const [label, description] of [
+      ["Hard limit", "Hard limits block further requests after exhaustion. Soft limits only warn. In-flight requests may exceed the allowance; estimates are not an invoice ceiling."],
+      ["Allow request usage increase", "Allow user to request an increase from within the app once their usage runs out"],
+    ]) {
+      const control = dialog.querySelector(`[aria-label="${label}"]`);
+      expect(document.getElementById(control?.getAttribute("aria-describedby") ?? "")?.textContent).toBe(description);
+    }
+    expect(dialog.textContent).toContain("USD Amount");
     expect(dialog?.textContent).toContain("Monthly: Resets on 1st of the month");
     expect(dialog?.textContent).not.toContain("Weekly: Resets on Monday");
     expect(dialog?.textContent).not.toContain("Daily: Resets at");
@@ -209,7 +227,13 @@ test("archive confirms the consequence and sends the displayed revision", async 
   });
   try {
     await click("Archive Standard");
-    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("Consumption and history are retained");
+    const dialog = document.querySelector('[role="alertdialog"]');
+    if (!dialog) throw new Error("Missing archive dialog");
+    expect(dialog.classList.contains("border")).toBe(true);
+    expect(dialog.classList.contains("border-[var(--ow-line)]/60")).toBe(true);
+    expect([...dialog.classList].some((name) => name.startsWith("shadow"))).toBe(false);
+    expect(document.getElementById(dialog.getAttribute("aria-labelledby") ?? "")?.textContent).toBe("Archive Standard?");
+    expect(document.getElementById(dialog.getAttribute("aria-describedby") ?? "")?.textContent).toContain("Consumption and history are retained");
     expect(view.calls.some((call) => call.init.method === "POST")).toBe(false);
     await click("Archive policy");
     expect(view.calls.find((call) => call.init.method === "POST")).toMatchObject({ path: `${policiesPath}/policy-fixture/archive`, init: { body: '{"revision":7}' } });
@@ -285,8 +309,16 @@ test("effective usage shows estimates, overage, extension, reset state and direc
   try {
     expect(view.container.textContent).toContain("$130.000001 used / $125.00 allowance");
     expect(view.container.textContent).toContain("$5.000001 over allowance");
-    expect(view.container.textContent).toContain("Extension $25.00");
-    expect(view.container.textContent).toContain("Request approved");
+    expectField(view.container, "Base", "$100.00");
+    expectField(view.container, "Extension", "$25.00");
+    expectField(view.container, "Increase requests", "Allowed");
+    expectField(view.container, "Request status", "approved");
+    expect(view.container.textContent).not.toContain("·");
+    expect(view.container.querySelector("h4")?.textContent).toBe("Standard - 1 month");
+    const blocked = [...view.container.querySelectorAll("span")].find((element) => element.textContent === "Blocked");
+    expect(blocked?.classList.contains("bg-gray-100")).toBe(true);
+    expect(blocked?.classList.contains("text-red-600")).toBe(false);
+    expect(blocked?.querySelector('svg[aria-hidden="true"]')?.classList.contains("lucide-lock-keyhole")).toBe(true);
     expect(view.container.textContent).toContain("05:00");
     const summary = view.container.querySelector("summary");
     await act(async () => summary?.click());
@@ -298,6 +330,34 @@ test("effective usage shows estimates, overage, extension, reset state and direc
   } finally { await view.close(); }
 });
 
+test("member inspector groups all bucket details with flat named sections and dividers", async () => {
+  const usage = status();
+  const timeframes: GatewayUsageStatus["buckets"][number]["timeframe"][] = ["day", "week", "month"];
+  usage.buckets = timeframes.map((timeframe) => ({ ...usage.buckets[0], id: `bucket-${timeframe}`, timeframe }));
+  const view = await mount(section(), (call) => call.path === `${membersPath}/${person.id}` ? { payload: usage } : defaultReply(call));
+  try {
+    const policyRow = view.container.querySelector("tbody tr");
+    if (!policyRow) throw new Error("Missing policy row");
+    expectField(policyRow, "Revision", "7");
+    expectField(policyRow, "Assignments", "0");
+    await click("Example Member (member@example.test)");
+    const buckets = view.container.querySelectorAll('section[aria-label$=" usage"]');
+    expect([...buckets].map((bucket) => bucket.getAttribute("aria-label"))).toEqual(["Standard - 1 day usage", "Standard - 1 week usage", "Standard - 1 month usage"]);
+    for (const bucket of buckets) {
+      expect(bucket.classList.contains("border-t")).toBe(true);
+      expect(bucket.classList.contains("border-[var(--ow-line)]")).toBe(true);
+      expect(bucket.classList.contains("border")).toBe(false);
+      expect([...bucket.classList].some((name) => name.startsWith("rounded"))).toBe(false);
+      const card = bucket.closest(".border");
+      expect(card).not.toBeNull();
+      expect(card?.parentElement?.closest(".border")).toBeNull();
+      expect(bucket.querySelector("details")?.open).toBe(false);
+      expectField(bucket, "Base", "$100.00");
+      expectField(bucket, "Extension", "$25.00");
+    }
+  } finally { await view.close(); }
+});
+
 test("reset queue previews ceil(base/4), safely renders reasons, approves once and shows reviewer history", async () => {
   let current = reset();
   const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[member]} />, (call) => {
@@ -305,7 +365,9 @@ test("reset queue previews ceil(base/4), safely renders reasons, approves once a
     return resetListReply(call.path, [current]);
   });
   try {
-    expect(view.container.textContent).toContain("Approve adds $25.000001 → $125.000002 total");
+    const impact = "+$25.000001 allowance ($125.000002 total); may increase provider charges; no undo.";
+    expect(view.container.textContent).toContain(impact);
+    expect(view.container.textContent).not.toContain("·");
     expect(view.container.textContent).toContain("Approval will still leave this bucket exhausted");
     expect(view.container.querySelector("script")).toBeNull();
     expect([...view.container.querySelectorAll("th")].map((cell) => cell.textContent)).toEqual(["User", "Reason", "Requested", "Actions"]);
@@ -316,7 +378,18 @@ test("reset queue previews ceil(base/4), safely renders reasons, approves once a
     expect(row?.querySelectorAll("button")).toHaveLength(2);
     expect(row?.textContent).not.toContain("Base:");
     expect(row?.nextElementSibling?.querySelector("td")?.colSpan).toBe(4);
-    expect(row?.nextElementSibling?.textContent).toContain("Approve adds $25.000001");
+    const context = row?.nextElementSibling;
+    expect(context?.textContent).toContain("Standard - 1 month");
+    expect(context?.textContent).toContain(impact);
+    expect(context?.querySelector("time")?.dateTime).toBe(reset().resetAt);
+    expect(context?.querySelector("time")?.textContent).toContain("05:00");
+    const approval = button("Approve 25% for Example Member, 1 month");
+    const description = document.getElementById(approval.getAttribute("aria-describedby") ?? "");
+    expect(description?.textContent).toBe(impact);
+    expect(context?.contains(description)).toBe(true);
+    expect(description?.parentElement?.classList.contains("text-[var(--ow-muted)]")).toBe(true);
+    expect([...view.container.querySelectorAll("span")].filter((element) => element.textContent === impact)).toHaveLength(1);
+    expect(row?.textContent).not.toContain("no undo");
     expect(view.container.textContent).not.toContain(reset().bucketId);
     expect(view.container.textContent).not.toContain(reset().id);
     expect(view.container.querySelector("summary")).toBeNull();
@@ -327,6 +400,23 @@ test("reset queue previews ceil(base/4), safely renders reasons, approves once a
     expect(view.container.textContent).toContain("approved");
     expect(view.container.textContent).toContain("Reviewer: Example Member");
     expect(view.container.textContent).toContain("Jan 16, 2026");
+    expect(view.container.textContent).not.toContain("no undo");
+    expect(view.container.querySelector('#gateway-reset-history [aria-describedby]')).toBeNull();
+  } finally { await view.close(); }
+});
+
+test("each approval describes only its own financial impact without adding a confirmation step", async () => {
+  const second = { ...reset(), id: "second-request", memberName: "Second person", baseAllowanceMicroUsd: 8_000_000, allowanceMicroUsd: 8_000_000, usedMicroUsd: 9_000_000 };
+  const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, (call) => resetListReply(call.path, [reset(), second]));
+  try {
+    const first = button("Approve 25% for Example Member, 1 month");
+    const next = button("Approve 25% for Second person, 1 month");
+    expect(first.getAttribute("aria-describedby")).not.toBe(next.getAttribute("aria-describedby"));
+    expect(document.getElementById(first.getAttribute("aria-describedby") ?? "")?.textContent).toBe("+$25.000001 allowance ($125.000002 total); may increase provider charges; no undo.");
+    expect(document.getElementById(next.getAttribute("aria-describedby") ?? "")?.textContent).toBe("+$2.00 allowance ($10.00 total); may increase provider charges; no undo.");
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(button("Deny request for Second person, 1 month").disabled).toBe(false);
+    expect(view.calls.every((call) => call.init.method === "GET")).toBe(true);
   } finally { await view.close(); }
 });
 
@@ -548,6 +638,7 @@ test("paginates pending and lazy history independently beyond fifty without drop
     expect(view.container.textContent).toContain("Last checked:");
     expect(view.container.textContent).toContain("Expired / ineligible");
     expect(button("Approve 25% for Queued person 49, 1 month").disabled).toBe(true);
+    expect(button("Approve 25% for Queued person 49, 1 month").hasAttribute("aria-describedby")).toBe(false);
     expect(button("Deny request for Queued person 49, 1 month").disabled).toBe(true);
     await click("Load more pending requests");
     expect(view.container.querySelectorAll("tbody tr:nth-child(odd)")).toHaveLength(51);
@@ -659,11 +750,16 @@ test("inspector preserves server-selected provenance/revision and reports quaran
     const summary = view.container.querySelector("summary");
     await act(async () => summary?.click());
     const snapshot = view.container.querySelector('[aria-label="Server-selected assignment snapshot"]');
-    expect(snapshot?.textContent).toContain("revision 6");
-    expect(snapshot?.textContent).toContain("Direct assignment · member member-fixture");
-    expect(snapshot?.textContent).toContain("Team: Snapshot Team (team-fixture)");
-    expect(snapshot?.textContent).toContain("assignment snapshot-team");
-    expect(snapshot?.textContent).not.toContain("Example Team");
+    if (!snapshot) throw new Error("Missing server-selected snapshot");
+    expectField(snapshot, "Policy", "Standard");
+    expectField(snapshot, "Revision", "6");
+    expect(snapshot.textContent).toContain("Direct assignment");
+    expect(snapshot.textContent).toContain("Team: Snapshot Team");
+    for (const id of ["policy-fixture", "bucket-fixture", person.id, team.id, "snapshot-direct", "snapshot-team"]) {
+      expect(view.container.textContent).not.toContain(id);
+    }
+    expect(view.container.textContent).not.toContain("·");
+    expect(snapshot.textContent).not.toContain("Example Team");
     expect(view.container.textContent).toContain("Current-directory policy comparison");
     expect(view.container.textContent).toContain("not the server-selected snapshot");
     expect(view.container.textContent).toContain("7 unresolved historical requests are quarantined");

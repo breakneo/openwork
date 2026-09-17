@@ -2,6 +2,7 @@
 
 import { useDeferredValue, useState } from "react";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
+import { LockKeyhole } from "lucide-react";
 import type { GatewayUsageLimitPolicy, GatewayUsageStatus } from "@openwork/types/den/gateway-usage-limits";
 import { DenBadge } from "../../_components/ui/badge";
 import { DenButton, buttonVariants } from "../../_components/ui/button";
@@ -78,39 +79,55 @@ export function GatewayMemberUsageDetails({ status, policies, teams }: { status:
   const quarantined = status.coverage.quarantinedRequests ?? 0;
   const matchingPolicies = policies.filter((policy) => !policy.archivedAt && policy.assignments.some((assignment) => assignment.memberId === status.memberId || teams.some((team) => team.id === assignment.teamId && team.memberIds.includes(status.memberId))));
   return <div className="flex flex-col gap-4">
-    <div className="flex flex-wrap items-center gap-3"><DenBadge tone={status.state === "blocked" ? "danger" : status.state === "over_limit" ? "warning" : "neutral"}>{status.state === "unlimited" ? "Unlimited" : status.state === "blocked" ? "Blocked" : status.state === "over_limit" ? "Over allowance" : "Within allowance"}</DenBadge><span className="text-xs text-[var(--ow-muted)]">Updated <GatewayLimitTimestamp value={status.serverTime} /></span></div>
+    <div className="flex flex-wrap items-center gap-3"><DenBadge tone={status.state === "over_limit" ? "warning" : "neutral"} icon={status.state === "blocked" ? LockKeyhole : undefined}>{status.state === "unlimited" ? "Unlimited" : status.state === "blocked" ? "Blocked" : status.state === "over_limit" ? "Over allowance" : "Within allowance"}</DenBadge><span className="text-xs text-[var(--ow-muted)]">Updated <GatewayLimitTimestamp value={status.serverTime} /></span></div>
     {status.state === "unlimited" ? <p>No usage limit policy assigned. Other provider, subscription, and service limits still apply.</p> : null}
     {status.state === "over_limit" ? <DenNotice tone="warning" message="Over the estimated usage allowance. Requests are still allowed under these soft limits." /> : null}
     {status.state === "blocked" ? <DenNotice tone="warning" message="An exhausted hard limit blocks further Gateway requests. All blocking buckets must clear before access is restored." /> : null}
     {!status.coverage.complete || quarantined > 0 ? <DenNotice tone="warning" message={`Accounting is incomplete.${status.coverage.unpricedRequests > 0 ? ` ${status.coverage.unpricedRequests} unpriced or incomplete requests.` : ""}${quarantined > 0 ? ` ${quarantined} unresolved historical requests are quarantined and have not been charged again.` : ""} Known costs are a subtotal, not complete spend.`} /> : <p className="text-sm text-[var(--ow-muted)]">Accounting coverage complete for recorded requests. All costs are estimates.</p>}
-    {status.buckets.map((bucket) => <DenCard key={bucket.id} className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-3"><h4 className="font-semibold">{timeframeLabels[bucket.timeframe]} · {bucket.policyName}</h4><DenBadge>{bucket.hardLimit ? "Hard limit" : "Soft limit"}</DenBadge></div>
+    {status.buckets.map((bucket) => <section key={bucket.id} aria-label={`${bucket.policyName} - ${timeframeLabels[bucket.timeframe]} usage`} className="flex flex-col gap-3 border-t border-[var(--ow-line)] pt-4">
+      <div className="flex flex-wrap items-center gap-3"><h4 className="font-semibold">{bucket.policyName} - {timeframeLabels[bucket.timeframe]}</h4><DenBadge>{bucket.hardLimit ? "Hard limit" : "Soft limit"}</DenBadge></div>
       <p className="text-lg font-medium tabular-nums">{formatLimitMoney(bucket.usedMicroUsd)} used / {formatLimitMoney(bucket.allowanceMicroUsd)} allowance</p>
-      <p className="text-sm">{bucket.remainingMicroUsd < 0 ? `${formatLimitMoney(-bucket.remainingMicroUsd)} over allowance` : `${formatLimitMoney(bucket.remainingMicroUsd)} remaining`} · Base {formatLimitMoney(bucket.baseAllowanceMicroUsd)} · Extension {formatLimitMoney(bucket.extensionMicroUsd)}</p>
+      <p className="text-sm">{bucket.remainingMicroUsd < 0 ? `${formatLimitMoney(-bucket.remainingMicroUsd)} over allowance` : `${formatLimitMoney(bucket.remainingMicroUsd)} remaining`}</p>
+      <dl className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        <div className="flex gap-1"><dt>Base</dt><dd>{formatLimitMoney(bucket.baseAllowanceMicroUsd)}</dd></div>
+        <div className="flex gap-1"><dt>Extension</dt><dd>{formatLimitMoney(bucket.extensionMicroUsd)}</dd></div>
+      </dl>
       <p className="text-sm">Next reset: <GatewayLimitTimestamp value={bucket.resetAt} /></p>
-      <p className="text-sm">Increase requests {bucket.allowRequestReset ? "allowed" : "disabled"} · {bucket.resetRequestStatus ? `Request ${bucket.resetRequestStatus}` : bucket.canRequestReset ? "Eligible to request an increase" : "Not currently eligible to request an increase"}</p>
+      <dl className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        <div className="flex gap-1"><dt>Increase requests</dt><dd>{bucket.allowRequestReset ? "Allowed" : "Disabled"}</dd></div>
+        <div className="flex gap-1"><dt>Request status</dt><dd>{bucket.resetRequestStatus ?? (bucket.canRequestReset ? "Eligible to request an increase" : "Not currently eligible to request an increase")}</dd></div>
+      </dl>
       <details className="text-sm"><summary className="cursor-pointer font-medium">Effective policy and assignment context</summary>
         <div className="flex flex-col gap-2 pt-3">
           <p>The highest allowance wins for each timeframe and supplies its hard-limit and increase-request settings. Ties prefer hard limits, then increase permission, then policy ID.</p>
           <section aria-label="Server-selected assignment snapshot" className="flex flex-col gap-2">
             <h5 className="font-medium">Server-selected snapshot</h5>
-            <p>Policy: {bucket.policyName} ({bucket.policyId}) · {bucket.policyRevision !== undefined ? `revision ${bucket.policyRevision}` : "Revision unavailable in this snapshot"}. Bucket: {bucket.id}.</p>
+            <dl className="flex flex-wrap gap-x-4 gap-y-1">
+              <div className="flex gap-1"><dt>Policy</dt><dd>{bucket.policyName}</dd></div>
+              <div className="flex gap-1"><dt>Revision</dt><dd>{bucket.policyRevision ?? "Unavailable in this snapshot"}</dd></div>
+            </dl>
             {bucket.provenance?.length ? <ul className="flex flex-col gap-2">{bucket.provenance.map((source) => <li key={source.assignmentId}>
-              {source.kind === "direct" ? `Direct assignment · member ${source.memberId}` : `Team: ${source.teamName} (${source.teamId})`} · assignment {source.assignmentId}
+              {source.kind === "direct" ? "Direct assignment" : `Team: ${source.teamName}`}
             </li>)}</ul> : <p className="text-[var(--ow-muted)]">No assignment provenance supplied for this snapshot.</p>}
           </section>
           <h5 className="font-medium">Current-directory policy comparison</h5>
           <p className="text-[var(--ow-muted)]">These comparison policies and memberships are from the current organization directory, not the server-selected snapshot above.</p>
           <ul className="flex flex-col gap-2">{matchingPolicies.filter((policy) => policy.limits.some((limit) => limit.timeframe === bucket.timeframe)).map((policy) => <li key={policy.id}>
-            {policy.name} · revision {policy.revision} · {formatLimitMoney(policy.limits.find((limit) => limit.timeframe === bucket.timeframe)?.costLimitMicroUsd ?? 0)} · {policy.id === bucket.policyId ? "Selected policy ID" : "Not selected"} · {policy.assignments.flatMap((assignment) => {
-              if (assignment.memberId === status.memberId) return ["Direct assignment"];
-              const team = teams.find((item) => item.id === assignment.teamId && item.memberIds.includes(status.memberId));
-              return team ? [`Team: ${team.name}`] : [];
-            }).join(", ")}
+            <dl className="flex flex-wrap gap-x-4 gap-y-1">
+              <div className="flex gap-1"><dt>Policy</dt><dd>{policy.name}</dd></div>
+              <div className="flex gap-1"><dt>Revision</dt><dd>{policy.revision}</dd></div>
+              <div className="flex gap-1"><dt>Allowance</dt><dd>{formatLimitMoney(policy.limits.find((limit) => limit.timeframe === bucket.timeframe)?.costLimitMicroUsd ?? 0)}</dd></div>
+              <div className="flex gap-1"><dt>Selection</dt><dd>{policy.id === bucket.policyId ? "Selected policy" : "Not selected"}</dd></div>
+              <div className="flex gap-1"><dt>Assignments</dt><dd>{policy.assignments.flatMap((assignment) => {
+                if (assignment.memberId === status.memberId) return ["Direct assignment"];
+                const team = teams.find((item) => item.id === assignment.teamId && item.memberIds.includes(status.memberId));
+                return team ? [`Team: ${team.name}`] : [];
+              }).join(", ")}</dd></div>
+            </dl>
           </li>)}</ul>
         </div>
       </details>
-    </DenCard>)}
+    </section>)}
   </div>;
 }
 
@@ -150,7 +167,7 @@ export function GatewayUsageLimitsSection({ orgId, teams, members }: { orgId: st
     <GatewayLimitsQueryFeedback query={policies} label="policies" />
     {!policies.isError && policies.data && active.length === 0 ? <DenCard className="py-10 text-center"><p className="text-sm text-[var(--ow-muted)]">No usage limits configured</p></DenCard> : null}
     {!policies.isError && policies.data && active.length > 0 ? <DenCard className="overflow-hidden p-0"><DenTable rows={filtered} getRowKey={(row) => row.id} emptyLabel="No policies match this search." columns={[
-      { key: "name", header: "Policy", render: (policy) => <div className="flex flex-col gap-1"><span className="font-medium">{policy.name}</span><span className="text-xs text-[var(--ow-muted)]">Revision {policy.revision} · {policy.assignments.length} assignments</span></div> },
+      { key: "name", header: "Policy", render: (policy) => <div className="flex flex-col gap-1"><span className="font-medium">{policy.name}</span><dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--ow-muted)]"><div className="flex gap-1"><dt>Revision</dt><dd>{policy.revision}</dd></div><div className="flex gap-1"><dt>Assignments</dt><dd>{policy.assignments.length}</dd></div></dl></div> },
       { key: "limits", header: "Estimated allowances", render: (policy) => <ul>{policy.limits.map((limit) => <li key={limit.timeframe}>{timeframeLabels[limit.timeframe]}: {formatLimitMoney(limit.costLimitMicroUsd)}</li>)}</ul> },
       { key: "flags", header: "Behavior", render: (policy) => <div className="flex flex-wrap gap-2"><DenBadge>{policy.hardLimit ? "Hard" : "Soft"}</DenBadge><DenBadge>{policy.allowRequestReset ? "Increase requests on" : "Increase requests off"}</DenBadge></div> },
       { key: "actions", header: "Actions", render: (policy) => <div className="flex flex-wrap gap-2"><DenButton size="sm" variant="secondary" disabled={policies.isFetching} aria-label={`Edit ${policy.name}`} onClick={() => setEditor({ policy })}>Edit</DenButton><DenButton size="sm" variant="secondary" disabled={policies.isFetching} aria-label={`Assignments for ${policy.name}`} onClick={() => setAssigning(assigning === policy.id ? null : policy.id)}>Assignments</DenButton><DenButton size="sm" variant="ghost" disabled={policies.isFetching} aria-label={`Archive ${policy.name}`} onClick={() => { mutation.reset(); setArchiving(policy); }}>Archive</DenButton></div> },
@@ -159,7 +176,7 @@ export function GatewayUsageLimitsSection({ orgId, teams, members }: { orgId: st
     {!policies.isError && active.length > 0 ? <MemberInspector orgId={orgId} policies={active} teams={teams} /> : null}
     {editor ? <GatewayUsagePolicyEditor orgId={orgId} policy={editor.policy} onClose={() => setEditor(null)} /> : null}
     <AlertDialog.Root open={Boolean(archiving)} onOpenChange={(open) => { if (!open && !mutation.isPending) setArchiving(null); }}>
-      <AlertDialog.Portal><AlertDialog.Backdrop className="fixed inset-0 z-50 bg-black/30" /><AlertDialog.Popup className="fixed left-1/2 top-1/2 z-50 flex w-[min(480px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-[var(--ow-line)] bg-[var(--dls-surface)] p-6 shadow-xl">
+      <AlertDialog.Portal><AlertDialog.Backdrop className="fixed inset-0 z-50 bg-black/30" /><AlertDialog.Popup className="fixed left-1/2 top-1/2 z-50 flex w-[min(480px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-[var(--ow-line)]/60 bg-[var(--dls-surface)] p-6">
         <AlertDialog.Title className="text-lg font-semibold">Archive {archiving?.name}?</AlertDialog.Title><AlertDialog.Description className="text-sm text-[var(--ow-muted)]">This stops the policy from applying to assigned people and teams. Consumption and history are retained; people without other policies become unlimited.</AlertDialog.Description>
         {mutation.error ? <DenNotice tone="error" message={mutation.error.message} /> : null}
         {staleArchive ? <DenNotice tone="error" message="This policy changed. Cancel and review the latest revision before archiving." /> : null}

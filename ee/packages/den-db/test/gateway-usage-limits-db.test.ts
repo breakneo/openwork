@@ -29,7 +29,6 @@ import {
   gatewayUsageStatusSchema,
   type GatewayUsagePolicyWrite,
 } from "@openwork/types/den/gateway-usage-limits"
-import { buildRollupRows, createDbRollupRepository } from "../../../apps/gateway/src/rollups"
 import { isGatewayUsageDeadlock } from "../src/gateway-usage-errors"
 
 const url = process.env.DEN_USAGE_TEST_DATABASE_URL
@@ -168,6 +167,39 @@ dbTest(
     assert.equal((await f.service.listPolicies(f.admin)).policies[0].assignments.length, 2)
   },
 )
+dbTest("member search rechecks admin authority and excludes removed and foreign identities", async () => {
+  const f = await fixture()
+  const foreign = await fixture()
+  await assert.rejects(
+    f.service.members(f.member),
+    (error) => error instanceof GatewayUsageError && error.status === 403,
+  )
+  await assert.rejects(
+    f.service.members({ ...f.admin, organizationId: foreign.admin.organizationId }),
+    (error) => error instanceof GatewayUsageError && error.status === 404,
+  )
+  await f.db
+    .update(MemberTable)
+    .set({ removedAt: new Date() })
+    .where(eq(MemberTable.id, f.member.memberId))
+  assert.deepEqual(
+    (await f.service.members(f.admin, "Test member")).members.map((member) => member.id),
+    [f.admin.memberId],
+  )
+  await f.db.update(MemberTable).set({ role: "member" }).where(eq(MemberTable.id, f.admin.memberId))
+  await assert.rejects(
+    f.service.members(f.admin),
+    (error) => error instanceof GatewayUsageError && error.status === 403,
+  )
+  await f.db
+    .update(MemberTable)
+    .set({ role: "owner", removedAt: new Date() })
+    .where(eq(MemberTable.id, f.admin.memberId))
+  await assert.rejects(
+    f.service.members(f.admin),
+    (error) => error instanceof GatewayUsageError && error.status === 404,
+  )
+})
 dbTest(
   "known current-window raw and hourly history is included exactly once with explicit coverage",
   async () => {
@@ -550,6 +582,9 @@ dbTest(
     f.setTime("2026-09-10T06:15:00Z")
     const row = f.raw(700_000)
     await f.db.insert(GatewayRequestLogTable).values(row)
+    const { buildRollupRows, createDbRollupRepository } = await import(
+      "../../../apps/gateway/src/rollups"
+    )
     const repository = createDbRollupRepository(f.db)
     await repository.transaction(async (store) => {
       const start = new Date("2026-09-10T06:00:00Z")
@@ -633,6 +668,9 @@ dbTest(
     await f.db.insert(GatewayRequestLogTable).values(row)
     f.setTime("2026-09-15T12:00:00Z")
     await f.assigned()
+    const { buildRollupRows, createDbRollupRepository } = await import(
+      "../../../apps/gateway/src/rollups"
+    )
     const repository = createDbRollupRepository(f.db)
     await Promise.all([
       repository.transaction(async (store) => {

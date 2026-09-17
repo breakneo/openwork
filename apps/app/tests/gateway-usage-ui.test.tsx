@@ -63,6 +63,16 @@ function renderProbe() {
   root?.render(<QueryClientProvider client={getReactQueryClient()}>{ownPanelActive ? <OwnPanelProbe /> : null}{Array.from({ length: paneCount }, (_, index) => <Probe key={index} />)}</QueryClientProvider>);
 }
 async function flush() { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); }); }
+function expectTitleOnlySurface(slot: "popover" | "dialog", name: string) {
+  const surface = document.querySelector(`[data-slot="${slot}-content"]`);
+  const title = surface?.querySelector(`[data-slot="${slot}-title"]`);
+  if (!surface || !title) throw new Error(`Missing ${slot} title`);
+  expect(title.textContent).toBe(name);
+  expect(title.id).not.toBe("");
+  expect(surface.getAttribute("aria-labelledby")).toBe(title.id);
+  expect(surface.hasAttribute("aria-describedby")).toBe(false);
+  expect(surface.querySelector(`[data-slot="${slot}-description"]`)).toBeNull();
+}
 function changeSettings(org = "org_test", token = "member-token") {
   writeDenSettings({ baseUrl: "https://den.test", activeOrgId: org, authToken: token }, { persistBootstrap: false });
 }
@@ -116,6 +126,11 @@ test("summary presents day/week/month micro-USD, base/extension, hard/soft, pend
   const first = status.buckets[0];
   const html = renderToStaticMarkup(<GatewayUsageSummary status={{ ...status, coverage: { complete: false, unpricedRequests: 2 }, buckets: [first, { ...first, id: "week", timeframe: "week", hardLimit: false, canRequestReset: false, resetRequestStatus: "pending" }, { ...approvedUsageStatus().buckets[0], id: "month", timeframe: "month" }] }} onRequest={() => {}} />);
   for (const text of ["Daily", "Weekly", "Monthly", "1.30", "1.00", "1.25", "Base", "Extension", "0.00", "0.25", "Hard limit", "Soft limit", "Incomplete accounting", "Increase request pending", "approved", "Running sessions not reflected in usage above", "GMT"]) expect(html).toContain(text);
+  expect(html).toContain("<dt>Base</dt><dd>$1.00</dd>");
+  expect(html).toContain("<dt>Extension</dt><dd>$0.25</dd>");
+  expect(html).toContain("<dt>Status</dt><dd>Exhausted</dd>");
+  expect(html).toContain("<dt>Over allowance</dt><dd>$0.30</dd>");
+  expect(html).not.toContain("·");
   expect(html).toContain("Request Increase — Daily");
   expect(html).not.toContain("Request Increase — Weekly");
   expect(html).not.toContain("Request Increase — Monthly");
@@ -126,6 +141,11 @@ test("hard/soft notices retain usage controls and stale truth disables only the 
   await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageNotice state="blocked" status={status} stale={true} /></QueryClientProvider>));
   expect(container.textContent).toContain("Out of usage");
   expect(container.textContent).toContain("You've consumed the AI usage limits assigned to you.");
+  expect(container.textContent).toContain("You can request a one time increase to your limits here:");
+  const notice = container.querySelector('[data-testid="gateway-usage-notice"]');
+  expect(notice?.classList.contains("text-destructive")).toBe(false);
+  expect(notice?.classList.contains("text-card-foreground")).toBe(true);
+  expect(notice?.querySelector('svg[aria-hidden="true"]')?.classList.contains("lucide-lock-keyhole")).toBe(true);
   expect(container.textContent).toContain("Consumed Limit: Standard - Daily");
   expect(container.textContent).toContain("Could not refresh usage");
   const increase = [...container.querySelectorAll("button")].find((button) => button.textContent === "Request Increase");
@@ -167,10 +187,12 @@ test("trigger observes approval before opening and panel exposes a titled loadin
   await flush();
   expect(reads).toBeGreaterThan(0);
   expect(document.body.textContent).toContain("Loading usage limits");
-  expect(document.querySelector('[data-slot="popover-title"]')?.textContent).toBe("Usage limits");
+  expectTitleOnlySurface("popover", "Usage limits");
+  expect(document.body.textContent).not.toContain("Your organization’s AI Gateway estimated cost.");
   await act(async () => resolveRead?.(Response.json({ error: "unavailable" }, { status: 503 })));
   await flush();
   expect(document.body.textContent).toContain("does not mean unlimited access");
+  expect(document.querySelector('[data-slot="popover-content"] [role="alert"]')?.classList.contains("text-destructive")).toBe(true);
 });
 
 test("eligible bucket opens a titled reset dialog and pending status removes its action", async () => {
@@ -183,7 +205,9 @@ test("eligible bucket opens a titled reset dialog and pending status removes its
   if (!request) throw new Error("Missing eligible reset action");
   await act(async () => request.click());
   await flush();
-  expect(document.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("Request Increase");
+  expectTitleOnlySurface("dialog", "Request Increase");
+  expect(document.querySelector('[data-slot="dialog-content"]')?.textContent).toContain("Approval adds 25% of the base allowance once; usage and reset time are unchanged.");
+  expect(document.body.textContent).not.toContain("Ask your organization administrator");
   expect(document.querySelector("textarea")?.required).toBe(true);
   status = { ...status, buckets: status.buckets.map((bucket) => ({ ...bucket, canRequestReset: false, resetRequestStatus: "pending" })) };
   await act(async () => { await getReactQueryClient().invalidateQueries({ queryKey: gatewayUsageQueryPrefix }); });
@@ -200,7 +224,9 @@ test("direct notice opens an increase dialog with a required reason and submits 
   await act(async () => request.click());
   await flush();
   const dialog = document.querySelector('[role="dialog"]');
-  expect(dialog?.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("Request Increase");
+  expectTitleOnlySurface("dialog", "Request Increase");
+  expect(dialog?.textContent).toContain("Approval adds 25% of the base allowance once; usage and reset time are unchanged.");
+  expect(dialog?.textContent).not.toContain("Ask your organization administrator");
   const textarea = dialog?.querySelector("textarea");
   const submit = dialog?.querySelector<HTMLButtonElement>('button[type="submit"]');
   if (!textarea || !submit) throw new Error("Missing dialog form");

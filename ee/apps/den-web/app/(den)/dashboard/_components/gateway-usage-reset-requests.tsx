@@ -25,12 +25,12 @@ function RequestTimestamp({ value }: { value: string }) {
 function RequestBucketContext({ request }: { request: GatewayUsageResetRequest }) {
   const preview = extensionPreview(request);
   return <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-[var(--ow-muted)]">
-    <span>{timeframeLabels[request.timeframe]} · {request.policyName}</span>
+    <span>{request.policyName} - {timeframeLabels[request.timeframe]}</span>
     <span>{formatLimitMoney(request.usedMicroUsd)} used / {formatLimitMoney(request.allowanceMicroUsd)} allowance</span>
     <span>Base: {formatLimitMoney(request.baseAllowanceMicroUsd)}</span>
     <span>Reset: <GatewayLimitTimestamp value={request.resetAt} /></span>
     {request.status === "expired" ? <span>Expired / ineligible</span> : null}
-    {request.status === "pending" ? <span>Approve adds {formatLimitMoney(preview.extension)} → {formatLimitMoney(preview.total)} total</span> : null}
+    {request.status === "pending" ? <span id={`gateway-reset-impact-${request.id}`}>+{formatLimitMoney(preview.extension)} allowance ({formatLimitMoney(preview.total)} total); may increase provider charges; no undo.</span> : null}
     {request.status === "pending" && Date.parse(request.resetAt) <= Date.now() ? <span className="text-[var(--ow-warning)]">This period ended. Refresh requests to check its current status.</span> : null}
     {request.status === "pending" && request.baseAllowanceMicroUsd === 0 ? <span className="text-[var(--ow-warning)]">A zero base allowance cannot receive a useful percentage extension.</span> : null}
     {request.status === "pending" && request.usedMicroUsd >= preview.total ? <span className="text-[var(--ow-warning)]">Approval will still leave this bucket exhausted.</span> : null}
@@ -94,7 +94,7 @@ function GatewayResetQueue({ orgId, members }: { orgId: string; members: DenOrgM
     {mutation.isSuccess && mutation.data && "status" in mutation.data ? <DenNotice tone={mutation.data.status === "expired" ? "warning" : "info"} message={mutation.data.status === "expired" ? "This request expired or its policy changed. No extension was granted by this decision; review the current bucket." : `Request ${mutation.data.status}. Check the queue and history for the latest state.`} /> : null}
     <ResetRequestPages query={requests} view="pending" onRefresh={refreshRequests} refreshing={refreshing} columns={[...requestColumns,
       { key: "actions", header: "Actions", align: "right", render: (request) => <div className="flex flex-wrap justify-end gap-2">
-        <DenButton size="sm" disabled={disabled || request.status !== "pending" || request.baseAllowanceMicroUsd === 0 || Date.parse(request.resetAt) <= Date.now()} aria-label={`Approve 25% for ${request.memberName}, ${timeframeLabels[request.timeframe]}`} onClick={() => mutation.mutate({ type: "approve", requestId: request.id })}>Approve 25%</DenButton>
+        <DenButton size="sm" disabled={disabled || request.status !== "pending" || request.baseAllowanceMicroUsd === 0 || Date.parse(request.resetAt) <= Date.now()} aria-label={`Approve 25% for ${request.memberName}, ${timeframeLabels[request.timeframe]}`} aria-describedby={request.status === "pending" ? `gateway-reset-impact-${request.id}` : undefined} onClick={() => mutation.mutate({ type: "approve", requestId: request.id })}>Approve 25%</DenButton>
         <DenButton size="sm" variant="secondary" disabled={disabled || request.status !== "pending"} aria-label={`Deny request for ${request.memberName}, ${timeframeLabels[request.timeframe]}`} onClick={() => mutation.mutate({ type: "deny", requestId: request.id })}>Deny</DenButton>
       </div> },
     ]} />

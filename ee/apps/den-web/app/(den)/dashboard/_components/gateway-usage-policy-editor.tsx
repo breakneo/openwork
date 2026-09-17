@@ -38,7 +38,7 @@ export function GatewayUsagePolicyEditor({ orgId, policy, onClose }: { orgId: st
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !mutation.isPending) onClose(); }}>
     <Dialog.Portal>
       <Dialog.Backdrop className="fixed inset-0 z-50 bg-black/30" />
-      <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 flex max-h-[90dvh] w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-5 overflow-y-auto rounded-2xl border border-[var(--ow-line)] bg-[var(--dls-surface)] p-6 shadow-xl">
+      <Dialog.Popup aria-describedby={undefined} className="fixed left-1/2 top-1/2 z-50 flex max-h-[90dvh] w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-5 overflow-y-auto rounded-2xl border border-[var(--ow-line)]/60 bg-[var(--dls-surface)] p-6">
         <Dialog.Title className="text-lg font-semibold">{policy ? "Edit usage limit policy" : "Create usage limit policy"}</Dialog.Title>
         <form noValidate className="flex flex-col gap-5" onSubmit={(event) => {
           event.preventDefault();
@@ -53,8 +53,8 @@ export function GatewayUsagePolicyEditor({ orgId, policy, onClose }: { orgId: st
               <DenInput id={`${id}-name`} value={draft.name} maxLength={120} aria-invalid={issues.some((issue) => issue.path[0] === "name")} aria-describedby={`${id}-name-error`} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
               <span id={`${id}-name-error`} className="text-sm text-[var(--ow-danger)]">{issues.find((issue) => issue.path[0] === "name")?.message}</span>
             </Field.Root>
-            <div className="flex items-center justify-between gap-4"><span>Hard limit</span><DenSwitch aria-label="Hard limit" checked={draft.hardLimit} onChange={(hardLimit) => setDraft({ ...draft, hardLimit })} /></div>
-            <p className="text-sm text-[var(--ow-muted)]">Hard limits block further requests after exhaustion. Soft limits only warn. In-flight requests may exceed the allowance; estimates are not an invoice ceiling.</p>
+            <div className="flex items-center justify-between gap-4"><span>Hard limit</span><DenSwitch aria-label="Hard limit" aria-describedby={`${id}-hard-limit-description`} checked={draft.hardLimit} onChange={(hardLimit) => setDraft({ ...draft, hardLimit })} /></div>
+            <p id={`${id}-hard-limit-description`} className="text-sm text-[var(--ow-muted)]">Hard limits block further requests after exhaustion. Soft limits only warn. In-flight requests may exceed the allowance; estimates are not an invoice ceiling.</p>
             <div className="flex items-center justify-between gap-4"><span>Allow request usage increase</span><DenSwitch aria-label="Allow request usage increase" aria-describedby={`${id}-reset-description`} checked={draft.allowRequestReset} onChange={(allowRequestReset) => setDraft({ ...draft, allowRequestReset })} /></div>
             <p id={`${id}-reset-description`} className="text-sm text-[var(--ow-muted)]">Allow user to request an increase from within the app once their usage runs out</p>
             <fieldset className="flex min-w-0 flex-col gap-3">

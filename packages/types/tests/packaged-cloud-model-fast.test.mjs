@@ -57,6 +57,27 @@ test("packaged runtime exports import in plain Node without a TypeScript loader"
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test("Bun imports usage-limit schemas from a clean source-only package", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "openwork-types-bun-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = fileURLToPath(new URL("../", import.meta.url));
+  const destination = join(root, "node_modules/@openwork/types");
+  mkdirSync(destination, { recursive: true });
+  copyFileSync(join(source, "package.json"), join(destination, "package.json"));
+  cpSync(join(source, "src"), join(destination, "src"), { recursive: true });
+  cpSync(join(source, "node_modules/zod"), join(root, "node_modules/zod"), { recursive: true, dereference: true });
+  assert.equal(existsSync(join(destination, "dist")), false);
+  const result = spawnSync("bun", ["--eval", `
+    import assert from "node:assert/strict";
+    import { gatewayUsdToMicroUsd, gatewayUsageTimeframes } from "@openwork/types/den/gateway-usage-limits";
+    assert.ok(import.meta.resolve("@openwork/types/den/gateway-usage-limits").endsWith("/src/den/gateway-usage-limits.ts"));
+    assert.equal(gatewayUsdToMicroUsd("1.25"), 1250000);
+    assert.deepEqual(gatewayUsageTimeframes, ["day", "week", "month"]);
+  `], { cwd: root, encoding: "utf8", timeout: 15_000, env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "production", NODE_OPTIONS: "", NODE_PATH: "" } });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
 const workspace = fileURLToPath(new URL("../../../", import.meta.url));
 const workspacePackages = {
   "@openwork/types": "packages/types",

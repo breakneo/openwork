@@ -1,11 +1,11 @@
 import { expect } from "vitest";
-import { spec } from "@openwork/testkit";
+import { browserScript, spec, type User, type Probe } from "@openwork/testkit";
 import { gatewayUsageLimitPolicySchema, gatewayUsageResetPageSchema, gatewayUsageStatusSchema } from "@openwork/types/den/gateway-usage-limits";
 import { gatewayUsagePolicy, usageRecord, usageRecords } from "../worlds/gateway-usage-policy.ts";
 
 const test = spec.world(gatewayUsagePolicy, {
   timeout: 600_000,
-  resources: { surfaces: ["web", "desktop"], services: ["den", "mock"], nativeReason: "Verify Electron's signed-in Den IPC transport reads member usage and submits the reset from the native account panel." },
+  resources: { surfaces: ["web", "desktop"], services: ["den", "mock"], nativeReason: "Verify Electron submits a usage increase through its native UI and the same composer completes a real Gateway-backed assistant turn after Den approval." },
   needs: { commands: ["pnpm", "bun"], optIn: ["OPENWORK_EVAL_E2E_TESTS"] },
 });
 
@@ -20,6 +20,33 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
   const member = user.on(world.desktop);
   const memberAgent = agent.on(world.desktop);
   const memberProbe = probe.on(world.desktop);
+  const capture = async (name: string, surfaceUser: User, surfaceProbe: Probe, selector: string) => {
+    let previous = "";
+    const dom = await surfaceProbe.eventually(() => surfaceProbe.dom(selector), {
+      within: 15_000, intervalMs: 250, label: `${name} settled visible geometry`,
+      until: (value) => {
+        const current = JSON.stringify(value);
+        const settled = current === previous;
+        previous = current;
+        return settled && value.elements.length > 0 && value.elements.every(({ rect }) => rect.width > 0 && rect.height > 0);
+      },
+    });
+    const viewport = await surfaceProbe.eval(browserScript(() => ({ width: innerWidth, height: innerHeight, scale: devicePixelRatio }), []));
+    expect(dom.documentWidth).toBeLessThanOrEqual(dom.viewportWidth);
+    for (const { rect } of dom.elements) {
+      expect(rect.left).toBeGreaterThanOrEqual(0);
+      expect(rect.right).toBeLessThanOrEqual(viewport.width);
+      expect(rect.top).toBeGreaterThanOrEqual(0);
+      expect(rect.bottom).toBeLessThanOrEqual(viewport.height);
+    }
+    const shot = await surfaceUser.screenshot();
+    expect(shot.png.subarray(1, 4).toString()).toBe("PNG");
+    const width = shot.png.readUInt32BE(16);
+    const height = shot.png.readUInt32BE(20);
+    expect(width).toBe(Math.round(viewport.width * viewport.scale));
+    expect(height).toBe(Math.round(viewport.height * viewport.scale));
+    evidence.recordAssertionEvidence(`${name}: real app screenshot and DOM dimensions`, JSON.stringify({ hash: shot.hash, width, height, viewport, elements: dom.elements.length }), true);
+  };
   const own = async (identity = world.member, query = "") => {
     const result = await probe.api(identity, `${ownPath}${query}`);
     expect(result.response.status).toBe(200);
@@ -42,6 +69,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
   expect(await own(world.control)).toMatchObject({ memberId: world.controlId, state: "unlimited", buckets: [] });
 
   const policy = await step("admin creates and assigns the monthly hard policy in rendered Den", async () => {
+    await admin.navigate(new URL("/dashboard/gateway-providers", world.den.ref.webUrl).toString());
     await admin.see({ role: "button", label: "Create policy" }, { timeoutMs: 90_000 });
     await admin.click({ role: "button", label: "Create policy" });
     await admin.see({ role: "combobox", label: "Timeframe 1" }, { value: "1 month" });
@@ -114,7 +142,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     await member.click({ role: "button", label: "Refresh usage" });
     await member.see({ text: "$1.00 used / $1.00 total" });
     await member.see({ role: "button", label: "Request Increase — Monthly" });
-    await member.screenshot();
+    await capture("Desktop exhausted usage", member, memberProbe, '[aria-label="Monthly usage"]');
     return status;
   });
   evidence.recordAssertionEvidence("Gateway, not Desktop, blocks after known consumption", "First request settled 1000000 micro-USD; second returned trusted policy HTTP 429 without a second upstream call or charge. Desktop rendered exhaustion; the unassigned control stayed unlimited.", true);
@@ -153,26 +181,37 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     await member.see({ testId: "gateway-usage-notice" }, { text: /Out of usage/ });
     expect((await memberProbe.dom('[data-testid="gateway-usage-notice"]')).elements).toHaveLength(1);
     expect(await memberProbe.composer()).toMatchObject({ composerEditable: true, modelUnavailable: false });
-    await member.screenshot();
+    await capture("Desktop blocked composer", member, memberProbe, '[data-testid="gateway-usage-notice"]');
     evidence.recordAssertionEvidence("Native composer reaches the real Gateway and own status corroborates the custom notice", JSON.stringify({ engine: world.engine, rejectedBefore: rejectedBefore.length, rejectedAfter: rejectedAfter.length, upstreamRequests: world.upstreamCount(), nativePromptRecorded: true, nativeAssistantErrorRecorded: true, usedMicroUsd: exhausted.buckets[0]?.usedMicroUsd }), true);
-    await member.click({ role: "button", label: "Usage limits", nth: 0 });
-    await member.see({ role: "button", label: "Request Increase — Monthly" });
+    await member.see({ role: "button", label: /^Request Increase$/ });
   });
 
   const pending = await step("member submits a required reason from Desktop and cannot review the request", async () => {
     const blank = await seed.api(world.member, requestsPath, { method: "POST", body: JSON.stringify({ bucketId: initialBucket.id, reason: "   " }) });
     expect(blank.response.status).toBe(400);
     expect(await requests()).toEqual([]);
-    await member.click({ role: "button", label: "Request Increase — Monthly" });
+    await member.click({ role: "button", label: /^Request Increase$/ });
     await member.see({ role: "textbox", label: "Reason (required)" });
     await member.type({ role: "textbox", label: "Reason (required)" }, reason);
+    await capture("Desktop direct increase form", member, memberProbe, '[role="dialog"]');
     const submit = await memberProbe.dom('[role="dialog"] button[type="submit"]');
     expect(submit.elements).toHaveLength(1);
     expect(submit.elements[0]?.text).toBe("Request Increase");
     expect((await memberProbe.dom("button")).elements.filter((element) => element.text === "Request Increase")).toHaveLength(2);
     await member.click({ role: "button", label: /^Request Increase$/, nth: 1 });
+    await probe.eventually(() => requests(world.member, "/me"), {
+      within: 15_000, intervalMs: 200, label: "one Desktop increase request persisted",
+      until: (rows) => rows.length === 1 && rows[0]?.reason === reason && rows[0]?.status === "pending",
+    });
+    await memberProbe.eventually(() => memberProbe.dom('[role="dialog"]'), {
+      within: 15_000, intervalMs: 200, label: "submitted increase dialog closes",
+      until: (value) => value.elements.length === 0,
+    });
+    await member.notSee({ role: "textbox", label: "Reason (required)" });
+    await member.click({ role: "button", label: "Usage limits", nth: 0 });
     await member.see({ text: "Increase request pending" });
     await member.notSee({ role: "button", label: "Request Increase — Monthly" });
+    await capture("Desktop pending increase", member, memberProbe, '[aria-label="Monthly usage"]');
     const rows = await requests();
     expect(rows).toHaveLength(1);
     const request = rows[0];
@@ -188,7 +227,8 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
   await step("admin reviews the actual reason in Den and approves exactly 25% without forgiving consumption", async () => {
     await admin.click({ role: "button", label: "Refresh requests" });
     await admin.see({ text: reason });
-    await admin.see({ text: "Approve adds $0.25 → $1.25 total" });
+    await admin.see({ text: "+$0.25 allowance ($1.25 total); may increase provider charges; no undo." });
+    await capture("Den pending request row", admin, probe.on(world.admin), '[aria-label="Pending increase request pages"] tbody tr');
     await admin.click({ role: "button", label: "Approve 25% for Usage Member, 1 month" });
     await admin.see({ text: "Request approved. Check the queue and history for the latest state." });
     const approved = await probe.eventually(own, { within: 15_000, intervalMs: 200, label: "approval restores real allowance", until: (value) => value.state === "within_limit" });
@@ -208,7 +248,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     expect((await probe.on(world.admin).dom('#gateway-reset-history tbody tr:nth-child(even)')).elements).toHaveLength(1);
     await admin.notSee({ role: "button", label: "Load more history" });
     await admin.see({ text: "Reviewer: Usage Admin" });
-    await admin.screenshot();
+    await capture("Den approved history", admin, probe.on(world.admin), '#gateway-reset-history tbody tr');
     await member.click({ role: "button", label: "Refresh usage" });
     await member.see({ text: "$1.00 used / $1.25 total" });
     await member.see({ text: "Increase request: approved" });
@@ -218,11 +258,66 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     await member.notSee({ testId: "gateway-usage-notice" }, { timeoutMs: 60_000 });
     await member.see({ testId: "gateway-usage-approved-notice" }, { text: /Usage increase approved/ });
     expect(await memberProbe.composer()).toMatchObject({ selectedModelLabel: world.modelName, composerEditable: true, modelUnavailable: false });
-    await member.screenshot();
+    await capture("Desktop approved increase", member, memberProbe, '[data-testid="gateway-usage-approved-notice"]');
     expect(await own(world.control)).toMatchObject({ state: "unlimited", buckets: [] });
-    expect((await world.generate()).status).toBe(200);
-    expect(world.upstreamCount()).toBe(2);
-    expect(world.upstreamUsesOnlyOrgKey()).toBe(true);
   });
-  evidence.recordAssertionEvidence("Desktop request and Den approval restore Gateway admission", "Required member reason persisted and rendered in Den. Member approval was forbidden. Admin granted exactly 250000 micro-USD with reviewer/time and unchanged consumption, bucket, reset. Desktop refreshed to $1/$1.25 and the custom notice cleared in the same managed-model session after a native engine rejection; the next real Gateway call reached upstream.", true);
+
+  await step("after approval the same Desktop composer completes a native assistant turn through the real Gateway", async () => {
+    world.streamSuccess();
+    const prompt = "Continue the synthetic review with one brief plain-text summary. Do not use tools.";
+    expect(prompt).not.toContain(world.providerId);
+    expect(prompt).not.toContain(world.modelId);
+    const rejectedBefore = await world.rejectedCalls();
+    await member.type("composer", prompt);
+    await memberProbe.eventually(() => memberProbe.composer(), {
+      within: 30_000, label: "approved session is ready for a new composer send",
+      until: (state) => state.runTaskEnabled && state.draftText === prompt,
+    });
+    await memberAgent.run("composer.send");
+    const native = await probe.eventually(() => world.nativeMessages(sessionId), {
+      within: 120_000, intervalMs: 500, label: "post-approval native assistant finishes successfully",
+      until: (value) => {
+        if (!value.ok || !value.data.some((message) => message.parts.some((part) => part.text === prompt))) return false;
+        const body = Array.isArray(value.body) ? value.body : usageRecord(value.body).data;
+        const last = usageRecords(body).at(-1);
+        if (!last) return false;
+        const info = usageRecord(last.info ?? last);
+        return (info.role === "assistant" || info.type === "assistant") && !info.error && info.finish === "stop"
+          && typeof usageRecord(info.time).completed === "number"
+          && value.data.at(-1)?.parts.some((part) => part.type === "text" && part.text === "Complete café") === true;
+      },
+    });
+    const body = Array.isArray(native.body) ? native.body : usageRecord(native.body).data;
+    const completed = usageRecords(body).at(-1);
+    if (!completed) throw new Error("Post-approval native assistant missing");
+    const info = usageRecord(completed.info ?? completed);
+    expect(info.error).toBeUndefined();
+    expect(info.finish).toBe("stop");
+    if (world.engine === "v1") expect(info).toMatchObject({ providerID: world.providerId, modelID: world.modelId });
+    else expect(info.model).toMatchObject({ providerID: world.providerId, id: world.modelId });
+    await member.see({ text: "Complete café" });
+    await member.see("Run task", { timeoutMs: 30_000 });
+    expect(await memberProbe.composer()).toMatchObject({ selectedModelLabel: world.modelName, composerEditable: true, modelUnavailable: false, draftText: "" });
+    expect(world.upstreamCount()).toBe(2);
+    expect(world.upstreamModel()).toBe("openai/gpt-4o-mini");
+    expect(world.upstreamStreamed()).toBe(true);
+    expect(world.upstreamUsesOnlyOrgKey()).toBe(true);
+    const calls = await probe.eventually(() => world.successfulCalls(), {
+      within: 15_000, intervalMs: 200, label: "post-approval native stream settles known upstream cost",
+      until: (rows) => rows.length === 2 && rows.every((row) => row.cost_micro_usd === 1_000_000),
+    });
+    expect(calls.filter((row) => Boolean(row.stream))).toEqual([{ status: 200, outcome: "ok", cost_micro_usd: 1_000_000, stream: 1, org_membership_id: world.memberId, requested_model: world.modelId }]);
+    const settled = await own();
+    expect(settled).toMatchObject({ state: "blocked", coverage: { complete: true, unpricedRequests: 0 }, buckets: [{ id: initialBucket.id, usedMicroUsd: 2_000_000, extensionMicroUsd: 250_000, allowanceMicroUsd: 1_250_000, resetRequestStatus: "approved", canRequestReset: false }] });
+    expect(await world.rejectedCalls()).toEqual(rejectedBefore);
+    expect(await own(world.control)).toMatchObject({ state: "unlimited", buckets: [] });
+    if (typeof info.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(info.id)) throw new Error("Native assistant has no valid message ID");
+    const answerSelector = `[data-message-role="assistant"][data-message-id="${info.id}"]`;
+    const answer = await memberProbe.dom(answerSelector);
+    expect(answer.elements).toHaveLength(1);
+    expect(answer.elements[0]?.text).toContain("Complete café");
+    await capture("Desktop native recovery completed", member, memberProbe, answerSelector);
+    evidence.recordAssertionEvidence("Den approval restores actual Desktop composer completion, not a direct HTTP bypass", JSON.stringify({ engine: world.engine, nativeAssistantCompleted: true, renderedAnswer: "Complete café", upstreamRequests: world.upstreamCount(), streamed: true, settledCostMicroUsd: 1_000_000, totalUsedMicroUsd: settled.buckets[0]?.usedMicroUsd, additionalRejections: 0 }), true);
+  });
+  evidence.recordAssertionEvidence("Desktop request and Den approval restore the same native session", "The member submitted a required reason through the blocked-notice dialog; Den displayed it and granted exactly 250000 micro-USD without forgiving consumption. After approval, a real Desktop composer send produced a completed native assistant and rendered answer with one streaming upstream call and a settled $1 cost. Total usage became $2, correctly exhausting the $1.25 allowance again; the control member remained unlimited.", true);
 });

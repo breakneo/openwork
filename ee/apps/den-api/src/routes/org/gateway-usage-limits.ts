@@ -100,9 +100,9 @@ async function respond<T>(c: Pick<RouteContext, "json">, work: () => Promise<T>)
   }
 }
 const available: MiddlewareHandler<{ Variables: OrgRouteVariables }> = async (c, next) => {
+  c.header("cache-control", "private, no-store")
   const unavailable = gatewayManagementUnavailable()
   if (unavailable) return c.json(unavailable, 403)
-  c.header("cache-control", "no-store")
   await next()
 }
 const admin: MiddlewareHandler<{ Variables: OrgRouteVariables }> = async (c, next) => {

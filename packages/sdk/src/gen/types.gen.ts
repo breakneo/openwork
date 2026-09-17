@@ -12304,6 +12304,1332 @@ export type GetV1InferenceProvidersUsageResponses = {
 export type GetV1InferenceProvidersUsageResponse =
   GetV1InferenceProvidersUsageResponses[keyof GetV1InferenceProvidersUsageResponses];
 
+export type GetV1GatewayUsageLimitPoliciesData = {
+  body?: never;
+  path?: never;
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies";
+};
+
+export type GetV1GatewayUsageLimitPoliciesErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitPoliciesError =
+  GetV1GatewayUsageLimitPoliciesErrors[keyof GetV1GatewayUsageLimitPoliciesErrors];
+
+export type GetV1GatewayUsageLimitPoliciesResponses = {
+  /**
+   * List usage limit policies
+   */
+  200: {
+    policies: Array<{
+      id: string;
+      name: string;
+      hardLimit: boolean;
+      allowRequestReset: boolean;
+      revision: number;
+      limits: Array<{
+        timeframe: "day" | "week" | "month";
+        costLimitMicroUsd: number;
+      }>;
+      assignments: Array<{
+        id: string;
+        memberId: string | null;
+        teamId: string | null;
+      }>;
+      archivedAt?: string | null;
+    }>;
+  };
+};
+
+export type GetV1GatewayUsageLimitPoliciesResponse =
+  GetV1GatewayUsageLimitPoliciesResponses[keyof GetV1GatewayUsageLimitPoliciesResponses];
+
+export type PostV1GatewayUsageLimitPoliciesData = {
+  body: {
+    name: string;
+    hardLimit?: boolean;
+    allowRequestReset?: boolean;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costUsd: string;
+    }>;
+  };
+  path?: never;
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies";
+};
+
+export type PostV1GatewayUsageLimitPoliciesErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitPoliciesError =
+  PostV1GatewayUsageLimitPoliciesErrors[keyof PostV1GatewayUsageLimitPoliciesErrors];
+
+export type PostV1GatewayUsageLimitPoliciesResponses = {
+  /**
+   * Create usage limit policy
+   */
+  200: {
+    id: string;
+    name: string;
+    hardLimit: boolean;
+    allowRequestReset: boolean;
+    revision: number;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costLimitMicroUsd: number;
+    }>;
+    assignments: Array<{
+      id: string;
+      memberId: string | null;
+      teamId: string | null;
+    }>;
+    archivedAt?: string | null;
+  };
+};
+
+export type PostV1GatewayUsageLimitPoliciesResponse =
+  PostV1GatewayUsageLimitPoliciesResponses[keyof PostV1GatewayUsageLimitPoliciesResponses];
+
+export type PatchV1GatewayUsageLimitPoliciesByPolicyIdData = {
+  body: {
+    name: string;
+    hardLimit?: boolean;
+    allowRequestReset?: boolean;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costUsd: string;
+    }>;
+    revision: number;
+  };
+  path: {
+    policyId: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies/{policyId}";
+};
+
+export type PatchV1GatewayUsageLimitPoliciesByPolicyIdErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PatchV1GatewayUsageLimitPoliciesByPolicyIdError =
+  PatchV1GatewayUsageLimitPoliciesByPolicyIdErrors[keyof PatchV1GatewayUsageLimitPoliciesByPolicyIdErrors];
+
+export type PatchV1GatewayUsageLimitPoliciesByPolicyIdResponses = {
+  /**
+   * Update usage limit policy
+   */
+  200: {
+    id: string;
+    name: string;
+    hardLimit: boolean;
+    allowRequestReset: boolean;
+    revision: number;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costLimitMicroUsd: number;
+    }>;
+    assignments: Array<{
+      id: string;
+      memberId: string | null;
+      teamId: string | null;
+    }>;
+    archivedAt?: string | null;
+  };
+};
+
+export type PatchV1GatewayUsageLimitPoliciesByPolicyIdResponse =
+  PatchV1GatewayUsageLimitPoliciesByPolicyIdResponses[keyof PatchV1GatewayUsageLimitPoliciesByPolicyIdResponses];
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveData = {
+  body: {
+    revision: number;
+  };
+  path: {
+    policyId: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies/{policyId}/archive";
+};
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveError =
+  PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveErrors[keyof PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveErrors];
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveResponses = {
+  /**
+   * Archive usage limit policy
+   */
+  200: {
+    id: string;
+    name: string;
+    hardLimit: boolean;
+    allowRequestReset: boolean;
+    revision: number;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costLimitMicroUsd: number;
+    }>;
+    assignments: Array<{
+      id: string;
+      memberId: string | null;
+      teamId: string | null;
+    }>;
+    archivedAt?: string | null;
+  };
+};
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveResponse =
+  PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveResponses[keyof PostV1GatewayUsageLimitPoliciesByPolicyIdArchiveResponses];
+
+export type GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsData = {
+  body?: never;
+  path: {
+    policyId: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies/{policyId}/assignments";
+};
+
+export type GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsError =
+  GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsErrors[keyof GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsErrors];
+
+export type GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponses = {
+  /**
+   * List policy assignments
+   */
+  200: {
+    assignments: Array<{
+      id: string;
+      memberId: string | null;
+      teamId: string | null;
+    }>;
+  };
+};
+
+export type GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponse =
+  GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponses[keyof GetV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponses];
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsData = {
+  body:
+    | {
+        memberId: string;
+      }
+    | {
+        teamId: string;
+      };
+  path: {
+    policyId: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies/{policyId}/assignments";
+};
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsError =
+  PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsErrors[keyof PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsErrors];
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponses = {
+  /**
+   * Assign usage limit policy
+   */
+  200: {
+    id: string;
+    name: string;
+    hardLimit: boolean;
+    allowRequestReset: boolean;
+    revision: number;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costLimitMicroUsd: number;
+    }>;
+    assignments: Array<{
+      id: string;
+      memberId: string | null;
+      teamId: string | null;
+    }>;
+    archivedAt?: string | null;
+  };
+};
+
+export type PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponse =
+  PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponses[keyof PostV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsResponses];
+
+export type DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdData = {
+  body?: never;
+  path: {
+    policyId: string;
+    assignmentId: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-policies/{policyId}/assignments/{assignmentId}";
+};
+
+export type DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdError =
+  DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdErrors[keyof DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdErrors];
+
+export type DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdResponses = {
+  /**
+   * Remove policy assignment
+   */
+  200: {
+    id: string;
+    name: string;
+    hardLimit: boolean;
+    allowRequestReset: boolean;
+    revision: number;
+    limits: Array<{
+      timeframe: "day" | "week" | "month";
+      costLimitMicroUsd: number;
+    }>;
+    assignments: Array<{
+      id: string;
+      memberId: string | null;
+      teamId: string | null;
+    }>;
+    archivedAt?: string | null;
+  };
+};
+
+export type DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdResponse =
+  DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdResponses[keyof DeleteV1GatewayUsageLimitPoliciesByPolicyIdAssignmentsByAssignmentIdResponses];
+
+export type GetV1GatewayUsageLimitsMembersData = {
+  body?: never;
+  path?: never;
+  query?: {
+    query?: string;
+  };
+  url: "/v1/gateway/usage-limits/members";
+};
+
+export type GetV1GatewayUsageLimitsMembersErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitsMembersError =
+  GetV1GatewayUsageLimitsMembersErrors[keyof GetV1GatewayUsageLimitsMembersErrors];
+
+export type GetV1GatewayUsageLimitsMembersResponses = {
+  /**
+   * Search members for usage limits
+   */
+  200: {
+    members: Array<{
+      id: string;
+      name: string;
+      email: string;
+    }>;
+  };
+};
+
+export type GetV1GatewayUsageLimitsMembersResponse =
+  GetV1GatewayUsageLimitsMembersResponses[keyof GetV1GatewayUsageLimitsMembersResponses];
+
+export type GetV1GatewayUsageLimitsMeData = {
+  body?: never;
+  path?: never;
+  query?: never;
+  url: "/v1/gateway/usage-limits/me";
+};
+
+export type GetV1GatewayUsageLimitsMeErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitsMeError = GetV1GatewayUsageLimitsMeErrors[keyof GetV1GatewayUsageLimitsMeErrors];
+
+export type GetV1GatewayUsageLimitsMeResponses = {
+  /**
+   * Read own Gateway usage limits
+   */
+  200: {
+    serverTime: string;
+    organizationId: string;
+    memberId: string;
+    state: "unlimited" | "within_limit" | "over_limit" | "blocked";
+    coverage: {
+      complete: boolean;
+      unpricedRequests: number;
+      quarantinedRequests?: number;
+    };
+    buckets: Array<{
+      id: string;
+      timeframe: "day" | "week" | "month";
+      policyId: string;
+      policyName: string;
+      policyRevision?: number;
+      provenance?: Array<
+        | {
+            kind: "direct";
+            assignmentId: string;
+            memberId: string;
+            teamId: null;
+          }
+        | {
+            kind: "team";
+            assignmentId: string;
+            memberId: null;
+            teamId: string;
+            teamName: string;
+          }
+      >;
+      baseAllowanceMicroUsd: number;
+      extensionMicroUsd: number;
+      allowanceMicroUsd: number;
+      usedMicroUsd: number;
+      remainingMicroUsd: number;
+      resetAt: string;
+      hardLimit: boolean;
+      allowRequestReset: boolean;
+      canRequestReset: boolean;
+      resetRequestStatus: "pending" | "approved" | "denied" | "expired" | null;
+    }>;
+  };
+};
+
+export type GetV1GatewayUsageLimitsMeResponse =
+  GetV1GatewayUsageLimitsMeResponses[keyof GetV1GatewayUsageLimitsMeResponses];
+
+export type GetV1GatewayUsageLimitsMembersByMemberIdData = {
+  body?: never;
+  path: {
+    memberId: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limits/members/{memberId}";
+};
+
+export type GetV1GatewayUsageLimitsMembersByMemberIdErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitsMembersByMemberIdError =
+  GetV1GatewayUsageLimitsMembersByMemberIdErrors[keyof GetV1GatewayUsageLimitsMembersByMemberIdErrors];
+
+export type GetV1GatewayUsageLimitsMembersByMemberIdResponses = {
+  /**
+   * Inspect member Gateway usage limits
+   */
+  200: {
+    serverTime: string;
+    organizationId: string;
+    memberId: string;
+    state: "unlimited" | "within_limit" | "over_limit" | "blocked";
+    coverage: {
+      complete: boolean;
+      unpricedRequests: number;
+      quarantinedRequests?: number;
+    };
+    buckets: Array<{
+      id: string;
+      timeframe: "day" | "week" | "month";
+      policyId: string;
+      policyName: string;
+      policyRevision?: number;
+      provenance?: Array<
+        | {
+            kind: "direct";
+            assignmentId: string;
+            memberId: string;
+            teamId: null;
+          }
+        | {
+            kind: "team";
+            assignmentId: string;
+            memberId: null;
+            teamId: string;
+            teamName: string;
+          }
+      >;
+      baseAllowanceMicroUsd: number;
+      extensionMicroUsd: number;
+      allowanceMicroUsd: number;
+      usedMicroUsd: number;
+      remainingMicroUsd: number;
+      resetAt: string;
+      hardLimit: boolean;
+      allowRequestReset: boolean;
+      canRequestReset: boolean;
+      resetRequestStatus: "pending" | "approved" | "denied" | "expired" | null;
+    }>;
+  };
+};
+
+export type GetV1GatewayUsageLimitsMembersByMemberIdResponse =
+  GetV1GatewayUsageLimitsMembersByMemberIdResponses[keyof GetV1GatewayUsageLimitsMembersByMemberIdResponses];
+
+export type GetV1GatewayUsageLimitResetRequestsData = {
+  body?: never;
+  path?: never;
+  query?: {
+    view?: "pending" | "history";
+    limit?: string;
+    cursor?: string;
+  };
+  url: "/v1/gateway/usage-limit-reset-requests";
+};
+
+export type GetV1GatewayUsageLimitResetRequestsErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitResetRequestsError =
+  GetV1GatewayUsageLimitResetRequestsErrors[keyof GetV1GatewayUsageLimitResetRequestsErrors];
+
+export type GetV1GatewayUsageLimitResetRequestsResponses = {
+  /**
+   * List organization usage increase requests
+   */
+  200: {
+    requests: Array<{
+      id: string;
+      memberId: string;
+      memberName: string;
+      memberEmail: string;
+      bucketId: string;
+      timeframe: "day" | "week" | "month";
+      policyName: string;
+      reason: string;
+      status: "pending" | "approved" | "denied" | "expired";
+      createdAt: string;
+      reviewedBy: string | null;
+      reviewedAt: string | null;
+      baseAllowanceMicroUsd: number;
+      allowanceMicroUsd: number;
+      usedMicroUsd: number;
+      resetAt: string;
+    }>;
+    view: "pending" | "history";
+    limit: number;
+    pendingCount: number;
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+};
+
+export type GetV1GatewayUsageLimitResetRequestsResponse =
+  GetV1GatewayUsageLimitResetRequestsResponses[keyof GetV1GatewayUsageLimitResetRequestsResponses];
+
+export type PostV1GatewayUsageLimitResetRequestsData = {
+  body: {
+    bucketId: string;
+    reason: string;
+  };
+  path?: never;
+  query?: never;
+  url: "/v1/gateway/usage-limit-reset-requests";
+};
+
+export type PostV1GatewayUsageLimitResetRequestsErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitResetRequestsError =
+  PostV1GatewayUsageLimitResetRequestsErrors[keyof PostV1GatewayUsageLimitResetRequestsErrors];
+
+export type PostV1GatewayUsageLimitResetRequestsResponses = {
+  /**
+   * Request usage limit extension
+   */
+  200: {
+    id: string;
+    memberId: string;
+    memberName: string;
+    memberEmail: string;
+    bucketId: string;
+    timeframe: "day" | "week" | "month";
+    policyName: string;
+    reason: string;
+    status: "pending" | "approved" | "denied" | "expired";
+    createdAt: string;
+    reviewedBy: string | null;
+    reviewedAt: string | null;
+    baseAllowanceMicroUsd: number;
+    allowanceMicroUsd: number;
+    usedMicroUsd: number;
+    resetAt: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitResetRequestsResponse =
+  PostV1GatewayUsageLimitResetRequestsResponses[keyof PostV1GatewayUsageLimitResetRequestsResponses];
+
+export type GetV1GatewayUsageLimitResetRequestsMeData = {
+  body?: never;
+  path?: never;
+  query?: {
+    view?: "pending" | "history";
+    limit?: string;
+    cursor?: string;
+  };
+  url: "/v1/gateway/usage-limit-reset-requests/me";
+};
+
+export type GetV1GatewayUsageLimitResetRequestsMeErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type GetV1GatewayUsageLimitResetRequestsMeError =
+  GetV1GatewayUsageLimitResetRequestsMeErrors[keyof GetV1GatewayUsageLimitResetRequestsMeErrors];
+
+export type GetV1GatewayUsageLimitResetRequestsMeResponses = {
+  /**
+   * List own usage increase requests
+   */
+  200: {
+    requests: Array<{
+      id: string;
+      memberId: string;
+      memberName: string;
+      memberEmail: string;
+      bucketId: string;
+      timeframe: "day" | "week" | "month";
+      policyName: string;
+      reason: string;
+      status: "pending" | "approved" | "denied" | "expired";
+      createdAt: string;
+      reviewedBy: string | null;
+      reviewedAt: string | null;
+      baseAllowanceMicroUsd: number;
+      allowanceMicroUsd: number;
+      usedMicroUsd: number;
+      resetAt: string;
+    }>;
+    view: "pending" | "history";
+    limit: number;
+    pendingCount: number;
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+};
+
+export type GetV1GatewayUsageLimitResetRequestsMeResponse =
+  GetV1GatewayUsageLimitResetRequestsMeResponses[keyof GetV1GatewayUsageLimitResetRequestsMeResponses];
+
+export type PostV1GatewayUsageLimitResetRequestsByIdApproveData = {
+  body: {
+    [key: string]: never;
+  };
+  path: {
+    id: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-reset-requests/{id}/approve";
+};
+
+export type PostV1GatewayUsageLimitResetRequestsByIdApproveErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitResetRequestsByIdApproveError =
+  PostV1GatewayUsageLimitResetRequestsByIdApproveErrors[keyof PostV1GatewayUsageLimitResetRequestsByIdApproveErrors];
+
+export type PostV1GatewayUsageLimitResetRequestsByIdApproveResponses = {
+  /**
+   * Approve 25 percent usage extension
+   */
+  200: {
+    id: string;
+    memberId: string;
+    memberName: string;
+    memberEmail: string;
+    bucketId: string;
+    timeframe: "day" | "week" | "month";
+    policyName: string;
+    reason: string;
+    status: "pending" | "approved" | "denied" | "expired";
+    createdAt: string;
+    reviewedBy: string | null;
+    reviewedAt: string | null;
+    baseAllowanceMicroUsd: number;
+    allowanceMicroUsd: number;
+    usedMicroUsd: number;
+    resetAt: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitResetRequestsByIdApproveResponse =
+  PostV1GatewayUsageLimitResetRequestsByIdApproveResponses[keyof PostV1GatewayUsageLimitResetRequestsByIdApproveResponses];
+
+export type PostV1GatewayUsageLimitResetRequestsByIdDenyData = {
+  body: {
+    note?: string;
+  };
+  path: {
+    id: string;
+  };
+  query?: never;
+  url: "/v1/gateway/usage-limit-reset-requests/{id}/deny";
+};
+
+export type PostV1GatewayUsageLimitResetRequestsByIdDenyErrors = {
+  /**
+   * Invalid request
+   */
+  400: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Sign-in required
+   */
+  401: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Not authorized or Gateway disabled
+   */
+  403: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Organization resource not found
+   */
+  404: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Policy revision or eligibility conflict
+   */
+  409: {
+    error: string;
+    message?: string;
+  };
+  /**
+   * Accounting unavailable
+   */
+  503: {
+    error: string;
+    message?: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitResetRequestsByIdDenyError =
+  PostV1GatewayUsageLimitResetRequestsByIdDenyErrors[keyof PostV1GatewayUsageLimitResetRequestsByIdDenyErrors];
+
+export type PostV1GatewayUsageLimitResetRequestsByIdDenyResponses = {
+  /**
+   * Deny usage extension
+   */
+  200: {
+    id: string;
+    memberId: string;
+    memberName: string;
+    memberEmail: string;
+    bucketId: string;
+    timeframe: "day" | "week" | "month";
+    policyName: string;
+    reason: string;
+    status: "pending" | "approved" | "denied" | "expired";
+    createdAt: string;
+    reviewedBy: string | null;
+    reviewedAt: string | null;
+    baseAllowanceMicroUsd: number;
+    allowanceMicroUsd: number;
+    usedMicroUsd: number;
+    resetAt: string;
+  };
+};
+
+export type PostV1GatewayUsageLimitResetRequestsByIdDenyResponse =
+  PostV1GatewayUsageLimitResetRequestsByIdDenyResponses[keyof PostV1GatewayUsageLimitResetRequestsByIdDenyResponses];
+
 export type GetV1InferenceProvidersData = {
   body?: never;
   path?: never;

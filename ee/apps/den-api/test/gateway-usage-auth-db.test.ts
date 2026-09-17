@@ -8,6 +8,8 @@ import {
   AuthUserTable,
   MemberTable,
   OrganizationTable,
+  TeamTable,
+  TeamMemberTable,
   GatewayRequestLogTable,
   GatewayUsagePolicyTable,
   GatewayUsageLimitTable,
@@ -58,8 +60,15 @@ const { registerOrgTeamRoutes } = await import("../src/routes/org/teams.js")
 const { registerDeleteOrganizationRoutes } = await import(
   "../src/routes/org/delete-organization.js"
 )
+const { createRequestAccessLogMiddleware } = await import("../src/observability/hono.js")
+const { createAppLogger } = await import("../src/observability/logger.js")
+const accessLogs: string[] = []
 const service = createGatewayUsageLimits(db)
 const app = new Hono<{ Variables: OrgRouteVariables }>()
+app.use(
+  "*",
+  createRequestAccessLogMiddleware(createAppLogger({ write: (line) => accessLogs.push(line) })),
+)
 app.use("*", sessionMiddleware)
 registerOrgGatewayUsageLimitRoutes(app)
 registerOrgTeamRoutes(app)
@@ -87,7 +96,7 @@ async function seed(role: string, organizationId = createDenTypeId("organization
     activeOrganizationId: organizationId,
     expiresAt: new Date(Date.now() + 86_400_000),
   })
-  return { memberId, organizationId, token }
+  return { memberId, userId, organizationId, token }
 }
 function request(
   token: string | null,
@@ -143,6 +152,106 @@ test("real session and org middleware enforce own identity, role and organizatio
   )
   expect(inspected.status).toBe(200)
   expect(usageSchema.parse(await inspected.json()).memberId).toBe(member.memberId)
+})
+
+test("member identity search is private, admin-only, active and organization-scoped with safe access logs", async () => {
+  const owner = await seed("owner")
+  const admin = await seed("admin", owner.organizationId)
+  const member = await seed("member", owner.organizationId)
+  const removed = await seed("admin", owner.organizationId)
+  const foreign = await seed("owner")
+  await db
+    .update(MemberTable)
+    .set({ removedAt: new Date() })
+    .where(eq(MemberTable.id, removed.memberId))
+  const path = "/v1/gateway/usage-limits/members"
+  const logStart = accessLogs.length
+  for (const token of [null, "invalid-session"]) {
+    const response = await request(token, `${path}?query=Fixture`)
+    expect(response.status).toBe(401)
+    expect(await response.json()).toEqual({ error: "unauthorized" })
+  }
+  const forbidden = await request(member.token, `${path}?query=Fixture`)
+  expect(forbidden.status).toBe(403)
+  expect(forbidden.headers.get("cache-control")).toBe("private, no-store")
+  expect(await forbidden.json()).toMatchObject({ error: "forbidden" })
+  for (const token of [owner.token, admin.token]) {
+    const response = await request(token, `${path}?query=Fixture`)
+    expect(response.status).toBe(200)
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
+    const result = z
+      .object({
+        members: z.array(z.object({ id: z.string(), name: z.string(), email: z.string() }).strict()),
+      })
+      .parse(await response.json())
+    expect(result.members.map((item) => item.id).sort()).toEqual(
+      [owner.memberId, admin.memberId, member.memberId].sort(),
+    )
+    expect(result.members.find((item) => item.id === member.memberId)).toEqual({
+      id: member.memberId,
+      name: "Fixture member",
+      email: `${member.userId}@example.test`,
+    })
+  }
+  const email = `${member.userId}@example.test`
+  const byEmail = await request(owner.token, `${path}?query=${encodeURIComponent(email)}`)
+  expect(await byEmail.json()).toEqual({
+    members: [{ id: member.memberId, name: "Fixture member", email }],
+  })
+  const crossOrg = await request(foreign.token, path, "GET", undefined, {
+    "X-OpenWork-Org-Id": owner.organizationId,
+  })
+  expect(crossOrg.status).toBe(404)
+  expect(await crossOrg.json()).toEqual({ error: "organization_not_found" })
+  expect(
+    await (await request(foreign.token, `${path}?query=${encodeURIComponent(email)}`)).json(),
+  ).toEqual({ members: [] })
+  const revoked = await request(removed.token, path, "GET", undefined, {
+    "X-OpenWork-Org-Id": owner.organizationId,
+  })
+  expect(revoked.status).toBe(404)
+  expect(await revoked.json()).toEqual({ error: "organization_not_found" })
+  const logs = accessLogs.slice(logStart)
+  expect(logs.length).toBeGreaterThan(0)
+  for (const line of logs) {
+    expect(JSON.parse(line)).toMatchObject({ http_route: path, message: "request completed" })
+    for (const value of [
+      "Fixture", "example.test", "query=", owner.token, member.memberId, member.userId,
+    ]) {
+      expect(line).not.toContain(value)
+    }
+  }
+})
+
+test("member identity search honors only current same-organization team admin grants", async () => {
+  const owner = await seed("owner")
+  const member = await seed("member", owner.organizationId)
+  const foreign = await seed("owner")
+  const teamId = createDenTypeId("team")
+  const membershipId = createDenTypeId("teamMember")
+  const path = "/v1/gateway/usage-limits/members"
+  await db.insert(TeamTable).values({
+    id: teamId,
+    organizationId: foreign.organizationId,
+    name: randomUUID(),
+    grantsOrganizationAdmin: true,
+  })
+  await db.insert(TeamMemberTable).values({
+    id: membershipId, teamId, orgMembershipId: member.memberId,
+  })
+  expect((await request(member.token, path)).status).toBe(403)
+  await db
+    .update(TeamTable)
+    .set({ organizationId: owner.organizationId })
+    .where(eq(TeamTable.id, teamId))
+  const allowed = await request(member.token, path)
+  expect(allowed.status).toBe(200)
+  expect(allowed.headers.get("cache-control")).toBe("private, no-store")
+  const result = z.object({ members: z.array(idSchema) }).parse(await allowed.json())
+  expect(result.members.map((item) => item.id).sort())
+    .toEqual([owner.memberId, member.memberId].sort())
+  await db.delete(TeamMemberTable).where(eq(TeamMemberTable.id, membershipId))
+  expect((await request(member.token, path)).status).toBe(403)
 })
 
 test("actual team API transactions expire remove/rejoin resets without touching unchanged teammates", async () => {

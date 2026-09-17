@@ -125,7 +125,7 @@ export async function startInferenceWitness(options: { reportedCostUsd?: number 
         return;
       }
       // Keep the original heartbeat-backed UTF-8 fragmentation coverage too.
-      const content = Buffer.from(frame({ content: "Complete café" }) + frame({}, "stop") + `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "", role: "assistant", tool_calls: [], reasoning_details: [] }, finish_reason: "stop" }], usage: { prompt_tokens: 11, completion_tokens: 13, total_tokens: 24, prompt_tokens_details: { cached_tokens: 5 }, completion_tokens_details: { reasoning_tokens: 3 } } })}\n\ndata: [DONE]\n\n`);
+      const content = Buffer.from(frame({ content: "Complete café" }) + frame({}, "stop") + `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "", role: "assistant", tool_calls: [], reasoning_details: [] }, finish_reason: "stop" }], usage: { prompt_tokens: 11, completion_tokens: 13, total_tokens: 24, prompt_tokens_details: { cached_tokens: 5 }, completion_tokens_details: { reasoning_tokens: 3 }, ...(options.reportedCostUsd === undefined ? {} : { cost: options.reportedCostUsd }) } })}\n\ndata: [DONE]\n\n`);
       const split = content.indexOf(Buffer.from("é")) + 1;
       response.write(content.subarray(0, split));
       const timer = setTimeout(() => { timers.delete(timer); response.end(content.subarray(split)); }, 5);

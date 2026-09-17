@@ -1,12 +1,12 @@
 import { useId, useState } from "react";
-import { CheckCircle2, Gauge } from "lucide-react";
+import { CheckCircle2, Gauge, LockKeyhole } from "lucide-react";
 import type { GatewayUsageBucket, GatewayUsageStatus } from "@openwork/types/den/gateway-usage-limits";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
-import { Popover, PopoverContent, PopoverDescription, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverContent, PopoverHeader, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { formatGatewayMoney, gatewayTimeframeLabels } from "./gateway-usage-state";
@@ -27,8 +27,14 @@ export function GatewayUsageSummary({ status, onRequest, requestsDisabled = fals
     {status.buckets.map((bucket) => <section key={bucket.id} aria-label={`${gatewayTimeframeLabels[bucket.timeframe]} usage`} className="flex flex-col gap-2 rounded-xl border p-3">
       <div className="flex items-center justify-between gap-2"><h3 className="font-medium">{gatewayTimeframeLabels[bucket.timeframe]}</h3><Badge variant="outline">{bucket.hardLimit ? "Hard limit" : "Soft limit"}</Badge></div>
       <p>{formatGatewayMoney(bucket.usedMicroUsd)} used / {formatGatewayMoney(bucket.allowanceMicroUsd)} total</p>
-      <p className="text-xs text-muted-foreground">Base {formatGatewayMoney(bucket.baseAllowanceMicroUsd)} · Extension {formatGatewayMoney(bucket.extensionMicroUsd)}</p>
-      {bucket.usedMicroUsd >= bucket.allowanceMicroUsd ? <p>{bucket.hardLimit ? "Exhausted" : "Over allowance"} · {formatGatewayMoney(Math.max(0, bucket.usedMicroUsd - bucket.allowanceMicroUsd))} over</p> : null}
+      <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <div className="flex gap-1"><dt>Base</dt><dd>{formatGatewayMoney(bucket.baseAllowanceMicroUsd)}</dd></div>
+        <div className="flex gap-1"><dt>Extension</dt><dd>{formatGatewayMoney(bucket.extensionMicroUsd)}</dd></div>
+      </dl>
+      {bucket.usedMicroUsd >= bucket.allowanceMicroUsd ? <dl className="flex flex-wrap gap-x-4 gap-y-1">
+        <div className="flex gap-1"><dt>Status</dt><dd>{bucket.hardLimit ? "Exhausted" : "Over allowance"}</dd></div>
+        <div className="flex gap-1"><dt>Over allowance</dt><dd>{formatGatewayMoney(Math.max(0, bucket.usedMicroUsd - bucket.allowanceMicroUsd))}</dd></div>
+      </dl> : null}
       <p className="text-xs text-muted-foreground">Next reset: <GatewayResetTime value={bucket.resetAt} /></p>
       {bucket.resetRequestStatus === "pending" ? <Badge role="status" variant="outline" className="border-amber-a6 bg-amber-3 text-amber-11">Increase request pending</Badge> : bucket.resetRequestStatus ? <p className="text-xs">Increase request: {bucket.resetRequestStatus}</p> : null}
       {bucket.canRequestReset && bucket.resetRequestStatus !== "pending" ? <Button size="sm" variant="outline" disabled={requestsDisabled} onClick={() => onRequest(bucket)}>Request Increase — {gatewayTimeframeLabels[bucket.timeframe]}</Button> : null}
@@ -67,7 +73,7 @@ function GatewayUsagePanelBody() {
       <Button size="sm" variant="outline" disabled={usage.query.isFetching} onClick={() => { void usage.query.refetch(); }}>{usage.query.isFetching ? "Refreshing…" : "Refresh usage"}</Button>
     </>}
     <Dialog open={Boolean(bucket)} onOpenChange={(open) => { if (!open) setSelectedBucketId(null); }}>
-      <DialogContent><DialogHeader><DialogTitle>Request Increase</DialogTitle><DialogDescription>Ask your organization administrator for a usage extension.</DialogDescription></DialogHeader>
+      <DialogContent aria-describedby={undefined}><DialogHeader><DialogTitle>Request Increase</DialogTitle></DialogHeader>
         {bucket ? <GatewayResetForm key={`${usage.scopeKey}:${bucket.id}`} bucket={bucket} pending={usage.reset.isPending} error={usage.reset.isError} onSubmit={(reason) => usage.reset.mutate({ bucketId: bucket.id, reason }, { onSuccess: () => setSelectedBucketId(null) })} /> : null}
       </DialogContent>
     </Dialog>
@@ -85,8 +91,8 @@ export function GatewayUsageTrigger({ compact = true }: { compact?: boolean }) {
   const hasApprovedIncrease = !usage.query.isError && approvedUsageIncreases(usage.data).length > 0;
   return <Popover open={open} onOpenChange={setOpen}>
     <PopoverTrigger render={<Button variant="ghost" size={compact ? "icon-sm" : "sm"} aria-label={compact ? "Usage limits" : "View Usage Limits"} title={hasApprovedIncrease ? "Usage increase approved" : compact ? "Usage limits" : "View Usage Limits"}><Gauge aria-hidden="true" className={hasApprovedIncrease ? "size-4 text-green-11" : "size-4"} />{compact ? null : "View Usage Limits"}</Button>} />
-    <PopoverContent side="top" align="end" className="max-h-[min(75vh,640px)] w-96 max-w-[calc(100vw-2rem)] overflow-y-auto">
-      <PopoverHeader><PopoverTitle>Usage limits</PopoverTitle><PopoverDescription>Your organization’s AI Gateway estimated cost.</PopoverDescription></PopoverHeader>
+    <PopoverContent side="top" align="end" aria-describedby={undefined} className="max-h-[min(75vh,640px)] w-96 max-w-[calc(100vw-2rem)] overflow-y-auto">
+      <PopoverHeader><PopoverTitle>Usage limits</PopoverTitle></PopoverHeader>
       {open ? <GatewayUsagePanelBody /> : null}
     </PopoverContent>
   </Popover>;
@@ -137,7 +143,8 @@ export function GatewayUsageNotice({ state, status, stale }: {
   const buckets = status.buckets.filter((bucket) => bucket.usedMicroUsd >= bucket.allowanceMicroUsd && (state !== "blocked" || bucket.hardLimit));
   const canRequestIncrease = buckets.some((bucket) => bucket.allowRequestReset && bucket.canRequestReset && bucket.resetRequestStatus !== "pending");
   return <>
-    <Alert className="mx-auto mb-2 max-w-3xl" data-testid="gateway-usage-notice" variant={state === "blocked" ? "destructive" : "default"}>
+    <Alert className="mx-auto mb-2 max-w-3xl" data-testid="gateway-usage-notice">
+      {state === "blocked" ? <LockKeyhole aria-hidden="true" className="size-4" /> : null}
       <AlertTitle>{state === "blocked" ? "Out of usage" : "Over estimated usage allowance"}</AlertTitle>
       <AlertDescription>
         <p>{state === "blocked" ? "You've consumed the AI usage limits assigned to you." : "You’re over your estimated usage allowance. Requests are still allowed."}</p>
@@ -151,7 +158,7 @@ export function GatewayUsageNotice({ state, status, stale }: {
       </AlertDescription>
     </Alert>
     <Dialog open={requestOpen} onOpenChange={setRequestOpen}>
-      <DialogContent><DialogHeader><DialogTitle>Request Increase</DialogTitle><DialogDescription>Ask your organization administrator for a one-time usage increase.</DialogDescription></DialogHeader>
+      <DialogContent aria-describedby={undefined}><DialogHeader><DialogTitle>Request Increase</DialogTitle></DialogHeader>
         {requestOpen ? <GatewayIncreaseDialogBody bucketIds={buckets.map((bucket) => bucket.id)} onClose={() => setRequestOpen(false)} /> : null}
       </DialogContent>
     </Dialog>
