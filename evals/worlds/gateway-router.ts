@@ -7,7 +7,7 @@ import { close, listen, stopChild } from "./openwork-server-cli.ts";
 
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected object");
-  return value;
+  return Object.fromEntries(Object.entries(value));
 }
 export function text(value: unknown): string {
   if (typeof value !== "string" || !value) throw new Error("Expected nonempty string");

@@ -1,8 +1,13 @@
 import { expect } from "vitest";
-import { spec } from "@openwork/testkit";
+import { compileVerification, createJevVerificationEvaluator, runVerification, spec, type VerificationEvaluator, type VerificationPlan } from "@openwork/testkit";
 import { memberRoutingWeb } from "../worlds/gateway-routing.ts";
+import { offlineRoutingEvaluator, routingCheckIds, routingDictionary, routingIntent, unsupportedRoutingIntent } from "../worlds/gateway-routing-verification.ts";
 
-const test = spec.world(memberRoutingWeb, { timeout: 600_000 });
+const liveJev = process.env.OPENWORK_EVAL_JEV_ROUTING_VERIFY === "1";
+const test = spec.world(memberRoutingWeb, {
+  timeout: 600_000,
+  needs: liveJev ? { env: ["JEV_AI_GATEWAY_API_KEY"] } : {},
+});
 
 test("a member creates, edits and reloads a prompt router in Den", async ({ world, user, probe, step, evidence }) => {
   await step("create a router using accessible model choices", async () => {
@@ -34,18 +39,44 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     await user.click({ role: "button", text: "Save router" });
     await user.see({ text: "Router saved. Not live-verified." }, { timeoutMs: 30_000 });
     await user.reload();
-    await user.see({ text: "Daily work revised" }, { timeoutMs: 60_000 });
+    await user.see({ role: "button", label: "Edit Daily work revised" }, { timeoutMs: 60_000 });
     await user.click({ role: "button", label: "Edit Daily work revised" });
     await user.see({ role: "heading", text: "Edit router" }, { timeoutMs: 30_000 });
+    await user.click({ text: "Advanced" });
     const displayedValues = await probe.eval(() => Array.from(document.querySelectorAll<HTMLInputElement>('form[aria-label="Router editor"] input')).map(input => input.value));
     expect(displayedValues).toEqual(["Daily work revised", "Code review and debugging", "Clear business writing", "0.75"]);
     expect(await world.savedRouters()).toMatchObject([{ name: "Daily work revised", revision: 2, minConfidence: 0.75,
       routes: [{ description: "Code review and debugging" }, { description: "Clear business writing" }] }]);
-    await user.notSee({ text: "Daily work" });
+    await user.notSee({ role: "button", label: /^Edit Daily work$/ });
     await user.screenshot();
     await user.click({ text: "Use this router" });
     await user.see({ text: /POST \/api\/v1\/routers\// });
     await user.see({ text: "Saved configuration only. No live request has been tested here." });
+    await user.notSee({ role: "link", text: "Gateway" });
+    const mode = liveJev ? "live Jev" : "deterministic offline selection fixture (not live Jev)";
+    let evaluatorCalls = 0;
+    const evaluator = liveJev ? createJevVerificationEvaluator({ onMetrics: metrics => {
+      evidence.recordAssertionEvidence("Jev routing selection metrics", JSON.stringify(metrics), metrics.status === "completed");
+    } }) : offlineRoutingEvaluator;
+    const evaluate: VerificationEvaluator = async request => { evaluatorCalls++; return evaluator(request); };
+    const compiled = await compileVerification({ intent: routingIntent, dictionary: routingDictionary, evaluate });
+    evidence.recordAssertionEvidence(`Router verification compilation: ${mode}`, JSON.stringify(compiled), compiled.status === "ready");
+    if (compiled.status !== "ready") throw new Error(`${mode} routing verification incomplete: ${compiled.reason}`);
+    expect(compiled.plan.checkIds).toEqual(routingCheckIds);
+    // Runtime validation at replay protects this JSON persistence boundary.
+    const plan: VerificationPlan = JSON.parse(JSON.stringify(compiled.plan));
+    const callsAfterCompile = evaluatorCalls;
+    for (let replay = 0; replay < 2; replay++) {
+      const result = await runVerification({ plan, dictionary: routingDictionary, channels: { user, probe, step }, observations: {
+        "saved-router": { version: "1", read: () => world.savedRouters() },
+      } });
+      evidence.recordAssertionEvidence(`Router verification replay ${replay + 1}: ${mode}`, JSON.stringify(result), result.status === "passed");
+      expect(result).toMatchObject({ status: "passed", checkIds: routingCheckIds, modelCalls: 0 });
+      expect(evaluatorCalls).toBe(callsAfterCompile);
+    }
+    const unsupported = await compileVerification({ intent: unsupportedRoutingIntent, dictionary: routingDictionary, evaluate });
+    evidence.recordAssertionEvidence(`Unsupported routing intent abstains: ${mode}`, JSON.stringify(unsupported), unsupported.status === "incomplete");
+    expect(unsupported).toMatchObject({ status: "incomplete", reason: "Verification selection is unsupported or uncertain", modelCalls: 1 });
     await user.screenshot();
     evidence.recordAssertionEvidence("Member browser authoring persists across reload", "Created and revised through browser controls against real Den; reload retained revision 2 and category edits, provider management stayed absent, no live verification claimed.", true);
   });
