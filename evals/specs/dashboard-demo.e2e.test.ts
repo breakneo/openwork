@@ -228,7 +228,7 @@ test("dashboard-demo Den Web shares real MCP Apps; separate member calendars ref
   await writeFile(`${reportDirectory}world-sanitized.json`, JSON.stringify({
     ...provenance, mcpUrls: world.mcpUrls, denWeb: den.ref.webUrl, denApi: den.ref.apiUrl,
     alexCdp: alex.handle.cdpUrl, jordanCdp: jordan.handle.cdpUrl,
-    alexEmail: den.admin.email, jordanEmail: jordanSession.email, orgId, registrations,
+    alexRole: "owner", jordanRole: "member", orgId: "demo-organization", registrations,
   }, null, 2));
 
   const registration = (key: string) => {

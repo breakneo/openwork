@@ -7,7 +7,7 @@
 | Surface | Meaning and boundary |
 |---|---|
 | Already-running isolated world | Owner-supplied **v0.18.46 release source**, `a0d6bd1de8debf4f09d22b8538e124b2ff45b339`, not a packaged binary. Den Web/API ports **3005/8790**; desktop aliases **A/B**, CDP **54343/54539** at handoff. Check ownership/liveness before reuse; these are not permanent endpoints. |
-| Hosted identity target | New provider `https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp`, `IDENTITY_MODE=openwork`, upstream `https://app.openworklabs.com/api/auth`. Names come from **real hosted OpenWork members**; the three business-content sets remain synthetic, keyed by **`org_id|sub`**. Aliases A/B are recording labels, never substitute provider names. |
+| Hosted identity target | New provider `<operator-supplied per-user Home MCP URL>`, `IDENTITY_MODE=openwork`, upstream `https://app.openworklabs.com/api/auth`. Names come from **real hosted OpenWork members**; the three business-content sets remain synthetic, keyed by **`org_id|sub`**. Aliases A/B are recording labels, never substitute provider names. |
 
 The hosted provider cannot reach the operator's `127.0.0.1`. Local-world accounts, cookies, registration receipts, and prior synthetic-name demos do not establish hosted sign-in or member consent. The dashboard host organization and upstream hosted identity organization are separate fields in the private receipt; do not assume they are the same. If using hosted Den to own the dashboard, both desktops must be signed into that host organization. Hosted Den's running build is not thereby v0.18.46; the release label applies to the owned desktops only.
 
@@ -41,10 +41,10 @@ Private world inventory: `evals/results/.worlds/scripts/acme-demo-dashboard.json
   "desktopSourceSha": "a0d6bd1de8debf4f09d22b8538e124b2ff45b339",
   "desktopVersion": "0.18.46",
   "connection": {
-    "url": "https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp",
+    "url": "<operator-supplied per-user Home MCP URL>",
     "authType": "oauth",
     "credentialMode": "per_member",
-    "issuer": "https://acme-home-demo-loo267kwv-prologe.vercel.app",
+    "issuer": "<operator-supplied per-user Home issuer origin>",
     "scopes": ["home:read"],
     "dcr": true
   },
@@ -70,7 +70,7 @@ From the owned release-based checkout supplied by the operator, after main has s
 ```sh
 OPENWORK_EVAL_E2E_TESTS=1 \
 PERUSER_MEMBERS_RECEIPT="$PERUSER_MEMBERS_RECEIPT" \
-PERUSER_MCP_URL=https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp \
+PERUSER_MCP_URL="$PERUSER_MCP_URL" \
 PERUSER_UPSTREAM_AUTH_URL=https://app.openworklabs.com/api/auth \
 PERUSER_A_CDP_URL=http://127.0.0.1:54343 \
 PERUSER_B_CDP_URL=http://127.0.0.1:54539 \
@@ -106,9 +106,9 @@ Optional local-upstream alternative: only if main independently estimates a sub-
 
 ## Main execution receipts — 2026-09-15
 
-- One local run: `OPENWORK_EVAL_E2E_TESTS=1 PERUSER_MCP_URL=https://acme-home-demo-loo267kwv-prologe.vercel.app/mcp PERUSER_UPSTREAM_AUTH_URL=https://app.openworklabs.com/api/auth PERUSER_A_CDP_URL=http://127.0.0.1:54343 PERUSER_B_CDP_URL=http://127.0.0.1:54539 PERUSER_CONSENT_WAIT_MS=1000 pnpm evals:e2e per-user-home-demo --local`. Exit **1**, **0 passed / 1 failed / 0 skipped**. Provider 401 assertion Passed; desktop phase **Incomplete**, missing actual private hosted identity/setup receipt. No receipt was fabricated to bypass that prerequisite.
-- Finalized runner: `evals/results/test-runs/2026-09-15T17-14-28-091Z-per-user-home-real-hosted-member-names-isolated-three-widget-sets-and-fresh-gene/test-run.json`; 1 passed assertion and 1 failed assertion, zero pending judgments. It records preparation HEAD plus the then-uncommitted spec. This is red diagnostic evidence, not a passing final-head run; the requested single run was not repeated.
-- Independent fresh session `ses_f59f0e7abffeLE55WbsEd0lqc3`, requested org-default GPT model / low: **steps 1–12 Incomplete**, no runtime claim certified. App-context timeout; no conversation browser tabs or authorized isolated-desktop observation action. No real names, subjects, consent, tile or widget comparison observed. No product failure inferred. One rerun remains reserved for after human access is supplied.
+- One local run: `OPENWORK_EVAL_E2E_TESTS=1 PERUSER_MCP_URL="$PERUSER_MCP_URL" PERUSER_UPSTREAM_AUTH_URL=https://app.openworklabs.com/api/auth PERUSER_A_CDP_URL=http://127.0.0.1:54343 PERUSER_B_CDP_URL=http://127.0.0.1:54539 PERUSER_CONSENT_WAIT_MS=1000 pnpm evals:e2e per-user-home-demo --local`. Exit **1**, **0 passed / 1 failed / 0 skipped**. Provider 401 assertion Passed; desktop phase **Incomplete**, missing actual private hosted identity/setup receipt. No receipt was fabricated to bypass that prerequisite.
+- Finalized runner: `<private finalized runner receipt>`; 1 passed assertion and 1 failed assertion, zero pending judgments. It records preparation HEAD plus the then-uncommitted spec. This is red diagnostic evidence, not a passing final-head run; the requested single run was not repeated.
+- Independent fresh reviewer session, requested org-default GPT model / low: **steps 1–12 Incomplete**, no runtime claim certified. App-context timeout; no conversation browser tabs or authorized isolated-desktop observation action. No real names, subjects, consent, tile or widget comparison observed. No product failure inferred. One rerun remains reserved for after human access is supplied.
 - Main broad `pnpm --dir evals run typecheck` exited **2** with repository-wide module-resolution/schema errors and one introduced record-narrowing error in the new spec. The latter was fixed before the single run; broader errors are **unresolved**, not labeled pre-existing without a clean control. The two standalone provider repositories passed their own typecheck/build/lint and 46/49 Node plus 12/5 browser tests respectively; those are not hosted member proof.
 - No current accepted screencast exists; **PERUSER-A.mp4 / PERUSER-B.mp4 were not produced or copied**. Reusing old Blob footage or filming an unrelated idle desktop would misrepresent this journey. Video delivery remains Incomplete until actual member consent and an authorized observation/capture path are available.
 - One operator world remains alive at handoff: Den Web `http://127.0.0.1:3005`, API `http://127.0.0.1:8790`, desktop A CDP `http://127.0.0.1:54343`, B CDP `http://127.0.0.1:54539`. Check live ownership/health before reusing.
