@@ -1,7 +1,8 @@
 import { chmod, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { readCoworkerAbilities } from "../src/lib/abilities.ts";
 import { installNativePlugin } from "./native-plugin.mjs";
+import { writeTeamAbilities } from "./team-workspace.mjs";
+import { readCoworkerAbilities } from "../src/lib/abilities.ts";
 
 export const ABILITIES_PLUGIN = `import { Plugin } from "@opencode-ai/plugin/effect";
 import { Tool } from "@opencode-ai/schema/tool";
@@ -17,18 +18,24 @@ export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect
     : "Coworker abilities transform failed; selected guidance was not applied." });
   const read = () => Effect.tryPromise({ try: async (signal) => {
     const config = JSON.parse(await readFile(file, { encoding: "utf8", signal }));
-    if (!config || typeof config.createdAt !== "string" || !config.createdAt || typeof config.workspaceId !== "string"
-      || typeof config.directory !== "string" || !config.directory || await realpath(config.directory) !== nativeDirectory) throw new Error(identityError);
+    if (!config || typeof config.workspaceId !== "string") throw new Error(identityError);
+    if (config.mode !== "team" && (typeof config.createdAt !== "string" || !config.createdAt || typeof config.directory !== "string" || await realpath(config.directory) !== nativeDirectory)) throw new Error(identityError);
     return config;
   }, catch: (error) => new Tool.Error({ message: error.message === identityError ? identityError : "Coworker abilities configuration could not be read; tool selection was not applied." }) });
   const initial = yield* read().pipe(Effect.orDie);
   const identity = { createdAt: initial.createdAt, workspaceId: initial.workspaceId, directory: nativeDirectory };
-  const fresh = () => Effect.gen(function* () {
+  const fresh = (sessionID, agent, model) => Effect.gen(function* () {
     const config = yield* read();
-    if (config.createdAt !== identity.createdAt) return yield* Effect.fail(new Tool.Error({ message: identityError }));
+    if (config.mode !== initial.mode || config.createdAt !== identity.createdAt) return yield* Effect.fail(new Tool.Error({ message: identityError }));
     if (!identity.workspaceId && config.workspaceId) identity.workspaceId = config.workspaceId;
     if (config.workspaceId !== identity.workspaceId) return yield* Effect.fail(new Tool.Error({ message: identityError }));
-    return config;
+    if (config.mode !== "team") return { ...config, context: identity };
+    if (typeof sessionID !== "string" || !sessionID) return yield* Effect.fail(new Tool.Error({ message: identityError }));
+    const session = yield* ctx.session.get({ sessionID }).pipe(Effect.mapError(() => new Tool.Error({ message: identityError })));
+    const context = { sessionID, directory: nativeDirectory, agent: agent ?? session.agent, model: model ?? session.model };
+    const owner = yield* request({ ...config, context }, "session_context", {});
+    if (typeof owner?.createdAt !== "string" || !owner.createdAt || typeof owner?.slug !== "string" || !owner.abilities) return yield* Effect.fail(new Tool.Error({ message: identityError }));
+    return { ...config, abilities: owner.abilities, homeContext: owner.homeContext, homeDirectory: owner.homeDirectory, context };
   });
   const inheritsEverything = (abilities) => abilities && abilities.version === 1 && Number.isSafeInteger(abilities.revision) && abilities.revision >= 0
     && Object.keys(abilities).sort().join(",") === "mcpServers,revision,skills,version"
@@ -39,7 +46,7 @@ export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect
     if (typeof config.url !== "string" || !config.url || typeof config.token !== "string" || !config.token) throw failure(name);
     const response = await fetch(config.url, { method: "POST", redirect: "error",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + config.token },
-      body: JSON.stringify({ name, args, context: identity }), signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+      body: JSON.stringify({ name, args, context: config.context }), signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
     const result = await response.json();
     if (!response.ok) {
       if ([identityError, "This skill is not selected for this coworker, or is no longer available.", "This MCP server is not selected for this coworker."].includes(result?.error)) throw new Tool.Error({ message: result.error });
@@ -54,6 +61,15 @@ export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect
     const result = yield* request(config, "abilities_check", { tool, args, ...(server ? { server } : {}), ...(skills ? { nativeSkills: skills } : {}) });
     if (result?.ok !== true) return yield* Effect.fail(failure("abilities_check"));
   });
+  yield* ctx.tool.hook("execute.before", (event) => Effect.gen(function* () {
+    if (initial.mode !== "team") return;
+    if (event.filesystemScopeVersion !== 1 || event.filesystemScopeProjectResolution !== 1) return yield* Effect.fail(new Tool.Error({ message: "This native runtime does not support admitted invocation filesystem scope. No tool was executed." }));
+    const config = yield* fresh(event.sessionID, event.agent);
+    const result = yield* request({ ...config, context: { ...config.context, messageID: event.messageID, callID: event.id, filesystemScopeVersion: event.filesystemScopeVersion, filesystemScopeProjectResolution: event.filesystemScopeProjectResolution } }, "filesystem_scope", {});
+    if (!result?.filesystemScope || typeof result.filesystemScope.directory !== "string" || !path.isAbsolute(result.filesystemScope.directory)
+      || Object.keys(result.filesystemScope).some((key) => key !== "directory")) return yield* Effect.fail(new Tool.Error({ message: identityError }));
+    event.filesystemScope = result.filesystemScope;
+  }));
   const servers = new Set();
   yield* ctx.mcp.transform((editor) => { for (const [name] of editor.list()) servers.add(name); });
   yield* ctx.tool.transform((editor) => {
@@ -64,7 +80,7 @@ export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect
       const namespace = tool.options?.namespace;
       editor.update(name, (updated) => {
         updated.execute = (args, context) => Effect.gen(function* () {
-          const config = yield* fresh();
+          const config = yield* fresh(context.sessionID, context.agent);
           yield* check(config, name, args, servers.has(namespace) ? namespace : undefined);
           return yield* execute(args, context);
         });
@@ -74,17 +90,19 @@ export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect
   yield* ctx.permission.hook("evaluate", (event) => {
     if (event.action !== "skill" || event.effect === "deny") return Effect.void;
     return Effect.gen(function* () {
-      const config = yield* fresh();
+      const config = yield* fresh(event.sessionID, event.agent, event.model);
       for (const id of event.resources) yield* check(config, "skill", { id });
     }).pipe(Effect.matchCause({ onFailure: () => { event.effect = "deny"; event.message = "This skill is not selected for this coworker, or is no longer available."; }, onSuccess: () => undefined }));
   });
   yield* ctx.session.hook("prompt", (event) => Effect.gen(function* () {
     if (!event.prompt.skills?.length) return;
-    const config = yield* fresh();
+    const config = yield* fresh(event.sessionID, event.agent, event.model);
     for (const skill of event.prompt.skills) yield* check(config, "skill", { id: skill.id });
   }).pipe(Effect.orDie));
   yield* ctx.session.hook("context", (event) => Effect.gen(function* () {
-    const config = yield* fresh();
+    if (initial.mode === "team" && ["coworker-coordinator", "progress-summary", "auto-memory"].includes(event.agent) && Object.keys(event.tools).length === 0) return;
+    const config = yield* fresh(event.sessionID, event.agent, event.model);
+    if (typeof config.homeContext === "string" && config.homeContext) event.system.push({ type: "text", text: config.homeContext });
     if (inheritsEverything(config.abilities)) return;
     const positions = event.system.flatMap((part, index) => part.type === "text" && typeof part.text === "string" ? [index] : []);
     const system = positions.map((index) => event.system[index].text);
@@ -97,19 +115,22 @@ export default Plugin.define({ id: "coworker.abilities", effect: (ctx) => Effect
 }) });
 `;
 
-export async function installAbilitiesPlugin(coworker, { url, token }) {
-  const directory = await realpath(coworker.path);
-  const root = path.join(directory, ".opencode");
-  if (typeof coworker.createdAt !== "string" || !coworker.createdAt || typeof coworker.workspaceId !== "string"
-    || typeof url !== "string" || !url || typeof token !== "string" || !token) throw new Error("Coworker abilities installation requires the current workspace identity and context connection.");
-  await mkdir(root, { recursive: true });
-  const connectionFile = path.join(root, "coworker-abilities.json");
-  const connection = JSON.stringify({ abilities: readCoworkerAbilities(coworker.abilities), createdAt: coworker.createdAt, workspaceId: coworker.workspaceId, directory, url, token });
-  if (await readFile(connectionFile, "utf8").catch(() => "") !== connection) {
-    await writeFile(`${connectionFile}.tmp`, connection, { mode: 0o600 });
-    await chmod(`${connectionFile}.tmp`, 0o600);
-    await rename(`${connectionFile}.tmp`, connectionFile);
+export async function installAbilitiesPlugin(owner, { url, token, coworkers }) {
+  const directory = await realpath(owner.path);
+  if (typeof owner.workspaceId !== "string" || typeof url !== "string" || !url || typeof token !== "string" || !token) throw new Error("Coworker abilities installation requires the workspace identity and context connection.");
+  if (coworkers !== undefined) {
+    if (!Array.isArray(coworkers)) throw new Error("The active team identities are required.");
+    await writeTeamAbilities(directory, { url, token, workspaceId: owner.workspaceId, coworkers });
+  } else {
+    if (typeof owner.createdAt !== "string" || !owner.createdAt) throw new Error("The original coworker creation identity is required.");
+    const target = path.join(directory, ".opencode", "coworker-abilities.json");
+    await mkdir(path.dirname(target), { recursive: true });
+    const content = JSON.stringify({ createdAt: owner.createdAt, workspaceId: owner.workspaceId, directory, url, token, abilities: readCoworkerAbilities(owner.abilities) });
+    if (await readFile(target, "utf8").catch(() => "") !== content) {
+      await writeFile(`${target}.tmp`, content, { mode: 0o600 });
+      await rename(`${target}.tmp`, target);
+    }
+    await chmod(target, 0o600);
   }
-  await chmod(connectionFile, 0o600);
-  await installNativePlugin(coworker, "coworker-abilities.js");
+  await installNativePlugin(owner, "coworker-abilities.js");
 }

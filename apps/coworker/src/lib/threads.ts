@@ -10,6 +10,7 @@ import {
   nativeV2PartId,
   type HeadlessThreadClient,
   type HeadlessThreadStatus as SessionStatus,
+  type NativeV2ClientOptions,
   type NativeV2Form,
   type NativeV2Permission,
   type NativeV2Skill,
@@ -20,7 +21,9 @@ import { readCloudProviderSyncStatus, type CloudProviderSyncStatus, type DenSess
 import type { CoworkerSummary, ExpectedWorkspaceReadiness, RuntimeInfo } from "./bridge.ts";
 import { resolveDiscussionModel } from "./model-choice.ts";
 import type { ModelDefaults } from "./model-defaults.ts";
-import { discussionIds, discussionIdsForWorkspace } from "./discussions.ts";
+import { discussionIds, discussionIdsForCoworker } from "./discussions.ts";
+import { coworkerAgent } from "./coworker-agents.ts";
+import { coworkerSessionAccess, sessionRouting } from "./session-routing.ts";
 import type { StreamEvent } from "./live-stream.ts";
 import { workerNameFromTitle } from "./workers.ts";
 import { PROGRESS_LIMITS } from "./progress-config.ts";
@@ -479,7 +482,7 @@ export type CoworkerThreads = {
   /** Assignment threads only; discussions are excluded. */
   listThreads: () => Promise<ThreadListItem[]>;
   /** Every top-level thread in the workspace, discussions included, newest first. */
-  listAllThreads: () => Promise<ThreadListItem[]>;
+  listAllThreads: (includeLegacy?: boolean) => Promise<ThreadListItem[]>;
   renameThread: (threadId: string, title: string) => Promise<void>;
   listModelCatalog: (signal?: AbortSignal) => Promise<EngineModelCatalog>;
   listModels: () => Promise<EngineModelOption[]>;
@@ -680,7 +683,7 @@ export function workspacePreparationScope(runtime: RuntimeInfo, coworker: Cowork
   return {
     runtimeKey: JSON.stringify([runtimeWorkspaceReadinessKey(runtime, ""), session?.baseUrl, session?.orgId, session?.token]),
     workspaceKey: JSON.stringify([coworker.slug, coworker.createdAt, coworker.path, coworker.workspaceId]),
-    configurationKey: JSON.stringify([runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0, coworker.model, coworker.modelVariant,
+    configurationKey: JSON.stringify([runtime.workspaceReadinessRevisions?.[`coworker:${coworker.slug}`] ?? runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0, coworker.model, coworker.modelVariant,
       coworker.modelMode, coworker.modelChosenBy, coworker.useAppModelDefaults, coworker.modelSelectionPreferences, coworker.effortPreference,
       coworker.thinkingModel, coworker.thinkingModelVariant, coworker.deliveryModel, coworker.deliveryModelVariant]),
   };
@@ -755,28 +758,42 @@ export function createCoworkerThreads(options: {
   discussionThreadIds?: readonly string[];
   /** The coworker's Workers' own threads; they count as work in progress, never as assignments. */
   workerThreadIds?: readonly string[];
+  /**
+   * The coworker these threads belong to. The team shares one workspace, so
+   * every session the client creates is bound to `coworker-<slug>` and marked
+   * with the owner, and listings show only that coworker's own sessions.
+   */
+  owner?: { slug: string; createdAt?: string };
 }): CoworkerThreads {
   const parsedModel = parseModelPreference(options.model ?? "");
   const discussions = discussionIds(options.discussionThreadIds ?? [], options.conversationThreadId);
   const workerIds = new Set(options.workerThreadIds ?? []);
   const notAssignments = [...discussions, ...workerIds];
-  const client = createHeadlessThreadClientV2({
-    baseUrl: options.serverUrl,
-    workspaceId: options.workspaceId,
-    token: options.token,
+  const owner = options.owner;
+  const access = coworkerSessionAccess();
+  const agentId = owner && access ? coworkerAgent(owner.slug) : "build";
+  const routed = access ? sessionRouting({ baseUrl: options.serverUrl, workspaceId: options.workspaceId, owner, access }) : undefined;
+  const nativeOptions: NativeV2ClientOptions = {
+    baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token, fetch: routed, apiContract: access?.apiContract?.(),
+  };
+  const headless = createHeadlessThreadClientV2({
+    ...nativeOptions,
     defaultModel: parsedModel
       ? { ...parsedModel, variant: options.modelVariant?.trim() || undefined }
       : undefined,
+    defaultAgent: agentId,
   });
+  const ownedSessionIds = new Set<string>();
+  const client: typeof headless = owner && access
+    ? { ...headless, createThread: async (input) => { const thread = await access.create(owner, { ...input, model: input.model ?? parsedModel ?? undefined }); ownedSessionIds.add(thread.id); return thread; } }
+    : headless;
 
-  const native = createNativeV2Client({
-    baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token,
-  });
+  const native = createNativeV2Client(nativeOptions);
 
   async function prepare(signal: AbortSignal, selection?: Parameters<CoworkerThreads["prepare"]>[1]): Promise<void> {
-    const startup = createNativeV2Client({ baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal });
-    const [agent, catalog] = await Promise.all([startup.getAgent("build", signal), listModelCatalog(signal)]);
-    if (agent.id !== "build") throw new Error("The native agent identity could not be confirmed.");
+    const startup = createNativeV2Client({ ...nativeOptions, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal });
+    const [agent, catalog] = await Promise.all([startup.getAgent(agentId, signal), listModelCatalog(signal)]);
+    if (agent.id !== agentId) throw new Error("The native agent identity could not be confirmed.");
     const decision = selection ? resolveDiscussionModel(catalog, selection.coworker, selection.requestText ?? "", selection.defaults) : null;
     if (decision && !decision.model) throw new Error(decision.reason);
     const model = decision?.model ? { providerID: decision.model.providerId, id: decision.model.modelId, variant: decision.variant }
@@ -787,10 +804,12 @@ export function createCoworkerThreads(options: {
     }
   }
 
-  async function listAllThreads(): Promise<ThreadListItem[]> {
+  async function listAllThreads(includeLegacy = true): Promise<ThreadListItem[]> {
     const [sessions, active] = await Promise.all([
-      native.listSessions(), native.readActive(),
+      owner && access ? access.list(owner, includeLegacy) : native.listSessions(), native.readActive(),
     ]);
+    ownedSessionIds.clear();
+    for (const session of sessions) ownedSessionIds.add(session.id);
     const statuses = new Map<string, SessionStatus>();
     await Promise.all(sessions.filter((session) => Object.hasOwn(active, session.id)).map(async (session) => {
       const page = await native.readHistory(session.id);
@@ -869,7 +888,7 @@ export function createCoworkerThreads(options: {
   }
 
   async function readActivity(): Promise<CoworkerActivity> {
-    const allSessions = await listAllThreads();
+    const allSessions = await listAllThreads(false);
     // A thread waiting on a person (a permission, a question) is busy until it is answered, so
     // when nothing is running there is nothing pending to read; every coworker is read this
     // way every few seconds, and the two extra reads per coworker added up to most of the idle traffic.
@@ -954,7 +973,7 @@ export function createCoworkerThreads(options: {
   }
 
   async function listModelCatalog(signal?: AbortSignal): Promise<EngineModelCatalog> {
-    const source = signal ? createNativeV2Client({ baseUrl: options.serverUrl, workspaceId: options.workspaceId, token: options.token, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal }) : native;
+    const source = signal ? createNativeV2Client({ ...nativeOptions, requestTimeoutMs: WORKSPACE_STARTUP_TIMEOUT_MS, signal }) : native;
     const [result, preferred, cloud] = await Promise.all([
       source.readCatalog(signal), source.defaultModel(signal),
       // Status is advisory: without it, account providers are still recognised by their ids.
@@ -1002,9 +1021,10 @@ export function createCoworkerThreads(options: {
       try {
         for await (const event of native.events(controller.signal)) {
           if (controller.signal.aborted) return;
-          if (event.type === "catalog.updated" || event.type === "integration.updated") onConfigurationChange?.();
+          if (["catalog.updated", "integration.updated", "model.updated", "provider.updated"].includes(event.type)) onConfigurationChange?.();
           if (onStream && /^session\.(text|reasoning)\.(started|delta|ended)$/.test(event.type)) {
             const part = z.object({ sessionID: z.string(), assistantMessageID: z.string(), ordinal: z.number().int().nonnegative(), delta: z.string().optional(), text: z.string().optional() }).parse(event.data);
+            if (owner && access && !ownedSessionIds.has(part.sessionID)) continue;
             const identity = { threadId: part.sessionID, messageId: part.assistantMessageID, partId: nativeV2PartId(part.assistantMessageID, part.ordinal, event.type.includes(".reasoning.") ? "reasoning" : "text") };
             if (event.type.endsWith(".delta")) {
               if (part.delta !== undefined) onStream({ kind: "delta", ...identity, delta: part.delta });
@@ -1017,7 +1037,7 @@ export function createCoworkerThreads(options: {
           } else if (
             event.type.startsWith("session.") ||
             event.type.startsWith("permission.") ||
-            event.type.startsWith("form.") || event.type === "catalog.updated" || event.type === "integration.updated"
+            event.type.startsWith("form.") || ["catalog.updated", "integration.updated", "model.updated", "provider.updated"].includes(event.type)
           ) {
             messageRefresh.cancel();
             onEvent();
@@ -1058,13 +1078,14 @@ export async function readCoworkerActivity(options: {
   serverUrl: string;
   workspaceId: string;
   token: string;
+  owner: { slug: string; createdAt?: string };
   conversationThreadId?: string;
   workerThreadIds?: readonly string[];
   preparationScope?: WorkspacePreparationScope;
 }): Promise<CoworkerActivity> {
   try {
     // Discussions other than the open one are only known to the coworker's registry.
-    const discussionThreadIds = await discussionIdsForWorkspace(options.workspaceId, options.conversationThreadId)
+    const discussionThreadIds = await discussionIdsForCoworker(options.owner.slug, options.conversationThreadId)
       .catch(() => discussionIds([], options.conversationThreadId));
     const activity = await createCoworkerThreads({ ...options, discussionThreadIds }).readActivity();
     return projectWorkspaceReadiness(activity, options.preparationScope ? workspaceReadinessCache.peek(options.preparationScope) : undefined);

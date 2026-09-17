@@ -11,8 +11,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import vm from "node:vm";
 import { createCoworker, getCoworker, updateCoworker } from "./coworkers.mjs";
-import { createCoworkerToolsServer, handleMcpMessage } from "./coworker-tools.mjs";
-import { assertControlOrigin, assertWorkerSupervisor, createWorkerControls, WORKER_MANAGEMENT } from "./worker-controls.mjs";
+import { createCoworkerToolsServer, handleMcpMessage, TEAM_SCOPE } from "./coworker-tools.mjs";
+import { assertControlOrigin, assertWorkerSupervisor, assertWorkerToolContext, createWorkerControls, WORKER_MANAGEMENT } from "./worker-controls.mjs";
+import { assertOwnedNativeTool } from "./team-sessions.mjs";
 import { createHeadlessThreadClient } from "@openwork/headless-threads";
 import { createCollaboration, withAbort } from "./collaboration.mjs";
 import { toTranscript } from "@openwork/headless-threads/v2";
@@ -270,6 +271,45 @@ test("control management is native-origin scoped; queued steering survives Done 
   await f.controls.reset(true);
 });
 
+test("shared native Worker spawn reaches the conversation-aware authority rather than ordinary handlers", async () => {
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("    onContextTool:", source.indexOf("async function ensureToolsServer("));
+  const end = source.indexOf("\n    handlers:", start);
+  const args = { name: "Evidence", goal: "Check the supplied evidence" };
+  const context = { sessionID: "ses_origin", messageID: "msg_assistant", callID: "call_spawn", directory: "/fixture/.runtime" };
+  const entry = { id: "work_origin", messageId: "msg_origin", state: "running", sentAt: 1, workspaceId: "ws_scout",
+    owner: { slug: "scout", threadId: context.sessionID, conversationId: context.sessionID, kind: "private" } };
+  const snapshot = { threadId: context.sessionID, directory: context.directory, messages: [
+    { id: entry.messageId, role: "user", parts: [] },
+    { id: context.messageID, role: "assistant", parentId: entry.messageId, parts: [{ type: "tool", callId: context.callID, tool: "coworker_worker_spawn", toolStatus: "running", toolInput: args }] },
+  ] };
+  const admitted = { entry, coworker: { slug: "scout", path: "/fixture/scout" }, binding: { slug: "scout", createdAt: "fixture-created", workspaceId: entry.workspaceId } };
+  const requests = [];
+  const workerHandlers = createWorkerToolHandlers({ coworkersDir: "/fixture", spawn: () => { throw new Error("Starting a Worker requires its conversation-aware tool."); } });
+  const call = vm.runInNewContext(`({${source.slice(start, end)}}).onContextTool`, {
+    TEAM_SCOPE, WORKER_MANAGEMENT, AbortSignal, assertOwnedNativeTool, assertWorkerToolContext,
+    maintenanceAdmission: { run: (work) => work() }, teamSessions: { context: async () => admitted },
+    COMPUTER_TOOLS: {}, BROWSER_TOOLS: {}, groupDocumentTools: new Set(), eventNativeSchemas: {}, ordinaryHandlers: workerHandlers, managementCalls: new Map(),
+    ensurePlatformServer: async () => ({ url: "http://127.0.0.1:1" }), ownerToken: "fixture-owner", ownedSessionClient: () => ({ getThreadSnapshot: async () => snapshot }),
+    collaboration: {
+      context: async (slug, nativeContext, expected, check) => {
+        check({ slug, context: nativeContext, ...expected, entry, snapshot, workspaceId: entry.workspaceId, active: true });
+        return { entry, callId: nativeContext.callID, assertActive() {} };
+      },
+      request: async (trusted, kind, input) => { requests.push({ trusted, kind, input }); return { accepted: true }; },
+    },
+    resolveWorkerSkills: async () => ({}),
+  });
+  assert.equal((await call(TEAM_SCOPE, { name: "worker_spawn", args, context })).accepted, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].kind, "worker");
+  assert.equal(requests[0].trusted.entry, entry);
+  assert.equal(requests[0].trusted.callId, context.callID);
+  assert.equal(requests[0].input.goal, args.goal);
+  await assert.rejects(call(TEAM_SCOPE, { name: "worker_spawn", args, context: { ...context, callID: "forged" } }), /exact running native/);
+  assert.equal(requests.length, 1);
+});
+
 test("a lifespan is always bounded by default and validated when chosen", () => {
   assert.deepEqual(normalizeLifespan(undefined, { now: NOW }), { kind: "turns", max: DEFAULT_TURN_BUDGET, used: 0 });
   assert.deepEqual(normalizeLifespan({ kind: "turns", max: 3.4 }, { now: NOW }), { kind: "turns", max: 3, used: 0 });
@@ -457,6 +497,7 @@ test("native Worker failure drains before settlement and retains unconfirmed cle
       } },
       workerKey: (slug, id) => `${slug}:${id}`, getWorker: async () => worker,
       getCoworker: async () => ({ name: "Fixture", workspaceId: "workspace_fixture" }),
+      sessionBinding: async () => ({ nativeWorkspaceId: "workspace_fixture" }), teamWorkspace: () => ({ workspaceId: "ws_team" }),
       isWorkerFinished: (value) => ["finished", "failed", "cancelled"].includes(value.status), lifespanSpent: () => false,
       prepareWorkerTurn: async () => worker, readyWorkerClient: async () => client,
       updateWorker: async (_dir, _slug, _id, change) => { worker = { ...worker, ...(typeof change === "function" ? change(worker) : change) }; return worker; },
@@ -485,58 +526,96 @@ test("native Worker failure drains before settlement and retains unconfirmed cle
   }
 });
 
-test("native Event Worker preparation freezes its role, brief and explicit effort before admission", async () => {
+test("native Event Worker preparation freezes its owner role, brief and effort without trusting saved agent pins", async (t) => {
   const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
-  for (const preparedBeforeRestart of [false, true]) {
+  for (const scenario of [
+    { name: "shared", shared: true }, { name: "shared saved pin", shared: true, pinned: true },
+    { name: "legacy", shared: false }, { name: "legacy saved pin", shared: false, pinned: true },
+    { name: "foreign owner", shared: true, pin: "foreign", rejected: true },
+    { name: "generic role in shared workspace", shared: true, pin: "generic", rejected: true },
+    { name: "mismatched role", shared: true, pin: "role", rejected: true },
+    { name: "foreign owner in legacy workspace", shared: false, pin: "foreign", rejected: true },
+    { name: "pin changed before persistence", shared: true, pinned: true, pinRace: true, rejected: true },
+    { name: "pin changed before input", shared: true, pinned: true, inputRace: true, rejected: true },
+    { name: "attempted recovery", shared: true, pin: "generic", attempted: true },
+    { name: "unobserved attempted recovery", shared: true, pin: "generic", attempted: true, unobserved: true, rejected: true },
+  ]) await t.test(scenario.name, async () => {
     const model = { providerId: "fixture", modelId: "text", variant: "high" };
     const prompt = `${ALL_HANDS_BRIEF}\n\nReview the supplied evidence`;
-    const agent = nativeTurnAgent({ tools: { ...workerTurnTools(), ...EVENT_SCHEDULE_DENY } });
+    const tools = { ...workerTurnTools(), ...EVENT_SCHEDULE_DENY };
+    const agent = nativeTurnAgent({ ...(scenario.shared ? { slug: "fixture" } : {}), tools });
+    const pins = { foreign: nativeTurnAgent({ slug: "other", tools }), generic: nativeTurnAgent({ tools }),
+      role: nativeTurnAgent({ slug: "fixture", tools: { ...workerTurnTools("browser"), ...EVENT_SCHEDULE_DENY } }) };
+    const pinned = scenario.pin ? pins[scenario.pin] : scenario.pinned ? agent : undefined;
     let worker = { id: "wrk_fixture", name: "Fixture", status: "running", threadId: "ses_worker", purpose: "delivery", lifespan: { kind: "turns", used: 0, max: 1 }, modelSnapshot: model, pendingSteers: [],
-      pendingTurn: { messageId: "msg_worker", prompt: preparedBeforeRestart ? prompt : "Review the supplied evidence", model, nativeAdmission: "prepared",
-        ...(preparedBeforeRestart ? { agent, eventPromptPrefix: ALL_HANDS_BRIEF } : {}) } };
+      pendingTurn: { messageId: "msg_worker", prompt: pinned ? prompt : "Review the supplied evidence", model, nativeAdmission: scenario.attempted ? "attempted" : "prepared",
+        ...(pinned ? { agent: pinned, eventPromptPrefix: ALL_HANDS_BRIEF } : {}) } };
     const snapshot = { threadId: worker.threadId, status: { type: "idle" }, messages: [], native: { engine: "v2", pendingInputIds: [], turnOutcomes: {} } };
-    let sends = 0, captures = 0, settlements = 0;
+    const complete = (input) => {
+      snapshot.messages.push({ id: input.messageId, role: "user", parts: [{ type: "text", text: input.prompt }] },
+        { id: "answer", role: "assistant", parentId: input.messageId, completedAt: 1, error: null, parts: [{ type: "text", text: "## Done\nEvidence reviewed." }] });
+      snapshot.native.turnOutcomes[input.messageId] = "succeeded";
+    };
+    if (scenario.attempted && !scenario.unobserved) complete(worker.pendingTurn);
+    const sends = [], outcomes = [], captures = [];
+    let catalogs = 0, roles = 0, raced = false;
     const client = {
       getThreadSnapshot: async () => snapshot,
       sendTurn: async (threadId, input) => {
+        if (scenario.inputRace) worker = { ...worker, pendingTurn: { ...worker.pendingTurn, agent: pins.foreign } };
         await input.beforeInput?.();
-        assert.equal(threadId, worker.threadId);
-        assert.equal(worker.pendingTurn.nativeAdmission, "attempted");
-        assert.equal(worker.pendingTurn.eventPromptPrefix, ALL_HANDS_BRIEF);
-        assert.equal(worker.pendingTurn.prompt, prompt);
-        assert.equal(input.prompt, prompt);
-        assert.equal(input.agent, agent);
-        assert.deepEqual(input.model, model);
-        assert.equal(input.tools, undefined);
-        sends++;
-        snapshot.messages.push({ id: input.messageId, role: "user", parts: [{ type: "text", text: input.prompt }] },
-          { id: "answer", role: "assistant", parentId: input.messageId, completedAt: 1, error: null, parts: [{ type: "text", text: "## Done\nEvidence reviewed." }] });
-        snapshot.native.turnOutcomes[input.messageId] = "succeeded";
+        sends.push({ threadId, input, phase: worker.pendingTurn.nativeAdmission });
+        complete(input);
         return { threadId, messageId: input.messageId, acceptedAt: Date.now(), messageCountBefore: 0 };
       },
+      abortThread: async () => ({ accepted: true }), waitUntilIdle: async () => ({ outcome: "settled" }),
     };
     const context = vm.createContext({
       AbortController, AbortSignal, Error, console, setTimeout, clearTimeout, EVENT_SCHEDULE_DENY, EVENT_WRITE_DENY,
       liveWorkerTurns: new Map(), activeLocalRuns: new Set(), coworkersDir: "/fixture",
       workerKey: (slug, id) => `${slug}:${id}`, getWorker: async () => worker,
-      getCoworker: async () => ({ name: "Fixture", workspaceId: "workspace_fixture" }),
+      getCoworker: async () => ({ slug: "fixture", name: "Fixture", createdAt: "fixture-created", workspaceId: "workspace_fixture" }),
+      sessionBinding: async () => ({ nativeWorkspaceId: scenario.shared ? "ws_team" : "workspace_fixture" }), teamWorkspace: () => ({ workspaceId: "ws_team" }),
       isWorkerFinished: (value) => ["finished", "failed", "cancelled"].includes(value.status), lifespanSpent: () => false,
       prepareWorkerTurn: async () => worker, readyWorkerClient: async () => client,
-      workerModelProviders: async () => ({ providers: [] }), resolveWorkerModel: (_coworker, _purpose, _providers, selected) => { assert.deepEqual(selected, model); return selected; },
-      updateWorker: async (_dir, _slug, _id, change) => { worker = { ...worker, ...(typeof change === "function" ? change(worker) : change) }; return worker; },
+      workerModelProviders: async () => { catalogs++; return { providers: [] }; }, resolveWorkerModel: (_coworker, _purpose, _providers, selected) => selected,
+      updateWorker: async (_dir, _slug, _id, change) => {
+        if (scenario.pinRace && !raced) { raced = true; worker = { ...worker, pendingTurn: { ...worker.pendingTurn, agent: pins.foreign } }; }
+        worker = { ...worker, ...(typeof change === "function" ? change(worker) : change) }; return worker;
+      },
       collaboration: { admitEventWorker: async () => ({ owner: { slug: "fixture", groupId: "grp_fixture", eventRunId: "event-run" }, deadlineAt: Date.now() + 60_000, promptPrefix: ALL_HANDS_BRIEF }) },
-      events: { captureExecution: async (entry, finalSnapshot) => { assert.equal(entry.owner.eventRunId, "event-run"); assert.equal(finalSnapshot, snapshot); captures++; } },
+      events: { captureExecution: async (entry) => { captures.push(entry); } },
       workerControls: { allowed: () => true, admit: async () => {}, endRun: async () => true, releaseRun() {} },
-      settleWorkerTurn: async (_slug, _id, outcome) => { assert.equal(outcome.kind, "settled"); assert.equal(captures, 1); worker.status = "finished"; settlements++; return false; },
-      drainLocalRunQueue: async () => {}, nativeTurnAgent: (input) => nativeTurnAgent(JSON.parse(JSON.stringify(input))), workerTurnTools,
+      settleWorkerTurn: async (_slug, _id, outcome) => { outcomes.push(outcome); worker.status = outcome.kind === "failed" ? "failed" : "finished"; return false; },
+      drainLocalRunQueue: async () => {}, nativeTurnAgent: (input) => { roles++; return nativeTurnAgent(JSON.parse(JSON.stringify(input))); }, workerTurnTools,
       dispatchNativeTurn, nativeTurnReceipt, verifyNativeTurnSkills, waitForNativeTurn, abortWorkerThread, withAbort, workerTurnOutcome, toTranscript, WORKER_TURN_TIMEOUT_MS: 1000,
     });
     const execute = vm.runInContext(`${mainFunction(source, "executeWorkerTurn")}; executeWorkerTurn`, context);
     await execute("fixture", worker.id, { onStarted() {} });
-    assert.equal(sends, 1);
-    assert.equal(settlements, 1);
-    assert.equal(worker.pendingTurn.prompt, prompt);
-  }
+    assert.equal(sends.length, scenario.rejected || scenario.attempted ? 0 : 1);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0].kind, scenario.rejected ? "failed" : "settled");
+    if (scenario.rejected) {
+      assert.match(outcomes[0].error, /agent|control surface|native admission/);
+      assert.equal(worker.pendingTurn.nativeAdmission, scenario.attempted ? "attempted" : "prepared");
+      assert.equal(worker.pendingTurn.agent, scenario.pinRace || scenario.inputRace ? pins.foreign : pinned);
+    } else {
+      assert.equal(captures.length, 1);
+      assert.equal(captures[0].owner.eventRunId, "event-run");
+      assert.equal(worker.pendingTurn.prompt, prompt);
+      assert.equal(worker.pendingTurn.eventPromptPrefix, ALL_HANDS_BRIEF);
+      assert.equal(worker.pendingTurn.agent, scenario.attempted ? pinned : agent);
+      for (const sent of sends) {
+        assert.equal(sent.threadId, worker.threadId);
+        assert.equal(sent.phase, "attempted");
+        assert.equal(sent.input.agent, agent);
+        assert.equal(sent.input.prompt, prompt);
+        assert.deepEqual(sent.input.model, model);
+        assert.equal(sent.input.tools, undefined);
+      }
+    }
+    if (scenario.attempted) { assert.equal(catalogs, 0); assert.equal(roles, 0); }
+  });
 });
 
 test("native Worker inbox recovery never resends and a durable attempt fences lost admission after restart", async () => {

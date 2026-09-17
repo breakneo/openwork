@@ -16,7 +16,8 @@ if (!process.env.OPENWORK_EMBEDDED_V2_TEST_ROOT) {
         !/^(OPENWORK_|OPENCODE_|COWORKER_|SENTRY_|XDG_|HOME$)/.test(key)));
       const child = Bun.spawn([process.execPath, "--conditions=development", "test", fileURLToPath(import.meta.url),
         fileURLToPath(new URL("./engine-v2-preview.test.ts", import.meta.url)),
-        ...(nativeBinary ? [fileURLToPath(new URL("./embedded-v2-native.test.ts", import.meta.url))] : [])], {
+        ...(nativeBinary ? [fileURLToPath(new URL("./embedded-v2-native.test.ts", import.meta.url))] : []),
+        ...(process.env.OPENWORK_EMBEDDED_V2_TEST_NAME ? ["-t", process.env.OPENWORK_EMBEDDED_V2_TEST_NAME] : [])], {
         env: { ...env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
           XDG_CACHE_HOME: join(root, "cache"), XDG_STATE_HOME: join(root, "state"), OPENWORK_DEV_MODE: "1",
           OPENWORK_EMBEDDED_V2_TEST_ROOT: root, ...(nativeBinary ? { OPENWORK_TEST_NATIVE_V2_BIN: nativeBinary } : {}) },
@@ -689,6 +690,7 @@ process.on("SIGTERM", () => { log({ stopped: true }); server.stop(true); process
         ["POST", `/api/session/${sessionId}/prompt`], ["POST", `/api/session/${sessionId}/model`],
         ["PATCH", "/api/config"], ["GET", "/api/provider"], ["DELETE", `/api/session/${sessionId}`],
         ["POST", `/api/session/${sessionId}/interrupt?continue=true`],
+        ["POST", `/api/experimental/session/${sessionId}/wait`],
         ["GET", `/api/session/${sessionId}/message?limit=201`], ["GET", `/api/session/${sessionId}/message?limit=200&limit=1`],
         ["GET", `/api/session/${sessionId}/message?location%5Bdirectory%5D=foreign`],
         ["GET", "/api/session/active?scope=global"], ["GET", `/api/session/${sessionId}/../active`],

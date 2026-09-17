@@ -48,17 +48,16 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
       if (coworkerCreatedAt && coworker.createdAt !== coworkerCreatedAt) throw new Error("The original coworker is no longer in this group request.");
       let threadId = group.participantThreadIds[slug];
       if (!threadId) {
-        const client = await withAbort(track(clientFor(slug, { observationOnly: true, signal })), signal);
+        const client = await withAbort(track(clientFor(slug, { sessionKind: "group", observationOnly: true, signal })), signal);
         if (coworkerCreatedAt && client.coworkerCreatedAt !== coworkerCreatedAt) throw new Error("The original coworker is no longer available.");
         signal.throwIfAborted();
         const thread = await withAbort(track(client.createThread({ title: `Group chat: ${group.name}`, signal })), signal);
         threadId = thread.id;
         await updateGroup(directory, groupId, { participantThreadIds: { [slug]: threadId } }, { authority: EVENT_GROUP_AUTHORITY });
       }
-      const owner = { slug, threadId, conversationId: groupId, groupId, kind: "group", workspaceId: coworker.workspaceId, coworkerCreatedAt };
+      const owner = { slug, threadId, conversationId: groupId, groupId, kind: "group", workspaceId: coworker.workspaceId, coworkerCreatedAt: coworkerCreatedAt ?? coworker.createdAt };
       signal.throwIfAborted();
-      await withAbort(track(collaboration.registerOwner(owner)), signal);
-      return owner;
+      return withAbort(track(collaboration.registerOwner(owner)), signal);
     });
     threadLocks.set(key, run);
     // Aborting the observer does not complete an in-flight filesystem write.
@@ -357,13 +356,14 @@ export function createGroupExecution({ directory, collaboration, coworkerFor, co
       // A consultation has its own native history; only the explicitly shared brief crosses over.
       let owner = await collaboration.read((state) => state.tasks[task.id].answerOwner ?? null);
       if (!owner) {
-        const client = await withAbort(track(clientFor(to.slug, { observationOnly: true, signal })), signal);
+        const client = await withAbort(track(clientFor(to.slug, { sessionKind: "consultation", observationOnly: true, signal })), signal);
         if (task.coworkerCreatedAt && client.coworkerCreatedAt !== task.coworkerCreatedAt) throw new Error("The original coworker is no longer available for this consultation.");
         await assertLive();
         const thread = await withAbort(track(client.createThread({ title: `Question from ${from.name}`, signal })), signal);
         owner = { slug: to.slug, threadId: thread.id, conversationId: groupId, groupId, kind: "consultation", workspaceId: task.workspaceId, coworkerCreatedAt: task.coworkerCreatedAt ?? null,
           ...(task.origin.eventRunId ? { eventRunId: task.origin.eventRunId, eventPhase: "contributions" } : {}),
           ...(task.origin.conversationIdentity && task.origin.groupId === groupId ? { conversationIdentity: task.origin.conversationIdentity } : {}) };
+        owner = await collaboration.registerOwner(owner);
         await collaboration.change((state) => { signal.throwIfAborted(); if (!state.tasks[task.id].cancelRequested) state.tasks[task.id].answerOwner = owner; });
       }
       await assertLive();

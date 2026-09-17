@@ -26,11 +26,11 @@ export function isolatedModelHooks(ctx, { agent, system, limits }, validate) {
       const session = sessions.get(event.sessionID);
       if (!session && event.agent !== agent) return;
       if (!session || event.agent !== agent || !same(session.model, event.model) || session.contexts++) refuse();
-      const catalog = yield* ctx.catalog.model.list().pipe(Effect.orDie);
+      const catalog = yield* (ctx.catalog?.model ?? ctx.model).list().pipe(Effect.orDie);
       const model = catalog.data.find((item) => item.providerID === event.model.providerID && item.id === event.model.id);
-      const provider = yield* ctx.catalog.provider.get({ providerID: event.model.providerID }).pipe(Effect.orDie);
+      const provider = yield* (ctx.catalog?.provider ?? ctx.provider).get({ providerID: event.model.providerID }).pipe(Effect.orDie);
       if (!model || !model.enabled || model.status !== "active" || provider.data.activation === "disabled"
-        || !["aisdk:@ai-sdk/openai", "aisdk:@ai-sdk/openai-compatible", "@opencode-ai/ai/providers/openai", "@opencode-ai/ai/providers/openai/chat", "@opencode-ai/ai/providers/openai/responses", "@opencode-ai/ai/providers/openai-compatible"].includes(model.package ?? provider.data.package)
+        || !["aisdk:@ai-sdk/openai", "aisdk:@ai-sdk/openai-compatible", "@opencode-ai/ai/providers/openai", "@opencode-ai/ai/providers/openai/chat", "@opencode-ai/ai/providers/openai/responses", "@opencode-ai/ai/providers/openai-compatible", "@opencode/ai/providers/openai", "@opencode/ai/providers/openai/chat", "@opencode/ai/providers/openai/responses", "@opencode/ai/providers/openai-compatible"].includes(model.package ?? provider.data.package)
         || !model.capabilities.input.includes("text") || !model.capabilities.output.includes("text")
         || model.capabilities.output.some((type) => type !== "text") || model.compatibility?.requireReasoning || model.compatibility?.reasoningField
         || model.variants.some((variant) => variant.id !== "default") || !model.cost.length || !model.cost.some((cost) => !cost.tier)

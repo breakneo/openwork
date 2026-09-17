@@ -76,7 +76,7 @@ export function continuationPrompt(task, results = [], introduction = "Continue 
 
 /** One commit contains the dependency outcome AND the obligation to continue.
  * Native messages remain in OpenCode; this file never stores reasoning or tool payloads. */
-export function createCollaboration({ directory, clientFor, cleanupClientFor = clientFor, consult, spawn, selectWorkerSkills = async (_slug, input) => { if (input.skills?.length) throw new Error("Worker skill selection is unavailable."); return skillFields(input); }, cancelWorker, validateOwner = async () => {}, validateAdmission = () => {}, invalidateWorker = () => {}, onExecutionEnd = async () => {}, onSuccess = async () => {}, memoryContext = async () => "", executionContext = async () => "", reactionContext = async () => null, publish = async () => {}, publishExecution = async () => {}, now = Date.now, stepTimeoutMs = 15 * 60_000, dependencyTimeoutMs = 60 * 60_000, personTimeoutMs = 60 * 60_000, pollMs = 750, setupTimeoutMs = 30_000, acceptanceTimeoutMs = 60_000, maxActiveExecutions = 4 }) {
+export function createCollaboration({ directory, clientFor, cleanupClientFor = clientFor, resolveOwner = async (owner) => owner, consult, spawn, selectWorkerSkills = async (_slug, input) => { if (input.skills?.length) throw new Error("Worker skill selection is unavailable."); return skillFields(input); }, cancelWorker, validateOwner = async () => {}, validateAdmission = () => {}, invalidateWorker = () => {}, onExecutionEnd = async () => {}, onSuccess = async () => {}, memoryContext = async () => "", executionContext = async () => "", reactionContext = async () => null, publish = async () => {}, publishExecution = async () => {}, now = Date.now, stepTimeoutMs = 15 * 60_000, dependencyTimeoutMs = 60 * 60_000, personTimeoutMs = 60 * 60_000, pollMs = 750, setupTimeoutMs = 30_000, acceptanceTimeoutMs = 60_000, maxActiveExecutions = 4 }) {
   if (!Number.isInteger(maxActiveExecutions) || maxActiveExecutions < 1 || maxActiveExecutions > 16) throw new Error("The collaboration execution limit must be between 1 and 16.");
   for (const value of [stepTimeoutMs, dependencyTimeoutMs, personTimeoutMs, pollMs, setupTimeoutMs, acceptanceTimeoutMs]) if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new Error("Collaboration time limits must be finite positive milliseconds.");
   const file = path.join(directory, ".collaboration", "state.json");
@@ -238,7 +238,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
     if (owner.kind !== "private" || !entry.personRequest || entry.continuation) entry.tools = { ...entry.tools, ...COMPUTER_DENY };
     if (!entry.personRequest || entry.continuation || !["private", "group"].includes(owner.kind)) entry.tools = { ...entry.tools, ...EVENT_WRITE_DENY };
     if (event) entry.tools = { ...entry.tools, ...EVENT_SCHEDULE_DENY };
-    entry.agent = nativeTurnAgent({ tools: entry.tools, agent: input.agent ?? (owner.kind === "coordinator" ? NATIVE_COORDINATOR_AGENT : "build") });
+    entry.agent = nativeTurnAgent({ tools: entry.tools, agent: input.agent ?? owner.agent ?? (owner.kind === "coordinator" ? NATIVE_COORDINATOR_AGENT : "build") });
     state.executions[id] = entry;
     state.tasks[entry.taskId] ??= { id: entry.taskId, owner, coworkerCreatedAt: input.owner.coworkerCreatedAt ?? null, state: "running", executionId: id, dependencies: [], parentId: null, depth: 0, lineage: [owner.slug], objective: text(input.prompt), refs: [], completedActions: [], resumeInstructions: "Use the requested results to finish the original task. Do not repeat completed actions.", continuationId: null, generation: 0, createdAt: at, deadline: at + dependencyTimeoutMs, error: "" };
     const task = state.tasks[entry.taskId];
@@ -426,7 +426,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
     try {
       const setupSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(setupTimeoutMs)]);
       await withAbort(validateOwner(entry.owner), setupSignal);
-      const client = await withAbort(track(clientFor(entry.owner.slug, { kind: entry.continuation ? "review" : "reply", requestText: entry.requestText, model: entry.model, agent: entry.agent, observationOnly: nativeAdmissionPhase(entry, false) === "attempted", signal: setupSignal })), setupSignal);
+      const client = await withAbort(track(clientFor(entry.owner.slug, { threadId: entry.owner.threadId, kind: entry.continuation ? "review" : "reply", requestText: entry.requestText, model: entry.model, agent: entry.agent, observationOnly: nativeAdmissionPhase(entry, false) === "attempted", signal: setupSignal })), setupSignal);
       running.client = client;
       if (entry.workspaceId && client.workspaceId !== entry.workspaceId) throw new Error("The original workspace is no longer available. This execution will not be moved or replayed.");
       if (entry.coworkerCreatedAt && client.coworkerCreatedAt !== entry.coworkerCreatedAt) throw new Error("The original coworker is no longer available. This execution will not be moved or replayed.");
@@ -830,7 +830,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
       stopping = task;
       try { await task; } finally { if (stopping === task) stopping = undefined; }
     },
-    async registerOwner(owner) { return change((state) => own(state, owner)); },
+    async registerOwner(owner) { const resolved = await resolveOwner(owner); return change((state) => own(state, resolved)); },
     async owner(slug, threadId) { return read((state) => state.owners[`${slug}:${threadId}`] ?? null); },
     /** Read-side identities only. A group id alone never grants access to a private execution. */
     async activityEntries({ groupId, slug, threadId }, limit = 16) {
@@ -937,7 +937,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
         if (!input.retryByPerson && cancelled(data, data.tasks[before.taskId])) throw new Error("This task was cancelled. Start a new request rather than resuming cancelled work.");
         if (before.followUpId) return read((state) => state.executions[before.followUpId]);
         const signal = AbortSignal.timeout(setupTimeoutMs);
-        const client = await withAbort(track(clientFor(before.owner.slug, { model: before.model, observationOnly: true, signal })), signal);
+        const client = await withAbort(track(clientFor(before.owner.slug, { threadId: before.owner.threadId, model: before.model, observationOnly: true, signal })), signal);
         if (before.workspaceId && client.workspaceId !== before.workspaceId) throw new Error("The original workspace is no longer available. Review the earlier work before continuing.");
         if (before.coworkerCreatedAt && client.coworkerCreatedAt !== before.coworkerCreatedAt) throw new Error("The original coworker is no longer available. Review the earlier work before continuing.");
         const snapshot = await withAbort(client.getThreadSnapshot(before.owner.threadId, { signal }), signal);
@@ -1052,7 +1052,7 @@ export function createCollaboration({ directory, clientFor, cleanupClientFor = c
       const signal = AbortSignal.timeout(setupTimeoutMs);
       const run = active.get(`${slug}:${context.sessionID}`);
       const model = run ? await read((state) => state.executions[run.id]?.model) : null;
-      const client = await withAbort(track(clientFor(slug, { model, observationOnly: true, signal })), signal);
+      const client = await withAbort(track(clientFor(slug, { threadId: context.sessionID, model, observationOnly: true, signal })), signal);
       const snapshot = await withAbort(client.getThreadSnapshot(context.sessionID, { signal }), signal);
       const message = snapshot.messages.find((entry) => entry.id === context.messageID && entry.role === "assistant");
       if (!message?.parentId || !message.parts.some((part) => part.callId === context.callID)) throw new Error("This tool call has no admitted parent message.");

@@ -11,7 +11,8 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { assignmentToolCatalog, selfToolCatalog } from "./assignment-tools.mjs";
 import { DEFAULT_INSTRUCTIONS, toolCatalog } from "./coworker-tools.mjs";
-import { COWORKER_INSTRUCTIONS, createCoworker, createLongTermMemory } from "./coworkers.mjs";
+import { COWORKER_INSTRUCTIONS, agentsTemplate, createCoworker, createLongTermMemory } from "./coworkers.mjs";
+import { coworkerAgentDefinition } from "./team-workspace.mjs";
 import { createDocument } from "./documents.mjs";
 import { eventToolCatalog } from "./events.mjs";
 import { teamToolCatalog } from "./team-tools.mjs";
@@ -40,7 +41,11 @@ function registeredMcpCatalog() {
 }
 
 async function layers(coworker) {
-  const files = await Promise.all(COWORKER_INSTRUCTIONS.concat("AGENTS.md").map(async (file) => [file, await readFile(path.join(coworker.path, file), "utf8")]));
+  const files = await Promise.all(COWORKER_INSTRUCTIONS.map(async (file) => [file, await readFile(path.join(coworker.path, file), "utf8")]));
+  const contract = agentsTemplate({ name: coworker.name });
+  const system = coworkerAgentDefinition(path.dirname(coworker.path), coworker).system;
+  assert.ok(system.startsWith(contract));
+  files.push(["AGENTS.md", contract], ["native owner location", system.slice(contract.length)]);
   return [...files, ["registered MCP catalog", JSON.stringify(registeredMcpCatalog())], ["registered MCP instructions", DEFAULT_INSTRUCTIONS]];
 }
 

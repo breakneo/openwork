@@ -1,4 +1,5 @@
 /** Typed access to the Open Coworker main-process bridge. */
+import { configureCoworkerSessionAccess } from "./session-routing.ts";
 import type { CoworkerAbilities, CoworkerAbilitiesCatalog } from "./abilities";
 import type { CoworkerDocument, CoworkerDocumentSummary, DocumentRevision, DocumentStatus } from "./documents";
 import type { GroupDocument, GroupDocumentSave, GroupDocumentSaved, GroupDocumentSummary, GroupDocumentsApi } from "./group-documents";
@@ -356,6 +357,8 @@ export type RuntimeInfo = {
   engineManaged: boolean;
   engineError: string;
   readinessKey?: string;
+  teamWorkspaceId?: string;
+  apiContract?: "beta19271" | "native-2";
   workspaceReadinessRevisions?: Record<string, number>;
 };
 
@@ -534,7 +537,21 @@ async function invoke<T>(command: string, payload?: unknown): Promise<T> {
   return response.result as T;
 }
 
+function configureSessionRuntime(runtime: RuntimeInfo): RuntimeInfo {
+  configureCoworkerSessionAccess(runtime.teamWorkspaceId ? { ...coworkerBridge.sessions, workspace: () => runtime.teamWorkspaceId ?? "", apiContract: () => runtime.apiContract ?? "beta19271" } : undefined);
+  return runtime;
+}
+
 export const coworkerBridge = {
+  sessions: {
+    active: (owner: import("./session-routing.ts").SessionOwner) => invoke<Record<string, { type: "running" }>>("sessions.active", owner),
+    binding: (owner: import("./session-routing.ts").SessionOwner, sessionId: string) => invoke<import("./session-routing.ts").SessionBinding>("sessions.binding", { ...owner, sessionId }),
+    list: (owner: import("./session-routing.ts").SessionOwner, includeLegacy = false) => invoke<import("@openwork/headless-threads/v2").NativeV2Session[]>("sessions.list", { ...owner, includeLegacy }),
+    create: (owner: import("./session-routing.ts").SessionOwner, input: import("@openwork/headless-threads/v2").CreateThreadInput) => {
+      if (input.prompt !== undefined || input.skills?.length) throw new Error("Create the discussion before submitting its admitted turn.");
+      return invoke<import("@openwork/headless-threads/v2").HeadlessThread>("sessions.create", { ...owner, input: { threadId: input.threadId, title: input.title, model: input.model } });
+    },
+  },
   reactions: {
     read: (scope: MessageReactionScope) => invoke<MessageReactionSnapshot>("reactions:read", scope),
     onChanged: (listener: (change: { scope: MessageReactionScope; revision: number }) => void): (() => void) => {
@@ -600,13 +617,13 @@ export const coworkerBridge = {
     import: () => invoke<CoworkerTemplateSync | null>("templates.import"),
     export: (slug: string) => invoke<{ saved: boolean }>("templates.export", { slug }),
   },
-  runtimeInfo: () => invoke<RuntimeInfo>("runtime.info"),
+  runtimeInfo: () => invoke<RuntimeInfo>("runtime.info").then(configureSessionRuntime),
   onRuntimeChanged: (listener: (runtime: RuntimeInfo) => void) => {
     const host: BridgeWindow = window;
-    return host.__COWORKER__?.onRuntimeChanged?.(listener) ?? (() => undefined);
+    return host.__COWORKER__?.onRuntimeChanged?.((runtime) => listener(configureSessionRuntime(runtime))) ?? (() => undefined);
   },
   /** Stop and start the local AI service, then report the fresh state. */
-  restartRuntime: () => invoke<RuntimeInfo>("runtime.restart"),
+  restartRuntime: () => invoke<RuntimeInfo>("runtime.restart").then(configureSessionRuntime),
   coworkers: {
     list: () => invoke<CoworkerSummary[]>("coworkers.list"),
     get: (slug: string) => invoke<CoworkerSummary>("coworkers.get", { slug }),

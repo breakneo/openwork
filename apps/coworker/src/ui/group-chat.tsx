@@ -87,7 +87,7 @@ function useGroupHoldings(members: readonly CoworkerSummary[], runtime: RuntimeI
             waitForGroup(loadDiscussionRegistry(member.slug)).catch((): string[] => []),
           ]);
           const all = member.workspaceId && runtime.engineManaged
-            ? await waitForGroup(createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: member.workspaceId, token: runtime.ownerToken }).listAllThreads()).catch(() => [])
+            ? await waitForGroup(createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId: member.workspaceId, token: runtime.ownerToken, owner: { slug: member.slug, createdAt: member.createdAt } }).listAllThreads(false)).catch(() => [])
             : [];
           const split = classifyThreads(all, {
             discussions: discussionIds(registry, member.conversationThreadId),
@@ -539,7 +539,7 @@ function GroupChatView({
     try {
       const workspaceId = owner.workspaceId || (await coworkerBridge.coworkers.ensureWorkspace(slug)).workspaceId;
       if (!workspaceId) throw new Error(`${owner.name}'s workspace is not ready.`);
-      const threads = createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId, token: runtime.ownerToken, model: owner.model, modelVariant: owner.modelVariant });
+      const threads = createCoworkerThreads({ serverUrl: runtime.serverUrl, workspaceId, token: runtime.ownerToken, model: owner.model, modelVariant: owner.modelVariant, owner: { slug: owner.slug, createdAt: owner.createdAt } });
       const title = assignmentTitle(outcome);
       const thread = await threads.client.createThread({ title });
       // The owner gets the visible group conversation, each line signed, never another coworker's reasoning or tools.

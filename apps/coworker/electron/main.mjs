@@ -11,7 +11,7 @@ import { readAllHands, updateAllHands, prepareAllHands, claimAllHands } from "./
  */
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { createServer as createPortProbe } from "node:net";
 import path from "node:path";
@@ -22,8 +22,10 @@ import { bindWindowAppearance, windowMaterial } from "./window-appearance.mjs";
 import { globalOpencodeConfigDir, openworkConfigDir } from "@openwork/paths";
 import { createHeadlessThreadClientV2 as createHeadlessThreadClient, createNativeV2Client, createNativeV2Id, nativeCatalogProviders, toTranscript } from "@openwork/headless-threads/v2";
 import { configureNativePluginBundles, verifyNativePluginBundles } from "./native-plugin.mjs";
-import { nativeTurnAgent, NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
-import { prepareNativeTurnRoles } from "./turn-roles-plugin.mjs";
+import { nativeTurnAgent, coworkerAgent, NATIVE_COORDINATOR_AGENT } from "./native-turns.mjs";
+import { assertTeamCompatibleHomes, teamWorkspaceDirectory, teamWorkspaceId, updateTeamWorkspaceConfig } from "./team-workspace.mjs";
+import { assertOwnedNativeTool, createTeamSessionRegistry, resolveNativeFilesystemScope } from "./team-sessions.mjs";
+import { awaitNativePluginActivation, prepareNativeTurnRoles } from "./turn-roles-plugin.mjs";
 import { dispatchNativeTurn, nativeTurnReceipt, waitForNativeTurn, verifyNativeTurnSkills } from "./native-recovery.mjs";
 import { nativeV2SkillsSchema } from "@openwork/headless-threads/v2";
 import { selectCatalogSkill, selectionFields, validateSkillSelections, sameSkillFields, selectedCloudSkillScope } from "../src/lib/skill-selection.ts";
@@ -55,6 +57,7 @@ import { createProgressSummaries } from "./progress-summaries.mjs";
 import { installMemoryPlugin } from "./memory-model.mjs";
 import { createConversationMemory } from "./conversation-memory.mjs";
 import { createCoworkerThreads, eligibleProgressModels } from "../src/lib/threads.ts";
+import { configureCoworkerSessionAccess } from "../src/lib/session-routing.ts";
 import { cloudModelOptions, resolveCloudModel } from "../src/lib/cloud-responsibilities.ts";
 import { createDenAutomationsClient, listAssignedCoworkerTemplates } from "../src/lib/den.ts";
 import { createTemplateInstaller, exportCoworkerTemplate, parseCoworkerTemplateFile, templateScope } from "./templates.mjs";
@@ -72,6 +75,7 @@ import {
   listMemoryFiles,
   listRetiredCoworkers,
   readCoworkerFile,
+  readHomeContext,
   repairCoworkerContract,
   restoreCoworker,
   retireCoworker,
@@ -79,7 +83,7 @@ import {
   updateCoworkerAbilities,
   writeCoworkerFile,
 } from "./coworkers.mjs";
-import { COWORKER_TOOLS_MCP_NAME, DEFAULT_INSTRUCTIONS, createCoworkerToolsServer, createToolHandlers, toolCatalog } from "./coworker-tools.mjs";
+import { TEAM_SCOPE, COWORKER_TOOLS_MCP_NAME, DEFAULT_INSTRUCTIONS, createCoworkerToolsServer, createToolHandlers, toolCatalog } from "./coworker-tools.mjs";
 import { readSuggestions, recommendTeam, refreshTeamRosters, setReferralState, setSuggestionState, teamCatalog, teamStates } from "./team.mjs";
 import { createTeamToolHandlers, teamToolCatalog } from "./team-tools.mjs";
 import {
@@ -156,15 +160,39 @@ import {
 } from "./workers.mjs";
 import { assertControlOrigin, assertWorkerSupervisor, assertWorkerToolContext, createWorkerControls, WORKER_MANAGEMENT, workerControlRequest } from "./worker-controls.mjs";
 
+import { verifyPackagedNativeRuntime } from "./packaged-native-runtime.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged || process.env.OPENWORK_DEV_MODE === "1";
+const packagedNativeProfile = app.isPackaged ? verifyPackagedNativeRuntime(process.resourcesPath) : undefined;
+if (packagedNativeProfile) nativeRuntime.sourceBuild = packagedNativeProfile.sourceBuild;
+if (nativeRuntime.sourceBuild) nativeRuntime.apiContract = "native-2";
 configureNativePluginBundles(app.isPackaged
   ? path.join(process.resourcesPath, "native-plugins")
-  : path.resolve(process.env.OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR?.trim() || path.join(__dirname, "..", "resources", "native-plugins")));
+  : path.resolve(process.env.OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR?.trim() || path.join(__dirname, "..", "resources", "native-plugins")), { sourceBuild: nativeRuntime.sourceBuild });
+let sourceRuntimeProfile;
+let sourceRuntimePreparation;
+async function prepareSourceRuntime() {
+  const manifestPath = process.env.OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST;
+  if (!manifestPath) return;
+  if (app.isPackaged || !process.env.COWORKER_HOME_DIR || !process.env.COWORKER_SERVER_CONFIG
+    || !(process.env.COWORKER_USER_DATA_DIR || process.env.OPENWORK_ELECTRON_USERDATA)) throw new Error("Source native development requires explicit isolated Coworker home, server config and Electron profile paths.");
+  sourceRuntimePreparation ??= (async () => {
+    const { readNativeSourceFixture, prepareNativeSourceBundles } = await import("./native-source-fixture.mjs");
+    const manifest = await readNativeSourceFixture(path.resolve(manifestPath));
+    const bundles = await prepareNativeSourceBundles(manifest, path.join(userDataDir, "source-native-plugins"));
+    configureNativePluginBundles(bundles.directory, { sourceBuild: bundles.sourceBuild });
+    sourceRuntimeProfile = { bin: manifest.executable.path, sourceBuild: bundles.sourceBuild };
+    nativeRuntime.apiContract = "native-2";
+  })();
+  await sourceRuntimePreparation;
+}
 
 const APP_NAME = "Open Coworker";
 const APP_IDENTIFIER = isDev ? "com.differentai.opencoworker.dev" : "com.differentai.opencoworker";
 const userDataDir = resolveUserDataDir({ env: process.env, appDataDir: app.getPath("appData"), appIdentifier: APP_IDENTIFIER });
+if (process.env.OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST && (app.isPackaged || ![process.env.COWORKER_HOME_DIR, process.env.COWORKER_SERVER_CONFIG,
+  process.env.COWORKER_USER_DATA_DIR || process.env.OPENWORK_ELECTRON_USERDATA].every((value) => typeof value === "string" && path.isAbsolute(value)))) throw new Error("Source native development requires explicit absolute isolated profile paths.");
 // This must precede the first await and app.setPath: a competing launch may
 // not select the old profile while its post-exit helper is moving it.
 const maintenanceNotice = readMaintenanceStartup(userDataDir, { consume: false });
@@ -413,8 +441,9 @@ async function startPlatformServer() {
   maintenanceAdmission.assertOpen();
   engineError = "";
   try {
+    await prepareSourceRuntime();
     await verifyNativePluginBundles();
-    const opencodeV2Bin = resolveBundledOpencodeV2Binary({ appRoot: path.resolve(__dirname, ".."), resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }) ?? undefined;
+    const opencodeV2Bin = sourceRuntimeProfile?.bin ?? resolveBundledOpencodeV2Binary({ appRoot: path.resolve(__dirname, ".."), resourcesPath: process.resourcesPath, isPackaged: app.isPackaged }) ?? undefined;
     const { startEmbeddedServer } = await import(pathToFileURL(embeddedServerPath()).href);
     const tokens = await loadOrCreateTokens();
     const movedPaths = [userDataDir, coworkersDir, serverConfigPath, settingsPath, process.env.OPENWORK_RUNTIME_DB, process.env.OPENWORK_ENV_STORE, `${path.resolve(userDataDir)}-recovery`];
@@ -426,17 +455,17 @@ async function startPlatformServer() {
     engineHistoryDb = resolveMaintenanceHistoryDb({ rootDir: opencodeV2RootDir });
     engineHistoryError = "";
     await mkdir(coworkersDir, { recursive: true });
-    const coworkers = await listCoworkers(coworkersDir);
+    nativeTeamDirectory = await realpath(coworkersDir);
     const contextServer = await ensureToolsServer();
-    for (const coworker of coworkers) await installNativeCoworkerPlugins(coworker, contextServer);
-    // The registry file is the source of truth once it exists; seeds only shape
-    // the very first boot (mirrors the OpenWork desktop's embedded-server use).
-    const seedWorkspaces = existsSync(serverConfigPath) ? [] : coworkers.map((coworker) => coworker.path);
+    await installNativeCoworkerPlugins(teamWorkspace(), contextServer);
+    const seedWorkspaces = existsSync(serverConfigPath) ? [] : [teamWorkspace().path];
 
     serverHandle = await startEmbeddedServer({
       engine: "v2",
       opencodeV2Bin,
-      opencodeV2: { version: nativeRuntime.opencodeV2Version, rootDir: opencodeV2RootDir },
+      opencodeV2: { ...(sourceRuntimeProfile?.sourceBuild || nativeRuntime.sourceBuild
+        ? { sourceBuild: sourceRuntimeProfile?.sourceBuild ?? nativeRuntime.sourceBuild, apiContract: "native-2" }
+        : { version: nativeRuntime.opencodeV2Version, apiContract: nativeRuntime.apiContract }), rootDir: opencodeV2RootDir, workspaceDirectory: teamWorkspace().path },
       host: "127.0.0.1",
       port: DEFAULT_SERVER_PORT,
       corsOrigins: ["*"],
@@ -448,6 +477,7 @@ async function startPlatformServer() {
     });
     if (!serverHandle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service is not running.");
     ownerToken = await resolveOwnerToken(serverHandle.url, tokens);
+    await registerCoworkerWorkspace(teamWorkspace(), serverHandle);
     if (denSession) {
       // A fresh server starts with no account context; hand the session back so
       // the signed-in user's providers keep flowing into this engine.
@@ -624,6 +654,8 @@ function runtimeInfo() {
     serverUrl: serverHandle?.url ?? "",
     ownerToken,
     coworkersDir,
+    teamWorkspaceId: teamWorkspace().workspaceId,
+    apiContract: nativeRuntime.apiContract ?? "beta19271",
     denBaseUrl: process.env.COWORKER_DEN_BASE_URL?.trim() || DEFAULT_DEN_BASE_URL,
     deepLinkScheme: DEEP_LINK_SCHEME,
     deepLinksRegistered: protocolRegistered,
@@ -660,7 +692,7 @@ const variantsByModel = new Map();
 
 async function readModelCatalog(workspaceId, { handle, signal } = {}) {
   handle ??= await ensurePlatformServer();
-  const catalog = createCoworkerThreads({ serverUrl: handle.url, workspaceId, token: ownerToken }).listModelCatalog();
+  const catalog = createCoworkerThreads({ serverUrl: handle.url, workspaceId: teamWorkspace().workspaceId, token: ownerToken }).listModelCatalog();
   const result = signal ? await withAbort(catalog, signal) : await catalog;
   if (handle !== serverHandle) throw new Error("The native AI service changed while reading models. Try again.");
   return result;
@@ -698,7 +730,7 @@ async function localRunModel(coworker, kind = "assignment-run", requestText) {
   }
   if (separator <= 0 || separator === preference.length - 1) {
     const handle = await ensurePlatformServer();
-    const model = await createNativeV2Client({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).defaultModel();
+    const model = await createNativeV2Client({ baseUrl: handle.url, workspaceId: teamWorkspace().workspaceId, token: ownerToken }).defaultModel();
     if (!model) throw new Error("No native model is available. Choose a connected model.");
     return { providerId: model.providerID, modelId: model.id, ...(model.variant ? { variant: model.variant } : {}) };
   }
@@ -765,19 +797,26 @@ async function executeLocalResponsibility(
     const threadId = started.latestRun.threadId;
     try {
       const handle = await ensurePlatformServer();
-      await warmCoworkerWorkspace(coworker);
+      const binding = resumeThreadId ? await sessionBinding(coworker, resumeThreadId) : null;
+      const shared = !binding || binding.nativeWorkspaceId === teamWorkspace().workspaceId;
+      if (shared) await warmCoworkerWorkspace(coworker);
+      else await prepareLegacySession(coworker, binding);
       const model = await localRunModel(coworker, "assignment-run");
-      const agent = nativeTurnAgent({ tools: COMPUTER_DENY });
-      client = createHeadlessThreadClient({
+      const agent = nativeTurnAgent({ tools: COMPUTER_DENY, ...(shared ? { slug } : {}) });
+      client = ownedSessionClient(coworker, {
         baseUrl: handle.url,
         workspaceId: coworker.workspaceId,
         token: ownerToken,
         defaultModel: model,
+        nativeWorkspaceId: binding?.nativeWorkspaceId ?? teamWorkspace().workspaceId,
         defaultAgent: agent,
-      });
+      }, "assignment");
       let acceptance;
       signal.throwIfAborted();
       const messageId = `msg_${activeRunId.replaceAll("-", "")}`;
+      const execution = { id: activeRunId, owner: { slug, threadId, kind: "assignment" }, coworkerCreatedAt: coworker.createdAt,
+        messageId, workspaceId: coworker.workspaceId, model, agent, tools: COMPUTER_DENY, state: "running", sentAt: Date.now() };
+      standaloneExecutions.set(threadId, execution);
       if (resumeThreadId) {
         acceptance = await client.sendTurn(threadId, { prompt: RESUME_PROMPT(started.name, resumeReason), messageId, agent, model, signal });
       } else {
@@ -807,6 +846,8 @@ async function executeLocalResponsibility(
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
       }).catch(() => undefined);
+    } finally {
+      if (standaloneExecutions.get(threadId)?.id === activeRunId) standaloneExecutions.delete(threadId);
     }
   } finally {
     activeLocalRuns.delete(key);
@@ -927,14 +968,27 @@ let workersRecovered = false;
 let workersRecovering = false;
 const WORKER_TURN_TIMEOUT_MS = 60 * 60_000;
 
+async function resolveSessionOwner(owner) {
+  const stored = owner.slug === ".coordinator" ? await readCoordinator(coworkersDir) : await getCoworker(coworkersDir, owner.slug);
+  const coworker = owner.slug === ".coordinator" && stored ? { ...stored, slug: owner.slug, createdAt: "coordinator" } : stored;
+  const createdAt = owner.coworkerCreatedAt ?? owner.coworkerIdentity?.createdAt;
+  if (!coworker?.path || !coworker.workspaceId || (createdAt && createdAt !== coworker.createdAt)) throw new Error("The original session owner changed.");
+  const binding = await sessionBinding(coworker, owner.threadId);
+  if ((createdAt && createdAt !== binding.createdAt) || binding.workspaceId !== coworker.workspaceId
+    || (owner.workspaceId && owner.workspaceId !== binding.workspaceId)) throw new Error("The original session owner changed.");
+  if (binding.kind !== "legacy" && binding.kind !== owner.kind) throw new Error("This native session belongs to another work surface.");
+  return { ...owner, coworkerCreatedAt: binding.createdAt, ...(binding.nativeWorkspaceId === teamWorkspace().workspaceId ? { agent: owner.slug === ".coordinator" ? NATIVE_COORDINATOR_AGENT : coworkerAgent(owner.slug) } : {}) };
+}
+
 const collaboration = createCollaboration({
+  resolveOwner: (owner) => owner.kind === "group" && owner.coworkerCreatedAt === undefined ? owner : resolveSessionOwner(owner),
   acceptanceTimeoutMs: 120_000,
   setupTimeoutMs: 120_000,
   validateAdmission: (entry) => assertExpectedReadiness(entry.expectedReadiness, { slug: entry.owner.slug, workspaceId: entry.workspaceId, coworkerCreatedAt: entry.coworkerCreatedAt }),
   directory: coworkersDir,
   clientFor: (slug, options) => maintenanceAdmission.run(() => collaborationClient(slug, options)),
   cleanupClientFor: collaborationCleanupClient,
-  validateOwner: (owner) => events.validateOwner(owner),
+  validateOwner: async (owner) => { await resolveSessionOwner(owner); await events.validateOwner(owner); },
   consult: (task) => maintenanceAdmission.run(() => groupExecution.consultation(task)),
   spawn: (slug, input) => maintenanceAdmission.run(() => spawnWorker(slug, input, "coworker")),
   selectWorkerSkills: (slug, input) => resolveWorkerSkills(slug, input),
@@ -1058,6 +1112,7 @@ const groupDocumentTools = new Set(groupDocumentToolCatalog().map((tool) => tool
 const groupDocuments = createGroupDocumentService({
   coworkersDir,
   coworkerFor: (slug) => getCoworker(coworkersDir, slug),
+  sessionBindingFor: (coworker, sessionId) => teamSessions.resolve(sessionId, coworker),
   resolveContext: (slug, context, expected) => collaboration.context(slug, context, expected, assertGroupDocumentToolContext),
   captureArtifact: async (...args) => {
     try { await events.captureArtifact(...args); }
@@ -1090,12 +1145,15 @@ async function ordinaryGroup(id) {
   if ((await getGroup(coworkersDir, id)).eventId) throw new Error("This group is managed through Events.");
 }
 
-async function collaborationClient(slug, { kind = "reply", requestText, model, agent, observationOnly = false, signal } = {}) {
+async function collaborationClient(slug, { threadId, kind = "reply", sessionKind = "private", requestText, model, agent, observationOnly = false, signal } = {}) {
   maintenanceAdmission.assertOpen();
-  const coworker = slug === ".coordinator" ? observationOnly ? await readCoordinator(coworkersDir) : await ensureCoordinatorWorkspace() : await getCoworker(coworkersDir, slug);
+  const stored = slug === ".coordinator" ? observationOnly ? await readCoordinator(coworkersDir) : await ensureCoordinatorWorkspace() : await getCoworker(coworkersDir, slug);
+  const coworker = slug === ".coordinator" && stored ? { ...stored, slug, createdAt: "coordinator" } : stored;
   const handle = await ensurePlatformServer();
   if (!coworker?.workspaceId) throw new Error("The AI service is not ready. Your work has been kept.");
-  if (!observationOnly && slug !== ".coordinator") {
+  const binding = threadId ? await sessionBinding(coworker, threadId) : null;
+  if (!observationOnly && binding && binding.nativeWorkspaceId !== teamWorkspace().workspaceId) await prepareLegacySession(coworker, binding);
+  else if (!observationOnly && slug !== ".coordinator") {
     const server = await ensureToolsServer();
     await installNativeCoworkerPlugins(coworker, server);
     if (!toolsRegistered.has(slug)) await registerCoworkerTools(coworker, 120_000);
@@ -1105,10 +1163,12 @@ async function collaborationClient(slug, { kind = "reply", requestText, model, a
   // Legacy admissions have no model pin. Observe their native work without
   // consulting today's catalog or turning a missing selection into a failure.
   const resolvedModel = model ?? (observationOnly ? undefined : await localRunModel(coworker, kind, requestText));
-  const client = skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, defaultModel: resolvedModel, defaultAgent: agent ?? (slug === ".coordinator" ? NATIVE_COORDINATOR_AGENT : "build"), captureSkillOrigin: slug !== ".coordinator" });
+  const options = { baseUrl: handle.url, workspaceId: coworker.workspaceId, nativeWorkspaceId: binding?.nativeWorkspaceId ?? teamWorkspace().workspaceId, token: ownerToken, defaultModel: resolvedModel, defaultAgent: agent ?? (slug === ".coordinator" ? NATIVE_COORDINATOR_AGENT : binding && binding.nativeWorkspaceId !== teamWorkspace().workspaceId ? "build" : coworkerAgent(slug)), captureSkillOrigin: slug !== ".coordinator" };
+  const client = ownedSessionClient(coworker, options, slug === ".coordinator" ? "coordinator" : sessionKind);
   client.resolvedModel = resolvedModel;
   if (slug !== ".coordinator") client.coworkerIdentity = coworkerIdentity(coworker);
-  const interactions = createCoworkerThreads({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
+  const interactions = createCoworkerThreads({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken,
+    ...(slug === ".coordinator" ? {} : { owner: { slug, createdAt: coworker.createdAt } }) });
   client.workspaceId = coworker.workspaceId;
   client.coworkerCreatedAt = coworker.createdAt ?? null;
   client.pendingInteractions = interactions.listThreadInteractions;
@@ -1127,7 +1187,9 @@ async function collaborationCleanupClient(slug, { owner, workspaceId, coworkerCr
   if (!owner || owner.slug !== slug || !owner.threadId || !workspaceId
     || (slug !== ".coordinator" && (typeof createdAt !== "string" || !createdAt))) throw new Error("The original cleanup identity is unavailable. No unrelated work was stopped.");
   if (typeof request !== "function") throw new Error("Cleanup-only access to the owned AI service is unavailable. Update Open Coworker before retrying Fresh start.");
-  const directory = path.join(path.resolve(coworkersDir), slug);
+  const homeDirectory = path.join(path.resolve(coworkersDir), slug);
+  const binding = (await teamSessions.list({ slug, createdAt: slug === ".coordinator" ? "coordinator" : createdAt })).find((entry) => entry.sessionId === owner.threadId);
+  const directory = binding?.directory ?? homeDirectory;
   const assertCurrent = () => {
     signal?.throwIfAborted();
     if (serverHandle !== handle || handle.managedOpencodeV2 !== generation || generation?.pid !== pid
@@ -1140,10 +1202,10 @@ async function collaborationCleanupClient(slug, { owner, workspaceId, coworkerCr
       AbortSignal.any([AbortSignal.timeout(8000), ...(signal ? [signal] : [])]));
     assertCurrent();
     const expected = owner.coworkerIdentity;
-    if (!current?.path || current.workspaceId !== workspaceId || path.resolve(current.path) !== directory
+    if (!current?.path || current.workspaceId !== workspaceId || path.resolve(current.path) !== homeDirectory
       || (owner.workspaceId && owner.workspaceId !== workspaceId)
       || (slug !== ".coordinator" && (current.slug !== slug || current.createdAt !== createdAt))
-      || (expected && (expected.slug !== slug || expected.path !== directory || expected.createdAt !== createdAt
+      || (expected && (expected.slug !== slug || expected.path !== homeDirectory || expected.createdAt !== createdAt
         || (expected.workspaceId && expected.workspaceId !== workspaceId)))) throw new Error("The original coworker or workspace changed. No unrelated work was stopped.");
     return current;
   };
@@ -1151,24 +1213,25 @@ async function collaborationCleanupClient(slug, { owner, workspaceId, coworkerCr
   const baseUrl = handle.url.replace(/\/+$/, "");
   const mount = new URL(`${baseUrl}/workspace/${encodeURIComponent(workspaceId)}/opencode2`);
   const session = `/api/session/${encodeURIComponent(owner.threadId)}`;
+  const wait = nativeRuntime.apiContract === "native-2" ? `/api/experimental/session/${encodeURIComponent(owner.threadId)}/wait` : `${session}/wait`;
   const transport = async (url, init = {}) => {
     const target = new URL(url);
     const route = target.pathname.slice(mount.pathname.length);
     const method = init.method ?? "GET";
     const read = method === "GET" && ([session, `${session}/inbox`, "/api/session/active"].includes(route) ? !target.search
       : route === `${session}/message` && [...target.searchParams.keys()].every((key) => ["limit", "cursor", "order"].includes(key)));
-    const stop = method === "POST" && (route === `${session}/interrupt` && target.search === "?continue=false" || route === `${session}/wait` && !target.search);
+    const stop = method === "POST" && (route === `${session}/interrupt` && target.search === "?continue=false" || route === wait && !target.search);
     const cancel = method === "DELETE" && route.startsWith(`${session}/inbox/`) && /^msg_[A-Za-z0-9_]+$/.test(route.slice(`${session}/inbox/`.length)) && !target.search;
     if (target.origin !== mount.origin || !target.pathname.startsWith(`${mount.pathname}/`) || target.username || target.password || target.hash
       || init.body != null || !(read || stop || cancel)) throw new Error("Only the original native session's cleanup operations are allowed.");
     await checkOwner();
     const requestSignal = AbortSignal.any([AbortSignal.timeout(8000), ...[signal, init.signal].filter(Boolean)]);
     requestSignal.throwIfAborted();
-    const response = await withAbort(request.call(handle, { workspaceId, directory, method, path: `${route}${target.search}`, signal: requestSignal }), requestSignal);
+    const response = await withAbort(request.call(handle, { workspaceId: binding?.nativeWorkspaceId ?? workspaceId, directory, method, path: `${route}${target.search}`, signal: requestSignal }), requestSignal);
     assertCurrent();
     return response;
   };
-  const options = { baseUrl, workspaceId, token: ownerToken, requestTimeoutMs: 8000, signal, fetch: transport };
+  const options = { baseUrl, workspaceId, apiContract: nativeRuntime.apiContract, token: ownerToken, requestTimeoutMs: 8000, signal, fetch: transport };
   const client = createHeadlessThreadClient(options);
   const native = createNativeV2Client(options);
   const checked = (work, scoped = true) => async (...args) => {
@@ -1191,14 +1254,145 @@ async function collaborationCleanupClient(slug, { owner, workspaceId, coworkerCr
   });
 }
 
+configureCoworkerSessionAccess({
+  apiContract: () => nativeRuntime.apiContract ?? "beta19271",
+  workspace: () => teamWorkspace().workspaceId,
+  active: async (owner) => ownedNativeActive(await checkedSessionCoworker(owner)),
+  binding: async (owner, id) => sessionBinding(await checkedSessionCoworker(owner), id),
+  list: async (owner, includeLegacy) => ownedNativeSessions(await checkedSessionCoworker(owner), includeLegacy),
+  create: async (owner, input) => commands["sessions.create"]({ ...owner, input }),
+});
+
 const privateTurnIntents = new Map();
+const standaloneExecutions = new Map();
+let nativeTeamDirectory;
+const teamWorkspace = () => ({ path: teamWorkspaceDirectory(nativeTeamDirectory ?? coworkersDir), name: "Coworker team", workspaceId: teamWorkspaceId(nativeTeamDirectory ?? coworkersDir) });
+const teamSessions = createTeamSessionRegistry({
+  file: path.join(userDataDir, "native-session-owners.json"),
+  coworkerFor: async (slug) => slug === ".coordinator" ? { ...await readCoordinator(coworkersDir), slug, createdAt: "coordinator" } : getCoworker(coworkersDir, slug),
+  executionFor: async (binding) => {
+    const entries = await collaboration.read((state) => Object.values(state.executions).filter((entry) => entry.owner.slug === binding.slug && entry.owner.threadId === binding.sessionId && entry.state === "running"));
+    for (const run of liveWorkerTurns.values()) if (run.entry?.owner.slug === binding.slug && run.entry.owner.threadId === binding.sessionId && run.active && !run.controller.signal.aborted) entries.push(run.entry);
+    const standalone = standaloneExecutions.get(binding.sessionId);
+    if (standalone?.state === "running") entries.push(standalone);
+    return entries.length === 1 ? entries[0] : null;
+  },
+});
+
+async function sessionKind(coworker, sessionId) {
+  const groups = await listGroups(coworkersDir);
+  if (groups.some((group) => group.participantThreadIds[coworker.slug] === sessionId)) return "group";
+  if ((await listWorkers(coworkersDir, coworker.slug)).some((worker) => worker.threadId === sessionId)) return "worker";
+  const saved = parseDiscussionRegistry(await readCoworkerFile(coworkersDir, coworker.slug, DISCUSSION_REGISTRY_FILE).catch((error) => { if (error.code !== "ENOENT") throw error; return ""; }));
+  if (saved.includes(sessionId) || coworker.conversationThreadId === sessionId) return "private";
+  const registered = await collaboration.owner(coworker.slug, sessionId);
+  return registered?.kind ?? "legacy";
+}
+
+async function sessionBinding(coworker, sessionId) {
+  const known = (await teamSessions.list(coworker)).find((binding) => binding.sessionId === sessionId);
+  if (known) return known;
+  const handle = await ensurePlatformServer();
+  const workspace = handle.config.workspaces.find((workspace) => workspace.id === coworker.workspaceId && workspace.workspaceType === "local" && path.resolve(workspace.path) === path.resolve(coworker.path));
+  if (!workspace || workspace.id === teamWorkspace().workspaceId) throw new Error("This native session has no host owner.");
+  const native = createNativeV2Client({ baseUrl: handle.url, workspaceId: workspace.id, token: ownerToken });
+  const session = await native.getSession(sessionId);
+  if (coworker.slug === ".coordinator") {
+    if (!(await listGroups(coworkersDir)).some((group) => group.facilitatorThreadId === sessionId) || path.resolve(session.location.directory) !== path.resolve(coworker.path)) throw new Error("Unknown legacy coordinator history.");
+    return teamSessions.bind({ slug: coworker.slug, createdAt: coworker.createdAt, sessionId, workspaceId: coworker.workspaceId, directory: coworker.path, kind: "coordinator" });
+  }
+  const kind = await sessionKind(coworker, sessionId);
+  await teamSessions.importLegacy({ owner: coworker, workspace, sessions: [session], classify: () => kind });
+  return teamSessions.resolve(sessionId, coworker);
+}
+
+async function ownedNativeSessions(coworker, includeLegacy = false) {
+  const handle = await ensurePlatformServer();
+  const legacy = handle.config.workspaces.find((workspace) => workspace.id === coworker.workspaceId && workspace.workspaceType === "local" && path.resolve(workspace.path) === path.resolve(coworker.path));
+  if (includeLegacy && legacy && legacy.id !== teamWorkspace().workspaceId) {
+    const sessions = await createNativeV2Client({ baseUrl: handle.url, workspaceId: legacy.id, token: ownerToken }).listSessions();
+    const classifications = new Map(await Promise.all(sessions.map(async (session) => [session.id, await sessionKind(coworker, session.id)])));
+    await teamSessions.importLegacy({ owner: coworker, workspace: legacy, sessions, classify: (id) => classifications.get(id) });
+  }
+  const activeLegacy = includeLegacy ? [] : await collaboration.read((state) => Object.values(state.executions).filter((entry) => entry.owner.slug === coworker.slug && ["running", "waiting-person"].includes(entry.state)).map((entry) => entry.owner.threadId));
+  const records = await Promise.all((await teamSessions.list(coworker)).filter((binding) => includeLegacy || binding.nativeWorkspaceId === teamWorkspace().workspaceId || activeLegacy.includes(binding.sessionId)).map((binding) => teamSessions.route(binding.sessionId, coworker,
+    async (record) => createNativeV2Client({ baseUrl: handle.url, workspaceId: record.nativeWorkspaceId, token: ownerToken }), { allowUnavailable: true })));
+  return records.flatMap(({ session }) => session ? [session] : []);
+}
+
+async function ownedNativeActive(coworker) {
+  const handle = await ensurePlatformServer();
+  const bindings = await teamSessions.list(coworker);
+  const activeIds = await collaboration.read((state) => Object.values(state.executions).filter((entry) => entry.owner.slug === coworker.slug && ["running", "waiting-person"].includes(entry.state)).map((entry) => entry.owner.threadId));
+  for (const run of liveWorkerTurns.values()) if (run.entry?.owner.slug === coworker.slug && run.active) activeIds.push(run.entry.owner.threadId);
+  const workspaces = new Set([teamWorkspace().workspaceId, ...bindings.filter((binding) => activeIds.includes(binding.sessionId)).map((binding) => binding.nativeWorkspaceId)]);
+  const results = await Promise.all([...workspaces].map((workspaceId) => createNativeV2Client({ baseUrl: handle.url, workspaceId, token: ownerToken }).readActive()));
+  const owned = new Set(bindings.map((binding) => binding.sessionId));
+  return Object.fromEntries(results.flatMap((result) => Object.entries(result).filter(([id]) => owned.has(id))));
+}
+
+const legacyPreparations = new Map();
+async function prepareLegacySession(coworker, binding) {
+  const handle = await ensurePlatformServer();
+  const key = JSON.stringify([readinessKey(), binding.workspaceId, binding.directory, binding.createdAt]);
+  if (legacyPreparations.has(key)) return legacyPreparations.get(key);
+  const pending = (async () => {
+    const legacy = { ...coworker, path: binding.directory, workspaceId: binding.nativeWorkspaceId };
+    if (coworker.slug !== ".coordinator") {
+      const server = await ensureToolsServer();
+      await installCollaborationPlugin(legacy, { url: server.url.replace(/\/mcp$/, "/context"), token: coworkerToolToken(coworker.slug) });
+      for (const install of [installComputerPlugin, installBrowserPlugin, installGroupDocumentPlugin, installEventPlugin]) await install(legacy);
+      await installAbilitiesPlugin(legacy, { url: server.url.replace(/\/mcp$/, "/context"), token: coworkerToolToken(coworker.slug) });
+      await fetchJson(`${handle.url}/workspace/${encodeURIComponent(binding.nativeWorkspaceId)}/mcp`, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${ownerToken}` },
+        body: JSON.stringify({ name: COWORKER_TOOLS_MCP_NAME, config: server.mcpConfig(coworkerToolToken(coworker.slug)) }),
+      }, 120_000);
+    }
+    await awaitNativePluginActivation((method, route) => nativeWorkspaceRequest(handle, binding.nativeWorkspaceId, method, route), { apiContract: nativeRuntime.apiContract });
+    if (coworker.slug !== ".coordinator") await prepareNativeTurnRoles((method, route, body) => nativeWorkspaceRequest(handle, binding.nativeWorkspaceId, method, route, body));
+  })();
+  legacyPreparations.set(key, pending);
+  try { await pending; } catch (error) { legacyPreparations.delete(key); throw error; }
+}
+
+function ownedSessionClient(coworker, options, kind = "private") {
+  const send = options.fetch ?? fetch;
+  const client = skillAwareClient({ apiContract: nativeRuntime.apiContract, ...options, nativeWorkspaceId: options.nativeWorkspaceId ?? teamWorkspace().workspaceId, defaultAgent: options.defaultAgent ?? coworkerAgent(coworker.slug),
+    onIntent: async (intent) => {
+      const { threadId, messageId } = intent;
+      if (messageId === undefined) {
+        const team = teamWorkspace();
+        await teamSessions.bind({ slug: coworker.slug, createdAt: coworker.createdAt, sessionId: threadId, workspaceId: coworker.workspaceId, nativeWorkspaceId: team.workspaceId, directory: team.path, kind });
+      } else await teamSessions.resolve(threadId, coworker);
+      await options.onIntent?.(intent);
+    },
+    fetch: async (url, init) => {
+      const target = new URL(url);
+      const prefix = `/workspace/${encodeURIComponent(options.workspaceId)}/opencode2`;
+      if (target.origin !== new URL(options.baseUrl).origin || !target.pathname.startsWith(`${prefix}/api/`)) throw new Error("Unexpected native session host.");
+      const route = target.pathname.slice(prefix.length);
+      const sessionId = /^\/api\/(?:experimental\/)?session\/(ses_[A-Za-z0-9_]+)(?:\/|$)/.exec(route)?.[1];
+      const binding = sessionId ? await sessionBinding(coworker, sessionId) : null;
+      if (binding && binding.nativeWorkspaceId !== teamWorkspace().workspaceId && init?.method === "POST" && /\/(permission|prompt|synthetic)$/.test(route)) await prepareLegacySession(coworker, binding);
+      target.pathname = `/workspace/${encodeURIComponent(binding?.nativeWorkspaceId ?? options.nativeWorkspaceId ?? teamWorkspace().workspaceId)}/opencode2${route}`;
+      return send(target.href, init);
+    },
+  });
+  client.workspaceId = coworker.workspaceId;
+  client.coworkerCreatedAt = coworker.createdAt;
+  return client;
+}
 
 async function privateOwner(slug, threadId, kind = "private") {
   const coworker = await getCoworker(coworkersDir, slug);
   const group = (await listGroups(coworkersDir)).find((group) => group.participantThreadIds[slug] === threadId);
   const worker = (await listWorkers(coworkersDir, slug)).find((worker) => worker.threadId === threadId);
   if (group || worker) throw new Error("This thread belongs to group or Worker work, not a private discussion.");
-  return collaboration.registerOwner({ slug, threadId, conversationId: threadId, kind, workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt });
+  let binding = await sessionBinding(coworker, threadId);
+  if (binding.kind === "unassigned") binding = await teamSessions.classify(threadId, coworker, kind);
+  if (![kind, "legacy"].includes(binding.kind)) throw new Error("This native session belongs to another work surface.");
+  return collaboration.registerOwner({ slug, threadId, conversationId: threadId, kind, workspaceId: coworker.workspaceId, coworkerCreatedAt: coworker.createdAt,
+    ...(binding.nativeWorkspaceId === teamWorkspace().workspaceId ? { agent: coworkerAgent(slug) } : {}) });
 }
 
 async function savedPrivateDiscussion(slug, threadId) {
@@ -1219,8 +1413,9 @@ async function computerDiscussion(slug, threadId) {
   const coworker = await savedPrivateDiscussion(slug, threadId);
   const client = await collaborationClient(slug, { observationOnly: true });
   const snapshot = await client.getThreadSnapshot(threadId, { signal: AbortSignal.timeout(8000) });
-  if (snapshot.threadId !== threadId || !snapshot.directory || path.resolve(snapshot.directory) !== path.resolve(coworker.path) || client.workspaceId !== coworker.workspaceId) throw new Error("This native discussion does not belong to the coworker's workspace.");
-  return { workspaceId: coworker.workspaceId, directory: path.resolve(coworker.path) };
+  const binding = await sessionBinding(coworker, threadId);
+  if (snapshot.threadId !== threadId || !snapshot.directory || path.resolve(snapshot.directory) !== binding.directory || client.workspaceId !== binding.workspaceId) throw new Error("This native discussion does not belong to its original host binding.");
+  return { workspaceId: binding.workspaceId, directory: binding.directory };
 }
 
 // Short-lived metadata only. Refresh and account/workspace changes invalidate it;
@@ -1235,29 +1430,39 @@ const abilitiesRuntime = createAbilitiesRuntime({
     }, 5_000);
     // Native admission already owns the skill catalog. Re-entering its proxy
     // here would wait on the same preparation barrier from inside the plugin.
-    if (nativeSkills !== undefined) return readAbilitiesCatalog(coworker, request, nativeSkills);
+    if (nativeSkills !== undefined) return readAbilitiesCatalog({ ...coworker, workspaceId: teamWorkspace().workspaceId }, request, nativeSkills);
     const identity = JSON.stringify([coworker.createdAt, coworker.workspaceId, handle.url, denSession?.baseUrl, denSession?.orgId, denSession?.userEmail]);
     const cached = abilitiesCatalogReads.get(coworker.path);
     if (cached?.identity === identity && cached.expiresAt > Date.now()) return cached.result;
-    const result = readAbilitiesCatalog(coworker, request);
+    const result = readAbilitiesCatalog({ ...coworker, workspaceId: teamWorkspace().workspaceId }, request);
     abilitiesCatalogReads.set(coworker.path, { identity, expiresAt: Date.now() + 10_000, result });
     return result;
   },
 });
 
 const nativePluginInstalls = new Map();
+let installedTeamRevision = "";
 async function installNativeCoworkerPlugins(coworker, server) {
-  const key = path.resolve(coworker.path);
+  const team = teamWorkspace();
+  const key = team.path;
   const pending = (nativePluginInstalls.get(key) ?? Promise.resolve()).catch(() => undefined).then(async () => {
-    const current = await getCoworker(coworkersDir, coworker.slug);
-    if (current.createdAt !== coworker.createdAt || path.resolve(current.path) !== key) throw new Error("This coworker was replaced before its tools were prepared.");
-    const context = { url: server.url.replace(/\/mcp$/, "/context"), token: coworkerToolToken(current.slug) };
-    await installCollaborationPlugin(current, context);
-    await installComputerPlugin(current);
-    await installBrowserPlugin(current);
-    await installGroupDocumentPlugin(current);
-    await installEventPlugin(current);
-    await installAbilitiesPlugin(current, context);
+    const coworkers = await listCoworkers(coworkersDir);
+    if (coworker.slug && !coworkers.some((current) => current.slug === coworker.slug && current.createdAt === coworker.createdAt)) throw new Error("This coworker was replaced before its tools were prepared.");
+    const context = { mode: "team", url: server.url.replace(/\/mcp$/, "/context"), token: coworkerToolToken(".team") };
+    const configured = await assertTeamCompatibleHomes(coworkers);
+    const revision = JSON.stringify([configured.map(({ slug, createdAt, name, nativePermissions }) => ({ slug, createdAt, name, nativePermissions })), context]);
+    if (installedTeamRevision === revision) return;
+    await updateTeamWorkspaceConfig(coworkersDir, coworkers);
+    await installCollaborationPlugin(team, context);
+    await installComputerPlugin(team);
+    await installBrowserPlugin(team);
+    await installGroupDocumentPlugin(team);
+    await installEventPlugin(team);
+    await installAbilitiesPlugin(team, { ...context, coworkers });
+    await installProgressPlugin(team);
+    await installMemoryPlugin(team);
+    installedTeamRevision = revision;
+    warmedCoworkerWorkspaces.delete(team.workspaceId);
   });
   nativePluginInstalls.set(key, pending);
   try { await pending; } finally { if (nativePluginInstalls.get(key) === pending) nativePluginInstalls.delete(key); }
@@ -1273,7 +1478,7 @@ async function readyProgressTransport() {
   return {
     key: `${handle.url}/${workspaceId}`,
     models: eligibleProgressModels(catalog),
-    client: createHeadlessThreadClient({ baseUrl: handle.url, workspaceId, token: ownerToken, defaultAgent: NATIVE_COORDINATOR_AGENT, requestTimeoutMs: PROGRESS_LIMITS.timeoutMs }),
+    client: createHeadlessThreadClient({ baseUrl: handle.url, workspaceId, apiContract: nativeRuntime.apiContract, token: ownerToken, defaultAgent: NATIVE_COORDINATOR_AGENT, requestTimeoutMs: PROGRESS_LIMITS.timeoutMs }),
   };
 }
 
@@ -1314,7 +1519,8 @@ async function readCollaborationActivity(scope) {
       const coworker = await getCoworker(coworkersDir, entry.slug);
       if (!coworker.workspaceId || entry.workspaceId !== coworker.workspaceId || entry.coworkerCreatedAt !== coworker.createdAt) return { ...entry, ...empty };
       if (entry.admission?.inFlight && !entry.admission.confirmed) return { ...entry, ...empty, available: true };
-      const snapshot = await readExecutionActivity({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, threadId: entry.threadId, messageId: entry.messageId, signal: AbortSignal.timeout(PROGRESS_LIMITS.activityReadTimeoutMs) });
+      const binding = await sessionBinding(coworker, entry.threadId);
+      const snapshot = await readExecutionActivity({ serverUrl: handle.url, workspaceId: binding.nativeWorkspaceId, apiContract: nativeRuntime.apiContract, token: ownerToken, threadId: entry.threadId, messageId: entry.messageId, signal: AbortSignal.timeout(PROGRESS_LIMITS.activityReadTimeoutMs) });
       return { ...entry, ...snapshot, available: handle === serverHandle && handle.managedOpencodeV2.isAlive() };
     } catch { return { ...entry, ...empty }; }
   }));
@@ -1351,7 +1557,8 @@ function skillAccountKey(session) {
   return session ? createHash("sha256").update(JSON.stringify([session.baseUrl, session.orgId, session.token])).digest("hex") : null;
 }
 
-function skillAwareClient({ captureSkillOrigin = false, ...options }) {
+function skillAwareClient({ captureSkillOrigin = false, nativeWorkspaceId, ...options }) {
+  const preparationWorkspaceId = nativeWorkspaceId ?? options.workspaceId;
   let pinnedSession;
   let pinnedScope;
   let validated = false;
@@ -1396,17 +1603,17 @@ function skillAwareClient({ captureSkillOrigin = false, ...options }) {
     if (session) {
       try {
         const handle = !validated && !turn.skills?.length && !turn.skillSelections?.length && typeof serverHandle?.nativeSkillOriginSnapshot === "function" ? serverHandle : null;
-        const registered = handle?.config?.workspaces?.filter((workspace) => workspace.id === options.workspaceId) ?? [];
+        const registered = handle?.config?.workspaces?.filter((workspace) => workspace.id === preparationWorkspaceId) ?? [];
         const workspace = registered.length === 1 && registered[0].workspaceType === "local" ? registered[0] : null;
         const directory = workspace?.path;
         const hintCurrent = () => workspace && typeof directory === "string" && path.isAbsolute(directory)
           && handle === serverHandle && handle.url === options.baseUrl && options.token === ownerToken
           && handle.managedOpencodeV2?.isAlive() && handle.config.workspaces.includes(workspace)
-          && workspace.workspaceType === "local" && workspace.id === options.workspaceId && workspace.path === directory;
+          && workspace.workspaceType === "local" && workspace.id === preparationWorkspaceId && workspace.path === directory;
         const readHint = async () => {
           assertCurrent();
           if (!hintCurrent()) return null;
-          const hint = await handle.nativeSkillOriginSnapshot({ workspaceId: options.workspaceId, directory, signal: preparationSignal });
+          const hint = await handle.nativeSkillOriginSnapshot({ workspaceId: preparationWorkspaceId, directory, signal: preparationSignal });
           assertCurrent();
           return hintCurrent() && Array.isArray(hint?.scopes) && Object.isFrozen(hint) && Object.isFrozen(hint.scopes)
             && hint.scopes.length === 1 && typeof hint.scopes[0] === "string" && /^[0-9a-f]{64}$/.test(hint.scopes[0]) ? hint : null;
@@ -1492,7 +1699,7 @@ async function resolveWorkerSkills(slug, input, origin) {
   if (cloudSelected) assertSession();
   const handle = await ensurePlatformServer();
   if (cloudSelected) assertSession();
-  const client = skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
+  const client = ownedSessionClient(coworker, { baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
   const catalog = await client.nativeSkills.listSkills(signal);
   const selectedCloud = catalog.filter((skill) => skill.source && ids.some(({ id }) => id === skill.id));
   cloudSelected ||= selectedCloud.length > 0;
@@ -1520,20 +1727,25 @@ async function resolveWorkerSkills(slug, input, origin) {
 async function readyWorkerClient(coworker, worker = null) {
   const handle = await ensurePlatformServer();
   if (!coworker.workspaceId) throw new Error("This coworker's workspace is not ready yet.");
-  await warmCoworkerWorkspace(coworker);
-  return skillAwareClient({
+  const binding = worker?.threadId ? await sessionBinding(coworker, worker.threadId) : null;
+  if (worker?.pendingTurn && worker.pendingTurn.nativeAdmission !== "prepared") {
+    if (!binding) throw new Error("The original Worker session binding is unavailable.");
+  } else if (binding && binding.nativeWorkspaceId !== teamWorkspace().workspaceId) await prepareLegacySession(coworker, binding);
+  else await warmCoworkerWorkspace(coworker);
+  return ownedSessionClient(coworker, {
     baseUrl: handle.url,
     workspaceId: coworker.workspaceId,
+    nativeWorkspaceId: binding?.nativeWorkspaceId ?? teamWorkspace().workspaceId,
     token: ownerToken,
     // Missing legacy pins are observation-only; recovery must not select a
     // replacement model just to read an already-accepted input.
     defaultModel: worker ? worker.pendingTurn?.model ?? worker.modelSnapshot ?? undefined : await localRunModel(coworker, "worker-turn"),
-  });
+  }, "worker");
 }
 
 async function workerModelProviders(coworker, readDefault = false) {
   const handle = await ensurePlatformServer();
-  const native = createNativeV2Client({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken });
+  const native = createNativeV2Client({ baseUrl: handle.url, workspaceId: teamWorkspace().workspaceId, token: ownerToken });
   const [catalog, preferred] = await Promise.all([native.readCatalog(), readDefault ? native.defaultModel() : undefined]);
   const providers = nativeCatalogProviders(catalog);
   return { providers, default: preferred ? { [preferred.providerID]: preferred.id } : {}, model: preferred ? `${preferred.providerID}/${preferred.id}` : undefined };
@@ -1706,11 +1918,15 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
       if (worker.modelSnapshot && !present) resolveWorkerModel(coworker, worker.purpose, (await workerModelProviders(coworker)).providers, worker.modelSnapshot);
       controller.signal.throwIfAborted();
       const eventTools = run.eventOwner?.eventRunId ? EVENT_SCHEDULE_DENY : EVENT_WRITE_DENY;
-      const agent = worker.pendingTurn.agent ?? (!present ? nativeTurnAgent({ tools: { ...workerTurnTools(worker.control?.surface), ...eventTools } }) : undefined);
+      const binding = threadId ? await sessionBinding(coworker, threadId) : null;
+      const shared = !binding || binding.nativeWorkspaceId === teamWorkspace().workspaceId;
+      const agent = present ? worker.pendingTurn.agent : nativeTurnAgent({ ...(shared ? { slug } : {}), tools: { ...workerTurnTools(worker.control?.surface), ...eventTools } });
       if (!present) {
+        if (worker.pendingTurn.agent !== undefined && worker.pendingTurn.agent !== agent) throw new Error("The Worker's native agent does not match its owner and approved tool role.");
         const intentThreadId = threadId || createNativeV2Id("ses");
         worker = await updateWorker(coworkersDir, slug, id, (current) => {
           if (current.status !== "running" || current.pendingTurn?.messageId !== worker.pendingTurn.messageId || current.pendingTurn.nativeAdmission !== "prepared") throw new Error("The Worker stopped or changed before native admission.");
+          if (current.pendingTurn.agent !== undefined && current.pendingTurn.agent !== agent) throw new Error("The Worker's native agent changed before native admission.");
           const model = current.pendingTurn.model ?? current.modelSnapshot;
           if (!model) throw new Error("The Worker's model was not recorded. Choose a model for a new Worker; this Worker will not switch models.");
           const pendingTurn = { ...current.pendingTurn, agent, model };
@@ -1740,12 +1956,14 @@ async function executeWorkerTurn(slug, id, { onStarted }) {
       run.entry.owner.threadId = threadId; run.entry.owner.conversationId = threadId;
       await workerControls.admit(worker, run);
       controller.signal.throwIfAborted();
-      if (!present && agent !== nativeTurnAgent({ tools: { ...workerTurnTools(run.control?.surface), ...eventTools } })) throw new Error("The Worker's approved control surface changed before native admission.");
+      if (!present && agent !== nativeTurnAgent({ ...(shared ? { slug } : {}), tools: { ...workerTurnTools(run.control?.surface), ...eventTools } })) throw new Error("The Worker's approved control surface changed before native admission.");
+      Object.assign(run.entry, { agent, model: worker.pendingTurn.model ?? worker.modelSnapshot, coworkerCreatedAt: coworker.createdAt, tools: { ...workerTurnTools(run.control?.surface), ...eventTools } });
       run.active = true;
       await collaboration.admitEventWorker(worker);
       const acceptance = await dispatchNativeTurn({ client, threadId, turn: worker.pendingTurn, signal: controller.signal, markAttempted: async () => {
         worker = await updateWorker(coworkersDir, slug, id, (current) => {
           if (current.status !== "running" || current.pendingTurn?.messageId !== worker.pendingTurn.messageId || (!present && current.pendingTurn.nativeAdmission !== "prepared")) throw new Error("The Worker stopped or changed before native admission.");
+          if (!present && current.pendingTurn.agent !== agent) throw new Error("The Worker's native agent changed before native admission.");
           return { pendingTurn: { ...current.pendingTurn, nativeAdmission: "attempted" } };
         });
       } });
@@ -1987,8 +2205,8 @@ function startLocalResponsibilitiesScheduler() {
 }
 
 /** Register the coworker directory as a native OpenWork workspace. */
-async function registerCoworkerWorkspace(coworker) {
-  const handle = await ensurePlatformServer();
+async function registerCoworkerWorkspace(coworker, readyHandle) {
+  const handle = readyHandle ?? await ensurePlatformServer();
   const tokens = await loadOrCreateTokens();
   const payload = await fetchJson(`${handle.url}/workspaces/local`, {
     method: "POST",
@@ -1996,11 +2214,46 @@ async function registerCoworkerWorkspace(coworker) {
       "Content-Type": "application/json",
       "X-OpenWork-Host-Token": tokens.hostToken,
     },
-    body: JSON.stringify({ folderPath: coworker.path, name: coworker.name, preset: "minimal" }),
+    body: JSON.stringify({ folderPath: teamWorkspace().path, name: teamWorkspace().name, preset: "minimal" }),
   });
   const workspaceId = typeof payload?.activeId === "string" ? payload.activeId : "";
   if (!workspaceId) throw new Error("Workspace registration did not return an id");
   return workspaceId;
+}
+
+async function restoreLegacyCoworkerWorkspace(coworker, handle) {
+  if (!coworker.workspaceId || coworker.workspaceId === teamWorkspace().workspaceId) return;
+  const directory = path.resolve(coworker.path);
+  const checkIdentity = async () => {
+    const current = await getCoworker(coworkersDir, coworker.slug);
+    if (!Number.isFinite(Date.parse(coworker.createdAt)) || directory !== path.join(path.resolve(coworkersDir), coworker.slug)
+      || current.slug !== coworker.slug || current.createdAt !== coworker.createdAt || current.workspaceId !== coworker.workspaceId
+      || path.resolve(current.path) !== directory) throw new Error("The original coworker changed before its legacy workspace could be restored.");
+  };
+  const descriptor = () => {
+    const matches = handle.config.workspaces.filter((workspace) => workspace.id === coworker.workspaceId || (typeof workspace.path === "string" && path.resolve(workspace.path) === directory));
+    if (!matches.length) return null;
+    const workspace = matches[0];
+    if (matches.length !== 1 || workspace.id !== coworker.workspaceId || workspace.workspaceType !== "local"
+      || typeof workspace.path !== "string" || path.resolve(workspace.path) !== directory) throw new Error("The original legacy workspace conflicts with an existing descriptor. Existing bindings were kept.");
+    return workspace;
+  };
+  await checkIdentity();
+  if (!descriptor()) {
+    const workspaceId = `ws_${createHash("sha256").update(directory).digest("hex").slice(0, 12)}`;
+    if (workspaceId !== coworker.workspaceId) throw new Error("The original legacy workspace id cannot be restored from its recorded path. Existing bindings were kept.");
+    const tokens = await loadOrCreateTokens();
+    await checkIdentity();
+    if (!descriptor()) {
+      const payload = await fetchJson(`${handle.url}/workspaces/local`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-OpenWork-Host-Token": tokens.hostToken },
+        body: JSON.stringify({ folderPath: directory, name: coworker.name, preset: "minimal" }),
+      });
+      if (payload?.activeId !== coworker.workspaceId) throw new Error("The original legacy workspace restoration could not be confirmed. Existing bindings were kept.");
+    }
+  }
+  await checkIdentity();
+  if (!descriptor()) throw new Error("The original legacy workspace descriptor is still unavailable. Existing bindings were kept.");
 }
 
 // OpenCode initializes plug-ins per workspace directory. A team landing in the
@@ -2016,14 +2269,14 @@ let workspaceReadinessRevision = 0;
 const workspaceReadinessRevisions = new Map();
 const workspaceReadinessChanges = new Map();
 const readinessKey = () => `${serverHandle?.managedOpencodeV2?.pid ?? "stopped"}:${workspaceReadinessRevision}`;
-const workspaceRevision = (workspaceId) => workspaceReadinessRevisions.get(workspaceId) ?? 0;
-const workspaceReadinessScope = (coworker) => JSON.stringify([coworker.path, coworker.createdAt, coworker.workspaceId, readinessKey(), workspaceRevision(coworker.workspaceId)]);
+const workspaceRevision = (workspaceId, slug) => workspaceReadinessRevisions.get(slug ? `coworker:${slug}` : workspaceId) ?? workspaceReadinessRevisions.get(workspaceId) ?? 0;
+const workspaceReadinessScope = () => JSON.stringify([teamWorkspace().workspaceId, readinessKey(), installedTeamRevision]);
 const pendingWorkspaceReadinessChanges = (owner) => [...workspaceReadinessChanges]
-  .filter(([, scope]) => !scope || scope.slug === owner.slug || (scope.workspaceId && scope.workspaceId === owner.workspaceId))
+  .filter(([, scope]) => !scope || (scope.slug ? scope.slug === owner.slug : scope.workspaceId && scope.workspaceId === owner.workspaceId))
   .map(([promise]) => promise);
 
 function assertExpectedReadiness(expected, owner) {
-  if (expected && (expected.readinessKey !== readinessKey() || (expected.workspaceRevision ?? 0) !== workspaceRevision(owner.workspaceId)
+  if (expected && (expected.readinessKey !== readinessKey() || (expected.workspaceRevision ?? 0) !== workspaceRevision(owner.workspaceId, owner.slug)
     || pendingWorkspaceReadinessChanges(owner).length > 0 || !serverHandle?.managedOpencodeV2?.isAlive()
     || expected.workspaceId !== owner.workspaceId || expected.createdAt !== owner.coworkerCreatedAt)) {
     throw Object.assign(new Error("The AI configuration changed before submission. Your draft is kept; wait for preparation and try again."), { code: "readiness_changed" });
@@ -2033,9 +2286,7 @@ function assertExpectedReadiness(expected, owner) {
 function invalidateWorkspaceReadiness(owner) {
   if (owner) {
     if (!owner.workspaceId) return;
-    workspaceReadinessRevisions.set(owner.workspaceId, workspaceRevision(owner.workspaceId) + 1);
-    warmedCoworkerWorkspaces.delete(owner.workspaceId);
-    warmedCoworkerScopes.delete(owner.workspaceId);
+    workspaceReadinessRevisions.set(owner.slug ? `coworker:${owner.slug}` : owner.workspaceId, workspaceRevision(owner.workspaceId, owner.slug) + 1);
   } else {
     workspaceReadinessRevision += 1;
     workspaceReadinessRevisions.clear();
@@ -2046,6 +2297,7 @@ function invalidateWorkspaceReadiness(owner) {
 }
 
 async function runCoworkerWorkspaceWarmup(coworker, signal = AbortSignal.timeout(120_000), scope = workspaceReadinessScope(coworker)) {
+  coworker = teamWorkspace();
   signal.throwIfAborted();
   if (scope !== workspaceReadinessScope(coworker) || pendingWorkspaceReadinessChanges(coworker).length) throw new Error("The native AI service changed during workspace preparation.");
   if (coworker.slug) {
@@ -2054,19 +2306,16 @@ async function runCoworkerWorkspaceWarmup(coworker, signal = AbortSignal.timeout
   }
   const handle = await ensurePlatformServer();
   if (!coworker?.workspaceId) throw new Error("The native workspace is not registered yet.");
-  if (coworker.slug && !toolsRegistered.has(coworker.slug)) await registerCoworkerTools(coworker, 120_000);
+  if (!toolsRegistered.has(coworker.workspaceId)) await registerCoworkerTools(coworker, 120_000);
   signal.throwIfAborted();
-  await nativeWorkspaceRequest(handle, coworker.workspaceId, "POST", "/api/plugin/await-activation", undefined, { timeoutMs: 120_000, signal });
-  const plugins = await nativeWorkspaceRequest(handle, coworker.workspaceId, "GET", "/api/plugin", undefined, { timeoutMs: 120_000, signal });
-  const required = coworker.slug
-    ? ["collaboration", "computer", "browser", "group-documents", "events", "abilities", "turn-roles"]
-    : ["progress-summary", "auto-memory"];
+  const plugins = await awaitNativePluginActivation((method, route) => nativeWorkspaceRequest(handle, coworker.workspaceId, method, route, undefined, { timeoutMs: 120_000, signal }), { apiContract: nativeRuntime.apiContract, signal });
+  const required = ["collaboration", "computer", "browser", "group-documents", "events", "abilities", "turn-roles", "progress-summary", "auto-memory"];
   if (!Array.isArray(plugins?.data)
     || plugins.data.some((plugin) => plugin.state?.status !== "active")
     || required.some((id) => !plugins.data.some((plugin) => plugin.id === `coworker.${id}` && plugin.state?.status === "active"))) {
     throw new Error(`The native plugins for ${coworker.name} are not ready. Check the plugin bundles before continuing.`);
   }
-  if (coworker.slug) await prepareNativeTurnRoles((method, route, body) => nativeWorkspaceRequest(handle, coworker.workspaceId, method, route, body, { timeoutMs: 120_000, signal }));
+  await prepareNativeTurnRoles((method, route, body) => nativeWorkspaceRequest(handle, coworker.workspaceId, method, route, body, { timeoutMs: 120_000, signal }), { requireFilesystemScope: true });
   const current = coworker.slug ? await getCoworker(coworkersDir, coworker.slug) : coworker;
   signal.throwIfAborted();
   if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || scope !== workspaceReadinessScope(current) || pendingWorkspaceReadinessChanges(current).length) throw new Error("The native AI service changed during workspace preparation.");
@@ -2080,8 +2329,10 @@ async function runCoworkerWorkspaceWarmup(coworker, signal = AbortSignal.timeout
   }
 }
 
-function warmCoworkerWorkspace(coworker) {
-  if (!coworker?.workspaceId) return Promise.reject(new Error("The native workspace is not registered yet."));
+async function warmCoworkerWorkspace(coworker) {
+  if (!coworker?.workspaceId) throw new Error("The native workspace is not registered yet.");
+  await installNativeCoworkerPlugins(coworker, await ensureToolsServer());
+  coworker = teamWorkspace();
   const scope = workspaceReadinessScope(coworker);
   if (warmedCoworkerWorkspaces.has(coworker.workspaceId) && warmedCoworkerScopes.get(coworker.workspaceId) === scope) return Promise.resolve();
   const current = coworkerWarmups.get(scope);
@@ -2117,7 +2368,7 @@ function coworkerToolToken(slug) {
   if (!token) {
     token = randomBytes(24).toString("hex");
     coworkerToolTokens.set(slug, token);
-    toolTokenSlugs.set(token, slug);
+    toolTokenSlugs.set(token, slug === ".team" ? TEAM_SCOPE : slug);
   }
   return token;
 }
@@ -2134,6 +2385,12 @@ async function ensureToolsServer() {
     resume: (slug, id) => resumeWorker(slug, id, "coworker"),
   });
   const managementCalls = new Map();
+  const ordinaryHandlers = {
+    ...createToolHandlers({ coworkersDir }), ...workerHandlers,
+    ...createAssignmentToolHandlers({ coworkersDir, settings: () => readSettings(settingsPath), timezone: coworkerTimezone,
+      runNow: (slug, id) => startLocalResponsibilityRun(slug, id, "manual"), cloud: () => cloudAssignments() }),
+    ...createSelfToolHandlers({ coworkersDir }), ...createTeamToolHandlers({ coworkersDir }),
+  };
   // Documents and Workers share one server: starting, steering, and stopping a Worker go
   // through the same functions the Workers view uses, so the run limit and records agree.
   // Documents, Workers, assignments, and memory share one server: each goes through the same
@@ -2142,13 +2399,53 @@ async function ensureToolsServer() {
     resolveSlug: (token) => maintenanceAdmission.closed ? null : toolTokenSlugs.get(token) ?? null,
     onContextTool: (slug, input, transportSignal) => maintenanceAdmission.run(async () => {
       const { name, args, context, cancel } = input;
+      let admitted;
+      if (slug === TEAM_SCOPE) {
+        if (cancel === true && (Object.hasOwn(COMPUTER_TOOLS, name) || Object.hasOwn(BROWSER_TOOLS, name))) {
+          const binding = await teamSessions.cleanupBinding(context?.sessionID);
+          if (typeof context?.directory !== "string" || path.resolve(context.directory) !== binding.directory) throw new Error("Cleanup does not match the original native location.");
+          return Object.hasOwn(COMPUTER_TOOLS, name)
+            ? computerControl.execute(binding.slug, { name, args, context, cancel })
+            : browserControl.execute(binding.slug, { name, args, context, cancel });
+        }
+        admitted = await teamSessions.context(context);
+        slug = admitted.binding.slug;
+        if (name === "filesystem_scope") {
+          if (context.filesystemScopeVersion !== 1 || context.filesystemScopeProjectResolution !== 1 || typeof context.callID !== "string" || !context.callID) throw new Error("The native invocation scope capability was not observed.");
+          const handle = await ensurePlatformServer();
+          const client = ownedSessionClient(admitted.coworker, { baseUrl: handle.url, workspaceId: admitted.binding.workspaceId, token: ownerToken, defaultModel: admitted.entry.model });
+          const snapshot = await client.getThreadSnapshot(context.sessionID, { signal: AbortSignal.timeout(8000) });
+          const message = snapshot.messages.find((item) => item.id === context.messageID && item.role === "assistant");
+          if (snapshot.threadId !== admitted.binding.sessionId || message?.parentId !== admitted.entry.messageId || message.completedAt != null || message.error) throw new Error("The scope request has no current admitted assistant message.");
+          const current = await teamSessions.context(context);
+          if (current.entry.id !== admitted.entry.id) throw new Error("The admitted execution changed during scope resolution.");
+          return { filesystemScope: await resolveNativeFilesystemScope(current.coworker, context) };
+        }
+        if (name === "session_context") return { slug, createdAt: admitted.binding.createdAt, abilities: admitted.coworker.abilities, homeDirectory: admitted.coworker.path,
+          homeContext: await readHomeContext(coworkersDir, slug) };
+      }
+      const abilityContext = admitted ? { ...context, createdAt: admitted.binding.createdAt, workspaceId: admitted.binding.workspaceId, directory: admitted.coworker.path } : context;
       if (name === "react") return messageReactions.execute(slug, args, context, transportSignal);
-      if (name === "abilities_check") return abilitiesRuntime.check(slug, { ...args, ...context });
-      if (name === "abilities_transform") return abilitiesRuntime.transform(slug, { ...args, ...context });
+      if (name === "abilities_check") return abilitiesRuntime.check(slug, { ...args, ...abilityContext });
+      if (name === "abilities_transform") return abilitiesRuntime.transform(slug, { ...args, ...abilityContext });
       if (Object.hasOwn(COMPUTER_TOOLS, name)) return computerControl.execute(slug, { name, args, context, cancel });
       if (Object.hasOwn(BROWSER_TOOLS, name)) return browserControl.execute(slug, { name, args, context, cancel });
       if (groupDocumentTools.has(name)) return groupDocuments.executeNative(slug, { name, args, context });
       if (Object.hasOwn(eventNativeSchemas, name)) return events.executeNative(slug, { name, args, context }, transportSignal);
+      if (admitted && Object.hasOwn(ordinaryHandlers, name) && name !== "worker_spawn" && !WORKER_MANAGEMENT.includes(name)) {
+        const handle = await ensurePlatformServer();
+        const client = ownedSessionClient(admitted.coworker, { baseUrl: handle.url, workspaceId: admitted.binding.workspaceId, token: ownerToken, defaultModel: admitted.entry.model });
+        const snapshot = await client.getThreadSnapshot(context.sessionID, { signal: AbortSignal.timeout(8000) });
+        const current = await teamSessions.context(context);
+        if (current.entry.id !== admitted.entry.id) throw new Error("The admitted execution changed before the tool call.");
+        assertOwnedNativeTool({ slug, context, name: `coworker_${name}`, args, entry: current.entry, snapshot, workspaceId: current.binding.workspaceId, active: true });
+        const key = JSON.stringify([admitted.entry.id, context.messageID, context.callID]);
+        if (managementCalls.has(key)) return managementCalls.get(key);
+        if (managementCalls.size >= 4096) throw new Error("This app launch reached its native action receipt limit.");
+        const result = ordinaryHandlers[name](slug, args);
+        managementCalls.set(key, result);
+        return result;
+      }
       const workerTool = name === "worker_spawn" || WORKER_MANAGEMENT.includes(name);
       const trusted = workerTool
         ? await collaboration.context(slug, context, { name: `coworker_${name}`, args }, assertWorkerToolContext)
@@ -2219,17 +2516,23 @@ async function ensureToolsServer() {
  * re-adds it after an engine restart. Best effort: a coworker without the
  * tools still talks; it just cannot write documents until the next attempt.
  */
-async function registerCoworkerTools(coworker, timeoutMs = 30_000) {
-  if (!coworker?.workspaceId) return false;
+let teamToolsRegistration;
+function registerCoworkerTools(coworker, timeoutMs = 30_000) {
+  return teamToolsRegistration ??= runTeamToolsRegistration(coworker, timeoutMs).finally(() => { teamToolsRegistration = null; });
+}
+
+async function runTeamToolsRegistration(coworker, timeoutMs = 30_000) {
+  coworker = teamWorkspace();
+  if (toolsRegistered.has(coworker.workspaceId)) return true;
   const [handle, server] = await Promise.all([ensurePlatformServer(), ensureToolsServer()]);
   const scope = workspaceReadinessScope(coworker);
   await fetchJson(`${handle.url}/workspace/${encodeURIComponent(coworker.workspaceId)}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${ownerToken}` },
-    body: JSON.stringify({ name: COWORKER_TOOLS_MCP_NAME, config: server.mcpConfig(coworkerToolToken(coworker.slug)) }),
+    body: JSON.stringify({ name: COWORKER_TOOLS_MCP_NAME, config: server.mcpConfig(coworkerToolToken(".team")) }),
   }, timeoutMs);
-  if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || scope !== workspaceReadinessScope(await getCoworker(coworkersDir, coworker.slug))) throw new Error("The coworker or AI service changed during tool preparation.");
-  toolsRegistered.add(coworker.slug);
+  if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || scope !== workspaceReadinessScope()) throw new Error("The coworker or AI service changed during tool preparation.");
+  toolsRegistered.add(coworker.workspaceId);
   return true;
 }
 
@@ -2277,7 +2580,8 @@ async function listPreparedCoworkers() {
       continue;
     }
     try {
-      const workspaceId = await registerCoworkerWorkspace(coworker);
+      const legacy = serverHandle.config.workspaces.find((workspace) => workspace.workspaceType === "local" && path.resolve(workspace.path) === path.resolve(coworker.path));
+      const workspaceId = legacy?.id ?? await registerCoworkerWorkspace(coworker);
       prepared.push(await updateCoworker(coworkersDir, coworker.slug, { workspaceId }));
     } catch {
       // Keep the coworker visible. Its explicit repair action remains the
@@ -2306,17 +2610,16 @@ function ensureCoordinatorWorkspace() {
 async function prepareCoordinatorWorkspace() {
   await ensurePlatformServer();
   const coordinator = await ensureCoordinatorHome(coworkersDir);
-  await installProgressPlugin(coordinator);
-  await installMemoryPlugin(coordinator);
+  await installNativeCoworkerPlugins(teamWorkspace(), await ensureToolsServer());
   if (coordinator.workspaceId) {
     await warmCoworkerWorkspace(coordinator);
-    progressCoordinator = coordinator;
+    progressCoordinator = teamWorkspace();
     return coordinator;
   }
   const workspaceId = await registerCoworkerWorkspace(coordinator);
   const updated = await updateCoordinator(coworkersDir, { workspaceId });
   await warmCoworkerWorkspace(updated);
-  progressCoordinator = updated;
+  progressCoordinator = teamWorkspace();
   return updated;
 }
 
@@ -2380,9 +2683,7 @@ async function nativeProviderContext() {
     const generation = { handle, pending: null };
     nativeProviderGeneration = generation;
     generation.pending = (async () => {
-      // A hidden, stable workspace keeps OAuth attempts scoped when teammates
-      // are added or retired. Model routing still reads each actual workspace.
-      const workspaceId = (await ensureCoordinatorWorkspace()).workspaceId;
+      const workspaceId = teamWorkspace().workspaceId;
       const tokens = await loadOrCreateTokens();
       const assertCurrent = () => {
         if (serverHandle !== handle || nativeProviderGeneration !== generation || !handle.managedOpencodeV2?.isAlive()) throw new Error("The native AI service changed. Refresh before continuing.");
@@ -2540,7 +2841,24 @@ function shortDate(at) {
 
 const installTemplates = createTemplateInstaller(coworkersDir, addCoworker);
 
+async function checkedSessionCoworker(input) {
+  const coworker = await getCoworker(coworkersDir, input.slug);
+  if (coworker.createdAt !== input.createdAt) throw new Error("The original coworker is no longer available.");
+  return coworker;
+}
+
 const commands = {
+  "sessions.active": async (input) => ownedNativeActive(await checkedSessionCoworker(input)),
+  "sessions.binding": async (input) => sessionBinding(await checkedSessionCoworker(input), input.sessionId),
+  "sessions.list": async (input) => ownedNativeSessions(await checkedSessionCoworker(input), input.includeLegacy === true),
+  "sessions.create": async (input) => {
+    const coworker = await checkedSessionCoworker(input);
+    await warmCoworkerWorkspace(coworker);
+    const handle = await ensurePlatformServer();
+    const model = input.input?.model ?? await localRunModel(coworker, "reply", "");
+    const client = ownedSessionClient(coworker, { baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, defaultModel: model }, "unassigned");
+    return client.createThread({ threadId: input.input?.threadId, title: input.input?.title, model });
+  },
   "reactions:read": (scope) => messageReactions.read(scope),
   "activity.list": () => activityInbox.list(),
   "activity.markRead": ({ ids, read = true }) => activityInbox.markRead(ids, read),
@@ -2572,7 +2890,7 @@ const commands = {
     if (account?.baseUrl?.replace(/\/+$/, "") !== identity.scope.baseUrl || account?.orgId !== identity.scope.orgId || typeof account?.email !== "string" || account.email.trim().toLowerCase() !== identity.email?.trim().toLowerCase()) throw new Error("The OpenWork account changed. Refresh Apps & tools and select the skill again.");
     const coworker = await getCoworker(coworkersDir, slug);
     const handle = await ensurePlatformServer();
-    const catalog = await createCoworkerThreads({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).listSkills(AbortSignal.timeout(30_000));
+    const catalog = await createCoworkerThreads({ serverUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken, owner: { slug: coworker.slug, createdAt: coworker.createdAt } }).listSkills(AbortSignal.timeout(30_000));
     assertSkillSession(session);
     return selectCatalogSkill(catalog, { uri, label }, coworker.workspaceId, identity.scope);
   },
@@ -2580,7 +2898,7 @@ const commands = {
     if (!fields.skills?.length && !fields.skillSelections?.length) { nativeV2SkillsSchema.parse(fields.skills ?? []); return; }
     const coworker = await getCoworker(coworkersDir, slug);
     const handle = await ensurePlatformServer();
-    await skillAwareClient({ baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).validateSkills(fields, AbortSignal.timeout(30_000));
+    await ownedSessionClient(coworker, { baseUrl: handle.url, workspaceId: coworker.workspaceId, token: ownerToken }).validateSkills(fields, AbortSignal.timeout(30_000));
   },
   "turns.send": async ({ slug, threadId, prompt, messageId, skills, skillSelections, model, expectedReadiness, retry, retryByPerson, retryLabel, kind }) => {
     if ([slug, threadId, messageId].some((value) => typeof value !== "string" || !value.trim() || value.length > 256)) throw new Error("A send requires its exact coworker, thread and message IDs.");
@@ -2726,10 +3044,10 @@ const commands = {
       const handle = await ensurePlatformServer();
       let coworker = await getCoworker(coworkersDir, slug);
       const generation = readinessKey();
-      const revision = workspaceRevision(coworker.workspaceId);
+      const revision = workspaceRevision(coworker.workspaceId, coworker.slug);
       const assertCurrent = (current) => {
         signal.throwIfAborted();
-        if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || generation !== readinessKey() || revision !== workspaceRevision(current.workspaceId)
+        if (handle !== serverHandle || !handle.managedOpencodeV2?.isAlive() || generation !== readinessKey() || revision !== workspaceRevision(current.workspaceId, current.slug)
           || current.createdAt !== coworker.createdAt || current.path !== coworker.path || current.workspaceId !== coworker.workspaceId
           || current.model !== coworker.model || current.modelVariant !== coworker.modelVariant || pendingWorkspaceReadinessChanges(current).length > 0
           || (expected && (expected.createdAt !== current.createdAt || expected.workspaceId !== current.workspaceId || expected.readinessKey !== generation || (expected.workspaceRevision ?? 0) !== revision))) {
@@ -2738,7 +3056,8 @@ const commands = {
       };
       assertCurrent(coworker);
       if (!coworker.workspaceId) {
-        const workspaceId = await registerCoworkerWorkspace(coworker);
+        const legacy = handle.config.workspaces.find((workspace) => workspace.workspaceType === "local" && path.resolve(workspace.path) === path.resolve(coworker.path));
+        const workspaceId = legacy?.id ?? await registerCoworkerWorkspace(coworker);
         signal.throwIfAborted();
         coworker = await updateCoworker(coworkersDir, slug, { workspaceId });
       }
@@ -2785,33 +3104,22 @@ const commands = {
         `${running === 1 ? "A scheduled assignment is" : `${running} scheduled assignments are`} still running for this coworker. Wait for it to finish or stop it before retiring.`,
       );
     }
-    // Deregister the workspace first so the registry never points at a
-    // directory that is about to disappear. Best effort: a failed
-    // deregistration must not leave the coworker half-retired in the UI.
     if (!await computerControl.revoke({ slug })) throw new Error(COMPUTER_STOP_GUIDANCE);
     const coworker = await getCoworker(coworkersDir, slug).catch(() => null);
-    if (coworker?.workspaceId) {
-      const handle = await ensurePlatformServer();
-      const tokens = await loadOrCreateTokens();
-      await fetch(`${handle.url}/workspaces/${encodeURIComponent(coworker.workspaceId)}`, {
-        method: "DELETE",
-        headers: { "X-OpenWork-Host-Token": tokens.hostToken },
-        signal: AbortSignal.timeout(8000),
-      }).catch(() => undefined);
-    }
+
     const retired = await retireCoworker(coworkersDir, slug);
+    await installNativeCoworkerPlugins(teamWorkspace(), await ensureToolsServer());
     toolTokenSlugs.delete(coworkerToolTokens.get(slug));
     coworkerToolTokens.delete(slug);
     return { ok: true, archiveId: retired.archiveId };
   },
   "coworkers.retired.list": async () => listRetiredCoworkers(coworkersDir),
   "coworkers.restore": async ({ archiveId }) => {
-    // Restoring puts the home back at its original path; the server derives the
-    // same workspace id from that path, so registration is idempotent.
     const restored = await restoreCoworker(coworkersDir, archiveId);
-    await ensurePlatformServer();
-    const workspaceId = await registerCoworkerWorkspace(restored);
-    const updated = await updateCoworker(coworkersDir, restored.slug, { workspaceId });
+    const handle = await ensurePlatformServer();
+    await restoreLegacyCoworkerWorkspace(restored, handle);
+    const workspaceId = await registerCoworkerWorkspace(restored, handle);
+    const updated = restored.workspaceId ? restored : await updateCoworker(coworkersDir, restored.slug, { workspaceId });
     await warmCoworkerWorkspace(updated);
     prepareCoworker(updated);
     return updated;

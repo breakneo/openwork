@@ -8,6 +8,7 @@ import { createGroup, updateGroup, archiveGroup, normalizeEvent, readGroupTimeli
 import { createDocument } from "./documents.mjs";
 import { assertGroupDocumentToolContext, createGroupDocumentService, createGroupDocuments, groupDocumentToolCatalog } from "./group-documents.mjs";
 import { installGroupDocumentPlugin } from "./group-document-plugin.mjs";
+import { createTeamSessionRegistry } from "./team-sessions.mjs";
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "group-documents-"));
@@ -188,12 +189,15 @@ test("a caller revoked while an operation waits cannot write", async (t) => {
 
 function documentWitness(groupId = "grp_12345678", directory = "/native/workspace") {
   const args = { groupId, title: "Plan", body: "Draft" };
+  const createdAt = "2026-01-01T00:00:00.000Z";
   return {
     slug: "editor", name: "coworker_group_document_save", args, workspaceId: "workspace-one", active: true,
-    context: { sessionID: "session-one", messageID: "assistant-one", callID: "call-one", directory },
-    entry: { id: "execution-one", state: "running", sentAt: 1, workspaceId: "workspace-one", messageId: "parent-one",
-      owner: { slug: "editor", threadId: "session-one", kind: "group", groupId, conversationId: groupId } },
-    snapshot: { threadId: "session-one", directory, messages: [
+    binding: { slug: "editor", createdAt, sessionId: "ses_one", workspaceId: "workspace-one", nativeWorkspaceId: "workspace-team", directory, kind: "group" },
+    context: { sessionID: "ses_one", messageID: "assistant-one", callID: "call-one", directory },
+    entry: { id: "execution-one", state: "running", sentAt: 1, workspaceId: "workspace-one", messageId: "parent-one", coworkerCreatedAt: createdAt,
+      model: { providerId: "fixture", modelId: "fixture" }, agent: "coworker_editor",
+      owner: { slug: "editor", threadId: "ses_one", kind: "group", groupId, conversationId: groupId } },
+    snapshot: { threadId: "ses_one", directory, messages: [
       { id: "parent-one", role: "user", parts: [{ type: "text", text: "Update our shared plan." }] },
       { id: "assistant-one", role: "assistant", parentId: "parent-one", completedAt: null, parts: [
         { type: "tool", callId: "call-one", tool: "coworker_group_document_save", toolStatus: "running", toolInput: structuredClone(args) },
@@ -227,14 +231,23 @@ test("native admission requires the exact active group, workspace, parent and ru
   }
 });
 
-test("person and native routing share storage without accepting payload identities", async (t) => {
+test("person and native routing share storage through the host-bound team runtime without accepting payload identities", async (t) => {
   const f = await fixture(t);
-  const witness = documentWitness(f.group.id, path.join(f.directory, "editor"));
+  const witness = documentWitness(f.group.id, path.join(f.directory, ".runtime"));
+  await mkdir(witness.context.directory);
+  const coworker = { slug: "editor", name: "Editor", workspaceId: witness.workspaceId, createdAt: witness.binding.createdAt, path: path.join(f.directory, "editor") };
+  const sessions = createTeamSessionRegistry({
+    file: path.join(f.directory, "native-session-owners.json"), coworkerFor: async () => coworker, executionFor: async () => witness.entry,
+  });
+  await sessions.bind(witness.binding);
+  assert.equal((await sessions.context(witness.context)).entry.id, witness.entry.id);
+  assert.notEqual(await realpath(coworker.path), await realpath(witness.context.directory));
   let active = true;
   const assertActive = () => { if (!active) throw new Error("Native execution stopped."); };
   const service = createGroupDocumentService({
     coworkersDir: f.directory,
-    coworkerFor: async (slug) => ({ slug, name: "Editor", workspaceId: witness.workspaceId, path: witness.context.directory }),
+    coworkerFor: async () => coworker,
+    sessionBindingFor: (owner, sessionId) => sessions.resolve(sessionId, owner),
     resolveContext: async (slug, context, expected) => {
       assertActive();
       assertGroupDocumentToolContext({ ...witness, slug, context, ...expected });
@@ -271,24 +284,39 @@ test("person and native routing share storage without accepting payload identiti
   assert.equal((await service.read(f.group.id, created.id)).revision, 3);
 });
 
-test("native service rechecks group membership and the coworker's actual workspace before writing", async (t) => {
+test("native service rechecks membership, host binding and revocation before writing", async (t) => {
   const f = await fixture(t);
   const witness = documentWitness(f.group.id, path.join(f.directory, "editor"));
   let lookups = 0;
+  let bindings = 0;
+  let revokeAt = 0;
+  let active = true;
+  const assertActive = () => { if (!active) throw new Error("Native execution stopped."); };
   let actualWorkspaceId = witness.workspaceId;
   const service = createGroupDocumentService({
     coworkersDir: f.directory,
     coworkerFor: async (slug) => {
       if (++lookups === 2) await updateGroup(f.directory, f.group.id, { participantSlugs: ["researcher", "operations"] });
-      return { slug, name: "Editor", workspaceId: actualWorkspaceId, path: witness.context.directory };
+      return { slug, name: "Editor", workspaceId: actualWorkspaceId, createdAt: witness.binding.createdAt, path: witness.context.directory };
+    },
+    sessionBindingFor: async () => {
+      if (++bindings === revokeAt) active = false;
+      return witness.binding;
     },
     resolveContext: async (slug, context, expected) => {
+      assertActive();
       assertGroupDocumentToolContext({ ...witness, slug, context, ...expected });
-      return { entry: witness.entry, assertActive() {} };
+      return { entry: witness.entry, assertActive };
     },
   });
   await assert.rejects(() => service.executeNative("editor", { name: "group_document_save", args: witness.args, context: witness.context }), /not available/);
   assert.deepEqual(await service.list(f.group.id), []);
+  assert.equal(bindings, 2);
+  await updateGroup(f.directory, f.group.id, { participantSlugs: ["editor", "researcher"] });
+  revokeAt = bindings + 2;
+  await assert.rejects(() => service.executeNative("editor", { name: "group_document_save", args: witness.args, context: witness.context }), /stopped/);
+  assert.deepEqual(await service.list(f.group.id), []);
+  active = true;
   await archiveGroup(f.directory, f.group.id);
   await assert.rejects(() => service.list(f.group.id), /not available/);
   await assert.rejects(() => service.executeNative("editor", { name: "group_document_save", args: witness.args, context: witness.context }), /not available/);
@@ -296,28 +324,55 @@ test("native service rechecks group membership and the coworker's actual workspa
   await assert.rejects(() => service.executeNative("editor", { name: "group_document_save", args: witness.args, context: witness.context }), /workspace changed/);
 });
 
-test("native document access accepts canonical workspace aliases but not a different directory", async (t) => {
+test("native document access requires its host binding and home identity, allowing canonical aliases", async (t) => {
   const f = await fixture(t);
   const actualPath = await realpath(path.join(f.directory, "editor"));
   const alias = path.join(f.directory, "editor-alias");
   await symlink(actualPath, alias, "dir");
   let coworkerPath = alias;
   const witness = documentWitness(f.group.id, actualPath);
+  let createdAt = witness.entry.coworkerCreatedAt;
+  const originalBinding = { ...witness.binding, directory: alias, nativeWorkspaceId: witness.workspaceId, kind: "legacy" };
+  let binding = originalBinding;
   const service = createGroupDocumentService({
     coworkersDir: f.directory,
-    coworkerFor: async (slug) => ({ slug, name: "Editor", workspaceId: witness.workspaceId, path: coworkerPath }),
+    coworkerFor: async (slug) => ({ slug, name: "Editor", workspaceId: witness.workspaceId, createdAt, path: coworkerPath }),
+    sessionBindingFor: async () => binding,
     resolveContext: async (slug, context, expected) => {
       assertGroupDocumentToolContext({ ...witness, slug, context, ...expected });
       return { entry: witness.entry, assertActive() {} };
     },
   });
   const request = { name: "group_document_save", args: witness.args, context: witness.context };
+  await assert.rejects(() => createGroupDocumentService({ coworkersDir: f.directory }).executeNative("editor", {
+    ...request, context: { ...request.context, binding: originalBinding },
+  }), /trusted host session binding/);
   const saved = JSON.parse((await service.executeNative("editor", request)).text);
   assert.equal(saved.author, "Editor");
   assert.equal(saved.groupId, f.group.id);
-  coworkerPath = path.join(f.directory, "different-workspace");
-  await mkdir(coworkerPath);
+  for (const extra of [null, { slug: "researcher" }, { sessionId: "ses_other" }, { workspaceId: "other-workspace" },
+    { createdAt: undefined }, { createdAt: "replacement" }, { kind: "private" }, { kind: "worker" }, { kind: "consultation" },
+    { directory: undefined }, { directory: "relative" }]) {
+    binding = extra ? { ...originalBinding, ...extra } : null;
+    await assert.rejects(() => service.executeNative("editor", request), /host binding/);
+  }
+  binding = originalBinding;
+  const differentDirectory = path.join(f.directory, "different-workspace");
+  await mkdir(differentDirectory);
+  witness.context.directory = differentDirectory;
+  witness.snapshot.directory = differentDirectory;
+  await assert.rejects(() => service.executeNative("editor", request), /location does not match its host binding/);
+  binding = { ...originalBinding, directory: differentDirectory };
+  coworkerPath = differentDirectory;
   await assert.rejects(() => service.executeNative("editor", request), /workspace changed/);
+  binding = originalBinding;
+  coworkerPath = alias;
+  witness.context.directory = actualPath;
+  witness.snapshot.directory = actualPath;
+  for (const replacement of [undefined, "", "replacement"]) {
+    createdAt = replacement;
+    await assert.rejects(() => service.executeNative("editor", request), /workspace changed/);
+  }
   assert.equal((await service.list(f.group.id)).length, 1);
 });
 

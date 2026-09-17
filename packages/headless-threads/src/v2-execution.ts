@@ -40,6 +40,14 @@ const sameModel = (a: NativeV2Model | undefined, b: NativeV2Model) => a?.id === 
 function isNativeSystemAnnotation(message: NativeV2Message): boolean {
   return message.type === "system" && !Object.hasOwn(message.metadata ?? {}, "headlessTurn") && nativeV2AttachmentsMatch(message, []);
 }
+function nativeV2IdleBoundary(history: NativeV2Message[]) {
+  for (let index = history.length - 1; index >= 0; index--) {
+    const item = history[index];
+    if (item.type === "idle") return history.slice(index + 1).every((annotation) => annotation.time.created >= item.time.created) ? item : undefined;
+    if (!isNativeSystemAnnotation(item) && !((item.type === "agent-switched" || item.type === "model-switched")
+      && !Object.hasOwn(item.metadata ?? {}, "headlessTurn") && nativeV2AttachmentsMatch(item, []))) return;
+  }
+}
 const terminalType = z.enum(["succeeded", "failed", "interrupted"]);
 type Outcome = z.infer<typeof terminalType>;
 
@@ -93,7 +101,7 @@ export function nativeV2PartId(messageId: string, ordinal: number, type = "text"
  * The host must serialize writers to the session. Unmarked users, overlapping
  * inputs, reverts, missing history and unknown synthetic input confer no authority.
  */
-export function projectNativeV2History(history: NativeV2Message[], session: NativeV2Session, idle: boolean) {
+export function projectNativeV2History(history: NativeV2Message[], session: NativeV2Session, idle: boolean, apiContract: "beta19271" | "native-2" = "beta19271") {
   const parents = new Map<string, string>();
   const turnOutcomes: Record<string, Outcome> = {};
   const turnErrors: Record<string, string> = {};
@@ -112,6 +120,7 @@ export function projectNativeV2History(history: NativeV2Message[], session: Nati
     const nextTail = next?.success ? history.findIndex((item) => item.id === next.data.previousMessageId) : -1;
     const end = nextUser ? nextTail + 1 : history.length;
     const interval = history.slice(index + 1, end);
+    const nativeIdle = apiContract === "native-2" ? nativeV2IdleBoundary(interval) : undefined;
     const replies = interval.filter((item) => item.type === "assistant");
     const idleAt = nextUser ? next?.success ? next.data.previousIdleAt : null : idle ? session.time.idle : null;
     const outcome = nextUser ? next?.success ? next.data.previousOutcome : null : idle ? session.outcome : null;
@@ -125,7 +134,8 @@ export function projectNativeV2History(history: NativeV2Message[], session: Nati
       && (binding.data.contextId === null ? between.length === 0 : between.length === 1 && between[0]?.id === binding.data.contextId && between[0].type === "synthetic" && nativeV2AttachmentsMatch(between[0], []) && JSON.stringify(between[0].metadata?.headlessTurn) === JSON.stringify(user.metadata?.headlessTurn))
       && (!previousUser || (binding.data.previousIdleAt !== null && binding.data.previousOutcome !== null && history.indexOf(previousUser) <= previousIndex && (!priorAssistant || priorAssistant.time.created <= binding.data.previousIdleAt)))
       && (!nextUser || (next?.success && nextTail >= index && terminal))
-      && interval.every((item) => ["assistant", "system", "agent-switched", "model-switched"].includes(item.type) || (item.type === "compaction" && item.reason === "auto"))
+      && interval.every((item) => ["assistant", "system", "agent-switched", "model-switched"].includes(item.type) || (item.type === "compaction" && item.reason === "auto")
+        || (apiContract === "native-2" && item.type === "idle" && terminal && item === nativeIdle && item.time.created === idleAt && item.outcome === outcome))
       && replies.every((item) => item.type === "assistant" && item.agent === binding.data.agent && sameModel(item.model, binding.data.model) && item.time.created >= user.time.created)
       && (!nextUser || replies.length > 0 || outcome === "failed" || outcome === "interrupted");
     if (!valid) {
@@ -181,11 +191,18 @@ export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Opti
       native.getSession(threadId, signal), native.readHistory(threadId, signal), native.readInbox(threadId, signal), native.readActive(signal),
     ]);
     let [session, history, pending, active] = await read();
-    for (let retry = 0; pending.some((item) => history.some((message) => message.id === item.id)); retry++) {
+    const sourceOverlap = () => {
+      if (options.apiContract !== "native-2") return false;
+      const last = nativeV2IdleBoundary(history);
+      if (!last) return false;
+      return Object.hasOwn(active, threadId) || session.time.idle !== last.time.created || session.outcome !== last.outcome
+        || history.some((message) => message.type === "assistant" && (message.time.completed === undefined || message.content.some((part) => part.type === "tool" && ["running", "streaming"].includes(part.state.status))));
+    };
+    for (let retry = 0; pending.some((item) => history.some((message) => message.id === item.id)) || sourceOverlap(); retry++) {
       if (retry === 2) throw new HeadlessThreadError({ code: "snapshot_unconfirmed", method: "GET", path: `/session/${threadId}`, message: "Native history and inbox did not reach a consistent observation. Earlier work will not be replayed." });
       [session, history, pending, active] = await read();
     }
-    const projection = projectNativeV2History(history, session, !Object.hasOwn(active, threadId) && pending.length === 0);
+    const projection = projectNativeV2History(history, session, !Object.hasOwn(active, threadId) && pending.length === 0, options.apiContract);
     const inputSkills = { ...projection.inputSkills };
     // The host admits one user input, optionally paired with one synthetic
     // context. Validate that boundary directly; never fabricate history for inbox items.
@@ -240,7 +257,7 @@ export function createHeadlessThreadClientV2(options: HeadlessThreadClientV2Opti
     const chosen = await selection(input.model ?? options.defaultModel, input.agent ?? options.defaultAgent ?? "build", input.signal);
     await options.onIntent?.({ threadId });
     let session;
-    try { session = await native.createSession({ id: threadId, title, ...chosen }, input.signal); }
+    try { session = await native.createSession({ id: threadId, title, ...chosen, ...(input.metadata ? { metadata: input.metadata } : {}) }, input.signal); }
     catch (error) { return fail("creation_unknown", threadId, `Session creation could not be confirmed. Reconcile this exact thread ID; do not create another.${error instanceof HeadlessThreadError ? ` ${error.message}` : ""}`); }
     if (prompt !== undefined) await sendTurn(threadId, { prompt, skills, model: input.model, agent: input.agent, signal: input.signal });
     return { id: threadId, workspaceId: options.workspaceId, title: session.title ?? null, directory: session.location.directory, createdAt: session.time.created, started: prompt !== undefined };

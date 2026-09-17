@@ -10,12 +10,17 @@ export const NATIVE_PLUGIN_DEPENDENCIES = Object.freeze({ "@opencode-ai/plugin":
 export const NATIVE_PLUGIN_FILES = Object.freeze(["coworker-collaboration.js", "coworker-browser.js", "coworker-computer.js",
   "coworker-group-documents.js", "progress-summary.js", "auto-memory.js", "coworker-turn-roles.js", "coworker-events.js", "coworker-abilities.js"]);
 
-export function validateNativePluginManifest(manifest) {
+export function validateNativePluginManifest(manifest, sourceBuild) {
   const exactKeys = (value, keys) => value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-  if (manifest?.format !== "coworker-native-plugins/v1" || manifest.opencodeVersion !== NATIVE_PLUGIN_VERSION
-    || !exactKeys(manifest.dependencies, Object.keys(NATIVE_PLUGIN_DEPENDENCIES))
-    || Object.entries(NATIVE_PLUGIN_DEPENDENCIES).some(([name, version]) => manifest.dependencies[name] !== version)
+  const source = sourceBuild !== undefined && sourceBuild !== null;
+  const dependencies = source ? { "@opencode/plugin": "2.0.5", "@opencode/schema": "2.0.5" } : NATIVE_PLUGIN_DEPENDENCIES;
+  if (manifest?.format !== (source ? "coworker-native-source-plugins/v1" : "coworker-native-plugins/v1")
+    || manifest.opencodeVersion !== (source ? sourceBuild.version : NATIVE_PLUGIN_VERSION)
+    || (source && (!/^0\.0\.0-local-[A-Za-z0-9.-]+$/.test(sourceBuild.version) || !/^[a-f0-9]{64}$/.test(sourceBuild.sha256)
+      || manifest.executableSha256 !== sourceBuild.sha256 || !/^[a-f0-9]{64}$/.test(manifest.sdkSourceDiffSha256)))
+    || !exactKeys(manifest.dependencies, Object.keys(dependencies))
+    || Object.entries(dependencies).some(([name, version]) => manifest.dependencies[name] !== version)
     || !exactKeys(manifest.entries, NATIVE_PLUGIN_FILES)) throw new Error("Native plugin bundle manifest does not match this runtime.");
   for (const name of NATIVE_PLUGIN_FILES) {
     const entry = manifest.entries[name];
@@ -27,7 +32,7 @@ export function validateNativePluginManifest(manifest) {
 
 async function readBundleManifest() {
   if (!bundleDirectory || !path.isAbsolute(bundleDirectory)) throw new Error("Native plugin bundles must be prepared before opening coworker workspaces.");
-  return validateNativePluginManifest(JSON.parse(await readFile(path.join(bundleDirectory, "manifest.json"), "utf8")));
+  return validateNativePluginManifest(JSON.parse(await readFile(path.join(bundleDirectory, "manifest.json"), "utf8")), bundleSourceBuild);
 }
 
 async function readBundle(entry) {
@@ -43,12 +48,14 @@ export async function verifyNativePluginBundles() {
 }
 
 let bundleDirectory = process.env.OPENWORK_COWORKER_PLUGIN_BUNDLE_DIR || null;
+let bundleSourceBuild;
 
 /** Set once before workspace preparation. The directory is a packaged build
  * artifact, not node_modules or a per-coworker package installation. */
-export function configureNativePluginBundles(directory) {
+export function configureNativePluginBundles(directory, { sourceBuild } = {}) {
   if (typeof directory !== "string" || !path.isAbsolute(directory)) throw new Error("Choose an absolute native plugin bundle directory.");
   bundleDirectory = directory;
+  bundleSourceBuild = sourceBuild;
 }
 
 // Embedded in each installed module. These are native Effect tools, not Promise

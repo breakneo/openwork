@@ -42,6 +42,7 @@ extraResources:
       - opencode2
       - opencode2.exe
       - versions.json
+      - native-receipt.json
   - from: resources/native-plugins
     to: native-plugins
     filter:
@@ -57,6 +58,7 @@ beforePack: scripts/electron-build.mjs
 afterPack: scripts/electron-build.mjs
 afterSign: ../desktop/scripts/electron-after-sign.cjs
 mac:
+  sign: scripts/sign-native-source.mjs
   icon: resources/icons/icon.icns
   category: public.app-category.productivity
   hardenedRuntime: true

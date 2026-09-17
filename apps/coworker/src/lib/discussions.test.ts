@@ -5,7 +5,7 @@ import {
   classifyThreads,
   configureDiscussionStore,
   discussionIds,
-  discussionIdsForWorkspace,
+  discussionIdsForCoworker,
   loadDiscussionRegistry,
   parseDiscussionRegistry,
   registerDiscussion,
@@ -42,7 +42,7 @@ test("classifyThreads keeps Worker threads out of both discussions and assignmen
   assert.deepEqual(classifyThreads(threads, { discussions: [], workers: [] }).assignments.length, threads.length);
 });
 
-test("the registry is written beside the coworker record and answers workspace lookups from cache", async () => {
+test("discussion registries stay separate when coworkers share one workspace", async () => {
   const files = new Map<string, string>();
   const reads: string[] = [];
   let listings = 0;
@@ -58,7 +58,7 @@ test("the registry is written beside the coworker record and answers workspace l
     },
     listCoworkers: async () => {
       listings += 1;
-      return [{ slug: "scout", workspaceId: "ws_1" }];
+      return [{ slug: "scout", workspaceId: "ws_team" }, { slug: "editor", workspaceId: "ws_team" }];
     },
   });
   try {
@@ -67,12 +67,13 @@ test("the registry is written beside the coworker record and answers workspace l
     assert.deepEqual(await registerDiscussion("scout", "ses_b"), ["ses_a", "ses_b"]);
     assert.deepEqual(await registerDiscussion("scout", "ses_a"), ["ses_a", "ses_b"]);
     assert.deepEqual(parseDiscussionRegistry(files.get(`scout/${DISCUSSION_REGISTRY_FILE}`)), ["ses_a", "ses_b"]);
-    assert.deepEqual(await discussionIdsForWorkspace("ws_1", "ses_c"), ["ses_a", "ses_b", "ses_c"]);
-    assert.deepEqual(await discussionIdsForWorkspace("ws_1"), ["ses_a", "ses_b"]);
-    assert.deepEqual(await discussionIdsForWorkspace("ws_unknown", "ses_z"), ["ses_z"]);
-    // One read for the missing file, one coworker listing for the first lookup, another for the unknown workspace.
-    assert.deepEqual(reads, [`scout/${DISCUSSION_REGISTRY_FILE}`]);
-    assert.equal(listings, 2);
+    assert.deepEqual(await discussionIdsForCoworker("scout", "ses_c"), ["ses_a", "ses_b", "ses_c"]);
+    assert.deepEqual(await discussionIdsForCoworker("scout"), ["ses_a", "ses_b"]);
+    await registerDiscussion("editor", "ses_z");
+    assert.deepEqual(await discussionIdsForCoworker("editor"), ["ses_z"]);
+    assert.deepEqual(await discussionIdsForCoworker("scout"), ["ses_a", "ses_b"]);
+    assert.deepEqual(reads, [`scout/${DISCUSSION_REGISTRY_FILE}`, `editor/${DISCUSSION_REGISTRY_FILE}`]);
+    assert.equal(listings, 0);
   } finally {
     configureDiscussionStore(null);
   }
@@ -80,6 +81,6 @@ test("the registry is written beside the coworker record and answers workspace l
 
 test("without a configured store the registry reads as empty and refuses to write", async () => {
   assert.deepEqual(await loadDiscussionRegistry("nobody"), []);
-  assert.deepEqual(await discussionIdsForWorkspace("ws_none", "ses_open"), ["ses_open"]);
+  assert.deepEqual(await discussionIdsForCoworker("ws_none", "ses_open"), ["ses_open"]);
   await assert.rejects(registerDiscussion("nobody", "ses_x"), /not available/);
 });

@@ -1,0 +1,1739 @@
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+index f55d8905e676f5dfe99991d46599c86b6ff5cc61..834430164cb9b97a8936066d2112bd8e892f5274 100755
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -10,6 +10,7 @@ import pkg from "../package.json"
+ import { buildAppArchive } from "./app-assets"
+ import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
+ import { resolveOpencodePty } from "./opencode-pty"
++import { portablePathsPlugin } from "./portable-paths"
+ 
+ const dir = path.resolve(import.meta.dirname, "..")
+ const binary = "opencode"
+@@ -124,7 +125,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
+   const result = await Bun.build({
+     entrypoints: ["./src/index.ts"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [appAssetsPlugin, solidPlugin, parcelWatcherPlugin, opencodePtyPlugin, simulationGraphPlugin],
++    plugins: [appAssetsPlugin, solidPlugin, parcelWatcherPlugin, opencodePtyPlugin, simulationGraphPlugin, portablePathsPlugin],
+     external: ["node-gyp"],
+     format: "esm",
+     minify: true,
+diff --git a/packages/cli/script/portable-paths.ts b/packages/cli/script/portable-paths.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..407eaf0d23c04f0b8026da65407dd6d48ba07a85
+--- /dev/null
++++ b/packages/cli/script/portable-paths.ts
+@@ -0,0 +1,17 @@
++import type { BunPlugin } from "bun"
++
++export const portablePathsPlugin: BunPlugin = {
++  name: "portable-commonjs-locations",
++  setup(build) {
++    build.onLoad(
++      {
++        filter:
++          /[/\\]node_modules[/\\](?:typescript[/\\]lib[/\\]typescript|@npmcli[/\\]run-script[/\\]lib[/\\]set-path|@npmcli[/\\]arborist[/\\]lib[/\\]debug|write-file-atomic[/\\]lib[/\\]index|@silvia-odwyer[/\\]photon-node[/\\]photon_rs)\.js$/,
++      },
++      async (args) => ({
++        loader: "js",
++        contents: `const __dirname = import.meta.dirname; const __filename = import.meta.filename;\n${await Bun.file(args.path).text()}`,
++      }),
++    )
++  },
++}
+diff --git a/packages/core/src/file-access.ts b/packages/core/src/file-access.ts
+index 880bb3b60b7a6265f4c66f09e048247cdf8d477a..ef063637955f9ecb0dcca4c97f60f76b2a97bc8a 100644
+--- a/packages/core/src/file-access.ts
++++ b/packages/core/src/file-access.ts
+@@ -6,6 +6,7 @@ import { Global } from "@opencode/util/global"
+ import { Array, Context, Effect, Layer, Schema } from "effect"
+ import path from "path"
+ import { Location } from "./location.js"
++import { FilesystemScope } from "./filesystem-scope.js"
+ import { Permission } from "./permission.js"
+ import { Project } from "./project.js"
+ import { AbsolutePath } from "./schema.js"
+@@ -97,15 +98,16 @@ const layer = Layer.effect(
+     const permission = yield* Permission.Service
+ 
+     const resolve = Effect.fn("FileAccess.resolve")(function* (input: ResolveInput) {
+-      const absolute = AbsolutePath.make(resolvePath(location.directory, input.path))
+-      const worktree = path.resolve(location.project.directory)
++      const owner = yield* FilesystemScope.boundary(location)
++      const absolute = AbsolutePath.make(resolvePath(owner.directory, input.path))
++      const worktree = path.resolve(owner.project.directory)
+       const internal =
+-        FSUtil.contains(location.directory, absolute) ||
++        FSUtil.contains(owner.directory, absolute) ||
+         (worktree !== path.parse(worktree).root && FSUtil.contains(worktree, absolute))
+       if (internal) {
+         return {
+           absolute,
+-          resource: slash(path.relative(location.directory, absolute) || "."),
++          resource: slash(path.relative(owner.directory, absolute) || "."),
+         } satisfies Target
+       }
+       const type =
+diff --git a/packages/core/src/filesystem-scope.ts b/packages/core/src/filesystem-scope.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..78361a3390ae7cf84637353919cb2dfa3e1309a0
+--- /dev/null
++++ b/packages/core/src/filesystem-scope.ts
+@@ -0,0 +1,50 @@
++export * as FilesystemScope from "./filesystem-scope.js"
++
++import { Tool } from "@opencode/schema/tool"
++import { FSUtil } from "@opencode/util/fs-util"
++import { Context, Effect, Schema } from "effect"
++import path from "path"
++import { Project } from "./project.js"
++import { AbsolutePath } from "./schema.js"
++
++export const Current = Context.Reference<Tool.FilesystemScope | undefined>("@opencode/FilesystemScope", {
++  defaultValue: () => undefined,
++})
++
++const Directory = Schema.String.check(Schema.makeFilter((value) => path.isAbsolute(value) && !value.includes("\0")))
++const Input = Schema.Struct({
++  directory: Directory,
++  project: Schema.optionalKey(Schema.Struct({ id: Project.ID, directory: Directory })),
++})
++
++export const validate = Effect.fn("FilesystemScope.validate")(function* (
++  input: unknown,
++  fs: FSUtil.Interface,
++  projects: Project.Interface,
++) {
++  if (input === undefined) return undefined
++  const scope = yield* Schema.decodeUnknownEffect(Input)(input).pipe(
++    Effect.mapError((error) => new Tool.Error({ message: "Invalid invocation filesystem scope", error })),
++  )
++  const stat = yield* fs
++    .stat(scope.directory)
++    .pipe(Effect.mapError((error) => new Tool.Error({ message: "Invalid invocation owner directory", error })))
++  if (stat.type !== "Directory") return yield* new Tool.Error({ message: "Invocation owner must be a directory" })
++  const directory = AbsolutePath.make(
++    yield* fs
++      .resolve(scope.directory)
++      .pipe(Effect.mapError((error) => new Tool.Error({ message: "Invalid invocation owner directory", error }))),
++  )
++  if (scope.project) {
++    const inspected = yield* projects.resolve(directory, { persist: false })
++    if (inspected.id !== scope.project.id || inspected.directory !== scope.project.directory)
++      return yield* new Tool.Error({ message: "Invocation filesystem scope does not match the native owner project" })
++  }
++  const project = yield* projects.resolve(directory)
++  if (scope.project && (project.id !== scope.project.id || project.directory !== scope.project.directory))
++    return yield* new Tool.Error({ message: "Invocation owner project changed during scope resolution" })
++  return Object.freeze({ directory, project: Object.freeze({ id: project.id, directory: project.directory }) })
++})
++
++export const boundary = <A extends Tool.FilesystemScope>(location: A) =>
++  Effect.map(Current, (scope) => scope ?? location)
+diff --git a/packages/core/src/formatter.ts b/packages/core/src/formatter.ts
+index eb85babf56ee2467ed8355dc5bd1a800024b8f2f..abda76e20f4cae1e6ff984695d332ea2d172f413 100644
+--- a/packages/core/src/formatter.ts
++++ b/packages/core/src/formatter.ts
+@@ -6,6 +6,7 @@ import path from "path"
+ import { makeLocationNode } from "@opencode/util/effect/app-node"
+ import { AppProcess } from "@opencode/util/process"
+ import { Location } from "./location.js"
++import { FilesystemScope } from "./filesystem-scope.js"
+ import type { Info } from "./formatter/builtins.js"
+ import { State } from "./state.js"
+ 
+@@ -29,7 +30,7 @@ const layer = Layer.effect(
+   Effect.gen(function* () {
+     const location = yield* Location.Service
+     const processes = yield* AppProcess.Service
+-    const commands = new WeakMap<Info, string[] | false>()
++    const commands = new WeakMap<Info, Map<string, string[] | false>>()
+     const state = State.create<Data, Editor>({
+       name: "formatter",
+       initial: () => ({ formatters: [] }),
+@@ -45,27 +46,32 @@ const layer = Layer.effect(
+       }),
+     })
+ 
+-    const command = Effect.fnUntraced(function* (formatter: Info) {
+-      const cached = commands.get(formatter)
++    const command = Effect.fnUntraced(function* (formatter: Info, directory: string) {
++      const cache = commands.get(formatter) ?? new Map<string, string[] | false>()
++      const cached = cache.get(directory)
+       if (cached !== undefined) return cached
+       const result = yield* formatter.enabled
+-      if (result !== false) commands.set(formatter, result)
++      if (result !== false) {
++        cache.set(directory, result)
++        commands.set(formatter, cache)
++      }
+       return result
+     })
+ 
+     const file = Effect.fn("Formatter.file")(function* (filepath: string) {
++      const owner = yield* FilesystemScope.boundary(location)
+       const extension = path.extname(filepath)
+       const matching = state.get().formatters.filter((formatter) => formatter.extensions.includes(extension))
+ 
+       for (const formatter of matching) {
+-        const enabled = yield* command(formatter)
++        const enabled = yield* command(formatter, owner.directory)
+         if (enabled === false) continue
+         const cmd = enabled.map((argument) => argument.replace("$FILE", filepath))
+         yield* Effect.logInfo("formatting file", { file: filepath, command: cmd })
+         const result = yield* processes
+           .run(
+             ChildProcess.make(cmd[0], cmd.slice(1), {
+-              cwd: location.directory,
++              cwd: owner.directory,
+               env: formatter.environment,
+               extendEnv: true,
+               stdin: "ignore",
+diff --git a/packages/core/src/formatter/builtins.ts b/packages/core/src/formatter/builtins.ts
+index ba8354f807b4e6e25bd43521bf7e1db80725e1a4..b04922a70f34b3fd8d05061b21b7909febcb6b1f 100644
+--- a/packages/core/src/formatter/builtins.ts
++++ b/packages/core/src/formatter/builtins.ts
+@@ -4,6 +4,7 @@ import { FSUtil } from "@opencode/util/fs-util"
+ import { Npm } from "@opencode/util/npm"
+ import { AppProcess } from "@opencode/util/process"
+ import { which } from "../util/which.js"
++import { FilesystemScope } from "../filesystem-scope.js"
+ 
+ export interface Info {
+   readonly name: string
+@@ -22,18 +23,26 @@ export function make(input: {
+ }) {
+   const disabled = false as const
+   const findExecutable = (name: string) => which(name, undefined, input.bin)
+-  const findUp = (target: string) => input.fs.findUp(target, input.directory, input.worktree)
++  const findUp = (target: string) =>
++    FilesystemScope.Current.pipe(
++      Effect.flatMap((scope) =>
++        input.fs.findUp(target, scope?.directory ?? input.directory, scope?.project.directory ?? input.worktree),
++      ),
++    )
+   const readText = (file: string) => input.fs.readFileString(file).pipe(Effect.orElseSucceed(() => ""))
+   const commandOutput = (command: string[]) =>
+-    input.processes
+-      .run(
+-        ChildProcess.make(command[0], command.slice(1), {
+-          cwd: input.directory,
+-          extendEnv: true,
+-          stdin: "ignore",
+-        }),
+-      )
+-      .pipe(Effect.option)
++    FilesystemScope.Current.pipe(
++      Effect.flatMap((scope) =>
++        input.processes.run(
++          ChildProcess.make(command[0], command.slice(1), {
++            cwd: scope?.directory ?? input.directory,
++            extendEnv: true,
++            stdin: "ignore",
++          }),
++        ),
++      ),
++      Effect.option,
++    )
+ 
+   const gofmt = executable("gofmt", [".go"], ["-w", "$FILE"], findExecutable)
+ 
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+index e3586f573b4bc458898c91f0ebd86e016ef9002a..ebd943416ac02665278cc327c97d7da968b578da 100644
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -5,6 +5,8 @@ import { Context, Deferred, Effect, Layer, Schema } from "effect"
+ import { Permission } from "@opencode/schema/permission"
+ import { Bus } from "./bus.js"
+ import { Location } from "./location.js"
++import { FilesystemScope } from "./filesystem-scope.js"
++import type { Project } from "./project.js"
+ import { Agent } from "./agent.js"
+ import { SessionErrors } from "./session/error.js"
+ import { SessionSchema } from "./session/schema.js"
+@@ -113,6 +115,7 @@ export interface Interface {
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
+ 
+ interface Pending {
++  readonly projectID: Project.ID
+   readonly request: Request
+   readonly agent?: Agent.ID
+   readonly deferred: Deferred.Deferred<void, DeclinedError | CorrectedError>
+@@ -145,8 +148,8 @@ const layer = Layer.effect(
+     }).pipe(Effect.uninterruptible)
+     yield* Effect.addFinalizer(() => close)
+ 
+-    const savedRules = Effect.fnUntraced(function* () {
+-      return (yield* saved.list({ projectID: location.project.id })).map(
++    const savedRules = Effect.fnUntraced(function* (projectID: Project.ID) {
++      return (yield* saved.list({ projectID })).map(
+         (item): Permission.Rule => ({
+           action: item.action,
+           resource: item.resource,
+@@ -170,10 +173,10 @@ const layer = Layer.effect(
+       return rules.filter((rule) => Wildcard.match(input.action, rule.action))
+     }
+ 
+-    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
++    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, projectID: Project.ID) {
+       const rules = yield* configured(input.sessionID, input.agent)
+       if (denied(input, rules)) return { effect: "deny" as const, rules }
+-      const all = [...rules, ...(yield* savedRules())]
++      const all = [...rules, ...(yield* savedRules(projectID))]
+       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+       const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
+       const event = yield* hooks.trigger("permission", "evaluate", {
+@@ -201,11 +204,11 @@ const layer = Layer.effect(
+       }
+     }
+ 
+-    const create = (request: Request, agent?: Agent.ID) =>
++    const create = (request: Request, projectID: Project.ID, agent?: Agent.ID) =>
+       Effect.uninterruptible(
+         Effect.gen(function* () {
+           const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
+-          const item = { request, agent, deferred }
++          const item = { request, projectID, agent, deferred }
+           if (closed) {
+             yield* Deferred.fail(deferred, new DeclinedError())
+             return item
+@@ -222,16 +225,18 @@ const layer = Layer.effect(
+ 
+     const ask = Effect.fn("Permission.ask")(function* (input: AssertInput) {
+       if (closed) return { id: input.id ?? ID.create(), effect: "deny" as const }
+-      const result = yield* evaluateInput(input)
++      const owner = yield* FilesystemScope.boundary(location)
++      const result = yield* evaluateInput(input, owner.project.id)
+       const value = request(input, result.message)
+-      if (result.effect === "ask") yield* create(value, input.agent)
++      if (result.effect === "ask") yield* create(value, owner.project.id, input.agent)
+       return { id: value.id, effect: result.effect }
+     })
+ 
+     const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
+       Effect.gen(function* () {
+         if (closed) return yield* Effect.die(new DeclinedError())
+-        const result = yield* evaluateInput(input)
++        const owner = yield* FilesystemScope.boundary(location)
++        const result = yield* evaluateInput(input, owner.project.id)
+         return yield* Effect.uninterruptibleMask((restore) =>
+           Effect.gen(function* () {
+             if (result.effect === "deny") {
+@@ -243,7 +248,7 @@ const layer = Layer.effect(
+               })
+             }
+             if (result.effect === "allow") return
+-            const item = yield* create(request(input, result.message), input.agent)
++            const item = yield* create(request(input, result.message), owner.project.id, input.agent)
+             return yield* restore(Deferred.await(item.deferred)).pipe(
+               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
+               // must not convert a user's decline into model-facing tool output. The decline
+@@ -294,7 +299,7 @@ const layer = Layer.effect(
+ 
+           if (input.reply === "always" && existing.request.save?.length) {
+             yield* saved.add({
+-              projectID: location.project.id,
++              projectID: existing.projectID,
+               action: existing.request.action,
+               resources: existing.request.save,
+             })
+@@ -304,7 +309,7 @@ const layer = Layer.effect(
+           if (input.reply !== "always" || !existing.request.save?.length) return
+ 
+           for (const [id, item] of pending) {
+-            const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
++            const result = yield* evaluateInput({ ...item.request, agent: item.agent }, item.projectID).pipe(
+               Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
+             )
+             if (result?.effect !== "allow") continue
+diff --git a/packages/core/src/project.ts b/packages/core/src/project.ts
+index c03e11c6de97292fa30195abb5dd33ca51f8afd1..180a3a14b6d4a1b5b846b6b3035d7589acafb9a3 100644
+--- a/packages/core/src/project.ts
++++ b/packages/core/src/project.ts
+@@ -61,7 +61,10 @@ export interface Interface {
+   readonly list: () => Effect.Effect<ReadonlyArray<Info>>
+   readonly update: (input: UpdateInput) => Effect.Effect<Info, NotFoundError>
+   /** Resolves and persists the owning Project. */
+-  readonly resolve: (input: AbsolutePath, options?: { readonly discovery?: boolean }) => Effect.Effect<Resolved>
++  readonly resolve: (
++    input: AbsolutePath,
++    options?: { readonly discovery?: boolean; readonly persist?: boolean },
++  ) => Effect.Effect<Resolved>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Project") {}
+@@ -315,8 +318,9 @@ const layer = Layer.effect(
+ 
+     const resolve = Effect.fn("Project.resolve")(function* (
+       input: AbsolutePath,
+-      _options?: { readonly discovery?: boolean },
++      _options?: { readonly discovery?: boolean; readonly persist?: boolean },
+     ) {
++      const resolved = _options?.persist === false ? Effect.succeed<Resolved> : persist
+       const directory = AbsolutePath.make(yield* fs.resolve(input))
+       const native = yield* fs.up({ targets: [".git", ".hg"], start: directory, mode: "first" }).pipe(
+         Effect.map((matches) => matches[0]),
+@@ -336,7 +340,7 @@ const layer = Layer.effect(
+                 Effect.map((items) => items.find((item) => item.kind === "main")?.directory ?? repo.worktree),
+                 Effect.orElseSucceed(() => repo.worktree),
+               )
+-        return yield* persist({
++        return yield* resolved({
+           previous,
+           id: id ?? ID.global,
+           directory: repo.worktree,
+@@ -347,13 +351,13 @@ const layer = Layer.effect(
+ 
+       const hg = native && path.basename(native) === ".hg" ? yield* hgDiscover(AbsolutePath.make(native)) : undefined
+       if (hg) {
+-        return yield* persist({
++        return yield* resolved({
+           ...hg,
+           canonical: hg.directory,
+         })
+       }
+ 
+-      return yield* persist({
++      return yield* resolved({
+         id: ID.make(Hash.fast(`directory:${directory}`)),
+         directory,
+         canonical: directory,
+diff --git a/packages/core/src/session/instructions.ts b/packages/core/src/session/instructions.ts
+index 1165ea6e6d1cb08ce46d038f9c7bbb9607bee79b..c742cb0634010d7572305ea78524f87a06b26bda 100644
+--- a/packages/core/src/session/instructions.ts
++++ b/packages/core/src/session/instructions.ts
+@@ -6,6 +6,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
+ import { Bus } from "../bus.js"
+ import { FSUtil } from "@opencode/util/fs-util"
+ import { Location } from "../location.js"
++import { FilesystemScope } from "../filesystem-scope.js"
+ import { SessionEvent } from "./event.js"
+ import { MessageDecodeError } from "./error.js"
+ import { SessionMessage } from "./message.js"
+@@ -44,6 +45,8 @@ const layer = Layer.effect(
+     const inFlight = yield* Ref.make<Map<SessionSchema.ID, Set<string>>>(new Map())
+ 
+     const load = Effect.fn("SessionInstructions.load")(function* (input: Parameters<Interface["load"]>[0]) {
++      const owner = yield* FilesystemScope.Current
++      const descriptionRoot = owner ? owner.project.directory : root
+       const claimed = yield* Ref.modify(inFlight, (map) => {
+         const existing = map.get(input.sessionID) ?? new Set<string>()
+         const newlyClaimed = input.paths.filter((path) => !existing.has(path))
+@@ -74,7 +77,7 @@ const layer = Layer.effect(
+         yield* bus.publish(SessionEvent.Synthetic, {
+           sessionID: input.sessionID,
+           text: readable.map((file) => `Instructions from: ${file.path}\n${file.content}`).join("\n\n"),
+-          description: `Loaded ${readable.map((file) => describePath(root, file.path)).join(", ")}`,
++          description: `Loaded ${readable.map((file) => describePath(descriptionRoot, file.path)).join(", ")}`,
+           metadata: { instruction: { paths: readable.map((file) => file.path) } },
+         })
+       }).pipe(
+diff --git a/packages/core/src/tool.ts b/packages/core/src/tool.ts
+index c125aee0560712396f90c73a9d46a8bb5b677aab..19cd611f96dfe42c2f65e08f9738054b15aa2918 100644
+--- a/packages/core/src/tool.ts
++++ b/packages/core/src/tool.ts
+@@ -1,8 +1,19 @@
+ export * as Tool from "./tool.js"
+ export { CallID, Content, Error, FileContent, TextContent } from "@opencode/schema/tool"
+-export type { Context, Metadata, Namespace, Options, Result } from "@opencode/schema/tool"
++export type {
++  Context,
++  FilesystemScope,
++  FilesystemScopeInput,
++  Metadata,
++  Namespace,
++  Options,
++  Result,
++} from "@opencode/schema/tool"
+ 
+ import { ToolDefinition, type ToolCall } from "@opencode/ai"
++import { FSUtil } from "@opencode/util/fs-util"
++import { FilesystemScope } from "./filesystem-scope.js"
++import { Project } from "./project.js"
+ import { Tool } from "@opencode/schema/tool"
+ import { Context, Effect, Layer, Result, Schema, SchemaIssue, Types } from "effect"
+ import { makeLocationNode } from "@opencode/util/effect/app-node"
+@@ -68,6 +79,8 @@ const layer = Layer.effect(
+   Effect.gen(function* () {
+     const hooks = yield* PluginHooks.Service
+     const image = yield* Image.Service
++    const fs = yield* FSUtil.Service
++    const projects = yield* Project.Service
+ 
+     type NormalizedItem = Tool.Content | "decode" | "size"
+     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
+@@ -99,8 +112,11 @@ const layer = Layer.effect(
+       ]
+     })
+ 
+-    const beforeExecute = (name: string, input: unknown, context: Tool.Context) =>
+-      hooks.trigger("tool", "execute.before", {
++    const beforeExecute = Effect.fnUntraced(function* (name: string, input: unknown, context: Tool.Context) {
++      const event = yield* hooks.trigger("tool", "execute.before", {
++        filesystemScopeVersion: 1,
++        filesystemScopeProjectResolution: 1,
++        ...(context.filesystemScope === undefined ? {} : { filesystemScope: context.filesystemScope }),
+         tool: name,
+         sessionID: context.sessionID,
+         agent: context.agent,
+@@ -108,6 +124,18 @@ const layer = Layer.effect(
+         id: context.id,
+         input,
+       })
++      if (Object.hasOwn(event, "filesystemScope") && event.filesystemScope === undefined)
++        return yield* new Tool.Error({ message: "Invocation filesystem scope must not be undefined when supplied" })
++      const filesystemScope = yield* FilesystemScope.validate(
++        event.filesystemScope === undefined ? context.filesystemScope : event.filesystemScope,
++        fs,
++        projects,
++      )
++      return {
++        ...event,
++        context: filesystemScope === undefined ? context : Object.freeze({ ...context, filesystemScope }),
++      }
++    })
+ 
+     const executeTool = Effect.fn("Tool.execute")(function* (
+       tool: Tool.Info,
+@@ -116,6 +144,7 @@ const layer = Layer.effect(
+       context: Tool.Context,
+     ) {
+       const execution = yield* execute(tool, input, context).pipe(
++        Effect.provideService(FilesystemScope.Current, context.filesystemScope),
+         Effect.map((value) => ({ value })),
+         Effect.catchTag("Tool.Error", (failure) => Effect.succeed({ failure })),
+       )
+@@ -237,7 +266,7 @@ const layer = Layer.effect(
+           const codeModeTool = codeModeEnabled
+             ? CodeModeTool.create(codeModeInventory, (name, tool, input, context) =>
+                 beforeExecute(name, input, context).pipe(
+-                  Effect.flatMap((event) => executeTool(tool, name, event.input, context)),
++                  Effect.flatMap((event) => executeTool(tool, name, event.input, event.context)),
+                 ),
+               )
+             : undefined
+@@ -273,9 +302,9 @@ const layer = Layer.effect(
+                 return yield* new Tool.Error({ message: `Tool is not available for this request: ${event.tool}` })
+               const name = requested?.name ?? event.tool
+               if (name === "execute" && codeModeTool)
+-                return yield* executeTool(codeModeTool, name, event.input, context)
++                return yield* executeTool(codeModeTool, name, event.input, event.context)
+               const tool = direct.get(name)
+-              if (tool) return yield* executeTool(tool, name, event.input, context)
++              if (tool) return yield* executeTool(tool, name, event.input, event.context)
+               return yield* new Tool.Error({
+                 message: `No tool named "${name}" is currently available. Please use a tool from the available tool list.`,
+               })
+@@ -326,5 +355,5 @@ function namespaceError(name: string) {
+ export const node = makeLocationNode({
+   service: Service,
+   layer,
+-  deps: [PluginHooks.node, Image.node],
++  deps: [PluginHooks.node, Image.node, FSUtil.node, Project.node],
+ })
+diff --git a/packages/core/src/tool/plugin/edit.ts b/packages/core/src/tool/plugin/edit.ts
+index b736c45beb31e5389e09656a0162b70d4786b52c..059b4be4c175a81320e0ea5d5773c3eb93ae5aa4 100644
+--- a/packages/core/src/tool/plugin/edit.ts
++++ b/packages/core/src/tool/plugin/edit.ts
+@@ -14,7 +14,6 @@ import { Effect, Schema } from "effect"
+ import { Environment } from "../../environment/index.js"
+ import { FileMutation } from "../../file-mutation.js"
+ import { Formatter } from "../../formatter.js"
+-import { Location } from "../../location.js"
+ import { FileAccess } from "../../file-access.js"
+ import { Permission } from "../../permission.js"
+ import { fileDiff } from "./file-diff.js"
+@@ -113,7 +112,6 @@ export const Plugin = {
+     const fileMutation = yield* FileMutation.Service
+     const environment = yield* Environment.Service
+     const formatter = yield* Formatter.Service
+-    const location = yield* Location.Service
+     const permission = yield* Permission.Service
+ 
+     yield* ctx.tool
+@@ -127,90 +125,91 @@ export const Plugin = {
+           output: Output,
+           execute: (input, context) => {
+             return Effect.gen(function* () {
+-              const permissionSource = {
+-                type: "tool" as const,
+-                messageID: context.messageID,
+-                id: context.id,
+-              }
+-              if (input.oldString === input.newString) {
+-                return yield* new ToolFailure({
+-                  message: "No changes to apply: oldString and newString are identical.",
+-                })
+-              }
+-              if (input.oldString === "") {
+-                return yield* new ToolFailure({
+-                  message: "oldString must not be empty. Use write to create or overwrite a file.",
+-                })
+-              }
+-
+               const target = yield* access.resolve({ path: input.path, kind: "file" })
+-              yield* access.authorizeExternal([target], context)
++              return yield* Effect.gen(function* () {
++                const permissionSource = {
++                  type: "tool" as const,
++                  messageID: context.messageID,
++                  id: context.id,
++                }
++                if (input.oldString === input.newString) {
++                  return yield* new ToolFailure({
++                    message: "No changes to apply: oldString and newString are identical.",
++                  })
++                }
++                if (input.oldString === "") {
++                  return yield* new ToolFailure({
++                    message: "oldString must not be empty. Use write to create or overwrite a file.",
++                  })
++                }
++
++                yield* access.authorizeExternal([target], context)
+ 
+-              const original = yield* FileMutation.readText(environment.files, target.absolute).pipe(
+-                Effect.catchTag("Environment.NotFound", () =>
+-                  Effect.fail(new ToolFailure({ message: `File not found: ${input.path}` })),
+-                ),
+-                Effect.catchTag("Environment.WrongKind", (error) =>
+-                  error.actual === "directory"
+-                    ? Effect.fail(new ToolFailure({ message: `Path is a directory, not a file: ${input.path}` }))
+-                    : Effect.fail(new ToolFailure({ message: `Unable to edit ${input.path}`, error })),
+-                ),
+-              )
+-              const source = original.text
+-              const ending = source.includes(crlf) ? crlf : "\n"
+-              const oldString = input.oldString.replaceAll(crlf, "\n").replaceAll("\n", ending)
+-              const newString = input.newString.replaceAll(crlf, "\n").replaceAll("\n", ending)
+-              const exact = findOccurrences(source, oldString)
+-              // These one-to-one mappings preserve offsets into the original source.
+-              const unicode =
+-                exact.length > 0 ? [] : findOccurrences(normalizeForMatch(source), normalizeForMatch(oldString))
+-              const trailing = exact.length > 0 || unicode.length > 0 ? [] : findLineOccurrences(source, oldString)
+-              const matches = exact.length > 0 ? exact : unicode.length > 0 ? unicode : trailing
+-              const replacements = matches.length
+-              const replaced = (input.replaceAll === true ? matches : matches.slice(0, 1))
+-                .toReversed()
+-                .reduce(
+-                  (content, match) => `${content.slice(0, match.start)}${newString}${content.slice(match.end)}`,
+-                  source,
++                const original = yield* FileMutation.readText(environment.files, target.absolute).pipe(
++                  Effect.catchTag("Environment.NotFound", () =>
++                    Effect.fail(new ToolFailure({ message: `File not found: ${input.path}` })),
++                  ),
++                  Effect.catchTag("Environment.WrongKind", (error) =>
++                    error.actual === "directory"
++                      ? Effect.fail(new ToolFailure({ message: `Path is a directory, not a file: ${input.path}` }))
++                      : Effect.fail(new ToolFailure({ message: `Unable to edit ${input.path}`, error })),
++                  ),
+                 )
+-              const preview =
+-                replacements > 0 && (replacements === 1 || input.replaceAll === true)
+-                  ? fileDiff(target.resource, source, replaced)
+-                  : undefined
+-              yield* permission.assert({
+-                action: "edit",
+-                resources: [target.resource],
+-                save: ["*"],
+-                metadata: preview ? { files: [preview] } : undefined,
+-                sessionID: context.sessionID,
+-                agent: context.agent,
+-                source: permissionSource,
+-              })
+-              if (replacements === 0) {
+-                return yield* new ToolFailure({
+-                  message: `Could not find oldString in ${input.path}. It must match exactly, including whitespace and indentation.`,
++                const source = original.text
++                const ending = source.includes(crlf) ? crlf : "\n"
++                const oldString = input.oldString.replaceAll(crlf, "\n").replaceAll("\n", ending)
++                const newString = input.newString.replaceAll(crlf, "\n").replaceAll("\n", ending)
++                const exact = findOccurrences(source, oldString)
++                // These one-to-one mappings preserve offsets into the original source.
++                const unicode =
++                  exact.length > 0 ? [] : findOccurrences(normalizeForMatch(source), normalizeForMatch(oldString))
++                const trailing = exact.length > 0 || unicode.length > 0 ? [] : findLineOccurrences(source, oldString)
++                const matches = exact.length > 0 ? exact : unicode.length > 0 ? unicode : trailing
++                const replacements = matches.length
++                const replaced = (input.replaceAll === true ? matches : matches.slice(0, 1))
++                  .toReversed()
++                  .reduce(
++                    (content, match) => `${content.slice(0, match.start)}${newString}${content.slice(match.end)}`,
++                    source,
++                  )
++                const preview =
++                  replacements > 0 && (replacements === 1 || input.replaceAll === true)
++                    ? fileDiff(target.resource, source, replaced)
++                    : undefined
++                yield* permission.assert({
++                  action: "edit",
++                  resources: [target.resource],
++                  save: ["*"],
++                  metadata: preview ? { files: [preview] } : undefined,
++                  sessionID: context.sessionID,
++                  agent: context.agent,
++                  source: permissionSource,
+                 })
+-              }
+-              if (replacements > 1 && input.replaceAll !== true) {
+-                return yield* new ToolFailure({
+-                  message: `Found ${replacements} matches for oldString, but expected exactly one. Add more surrounding context to make oldString unique, or set replaceAll to true to replace every occurrence.`,
++                if (replacements === 0) {
++                  return yield* new ToolFailure({
++                    message: `Could not find oldString in ${input.path}. It must match exactly, including whitespace and indentation.`,
++                  })
++                }
++                if (replacements > 1 && input.replaceAll !== true) {
++                  return yield* new ToolFailure({
++                    message: `Found ${replacements} matches for oldString, but expected exactly one. Add more surrounding context to make oldString unique, or set replaceAll to true to replace every occurrence.`,
++                  })
++                }
++                const replacementBom = replaced.startsWith("\uFEFF")
++                const result = yield* fileMutation.write({
++                  target,
++                  content: Bom.join(replaced, original.bom || replacementBom),
+                 })
+-              }
+-              const replacementBom = replaced.startsWith("\uFEFF")
+-              const result = yield* fileMutation.write({
+-                target,
+-                content: Bom.join(replaced, original.bom || replacementBom),
+-              })
+-              const bom = original.bom || replacementBom
+-              const formatted = (yield* formatter.file(target.absolute))
+-                ? yield* FileMutation.syncTextBom(environment.files, target.absolute, bom)
+-                : (yield* FileMutation.readText(environment.files, target.absolute)).text
+-              return {
+-                files: [fileDiff(result.resource, source, formatted)],
+-                replacements,
+-              } satisfies Output
++                const bom = original.bom || replacementBom
++                const formatted = (yield* formatter.file(target.absolute))
++                  ? yield* FileMutation.syncTextBom(environment.files, target.absolute, bom)
++                  : (yield* FileMutation.readText(environment.files, target.absolute)).text
++                return {
++                  files: [fileDiff(result.resource, source, formatted)],
++                  replacements,
++                } satisfies Output
++              }).pipe(fileMutation.withLock([target.absolute]))
+             }).pipe(
+-              fileMutation.withLock([FileAccess.resolvePath(location.directory, input.path)]),
+               Effect.map((output) => ({
+                 output,
+                 content: `Edited ${output.files[0]?.file} (${output.replacements} replacement${output.replacements === 1 ? "" : "s"})`,
+diff --git a/packages/core/src/tool/plugin/glob.ts b/packages/core/src/tool/plugin/glob.ts
+index ebe9af112cdec75731991d1c21b255091ae0945a..6a2743a3d74440c199f1a4af8e5f0029b436fbd4 100644
+--- a/packages/core/src/tool/plugin/glob.ts
++++ b/packages/core/src/tool/plugin/glob.ts
+@@ -111,7 +111,12 @@ export const Plugin = {
+                     result.map((entry) =>
+                       FileSystem.Entry.make({
+                         ...entry,
+-                        path: RelativePath.make(path.relative(location.directory, path.resolve(root, entry.path))),
++                        path: RelativePath.make(
++                          path.relative(
++                            context.filesystemScope?.directory ?? location.directory,
++                            path.resolve(root, entry.path),
++                          ),
++                        ),
+                       }),
+                     ),
+                   ),
+@@ -121,7 +126,10 @@ export const Plugin = {
+               Effect.map((result) => ({
+                 output: result.entries,
+                 content: toModelContent(
+-                  result.entries.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })),
++                  result.entries.map((entry) => ({
++                    ...entry,
++                    path: path.resolve(context.filesystemScope?.directory ?? location.directory, entry.path),
++                  })),
+                   result.truncated,
+                 ),
+                 metadata: { count: result.entries.length, truncated: result.truncated },
+diff --git a/packages/core/src/tool/plugin/grep.ts b/packages/core/src/tool/plugin/grep.ts
+index e13466a37e12033dfbb0b759bb977bbe2eabbc12..0f573a7733ae2231dae7360e5a48a8a454b805af 100644
+--- a/packages/core/src/tool/plugin/grep.ts
++++ b/packages/core/src/tool/plugin/grep.ts
+@@ -135,7 +135,10 @@ export const Plugin = {
+                         entry: FileSystem.Entry.make({
+                           ...match.entry,
+                           path: RelativePath.make(
+-                            path.relative(location.directory, path.resolve(cwd, match.entry.path)),
++                            path.relative(
++                              context.filesystemScope?.directory ?? location.directory,
++                              path.resolve(cwd, match.entry.path),
++                            ),
+                           ),
+                         }),
+                       }),
+@@ -149,7 +152,10 @@ export const Plugin = {
+                 content: toModelContent(
+                   result.matches.map((match) => ({
+                     ...match,
+-                    entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
++                    entry: {
++                      ...match.entry,
++                      path: path.resolve(context.filesystemScope?.directory ?? location.directory, match.entry.path),
++                    },
+                   })),
+                   result.truncated,
+                 ),
+diff --git a/packages/core/src/tool/plugin/patch.ts b/packages/core/src/tool/plugin/patch.ts
+index 30b3ea7d9c72a369f1bc141ec46e3af73780fb36..ab9cb7da40946459d26cd32ae1f5564167e6d83c 100644
+--- a/packages/core/src/tool/plugin/patch.ts
++++ b/packages/core/src/tool/plugin/patch.ts
+@@ -87,9 +87,9 @@ export const Plugin = {
+             const parsed = Patch.parse(input.patchText)
+             const lockTargets = Result.isSuccess(parsed)
+               ? parsed.success.flatMap((hunk) => [
+-                  FileAccess.resolvePath(location.directory, hunk.path),
++                  FileAccess.resolvePath(context.filesystemScope?.directory ?? location.directory, hunk.path),
+                   ...(hunk.type === "update" && hunk.movePath
+-                    ? [FileAccess.resolvePath(location.directory, hunk.movePath)]
++                    ? [FileAccess.resolvePath(context.filesystemScope?.directory ?? location.directory, hunk.movePath)]
+                     : []),
+                 ])
+               : []
+diff --git a/packages/core/src/tool/plugin/read.ts b/packages/core/src/tool/plugin/read.ts
+index 1259dc81f8eb04de0389edc5ab831ea92e40125c..f5101b3e0ef1712a258b87d44a8e7f428496943f 100644
+--- a/packages/core/src/tool/plugin/read.ts
++++ b/packages/core/src/tool/plugin/read.ts
+@@ -7,6 +7,7 @@ import { Effect, Schema } from "effect"
+ import { FSUtil } from "@opencode/util/fs-util"
+ import { Location } from "../../location.js"
+ import { FileAccess } from "../../file-access.js"
++import { FilesystemScope } from "../../filesystem-scope.js"
+ import { SessionInstructions } from "../../session/instructions.js"
+ import { AbsolutePath } from "../../schema.js"
+ import { ReadToolFileSystem } from "../read-filesystem.js"
+@@ -87,7 +88,13 @@ export const Plugin = {
+               yield* Effect.gen(function* () {
+                 if (result.target.externalDirectory !== undefined) return
+                 const resolved = yield* fs.resolve(result.target.absolute)
+-                const root = yield* fs.resolve(location.directory)
++                const owner = yield* FilesystemScope.boundary(location)
++                const boundary =
++                  context.filesystemScope && !FSUtil.contains(owner.directory, resolved)
++                    ? owner.project.directory
++                    : owner.directory
++                const root = yield* fs.resolve(boundary)
++                if (context.filesystemScope && !FSUtil.contains(root, resolved)) return
+                 // up() searches its stop directory, so the Location-root AGENTS.md (already
+                 // supplied by core initial instructions) is dropped by the dirname filter.
+                 const discovered = yield* fs.up({
+@@ -96,7 +103,7 @@ export const Plugin = {
+                   stop: root,
+                 })
+                 const candidates = (yield* Effect.forEach(discovered, fs.resolve)).filter(
+-                  (file) => dirname(file) !== root,
++                  (file) => dirname(file) !== root && (!context.filesystemScope || FSUtil.contains(root, file)),
+                 )
+                 if (candidates.length === 0) return
+                 yield* sessionInstructions.load({ sessionID: context.sessionID, paths: candidates })
+diff --git a/packages/core/src/tool/plugin/shell.ts b/packages/core/src/tool/plugin/shell.ts
+index a5abb1d7cd4b3c2a0214f7e0c722d218cd12a03c..51f4c6e086482c6bf5269c67976e4054063cafe9 100644
+--- a/packages/core/src/tool/plugin/shell.ts
++++ b/packages/core/src/tool/plugin/shell.ts
+@@ -199,7 +199,7 @@ export const Plugin = {
+               const info = yield* shell.create(
+                 {
+                   command: input.command,
+-                  cwd: input.workdir,
++                  cwd: input.workdir ?? context.filesystemScope?.directory,
+                   timeout,
+                   shell: yield* compatibleShell,
+                   metadata: { sessionID: context.sessionID },
+diff --git a/packages/core/test/file-access.test.ts b/packages/core/test/file-access.test.ts
+index 7d7497b434f91a69ca471e4b42434644d6071fbf..43618163a56041d2368d11409ea24b9d238ce39d 100644
+--- a/packages/core/test/file-access.test.ts
++++ b/packages/core/test/file-access.test.ts
+@@ -3,6 +3,8 @@ import fs from "fs/promises"
+ import path from "path"
+ import { Effect } from "effect"
+ import { FileAccess } from "@opencode/core/file-access"
++import { FilesystemScope } from "@opencode/core/filesystem-scope"
++import { Project } from "@opencode/core/project"
+ import { Location } from "@opencode/core/location"
+ import { Permission } from "@opencode/core/permission"
+ import { Session } from "@opencode/core/session"
+@@ -45,6 +47,81 @@ function provide(requests: Permission.AssertInput[], denied?: string) {
+   )
+ }
+ 
++describe("FileAccess invocation scope", () => {
++  it.live("isolates concurrent owner paths and preserves legacy external resources and sources", () => {
++    const requests: Permission.AssertInput[] = []
++    return Effect.gen(function* () {
++      const access = yield* FileAccess.Service
++      const location = yield* Location.Service
++      const owners = ["owner", "peer"].map((name) => {
++        const directory = path.join(location.directory, name)
++        return Object.freeze({ directory, project: Object.freeze({ id: Project.ID.make(name), directory }) })
++      })
++      yield* Effect.promise(() => Promise.all(owners.map((owner) => fs.mkdir(owner.directory))))
++      const results = yield* Effect.forEach(
++        owners,
++        (owner) =>
++          Effect.gen(function* () {
++            const own = yield* access.authorizeRead("./notes.txt", invocation)
++            yield* Effect.yieldNow
++            const peer = yield* access.authorizeRead(
++              `../${owner === owners[0] ? "peer" : "owner"}/notes.txt`,
++              invocation,
++            )
++            expect(own.absolute).toBe(AbsolutePath.make(path.join(owner.directory, "notes.txt")))
++            expect(own.resource).toBe("notes.txt")
++            expect(own.externalDirectory).toBeUndefined()
++            expect(peer.resource).toBe(slash(peer.absolute))
++            expect(peer.externalDirectory).toEqual({
++              action: "external_directory",
++              directory: AbsolutePath.make(path.dirname(peer.absolute)),
++              resource: slash(path.join(path.dirname(peer.absolute), "*")),
++              save: slash(path.join(path.dirname(peer.absolute), "*")),
++            })
++            return own.absolute
++          }).pipe(Effect.provideService(FilesystemScope.Current, owner)),
++        { concurrency: "unbounded" },
++      )
++      expect(new Set(results).size).toBe(2)
++      expect(requests.filter((request) => request.action === "external_directory")).toHaveLength(2)
++      for (const request of requests)
++        expect(request).toMatchObject({
++          sessionID: invocation.sessionID,
++          agent: invocation.agent,
++          source: { type: "tool", messageID: invocation.messageID, id: invocation.id },
++        })
++      expect((yield* access.resolve({ path: "peer/notes.txt" })).externalDirectory).toBeUndefined()
++      expect((yield* access.resolve({ path: "notes.txt" })).absolute).toBe(
++        AbsolutePath.make(path.join(location.directory, "notes.txt")),
++      )
++    }).pipe(provide(requests))
++  })
++
++  it.live("retains original project-relative and lexical symlink classification", () => {
++    const requests: Permission.AssertInput[] = []
++    return Effect.gen(function* () {
++      const access = yield* FileAccess.Service
++      const location = yield* Location.Service
++      const project = path.join(location.directory, "original")
++      const directory = path.join(project, "nested")
++      const external = yield* tmpdirScoped()
++      yield* Effect.promise(async () => {
++        await fs.mkdir(directory, { recursive: true })
++        await fs.symlink(external.path, path.join(directory, "link"), "dir")
++      })
++      const owner = { directory, project: { id: Project.ID.make("original"), directory: project } }
++      yield* Effect.gen(function* () {
++        expect(yield* access.resolve({ path: "../README.md" })).toEqual({
++          absolute: AbsolutePath.make(path.join(project, "README.md")),
++          resource: "../README.md",
++        })
++        expect((yield* access.resolve({ path: "link/notes.txt" })).externalDirectory).toBeUndefined()
++        expect((yield* access.resolve({ path: "../../peer/notes.txt", kind: "file" })).externalDirectory).toBeDefined()
++      }).pipe(Effect.provideService(FilesystemScope.Current, owner))
++    }).pipe(provide(requests))
++  })
++})
++
+ describe("FileAccess.authorizeRead", () => {
+   it.live("returns an absolute target and preserves invocation identity on the read assertion", () => {
+     const requests: Permission.AssertInput[] = []
+diff --git a/packages/core/test/formatter.test.ts b/packages/core/test/formatter.test.ts
+index 2d03c3620ef61cf7320dccf3736066886fb754b4..f39ec9bff922f94451d3769601edb80206612802 100644
+--- a/packages/core/test/formatter.test.ts
++++ b/packages/core/test/formatter.test.ts
+@@ -13,6 +13,8 @@ import { Info } from "@opencode/schema/config"
+ import { Global } from "@opencode/util/global"
+ import { LayerNode } from "@opencode/util/effect/layer-node"
+ import { Formatter } from "../src/formatter"
++import { FilesystemScope } from "@opencode/core/filesystem-scope"
++import { Project } from "@opencode/core/project"
+ import { Location } from "../src/location"
+ import { tempGlobalLayer } from "./fixture/global"
+ import { offlineModels } from "./fixture/models"
+@@ -60,6 +62,50 @@ function withFormatter<A, E, R>(
+ }
+ 
+ describe("Formatter", () => {
++  it.live("invocation scopes isolate command discovery caches and formatter cwd", () =>
++    withFormatter(false, (formatter, directory) =>
++      Effect.gen(function* () {
++        const owners = ["owner", "peer"].map((name) => ({
++          directory: path.join(directory, name),
++          project: { id: Project.ID.make(name), directory: path.join(directory, name) },
++        }))
++        yield* Effect.promise(() => Promise.all(owners.map((owner) => fs.mkdir(owner.directory))))
++        const discoveries: string[] = []
++        yield* formatter.transform((editor) =>
++          editor.set({
++            name: "scoped",
++            extensions: [".scope"],
++            enabled: Effect.gen(function* () {
++              const owner = yield* FilesystemScope.Current
++              if (!owner) return false
++              discoveries.push(owner.directory)
++              return [
++                process.execPath,
++                "-e",
++                `require('fs').writeFileSync(process.argv.at(-1), ${JSON.stringify(owner.directory)} + '|' + process.cwd())`,
++                "$FILE",
++              ]
++            }),
++          }),
++        )
++        for (const repeat of [0, 1]) {
++          yield* Effect.forEach(
++            owners,
++            (owner) =>
++              Effect.gen(function* () {
++                const file = path.join(owner.directory, `${repeat}.scope`)
++                expect(yield* formatter.file(file)).toBe(true)
++                expect(yield* Effect.promise(() => fs.readFile(file, "utf8"))).toBe(
++                  `${owner.directory}|${owner.directory}`,
++                )
++              }).pipe(Effect.provideService(FilesystemScope.Current, owner)),
++            { concurrency: "unbounded" },
++          )
++        }
++        expect(discoveries.sort()).toEqual(owners.map((owner) => owner.directory).sort())
++      }),
++    ),
++  )
+   ;[
+     { file: "test.match", extension: ".match", matches: true },
+     { file: "test.other", extension: ".match", matches: false },
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+index e9a0f96ed5ea0c3395a81319514fb65c4597cf5b..a2cc77aa41476f06dfaa8373cb5de2820c1fd904 100644
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -4574,6 +4574,10 @@ describe("SessionRunnerLLM", () => {
+     expect(exit._tag).toBe("Failure")
+     if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+     expect(s.requests).toHaveLength(1)
++    const execution = yield* SessionExecution.Service
++    yield* execution.awaitIdle(sessionID)
++    expect(yield* execution.isActive(sessionID)).toBe(false)
++    expect(yield* execution.active).not.toContain(sessionID)
+     expect(yield* s.context).toMatchObject([
+       Expected.user("Call declined"),
+       Expected.assistant({}, [
+diff --git a/packages/core/test/tool-registry.test.ts b/packages/core/test/tool-registry.test.ts
+index 5fb933b2a74cc2cd109dea588a73f1978b89a0b2..e7e7acf05537a513482b6e7fc3f086af4fdcbdad 100644
+--- a/packages/core/test/tool-registry.test.ts
++++ b/packages/core/test/tool-registry.test.ts
+@@ -1,4 +1,10 @@
+ import { describe, expect } from "bun:test"
++import fs from "fs/promises"
++import path from "path"
++import { FilesystemScope } from "@opencode/core/filesystem-scope"
++import { Project } from "@opencode/core/project"
++import { AbsolutePath } from "@opencode/core/schema"
++import { tmpdirScoped } from "./fixture/tmpdir"
+ import { Agent } from "@opencode/core/agent"
+ import type { Permission } from "@opencode/core/permission"
+ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+@@ -37,7 +43,7 @@ const imageStore = Layer.mock(Image.Service, {
+     })
+   },
+ })
+-const registryLayer = AppNodeBuilder.build(LayerNode.group([Tool.node, PluginHooks.node]), [
++const registryLayer = AppNodeBuilder.build(LayerNode.group([Tool.node, PluginHooks.node, Project.node]), [
+   Image.node.replace(imageStore),
+ ])
+ const it = testEffect(registryLayer)
+@@ -73,6 +79,154 @@ const transform = (service: Tool.Interface, tools: Readonly<Record<string, Info>
+     Object.entries(tools).forEach(([name, tool]) => editor.add({ ...tool, name, options: options ?? tool.options })),
+   )
+ 
++describe("Tool invocation filesystem scope", () => {
++  for (const resolveProject of [false, true]) {
++    for (const codemode of [false, true]) {
++      it.live(
++        `${resolveProject ? "fresh directory-only" : "explicit registered project"} ${codemode ? "Code Mode leaf" : "direct"} carries frozen concurrent owner contexts without accepting model scope`,
++        () =>
++          Effect.gen(function* () {
++            const tmp = yield* tmpdirScoped()
++            const projects = yield* Project.Service
++            const owners = yield* Effect.forEach(["owner", "peer"], (name) =>
++              Effect.gen(function* () {
++                const directory = AbsolutePath.make(path.join(tmp.path, name))
++                yield* Effect.promise(() => fs.mkdir(directory))
++                const project = yield* projects.resolve(directory, { persist: !resolveProject })
++                return { directory, project: { id: project.id, directory: project.directory } }
++              }),
++            )
++            const service = yield* Tool.Service
++            const hooks = yield* PluginHooks.Service
++            const registration = yield* hooks.register("tool", "execute.before", (event) =>
++              Effect.sync(() => {
++                expect(event.filesystemScopeVersion).toBe(1)
++                expect(event.filesystemScopeProjectResolution).toBe(1)
++                if (event.tool === "execute") return
++                const owner = event.sessionID === Session.ID.make("ses_peer") ? owners[1] : owners[0]
++                event.filesystemScope = resolveProject ? { directory: `${owner.directory}/.` } : owner
++              }),
++            )
++            yield* service.transform((editor) =>
++              editor.add({
++                name: "owner",
++                description: "Observe invocation scope",
++                input: Schema.Unknown,
++                options: { codemode },
++                output: Schema.String,
++                execute: (_input, context) =>
++                  Effect.gen(function* () {
++                    const before = yield* FilesystemScope.Current
++                    yield* Effect.yieldNow
++                    const after = yield* FilesystemScope.Current
++                    expect(after).toBe(before)
++                    expect(context.filesystemScope).toBe(before)
++                    if (before) {
++                      expect(Object.isFrozen(before)).toBe(true)
++                      expect(Object.isFrozen(before.project)).toBe(true)
++                    }
++                    return { output: before?.directory ?? "unscoped" }
++                  }),
++              }),
++            )
++            const invoke = (sessionID: Session.ID) =>
++              executeTool(service, {
++                ...call("owner"),
++                sessionID,
++                call: {
++                  type: "tool-call",
++                  name: codemode ? "execute" : "owner",
++                  id: sessionID,
++                  input: codemode
++                    ? { code: 'return await tools.owner({filesystemScope: {directory: "/"}})' }
++                    : { filesystemScope: { directory: "/" } },
++                },
++              })
++            if (resolveProject) {
++              const registered = (yield* projects.list()).map((project) => project.id)
++              for (const owner of owners) expect(registered).not.toContain(owner.project.id)
++            }
++            const results = yield* Effect.all([invoke(sessionID), invoke(Session.ID.make("ses_peer"))], {
++              concurrency: "unbounded",
++            })
++            for (const [index, result] of results.entries()) {
++              expect(result.status).toBe("completed")
++              expect(result.content).toEqual([{ type: "text", text: owners[index].directory }])
++            }
++            const registered = (yield* projects.list()).map((project) => project.id)
++            for (const owner of owners) expect(registered).toContain(owner.project.id)
++            expect(yield* FilesystemScope.Current).toBeUndefined()
++            yield* registration.dispose
++            expect((yield* invoke(sessionID)).content).toEqual([{ type: "text", text: "unscoped" }])
++          }),
++      )
++    }
++  }
++
++  for (const codemode of [false, true]) {
++    it.live(
++      `${codemode ? "Code Mode leaf" : "direct"} rejects malformed and mismatched owner scopes before executor IO`,
++      () =>
++        Effect.gen(function* () {
++          const tmp = yield* tmpdirScoped()
++          const projects = yield* Project.Service
++          const project = yield* projects.resolve(AbsolutePath.make(tmp.path), { persist: false })
++          const service = yield* Tool.Service
++          const hooks = yield* PluginHooks.Service
++          let executions = 0
++          yield* service.transform((editor) =>
++            editor.add({
++              name: "owner",
++              description: "Must not execute",
++              input: Schema.Unknown,
++              options: { codemode },
++              execute: () =>
++                Effect.sync(() => {
++                  executions++
++                  return { content: "unexpected" }
++                }),
++            }),
++          )
++          const values: unknown[] = [
++            undefined,
++            null,
++            {},
++            "owner",
++            { directory: "relative", project },
++            { directory: tmp.path, project: { id: "wrong", directory: tmp.path } },
++            { directory: tmp.path, project: { id: project.id, directory: path.dirname(tmp.path) } },
++            { directory: path.join(tmp.path, "missing"), project },
++            { directory: tmp.path + "\0", project },
++            { directory: tmp.path, project: undefined },
++            { directory: tmp.path, project: null },
++            { directory: tmp.path, project: {} },
++          ]
++          const registered = (yield* projects.list()).map((project) => project.id)
++          for (const value of values) {
++            const registration = yield* hooks.register("tool", "execute.before", (event) =>
++              Effect.sync(() => {
++                if (event.tool === "owner") event.filesystemScope = value as Tool.FilesystemScope
++              }),
++            )
++            const result = yield* executeTool(service, {
++              ...call("owner"),
++              call: {
++                type: "tool-call",
++                id: "invalid",
++                name: codemode ? "execute" : "owner",
++                input: codemode ? { code: "return await tools.owner({})" } : {},
++              },
++            })
++            expect(codemode ? result.metadata?.error : result.status === "error").toBe(true)
++            yield* registration.dispose
++          }
++          expect(executions).toBe(0)
++          expect((yield* projects.list()).map((project) => project.id)).toEqual(registered)
++        }),
++    )
++  }
++})
++
+ describe("Tool", () => {
+   it.effect("reads the current editor tools by effective name", () =>
+     Effect.gen(function* () {
+diff --git a/packages/core/test/tool-shell.test.ts b/packages/core/test/tool-shell.test.ts
+index faa6c1c9a479a36354a216f71ceb256d07688e58..fea047d7b51477b8924a309a6bf0224d5e9cc713 100644
+--- a/packages/core/test/tool-shell.test.ts
++++ b/packages/core/test/tool-shell.test.ts
+@@ -31,6 +31,19 @@ import { SessionStore } from "@opencode/core/session/store"
+ import { Permission } from "@opencode/core/permission"
+ import { PermissionSaved } from "@opencode/core/permission/saved"
+ import { Plugin } from "@opencode/core/plugin"
++import { PluginHooks } from "@opencode/core/plugin/hooks"
++import { Project } from "@opencode/core/project"
++import { ReadTool } from "@opencode/core/tool/plugin/read"
++import { ReadToolFileSystem } from "@opencode/core/tool/read-filesystem"
++import { SessionInstructions } from "@opencode/core/session/instructions"
++import { EditTool } from "@opencode/core/tool/plugin/edit"
++import { WriteTool } from "@opencode/core/tool/plugin/write"
++import { PatchTool } from "@opencode/core/tool/plugin/patch"
++import { GlobTool } from "@opencode/core/tool/plugin/glob"
++import { GrepTool } from "@opencode/core/tool/plugin/grep"
++import { FileMutation } from "@opencode/core/file-mutation"
++import { Formatter } from "@opencode/core/formatter"
++import { Ripgrep } from "@opencode/core/ripgrep"
+ import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
+ import { Shell } from "@opencode/core/shell"
+ import { ShellSelect } from "@opencode/core/shell/select"
+@@ -171,6 +184,50 @@ const permissionIt = testEffect(
+   ]),
+ )
+ 
++const ownerActivations: string[] = []
++const ownerPluginSupervisor = makeLocationNode({
++  name: "test/owner-tool-plugins",
++  layer: Layer.effectDiscard(
++    Effect.gen(function* () {
++      const location = yield* Location.Service
++      ownerActivations.push(location.directory)
++      yield* registerToolPlugin(ShellTool.Plugin)
++      yield* registerToolPlugin(ReadTool.Plugin)
++      yield* registerToolPlugin(EditTool.Plugin)
++      yield* registerToolPlugin(WriteTool.Plugin)
++      yield* registerToolPlugin(PatchTool.Plugin)
++      yield* registerToolPlugin(GlobTool.Plugin)
++      yield* registerToolPlugin(GrepTool.Plugin)
++    }),
++  ),
++  deps: [
++    Config.node,
++    Environment.node,
++    FileAccess.node,
++    Permission.node,
++    Session.node,
++    Job.node,
++    Shell.node,
++    ShellSelect.node,
++    Tool.node,
++    ReadToolFileSystem.node,
++    SessionInstructions.node,
++    FSUtil.node,
++    Location.node,
++    FileMutation.node,
++    Formatter.node,
++    Ripgrep.node,
++  ],
++})
++const ownerIt = testEffect(
++  AppNodeBuilder.build(LayerNode.group([nodes, PermissionSaved.node, Project.node, SessionStore.node]), [
++    SessionExecution.node.replace(executionNode),
++    Global.node.replace(tempGlobalLayer),
++    PluginSupervisor.node.replace(ownerPluginSupervisor),
++    offlineModels,
++  ]),
++)
++
+ const call = (input: typeof ShellTool.Input.Type, id = "call-shell") => ({
+   sessionID,
+   ...toolIdentity,
+@@ -288,6 +345,379 @@ const runPermissionCommand = (
+     return { exit, requests }
+   }).pipe(Effect.scoped, Effect.timeout(Duration.seconds(5)))
+ 
++const peerSessionID = Session.ID.make("ses_scope_peer")
++const ownerCall = (
++  name: string,
++  input: unknown,
++  codemode = false,
++  owner = sessionID,
++): Parameters<Tool.Snapshot["execute"]>[0] => ({
++  sessionID: owner,
++  ...toolIdentity,
++  call: {
++    type: "tool-call",
++    id: `call-owner-${name}`,
++    name: codemode ? "execute" : name,
++    input: codemode ? { code: `return await tools.${name}(${JSON.stringify(input)})` } : input,
++  },
++})
++
++const withOwnerScopes = <A, E, R>(
++  body: (
++    registry: Tool.Interface,
++    owners: readonly Tool.FilesystemScope[],
++    registration: { readonly dispose: Effect.Effect<void> },
++  ) => Effect.Effect<A, E, R>,
++) =>
++  Effect.gen(function* () {
++    const tmp = yield* tmpdirScoped()
++    const sessions = yield* Session.Service
++    ownerActivations.length = 0
++    yield* Effect.promise(async () => {
++      for (const name of ["owner", "peer"]) {
++        await fs.mkdir(path.join(tmp.path, name))
++        await fs.writeFile(path.join(tmp.path, name, "notes.txt"), name)
++        await fs.writeFile(path.join(tmp.path, name, ".env"), "SYNTHETIC_TEST_VALUE=1")
++      }
++    })
++    return yield* withSession(tmp.path, (registry) =>
++      Effect.gen(function* () {
++        const projects = yield* Project.Service
++        const owners = yield* Effect.forEach(["owner", "peer"], (name) =>
++          Effect.gen(function* () {
++            const directory = AbsolutePath.make(path.join(tmp.path, name))
++            const project = yield* projects.resolve(directory, { persist: false })
++            return { directory, project: { id: project.id, directory: project.directory } }
++          }),
++        )
++        yield* sessions.create({
++          id: peerSessionID,
++          title: "peer",
++          model: sessionModel,
++          location: Location.Ref.make({ directory: AbsolutePath.make(tmp.path) }),
++        })
++        const selection = yield* ShellSelect.Service
++        yield* selection.transform((editor) => editor.configure("sh"))
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) =>
++          editor.update(toolIdentity.agent, (agent) => {
++            agent.permissions = [...Agent.Info.default(toolIdentity.agent).permissions]
++          }),
++        )
++        const hooks = yield* PluginHooks.Service
++        const registration = yield* hooks.register("tool", "execute.before", (event) =>
++          Effect.sync(() => {
++            expect(event.filesystemScopeVersion).toBe(1)
++            expect(event.filesystemScopeProjectResolution).toBe(1)
++            const owner = event.sessionID === peerSessionID ? owners[1] : owners[0]
++            event.filesystemScope = { directory: owner.directory }
++          }),
++        )
++        const registered = (yield* projects.list()).map((project) => project.id)
++        for (const owner of owners) expect(registered).not.toContain(owner.project.id)
++        const result = yield* body(registry, owners, registration)
++        expect(ownerActivations).toEqual([tmp.path])
++        return result
++      }),
++    )
++  })
++
++const ownerRequest = <R = never>(
++  registry: Tool.Interface,
++  input: Parameters<Tool.Snapshot["execute"]>[0],
++  reply?: Permission.Reply | "cancel",
++  beforeReply?: Effect.Effect<unknown, never, R>,
++) =>
++  Effect.gen(function* () {
++    const bus = yield* Bus.Service
++    const permission = yield* Permission.Service
++    const queue = yield* Queue.unbounded<Permission.Request>()
++    yield* bus.subscribe(Permission.Event.Asked).pipe(
++      Stream.runForEach((event) => Queue.offer(queue, event.data)),
++      Effect.forkScoped({ startImmediately: true }),
++    )
++    const fiber = yield* executeTool(registry, input).pipe(Effect.forkScoped)
++    const request = reply ? yield* Queue.take(queue) : undefined
++    if (request) {
++      expect(request.source).toEqual({ type: "tool", messageID: input.messageID, id: input.call.id })
++      expect(request.sessionID).toBe(input.sessionID)
++      if (beforeReply) yield* beforeReply
++      if (reply === "cancel") yield* Fiber.interrupt(fiber)
++      else yield* permission.reply({ requestID: request.id, reply: reply! })
++    }
++    const exit = yield* Fiber.await(fiber)
++    expect(yield* permission.list()).toEqual([])
++    expect(yield* Queue.size(queue)).toBe(0)
++    return { exit, request }
++  }).pipe(Effect.scoped, Effect.timeout("5 seconds"))
++
++describe("Native invocation owner tools", () => {
++  const test = isWindows || !Bun.which("sh") ? ownerIt.live.skip : ownerIt.live
++
++  test("concurrent owners read their own relative files and pwd; unscoped calls keep the shared Location", () =>
++    withOwnerScopes((registry, owners, registration) =>
++      Effect.gen(function* () {
++        const results = yield* Effect.forEach(
++          [sessionID, peerSessionID],
++          (owner) =>
++            Effect.all(
++              [
++                executeTool(registry, ownerCall("read", { path: "notes.txt" }, false, owner)),
++                executeTool(registry, ownerCall("shell", { command: "pwd" }, false, owner)),
++              ],
++              { concurrency: "unbounded" },
++            ),
++          { concurrency: "unbounded" },
++        )
++        for (const [index, result] of results.entries()) {
++          expect(result[0]).toMatchObject({
++            status: "completed",
++            content: [{ type: "text", text: `Read file notes.txt, lines 1-1\n1: ${index === 0 ? "owner" : "peer"}` }],
++          })
++          expect(result[1]).toMatchObject({
++            status: "completed",
++            metadata: { exit: 0 },
++            content: [{ type: "text", text: `${owners[index].directory}\n` }, { type: "text" }],
++          })
++        }
++        yield* registration.dispose
++        const unscoped = yield* executeTool(registry, ownerCall("shell", { command: "pwd" }))
++        expect(unscoped.content?.[0]).toEqual({ type: "text", text: `${path.dirname(owners[0].directory)}\n` })
++        expect((yield* executeTool(registry, ownerCall("read", { path: "peer/notes.txt" }))).status).toBe("completed")
++      }),
++    ))
++
++  for (const codemode of [false, true]) {
++    for (const scenario of ["read", "cwd", "cd"] as const) {
++      test(`${codemode ? "Code Mode" : "direct"} peer ${scenario} preserves external reject/once resources and never runs before approval`, () =>
++        withOwnerScopes((registry, owners) =>
++          Effect.gen(function* () {
++            if (codemode)
++              yield* registry.transform((editor) => {
++                for (const name of ["read", "shell"])
++                  editor.update(name, (tool) => {
++                    tool.options = { ...tool.options, codemode: true }
++                  })
++              })
++            const marker = path.join(owners[1].directory, "marker")
++            const input =
++              scenario === "read"
++                ? ownerCall("read", { path: "../peer/notes.txt" }, codemode)
++                : ownerCall(
++                    "shell",
++                    scenario === "cwd"
++                      ? { command: "pwd; printf reached > marker", workdir: owners[1].directory }
++                      : { command: "cd ../peer && pwd && printf reached > marker" },
++                    codemode,
++                  )
++            for (const reply of ["reject", "once"] as const) {
++              const result = yield* ownerRequest(
++                registry,
++                input,
++                reply,
++                Effect.gen(function* () {
++                  expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++                  const shell = yield* Shell.Service
++                  expect(yield* shell.list()).toEqual([])
++                }),
++              )
++              expect(result.request).toMatchObject({
++                action: "external_directory",
++                resources: [path.join(owners[1].directory, "*")],
++                save: [path.join(owners[1].directory, "*")],
++              })
++              if (reply === "reject") {
++                if (codemode)
++                  expect(result.exit).toMatchObject({ _tag: "Success", value: { metadata: { error: true } } })
++                else expect(Exit.isFailure(result.exit)).toBe(true)
++                expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++              } else {
++                expect(result.exit).toMatchObject({ _tag: "Success", value: { status: "completed" } })
++                if (Exit.isSuccess(result.exit))
++                  expect(JSON.stringify(result.exit.value.content)).toContain(
++                    scenario === "read" ? "peer" : owners[1].directory,
++                  )
++                if (scenario !== "read") expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("reached")
++              }
++            }
++            const saved = yield* PermissionSaved.Service
++            expect(yield* saved.list()).toEqual([])
++          }),
++        ))
++    }
++  }
++
++  test("final shell hooks cannot move cwd beyond the original owner without approval, and cancellation prevents spawn", () =>
++    withOwnerScopes((registry, owners) =>
++      Effect.gen(function* () {
++        const hooks = yield* PluginHooks.Service
++        yield* hooks.register("shell", "create.before", (event) =>
++          Effect.sync(() => {
++            event.cwd = owners[1].directory
++            event.command = "printf reached > marker"
++          }),
++        )
++        const marker = path.join(owners[1].directory, "marker")
++        const result = yield* ownerRequest(registry, ownerCall("shell", { command: "pwd" }), "cancel")
++        expect(result.request).toMatchObject({
++          action: "external_directory",
++          resources: [path.join(owners[1].directory, "*")],
++        })
++        expect(Exit.isFailure(result.exit)).toBe(true)
++        expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
++      }),
++    ))
++
++  test("always grants stay with the original project, while configured shell and file denies still win", () =>
++    withOwnerScopes((registry, owners) =>
++      Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) =>
++          editor.update(toolIdentity.agent, (agent) => {
++            agent.permissions = [
++              { action: "shell", resource: "*", effect: "ask" },
++              { action: "read", resource: "*", effect: "allow" },
++            ]
++          }),
++        )
++        const saved = yield* PermissionSaved.Service
++        const own = yield* ownerRequest(registry, ownerCall("shell", { command: "pwd" }), "always")
++        expect(own.request).toMatchObject({ action: "shell", resources: ["pwd"], save: ["pwd *"] })
++        expect((yield* saved.list({ projectID: owners[0].project.id })).map((rule) => rule.resource)).toEqual(["pwd *"])
++        expect(yield* saved.list({ projectID: owners[1].project.id })).toEqual([])
++        const location = yield* Location.Service
++        expect(yield* saved.list({ projectID: location.project.id })).toEqual([])
++        expect((yield* ownerRequest(registry, ownerCall("shell", { command: "pwd" }))).request).toBeUndefined()
++        expect(
++          (yield* ownerRequest(registry, ownerCall("shell", { command: "pwd" }, false, peerSessionID), "once")).request
++            ?.action,
++        ).toBe("shell")
++        yield* agents.transform((editor) =>
++          editor.update(toolIdentity.agent, (agent) => {
++            agent.permissions = [
++              { action: "shell", resource: "*", effect: "allow" },
++              { action: "shell", resource: "pwd", effect: "deny" },
++              { action: "read", resource: "*", effect: "allow" },
++              { action: "read", resource: "notes.txt", effect: "deny" },
++              { action: "read", resource: ".env", effect: "deny" },
++              { action: "read", resource: path.join(owners[1].directory, "notes.txt"), effect: "deny" },
++            ]
++          }),
++        )
++        for (const input of [
++          ownerCall("shell", { command: "pwd" }),
++          ownerCall("read", { path: "notes.txt" }),
++          ownerCall("read", { path: path.join(owners[0].directory, "notes.txt") }),
++          ownerCall("read", { path: ".env" }),
++        ]) {
++          expect((yield* ownerRequest(registry, input)).exit).toMatchObject({
++            _tag: "Success",
++            value: { status: "error" },
++          })
++        }
++        expect(
++          (yield* ownerRequest(registry, ownerCall("read", { path: "../peer/notes.txt" }), "once")).exit,
++        ).toMatchObject({ _tag: "Success", value: { status: "error" } })
++      }),
++    ))
++
++  test("an always reply does not release a different owner's pending request", () =>
++    withOwnerScopes((registry, owners) =>
++      Effect.gen(function* () {
++        const agents = yield* Agent.Service
++        yield* agents.transform((editor) =>
++          editor.update(toolIdentity.agent, (agent) => {
++            agent.permissions = [{ action: "shell", resource: "*", effect: "ask" }]
++          }),
++        )
++        const bus = yield* Bus.Service
++        const permission = yield* Permission.Service
++        const queue = yield* Queue.unbounded<Permission.Request>()
++        yield* bus.subscribe(Permission.Event.Asked).pipe(
++          Stream.runForEach((event) => Queue.offer(queue, event.data)),
++          Effect.forkScoped({ startImmediately: true }),
++        )
++        const first = yield* executeTool(registry, ownerCall("shell", { command: "pwd" })).pipe(Effect.forkScoped)
++        const second = yield* executeTool(registry, ownerCall("shell", { command: "pwd" }, false, peerSessionID)).pipe(
++          Effect.forkScoped,
++        )
++        const requests = [yield* Queue.take(queue), yield* Queue.take(queue)]
++        const own = requests.find((request) => request.sessionID === sessionID)!
++        const peer = requests.find((request) => request.sessionID === peerSessionID)!
++        yield* permission.reply({ requestID: own.id, reply: "always" })
++        expect((yield* Fiber.join(first)).content?.[0]).toEqual({ type: "text", text: `${owners[0].directory}\n` })
++        expect(yield* permission.list()).toEqual([peer])
++        yield* permission.reply({ requestID: peer.id, reply: "once" })
++        expect((yield* Fiber.join(second)).content?.[0]).toEqual({ type: "text", text: `${owners[1].directory}\n` })
++        expect(yield* permission.list()).toEqual([])
++      }),
++    ))
++
++  test("default .env protection remains an ask under the owner boundary", () =>
++    withOwnerScopes((registry) =>
++      Effect.gen(function* () {
++        const result = yield* ownerRequest(registry, ownerCall("read", { path: ".env" }), "reject")
++        expect(result.request).toMatchObject({ action: "read", resources: [".env"], save: ["*"] })
++        expect(Exit.isFailure(result.exit)).toBe(true)
++      }),
++    ))
++
++  const searchTest = Bun.which("rg") ? test : ownerIt.live.skip
++  searchTest("native glob and grep default to the original owner and display its absolute paths", () =>
++    withOwnerScopes((registry, owners) =>
++      Effect.gen(function* () {
++        const glob = yield* executeTool(registry, ownerCall("glob", { pattern: "*.txt" }))
++        expect(glob.output.map((entry: { path: string }) => entry.path)).toEqual(["notes.txt"])
++        expect(JSON.stringify(glob.content)).toContain(path.join(owners[0].directory, "notes.txt"))
++        const grep = yield* executeTool(registry, ownerCall("grep", { pattern: "owner" }))
++        expect(grep.output).toMatchObject([{ entry: { path: "notes.txt" }, text: "owner" }])
++        expect(JSON.stringify(grep.content)).toContain(path.join(owners[0].directory, "notes.txt"))
++      }),
++    ),
++  )
++
++  test("write, edit, patch and discovered instructions use the same original owner", () =>
++    withOwnerScopes((registry, owners) =>
++      Effect.gen(function* () {
++        expect(
++          (yield* executeTool(registry, ownerCall("write", { path: "created.txt", content: "first" }))).output,
++        ).toMatchObject({ target: path.join(owners[0].directory, "created.txt"), resource: "created.txt" })
++        expect(
++          (yield* executeTool(
++            registry,
++            ownerCall("edit", { path: "created.txt", oldString: "first", newString: "second" }),
++          )).status,
++        ).toBe("completed")
++        expect(
++          (yield* executeTool(
++            registry,
++            ownerCall("patch", {
++              patchText: "*** Begin Patch\n*** Update File: created.txt\n@@\n-second\n+third\n*** End Patch",
++            }),
++          )).status,
++        ).toBe("completed")
++        expect(yield* Effect.promise(() => Bun.file(path.join(owners[0].directory, "created.txt")).text())).toBe(
++          "third\n",
++        )
++        expect(
++          yield* Effect.promise(() => Bun.file(path.join(path.dirname(owners[0].directory), "created.txt")).exists()),
++        ).toBe(false)
++        yield* Effect.promise(async () => {
++          await fs.writeFile(path.join(path.dirname(owners[0].directory), "AGENTS.md"), "TEAM_SENTINEL")
++          await fs.mkdir(path.join(owners[0].directory, "nested"))
++          await fs.writeFile(path.join(owners[0].directory, "nested", "AGENTS.md"), "OWNER_SENTINEL")
++          await fs.writeFile(path.join(owners[0].directory, "nested", "notes.txt"), "nested")
++        })
++        expect((yield* executeTool(registry, ownerCall("read", { path: "nested/notes.txt" }))).status).toBe("completed")
++        const store = yield* SessionStore.Service
++        const history = yield* store.context(sessionID)
++        const synthetics = history.filter((message) => message.type === "synthetic")
++        expect(JSON.stringify(synthetics)).toContain("OWNER_SENTINEL")
++        expect(JSON.stringify(synthetics)).not.toContain("TEAM_SENTINEL")
++      }),
++    ))
++})
++
+ // Directory cases still document inherited limitations; fixed scanner cases require matching behavior.
+ describe("ShellTool scanner permissions", () => {
+   const test = isWindows || !Bun.which("sh") ? permissionIt.live.skip : permissionIt.live
+diff --git a/packages/plugin/src/effect/tool.ts b/packages/plugin/src/effect/tool.ts
+index 1fd90a5113e39233f0ee051190907cfdf1ea668e..ec119e22be6cf3081d9b0476973f006a9dc0112a 100644
+--- a/packages/plugin/src/effect/tool.ts
++++ b/packages/plugin/src/effect/tool.ts
+@@ -19,6 +19,11 @@ export interface ToolEditor {
+ 
+ export interface ToolHooks {
+   readonly "execute.before": {
++    /** Advertised by native dispatch, not inferred from the installed SDK version. */
++    readonly filesystemScopeVersion?: 1
++    readonly filesystemScopeProjectResolution?: 1
++    /** Trusted hook only: admitted absolute owner directory; native resolves its project. An explicit project must match. Supplied undefined is invalid. */
++    filesystemScope?: Tool.FilesystemScopeInput
+     tool: string
+     readonly sessionID: Session.ID
+     readonly agent: Agent.ID
+diff --git a/packages/plugin/src/promise/tool.ts b/packages/plugin/src/promise/tool.ts
+index 729cb7e5493879b3be596a34f7f4c903b10ff4ba..6b93e7c23a42820e61467d435c3c442a0a1556dc 100644
+--- a/packages/plugin/src/promise/tool.ts
++++ b/packages/plugin/src/promise/tool.ts
+@@ -36,6 +36,11 @@ export interface ToolEditor {
+ 
+ interface ToolHooks {
+   readonly "execute.before": {
++    /** Advertised by native dispatch, not inferred from the installed SDK version. */
++    readonly filesystemScopeVersion?: 1
++    readonly filesystemScopeProjectResolution?: 1
++    /** Trusted hook only: admitted absolute owner directory; native resolves its project. An explicit project must match. Supplied undefined is invalid. */
++    filesystemScope?: Tool.FilesystemScopeInput
+     tool: string
+     readonly sessionID: Session.ID
+     readonly agent: Agent.ID
+diff --git a/packages/schema/src/tool.ts b/packages/schema/src/tool.ts
+index 06dec1c0c57c1a6c5809eae1bd61a89e1b9cd8c1..936b52f5b959fd7548d5dab6df6c805856a2d702 100644
+--- a/packages/schema/src/tool.ts
++++ b/packages/schema/src/tool.ts
+@@ -3,6 +3,7 @@ export * as Tool from "./tool.js"
+ import { Effect, JsonSchema, Schema } from "effect"
+ import type { StandardSchemaV1 } from "@standard-schema/spec"
+ import type { Agent } from "./agent.js"
++import type { Project } from "./project.js"
+ import type { Session } from "./session.js"
+ import type { SessionMessage } from "./session-message.js"
+ 
+@@ -11,7 +12,21 @@ export type Metadata = Readonly<Record<string, any>>
+ export const CallID = Schema.String.pipe(Schema.brand("Tool.CallID"))
+ export type CallID = typeof CallID.Type
+ 
++export interface FilesystemScope {
++  readonly directory: string
++  readonly project: {
++    readonly id: Project.ID
++    readonly directory: string
++  }
++}
++
++export interface FilesystemScopeInput {
++  readonly directory: string
++  readonly project?: FilesystemScope["project"]
++}
++
+ export interface Context {
++  readonly filesystemScope?: FilesystemScope
+   readonly sessionID: Session.ID
+   readonly agent: Agent.ID
+   readonly messageID: SessionMessage.ID
+diff --git a/packages/sdk/src/effect/tool.ts b/packages/sdk/src/effect/tool.ts
+index 6e6eb1d8885487580574b59c120daffe4bada363..d20e61aa511b23829ace1ffac894c71a23b996f9 100644
+--- a/packages/sdk/src/effect/tool.ts
++++ b/packages/sdk/src/effect/tool.ts
+@@ -1,3 +1,3 @@
+ export { RegistrationError } from "@opencode/core/tool"
+ export { Error } from "@opencode/schema/tool"
+-export type { Context, Info } from "@opencode/schema/tool"
++export type { Context, FilesystemScope, FilesystemScopeInput, Info } from "@opencode/schema/tool"
+diff --git a/packages/sdk/src/tool.ts b/packages/sdk/src/tool.ts
+index 572c29ce1e2ff6aa77d26f990d55edcd1e0e3998..8a97ddb4aeee27d418feb218d8f62c98fcb7fc6c 100644
+--- a/packages/sdk/src/tool.ts
++++ b/packages/sdk/src/tool.ts
+@@ -1,3 +1,4 @@
+ export { RegistrationError } from "@opencode/core/tool"
+ export { Error } from "@opencode/schema/tool"
++export type { FilesystemScope, FilesystemScopeInput } from "@opencode/schema/tool"
+ export type { ToolContext as Context, Info } from "@opencode/plugin/promise/tool"

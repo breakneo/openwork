@@ -2,7 +2,8 @@ import { build } from "esbuild";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { isBuiltin } from "node:module";
+import { isBuiltin, createRequire } from "node:module";
+import { nativeSource, validateSourceReceipt } from "./packaged-native-runtime.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { NATIVE_PLUGIN_DEPENDENCIES, NATIVE_PLUGIN_VERSION, validateNativePluginManifest } from "./native-plugin.mjs";
@@ -51,9 +52,7 @@ export async function prepareNativePluginBundles({ outputDirectory, dependencyDi
     });
   }
   if (!await installed()) throw new Error("Native plugin build dependency verification failed.");
-  const sources = { "coworker-collaboration.js": COLLABORATION_PLUGIN, "coworker-browser.js": BROWSER_PLUGIN, "coworker-computer.js": COMPUTER_PLUGIN,
-    "coworker-group-documents.js": GROUP_DOCUMENT_PLUGIN, "progress-summary.js": PROGRESS_PLUGIN, "auto-memory.js": MEMORY_PLUGIN, "coworker-turn-roles.js": TURN_ROLES_PLUGIN,
-    "coworker-events.js": EVENT_PLUGIN, "coworker-abilities.js": ABILITIES_PLUGIN };
+  const sources = nativePluginSources();
   await mkdir(outputDirectory, { recursive: true });
   const entries = {};
   for (const [name, contents] of Object.entries(sources)) {
@@ -70,6 +69,44 @@ export async function prepareNativePluginBundles({ outputDirectory, dependencyDi
   await writeFile(path.join(outputDirectory, "manifest.json.tmp"), JSON.stringify(manifest, null, 2) + "\n");
   await rename(path.join(outputDirectory, "manifest.json.tmp"), path.join(outputDirectory, "manifest.json"));
   return { directory: outputDirectory, manifest };
+}
+
+export async function prepareNativeSourcePluginBundles({ sourceDirectory, outputDirectory, receipt }) {
+  validateSourceReceipt(receipt);
+  const require = createRequire(path.join(sourceDirectory, "packages/plugin/package.json"));
+  const packages = { effect: require.resolve("effect"), zod: require.resolve("zod") };
+  const resolver = { name: "matching-native-source-sdk", setup(plugin) {
+    plugin.onResolve({ filter: /^@opencode(?:-ai)?\/(plugin|schema)(\/.*)?$/ }, (args) => {
+      const match = /^@opencode(?:-ai)?\/(plugin|schema)(?:\/(.*))?$/.exec(args.path);
+      const relative = match[2] === "effect" ? "effect/index" : match[2] ?? "index";
+      if (relative.includes("..")) throw new Error("Invalid native SDK import.");
+      return { path: path.join(sourceDirectory, "packages", match[1], "dist", `${relative}.js`) };
+    });
+    plugin.onResolve({ filter: /^(effect|zod)$/ }, (args) => ({ path: packages[args.path] }));
+  } };
+  await mkdir(outputDirectory, { recursive: true });
+  const entries = {};
+  for (const [name, contents] of Object.entries(nativePluginSources())) {
+    const result = await build({ stdin: { contents, sourcefile: name, resolveDir: sourceDirectory, loader: "js" }, plugins: [resolver], bundle: true,
+      platform: "node", format: "esm", target: "node22", write: false, metafile: true, legalComments: "eof", minify: true, logLevel: "silent" });
+    if (Object.values(result.metafile.outputs).some((output) => output.imports.some((entry) => entry.external && !isBuiltin(entry.path)))) throw new Error(`Native plugin ${name} retained an external package import.`);
+    const bytes = result.outputFiles[0].contents;
+    const file = name.replace(/\.js$/, ".mjs");
+    await writeFile(path.join(outputDirectory, file), bytes);
+    entries[name] = { file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
+  }
+  const sourceBuild = { version: receipt.version, sha256: receipt.binary.sha256 };
+  const manifest = validateNativePluginManifest({ format: "coworker-native-source-plugins/v1", opencodeVersion: receipt.version,
+    executableSha256: receipt.binary.sha256, sdkSourceDiffSha256: nativeSource.patchSha256, sdkSha256: receipt.sdk.sha256,
+    dependencies: { "@opencode/plugin": nativeSource.sdkVersion, "@opencode/schema": nativeSource.sdkVersion }, entries }, sourceBuild);
+  await writeFile(path.join(outputDirectory, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
+export function nativePluginSources() {
+  return { "coworker-collaboration.js": COLLABORATION_PLUGIN, "coworker-browser.js": BROWSER_PLUGIN, "coworker-computer.js": COMPUTER_PLUGIN,
+    "coworker-group-documents.js": GROUP_DOCUMENT_PLUGIN, "progress-summary.js": PROGRESS_PLUGIN, "auto-memory.js": MEMORY_PLUGIN, "coworker-turn-roles.js": TURN_ROLES_PLUGIN,
+    "coworker-events.js": EVENT_PLUGIN, "coworker-abilities.js": ABILITIES_PLUGIN };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

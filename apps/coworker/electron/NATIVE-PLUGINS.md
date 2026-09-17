@@ -11,10 +11,45 @@ No real user profile or paid provider is used by the checks below.
 
 ## Build And Startup APIs
 
-The dev and packaging scripts dynamically import this **build-time-only** helper
-after the headless v2 and server builds, before bundling Electron main. Its memory
-plugin source imports the built headless v2 client, so a static helper import would
-break clean bootstrap. Use a dedicated dependency staging directory, not a coworker home:
+Packaging uses the checked-in `native-source.json` recipe and
+`patches/opencode-invocation-filesystem-scope.patch`, not the published beta engine.
+`node apps/coworker/scripts/build-native-source.mjs` fetches upstream commit
+`8520617ca86ba0acd883f7169324db2b3a3f2a59`, checks the patch SHA-256, applies it
+with Git's index checks, and requires the exact patched tree
+`31c9fde67b85d6bd1579d0b318c6c5431d789570`. Bun **1.4.2** must be on PATH.
+It installs the immutable source's frozen lockfile, builds schema/plugin/SDK,
+and compiles the host target with web UI and source maps excluded. x64 uses the
+upstream baseline target; no cross-target package is inferred from the host.
+
+The source/patch/target/toolchain-keyed `.native-source` cache lives under ignored
+sidecar staging. Reuse verifies the source tree, lockfile, all 354 SDK output files,
+package versions, executable header, byte count, SHA-256 and `--version`. Missing
+receipts, changed files or wrong toolchains fail, rather than selecting beta or
+another cached binary. Inspect and move aside an incomplete owned cache before
+retrying. No native release publication or private source directory is required.
+
+The CLI build patch includes `script/portable-paths.ts`. Bun otherwise folds
+CommonJS `__dirname`/`__filename` into absolute host paths in TypeScript,
+`@npmcli/run-script`, `@npmcli/arborist`, `write-file-atomic` and photon-node.
+The build plugin gives only those five dependency files lexical bindings to
+`import.meta.dirname`/`filename`, which resolve to Bun's compiled virtual
+filesystem. It does not replace paths with inert strings, relocate the build to
+a disguised directory, or alter the privacy gate. Photon retains its existing
+embedded WASM path. The compile regression extracts this helper from the pinned
+patch, proves the old compile retains paths, and verifies the corrected compile's
+virtual locations and embedded-file read after removing its source directory.
+
+`build:electron` builds the shared prerequisites before loading the plugin helper,
+then bundles all nine plugins against that source SDK, including compatibility
+for the older `@opencode-ai` import namespace. Production identity is
+`0.0.0-local-coworker-8520617-504f1d081f9b`, a stable source-build version accepted
+by the explicit `native-2` profile, not a registry release. The build receipt records
+the actual target's executable and SDK hashes; unbuilt targets have no invented
+hashes. The upstream MIT license is retained as `electron-dist/OPENCODE-LICENSE`.
+
+The following helper remains the **beta development/test** preparation path.
+It is loaded after the headless v2 and server builds; its memory plugin imports
+the built headless v2 client. Use dedicated staging, never a coworker home:
 
 ```js
 import nativeRuntime from "../native-runtime.json" with { type: "json" };
@@ -39,14 +74,29 @@ published; their exact registry URLs and SHA-512 values are pinned in
 Effect tool, agent-editor and session-hook contracts used here remain compatible;
 no native policy or cancellation adapter change was needed for this release.
 
-`apps/coworker/native-runtime.json` owns Coworker's native version. Main passes
-`opencodeV2: { version: nativeRuntime.opencodeV2Version, rootDir }` to the embedded
-server. Plugin preparation, development/build staging and release validation use
-that same pin. Packaging retains it as `electron-dist/native-runtime.json`.
+`apps/coworker/native-runtime.json` retains the beta development/test pin and
+selects the source packaging profile. Packaged startup instead verifies
+`sidecars/native-receipt.json` against the bundled immutable `native-source.json`,
+the real executable header/hash and every plugin byte. It passes that verified
+`{ sourceBuild: { version, sha256 }, apiContract: "native-2" }` to the embedded
+server. There is no startup compiler, SDK installation, arbitrary binary URL,
+development-manifest environment override or beta fallback. The build strips the
+test-only source fixture implementation from Electron main. Plugin and SDK package
+metadata describes bundled inputs, not dependencies installed on a person's machine.
 The shared `constants.json` and `opencode-v2-artifacts.json` retain Desktop's
-beta19086 optional-v2 default. The shared installer accepts only known exact
-checked-in releases, never a host-supplied URL or manifest; an explicitly selected
-version is checked at startup and cannot fall back to PATH or a different release.
+beta19086 optional-v2 default, and the shared release installer is unchanged.
+The server adds an explicit verified source profile alongside those release pins.
+
+CI prepares the source cache in a nonsigning step with an isolated allowlisted
+environment and no Apple secrets. The existing signing step requires that cache.
+The macOS sign hook verifies the unsigned payload, signs its one native engine
+using electron-builder's resolved identity/keychain/options, updates the external
+receipt and plugin manifest with the final signed hash, then invokes the existing
+app signer. Only that already-signed engine is excluded from a second signing pass;
+strict engine/app verification, helper checks and the existing afterSign notarization
+remain in force. Windows/Linux matrix checks remain enabled; only macOS ARM64
+assembly has been run locally. Signed CI and packaged runtime journeys remain
+separate proof obligations.
 
 Packaging must copy that output directory as an extra resource named
 `native-plugins`, **outside asar**. Do not copy the dependency staging directory.
@@ -54,10 +104,11 @@ Main initializes the runtime writer before any workspace preparation:
 
 ```js
 import { configureNativePluginBundles, verifyNativePluginBundles } from "./native-plugin.mjs";
+import { verifyPackagedNativeRuntime } from "./packaged-native-runtime.mjs";
 
-configureNativePluginBundles(path.join(process.resourcesPath, "native-plugins"));
-// In development, pass the absolute build outputDirectory instead.
-await verifyNativePluginBundles(); // Entire manifest and every bundle, before workspace preparation.
+const { sourceBuild } = verifyPackagedNativeRuntime(process.resourcesPath);
+configureNativePluginBundles(path.join(process.resourcesPath, "native-plugins"), { sourceBuild });
+await verifyNativePluginBundles();
 ```
 
 Do not import the build helper into main. There is no runtime package installer.
@@ -341,6 +392,110 @@ Config migration is atomic/serialized and retains original bytes once in
 Soul, memory, documents, unrelated plugins and package files are not rewritten.
 Custom legacy provider/command/mode configurations and third-party v1 plugins
 still require explicit migration; preserving them is not a compatibility claim.
+
+## Team Location Candidate — Admission Gated
+
+The single-location candidate registers the team's `.runtime` directory for new sessions. Existing
+coworker workspace IDs and legacy descriptors are retained, not rewritten or
+removed. Explicit history reads use the original location; background activity
+avoids opening dormant legacy locations. Legacy input preparation is on demand.
+
+`team-sessions.mjs` persists host-owned session bindings outside the engine location.
+Bindings contain the coworker creation identity, logical and native workspace IDs,
+original directory and work classification. Scoped tools and abilities resolve
+against those bindings and the host's current execution/model/role receipt, never
+native session metadata or agent-name prefixes. Unknown, retired and replaced
+owners fail closed. A new unassigned session can be classified once by the host.
+
+`team-workspace.mjs` emits model-independent `coworker-owner-<slug>` agent entries.
+Home context is bounded and read per turn without configuration rewrites. Supported
+per-home `permissions` and `agents.build.permissions` are copied without rebasing
+resources or rewriting the original config. Conflicting global-build/owner policy
+combinations fail closed rather than changing precedence. Changed team configuration
+requires native reload/revalidation; model preferences alone do not change those
+bytes. Other per-home agents, instructions, providers and nonstandard integrations
+still fail closed where unsupported.
+
+The abilities plugin now uses the trusted `tool.execute.before` hook. Only an
+actual invocation carrying both `filesystemScopeVersion: 1` and
+`filesystemScopeProjectResolution: 1` can receive the host-resolved
+`filesystemScope` (canonical owner directory). Native project resolution registers
+fresh owners without activating their locations. Native
+validation and execution consume the frozen scope for built-ins, including shell
+parsing and permission persistence. Arguments, agent names and session metadata do
+not select the owner. Generated peer-denial rules and search/shell path rewriting
+are no longer used. Broad shell remains broad shell; native external-directory
+approval is preserved instead of replaced with a claimed sandbox.
+
+Role readiness advertises that the scope hook is required, not that the engine
+supports it. Old runtimes lacking the invocation marker refuse every shared tool
+before its original executor runs. No package version or saved metadata enables
+the capability. Shared Coworker MCP reads remain direct pending separate nested
+receipt support; native filesystem tools are covered through direct and Code Mode
+invocations.
+
+### Matching source-runtime proof
+
+`OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST` selects the separate source case in
+`native-plugin-engine.test.mjs`. `native-source-fixture.mjs` checks the executable
+SHA-256 and built SDK contract hashes, bundles the matching `@opencode/plugin` and
+`@opencode/schema` 2.0.5 directories, and writes disposable fixture artifacts.
+`OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST_SHA256` optionally pins the manifest too.
+Prepared bundles use `coworker-native-source-plugins/v1`, never a beta19271 release
+manifest, and require a matching explicit source build at installation.
+
+The test starts the actual embedded server with isolated HOME/XDG storage and a
+loopback model. It exercises three fresh owners without project preregistration,
+concurrent home scope, follow-up, configured denies, native approval rejection
+without Stop or another model request, Code Mode filesystem scope, forged metadata
+rejection, host-authorized MCP reads, live teammate addition, and provider rotation
+without replacing the native process. Model-only saves leave team config unchanged.
+
+The additive `native-2` client contract supports experimental wait routes,
+permission `decision` payloads, validated idle markers, queued receipt
+`time.created` normalization and PATCH session renaming. Conflicting history/active
+observations retry within the existing bound, without replay. Experimental session
+operations retain the original host binding, including legacy locations.
+
+`native-api-profile.ts` verifies explicit executable hashes and separates source
+builds from known release pins. Embedded preparation polls the public plugin
+inventory, uses native-2 MCP/instruction routes, maps provider packages and preserves
+no-op provider configuration. Provider setup uses the registered team location
+without depending on conversation-role preparation; sends retain that preparation.
+
+September 17, 2026: the registered source Electron journey passed with a fresh
+isolated profile, three teammates, loopback provider setup/refresh, a visible first
+reply and a same-discussion follow-up. React development lifecycle replay no longer
+aborts the pending first send; actual view unmount still cancels its observer.
+Run only this case through the existing testkit:
+
+```sh
+OPENWORK_EVAL_ELECTRON_BINARY=/absolute/source/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
+OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST=/absolute/build-manifest.json \
+pnpm evals:e2e open-coworker-local-first --local --engine v2 --case COWORKER-SHARED
+```
+
+The world refuses installed app binaries, uses temporary explicit app/storage
+paths and disables protocol registration. The source bootstrap is development-only
+and refuses packaged-app overrides. No credentials or real provider requests are
+needed. This is source Electron plus embedded-server proof, not packaged proof.
+
+### Remaining integration and packaging requirements
+
+Packaging now builds the verified immutable upstream source plus the checked-in
+patch and matching SDK; no separately published native release is required.
+The corrected unsigned ARM64 package passes the unchanged private-path gate,
+receipt/file-list checks and size budget. A copy outside the checkout passed
+archive import, native startup/health, activation of all nine Coworker plugins
+and cleanup under a macOS sandbox denying reads of the build checkout and native
+source clones. See RELEASE-SIZE for the exact artifact and verification limits.
+The installed alpha has not been changed. Upgrade,
+shared browser/computer controls, signed distribution and packaged lifecycle
+validation remain separate.
+Unbound native child sessions remain refused; no session-move API or automatic
+history migration is used. These fixtures do not install an app or build an alpha.
+The broader evals typecheck and layer lint remain red outside the new source case;
+passing runtime checks do not clear those repository-wide gates.
 
 ## Isolated Inference And Proof
 

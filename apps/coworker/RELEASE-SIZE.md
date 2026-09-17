@@ -12,25 +12,30 @@ bytes including peers/native assets, and the feature that needs it. Lazy imports
 can improve startup but do not remove downloaded bytes. Do not weaken runtime
 checks or raise a size budget just to accommodate unexplained growth.
 
-## Native V2 Contract — updated September 12, 2026
+## Native V2 Contract — updated September 17, 2026
 
-`beforePack` reads sidecars and `native-runtime.json` from the builder's
-`context.packager.projectDir`. It requires nonempty regular `opencode2` (Windows:
-`opencode2.exe`) and `versions.json` files, with exact native version/platform/CPU
-metadata. Only that executable and metadata are selected; shared staging remains
-intact. Directory copying preserves Windows signing transformations. Native
-plugin resources remain selected; legacy `opencode-plugins` resources do not.
+`beforePack` reads sidecars from the builder's `context.packager.projectDir`.
+The packaged profile is the immutable source plus dependency patch in
+`native-source.json`, not Coworker's retained beta development/test pin.
+It requires one nonempty regular `opencode2` (Windows: `opencode2.exe`),
+`versions.json`, and `native-receipt.json`. The exact source/patch/toolchain,
+native version, platform/CPU, executable header/hash and matching SDK/plugin
+receipt are checked before copying. Only the executable and two metadata files
+are selected; caches and source remain in staging. Directory copying preserves
+Windows executable handling. Native plugins stay outside ASAR; legacy plugin
+resources do not ship.
 
-The release gate requires the source `native-runtime.json` and packaged
-`electron-dist/native-runtime.json` pins to match native sidecar metadata and the
-native plugin runtime version. Shared server constants retain Desktop's separate
-optional-v2 pin; they do not select Coworker's release. The manifest
-must contain exactly the generator's nine source entries and the runtime's full
-dependency set, with exact plugin/schema, Effect and Zod pins. Every bundle must
-have its declared filename, byte count and SHA-256; omitted declarations and
-missing, corrupt, undeclared or duplicated bundles fail. Native bundles
-are built self-contained by `prepare-native-plugins.mjs`, which rejects external
-package imports. Dependency staging must never be packaged.
+The release gate checks the packaged source recipe and development defaults
+against the source files, then runs the same source-profile preflight as startup.
+Shared server constants retain Desktop's separate optional-v2 pin. All nine
+self-contained bundles must match their filenames, byte counts and SHA-256,
+the engine receipt and the SDK's source/output hashes. Undeclared, missing,
+corrupt or duplicated bundles fail. Source SDKs, compilers, lockfiles, patches,
+source fixture helpers and dependency build staging must never ship; the upstream
+MIT license is retained in ASAR. macOS signing finalizes the executable hash before
+the existing app signer seals the external receipt; helper/signature/notary/import
+and size gates remain enabled. See [Native Plugins](electron/NATIVE-PLUGINS.md)
+for the reproducible build and cache recipe.
 
 The source runtime closure now excludes `@opencode-ai/sdk`,
 `opencode-chrome-devtools`, external `@opencode-ai/plugin`, `better-sqlite3` and
@@ -49,6 +54,45 @@ An earlier separate-migration artifact measured **528.62 MiB** and failed the
 legacy-closure gate. It is historical, not the integrated main build below.
 The **512 MiB macOS ARM64 budget is unchanged**. Staged imports and synthetic
 ASAR checks are not native execution, signing or packaged-startup proof.
+
+### Source-profile assembly — September 17, 2026
+
+The first source package was rejected because five CommonJS dependencies retained
+12 absolute build-path occurrences in native JS/bytecode even with source maps off.
+That rejected artifact remains separate. The corrected dependency patch gives
+those modules runtime virtual locations; the privacy gate is unchanged.
+
+One fresh public-upstream checkout plus the updated patch rebuilt the engine and
+SDK with Bun 1.4.2 and the frozen lockfile, followed by one full unsigned Electron
+44.2.0 ARM64 assembly. Neither the old cache nor the earlier proof binary was reused.
+Output: `dist-electron/portable-source-workspace/mac-arm64/Open Coworker.app`.
+Engine: `0.0.0-local-coworker-8520617-504f1d081f9b`.
+SHA-256: `18d3fcd3d41eccc472bc131e15f1abc90d94a49f47a7efc3cdde30b064785924`.
+Patch SHA-256: `504f1d081f9bafc57bac3fb3996d3a1f2612b59d2ab37ddfc0720c4ea4f1c27f`.
+The patched tree is `31c9fde67b85d6bd1579d0b318c6c5431d789570` (26 changed files).
+
+The final package contains **493,229,144 regular-file bytes (470.38 MiB)**:
+18.88 MiB ASAR, 156.97 MiB native sidecar/receipts, 4.70 MiB plugin payload,
+no unpacked dependencies, plus Electron and the helper. Exact final release
+validation passes privacy, native payload and unchanged 512 MiB budget checks.
+One engine, nine bundles and 354 SDK output hashes are verified. Compiler/source
+staging is excluded; local-home and temporary-build path scans found zero matches.
+
+A copied app outside the checkout ran under a macOS sandbox denying the personal
+home/build checkout and all relevant native source clones, with only loopback
+networking. A denied checkout read was asserted. Packaged Electron imported the
+ASAR server with repository fallback imports rejected, started the actual native
+engine at its verified version/hash, activated all nine Coworker plugins (93 total
+active native/plugins), and stopped cleanly. The temporary check needed corrections
+to its handle API and synthetic abilities metadata before passing; product runtime
+code and gates were not changed to accommodate it.
+
+Packaging tests pass 8/8, including the old-versus-corrected compile and embedded
+resource read after source removal. Coworker/headless/server and native CLI
+typechecks pass; native source lint reports zero errors/warnings. The prior 11/11
+plugin/platform result is retained, not rerun as this packaging change's proof.
+Signed CI/notarization, Linux/Windows builds and full packaged conversation/tool
+journeys remain separate verification. No app was installed or published.
 
 ### Integrated main build — September 12, 2026
 

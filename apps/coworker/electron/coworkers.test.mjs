@@ -3,6 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
+import { runInNewContext } from "node:vm";
+import { createHash } from "node:crypto";
+import { workspaceIdForPath } from "../../server/src/workspaces.ts";
 import { createTemplateInstaller, exportCoworkerTemplate, parseCoworkerTemplateFile, templateScope } from "./templates.mjs";
 import { usesAppConversationDefault } from "../src/lib/model-defaults.ts";
 import { defaultCoworkerAbilities } from "../src/lib/abilities.ts";
@@ -190,7 +193,7 @@ test("every coworker reads a description of its team that follows the team throu
   assert.equal(loose.suggestedBy, null);
 });
 
-test("repairing an older coworker regenerates only the app-owned contract files", async () => {
+test("repairing an older coworker preserves its execution config while repairing data indexes", async () => {
   const coworkersDir = await tempCoworkersDir();
   const coworker = await createCoworker(coworkersDir, { name: "Legacy" });
   // Make it look like a coworker created before documents existed.
@@ -203,14 +206,11 @@ test("repairing an older coworker regenerates only the app-owned contract files"
   await rm(path.join(coworker.path, "team"), { recursive: true, force: true });
 
   const repaired = await repairCoworkerContract(coworkersDir, "legacy");
-  assert.deepEqual(repaired.changed, ["AGENTS.md", "opencode.json", "documents/index.md", "team/roster.md"]);
-  const agents = await readFile(path.join(coworker.path, "AGENTS.md"), "utf8");
-  assert.match(agents, /## How I talk/);
-  assert.match(agents, /## My team/);
-  assert.match(agents, /# Legacy — coworker contract/);
+  assert.deepEqual(repaired.changed, ["documents/index.md", "team/roster.md"]);
+  assert.equal(await readFile(path.join(coworker.path, "AGENTS.md"), "utf8"), "# Legacy — coworker contract\n\nOld words.\n");
   const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
-  assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md", "documents/index.md", "team/roster.md"]);
-  assert.deepEqual(config.mcp.servers, { keep: { type: "remote", url: "http://x" } }, "MCP configuration survives in native form");
+  assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md"]);
+  assert.deepEqual(config.mcp, { keep: { type: "remote", url: "http://x" } });
   assert.match(await readFile(path.join(coworker.path, "documents", "index.md"), "utf8"), /\(none yet\)/);
   assert.match(await readFile(path.join(coworker.path, "team", "roster.md"), "utf8"), /^# My team/);
   // Soul and memory are the coworker's; the repair never touches them.
@@ -481,6 +481,74 @@ test("retirement archives the whole home and restore brings it back intact", asy
   assert.deepEqual(await listRetiredCoworkers(coworkersDir), []);
 });
 
+test("shared workspace restore reinstates only the exact original legacy descriptor", async () => {
+  const coworkersDir = await tempCoworkersDir();
+  const created = await createCoworker(coworkersDir, { name: "Legacy restore" });
+  const original = await updateCoworker(coworkersDir, created.slug, { workspaceId: workspaceIdForPath(created.path) });
+  const retired = await retireCoworker(coworkersDir, original.slug);
+  const team = { path: path.join(coworkersDir, ".runtime"), name: "Coworker team" };
+  team.workspaceId = workspaceIdForPath(team.path);
+  const unrelated = { id: "ws_unrelated", path: path.join(coworkersDir, "unrelated"), workspaceType: "local", preset: "keep" };
+  const handle = { url: "http://127.0.0.1:1", config: { workspaces: [unrelated] } };
+  const posts = [], warmed = [];
+  let changedOwner = null, beforeTokens = null;
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  const declaration = source.match(/^async function registerCoworkerWorkspace\([\s\S]*?^\}/m)?.[0];
+  const restoration = source.match(/^async function restoreLegacyCoworkerWorkspace\([\s\S]*?^\}/m)?.[0] ?? "";
+  const start = source.indexOf('  "coworkers.restore":');
+  const end = source.indexOf('  "coworkers.retired.delete":', start);
+  const host = runInNewContext(`${declaration}\n${restoration}\n({ restore: ({${source.slice(start, end)}})["coworkers.restore"], recheck: typeof restoreLegacyCoworkerWorkspace === "function" ? restoreLegacyCoworkerWorkspace : null })`, {
+    path, createHash, coworkersDir, restoreCoworker, updateCoworker, teamWorkspace: () => team,
+    getCoworker: async (...args) => changedOwner ?? getCoworker(...args), ensurePlatformServer: async () => handle,
+    loadOrCreateTokens: async () => { await beforeTokens?.(); return { hostToken: "fixture-host" }; },
+    fetchJson: async (_url, input) => {
+      const body = JSON.parse(input.body);
+      posts.push(body);
+      const workspace = { id: workspaceIdForPath(body.folderPath), path: body.folderPath, name: body.name, preset: body.preset, workspaceType: "local" };
+      handle.config.workspaces = [workspace, ...handle.config.workspaces.filter((item) => item.id !== workspace.id)];
+      return { activeId: workspace.id, workspaces: handle.config.workspaces };
+    },
+    warmCoworkerWorkspace: async (owner) => { warmed.push(owner); }, prepareCoworker: () => {},
+  });
+  const restored = await host.restore({ archiveId: retired.archiveId });
+  assert.equal(restored.workspaceId, original.workspaceId);
+  assert.equal(restored.createdAt, original.createdAt);
+  assert.equal(restored.path, original.path);
+  const legacy = handle.config.workspaces.find((workspace) => workspace.id === original.workspaceId);
+  assert.equal(legacy?.path, original.path);
+  assert.equal(legacy?.workspaceType, "local");
+  assert.equal(posts.filter((post) => post.folderPath === original.path).length, 1);
+  assert.equal(posts.filter((post) => post.folderPath === team.path).length, 1);
+  assert.ok(handle.config.workspaces.includes(unrelated));
+  assert.deepEqual(warmed, [restored]);
+  legacy.preset = "original-custom-preset";
+  const before = JSON.stringify(handle.config.workspaces);
+  await host.recheck(restored, handle);
+  assert.equal(posts.length, 2);
+  assert.equal(JSON.stringify(handle.config.workspaces), before);
+  for (const conflict of [{ ...legacy, path: unrelated.path }, { ...legacy, id: "ws_foreign" }, { ...legacy, workspaceType: "remote" }]) {
+    handle.config.workspaces = [unrelated, conflict];
+    const conflictBefore = JSON.stringify(handle.config.workspaces);
+    await assert.rejects(host.recheck(restored, handle), /original legacy workspace/);
+    assert.equal(JSON.stringify(handle.config.workspaces), conflictBefore);
+    assert.equal(posts.length, 2);
+  }
+  handle.config.workspaces = [unrelated];
+  changedOwner = { ...restored, createdAt: "2026-09-01T00:00:00.000Z" };
+  await assert.rejects(host.recheck(restored, handle), /original coworker/);
+  changedOwner = { ...restored, workspaceId: "ws_unreconstructible" };
+  await assert.rejects(host.recheck(changedOwner, handle), /original legacy workspace/);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(handle.config.workspaces, [unrelated]);
+  changedOwner = null;
+  const lateConflict = { ...legacy, path: unrelated.path };
+  beforeTokens = async () => { handle.config.workspaces.push(lateConflict); };
+  await assert.rejects(host.recheck(restored, handle), /original legacy workspace/);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(handle.config.workspaces, [unrelated, lateConflict]);
+  assert.equal((await getCoworker(coworkersDir, restored.slug)).workspaceId, original.workspaceId);
+});
+
 test("restore refuses to overwrite a live coworker and permanent delete is explicit", async () => {
   const coworkersDir = await tempCoworkersDir();
   await createCoworker(coworkersDir, { name: "Twin" });
@@ -495,7 +563,7 @@ test("restore refuses to overwrite a live coworker and permanent delete is expli
   assert.equal((await listCoworkers(coworkersDir)).length, 1, "the live twin is untouched");
 });
 
-test("the version 13 contract upgrades without changing identity, soul or memory", async () => {
+test("the legacy version 13 contract and configuration remain available without changing identity or memory", async () => {
   const coworkersDir = await tempCoworkersDir();
   const coworker = await createCoworker(coworkersDir, { name: "Pilot", role: "Ops" });
   const soulPath = path.join(coworker.path, "soul.md");
@@ -507,16 +575,14 @@ test("the version 13 contract upgrades without changing identity, soul or memory
   await writeFile(path.join(coworker.path, "opencode.json"), JSON.stringify({ instructions: ["soul.md"], mcp: { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } } }), "utf8");
 
   const { changed } = await repairCoworkerContract(coworkersDir, "pilot");
-  assert.ok(changed.includes("AGENTS.md") && changed.includes("opencode.json"), JSON.stringify(changed));
+  assert.deepEqual(changed, []);
   const agents = await readFile(path.join(coworker.path, "AGENTS.md"), "utf8");
-  assert.equal(agents, agentsTemplate({ name: "Pilot" }));
-  assert.equal(agentsContractVersion(agents), AGENTS_CONTRACT_VERSION);
-  assert.equal(agentsContractVersion(agents), 15);
+  assert.equal(agentsContractVersion(agents), 13);
   assert.deepEqual(await getCoworker(coworkersDir, "pilot"), coworker);
   const config = JSON.parse(await readFile(path.join(coworker.path, "opencode.json"), "utf8"));
-  assert.deepEqual(config.instructions, ["soul.md", "memory/working.md", "memory/index.md", "documents/index.md", "team/roster.md"]);
-  assert.deepEqual(config.mcp.servers, { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } });
-  assert.equal(config.$schema, "https://opencode.ai/config.json");
+  assert.deepEqual(config.instructions, ["soul.md"]);
+  assert.deepEqual(config.mcp, { notes: { type: "remote", url: "http://127.0.0.1:1/mcp" } });
+  assert.equal(config.$schema, undefined);
   assert.equal(await readFile(soulPath, "utf8"), "# Soul — Pilot\n\n## Role\n\nOps lead, edited by hand.\n");
   assert.equal(await readFile(workingPath, "utf8"), "# Working memory — Pilot\n\n## Now\n\n- Halfway through the audit.\n");
   // Already current: nothing is rewritten.

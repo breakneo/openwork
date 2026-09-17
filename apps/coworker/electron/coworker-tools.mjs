@@ -4,10 +4,11 @@
  * Open Coworker gives each coworker a handful of tools the platform does not
  * have — documents and the active context around them — without inventing a
  * second tool protocol: the Electron main process answers MCP over HTTP on
- * 127.0.0.1, and the embedded server registers that endpoint in each coworker
- * workspace exactly like any other remote MCP (`POST /workspace/:id/mcp`). A
- * per-coworker bearer token names the coworker, so the tools never take a
- * coworker id from the model.
+ * 127.0.0.1, and the embedded server registers that endpoint once in the team
+ * workspace exactly like any other remote MCP (`POST /workspace/:id/mcp`). The
+ * bearer token only authorizes the team; the owning coworker is resolved from
+ * the trusted native session identity the turn-role plugin forwards over
+ * `/context` (`TEAM_SCOPE`), so the tools never take a coworker id from the model.
  *
  * Only the subset of MCP Streamable HTTP the engine's client needs is spoken:
  * `initialize`, `notifications/initialized`, `ping`, `tools/list`, and
@@ -28,8 +29,10 @@ import {
   updateDocument,
 } from "./documents.mjs";
 
-/** The MCP name in each workspace; tools reach the model as `coworker_<tool>`. */
+/** The MCP name in the team workspace; tools reach the model as `coworker_<tool>`. */
 export const COWORKER_TOOLS_MCP_NAME = "coworker";
+/** `resolveSlug` answer for the team token: authorized, but the coworker is named by the call's session, never the token. */
+export const TEAM_SCOPE = Object.freeze({ team: true });
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 /**
@@ -312,6 +315,11 @@ export async function handleMcpMessage(message, { slug, handlers, tools, serverI
       const name = typeof message.params?.name === "string" ? message.params.name : "";
       const handler = handlers[name];
       if (!handler) return jsonRpcError(id, -32602, `Unknown tool: ${name}`);
+      if (slug === TEAM_SCOPE || typeof slug !== "string") {
+        // A direct MCP call carries no session identity; the engine-side turn-role
+        // plugin executes coworker tools through /context with the trusted session.
+        return jsonRpcResult(id, { content: [{ type: "text", text: "This tool call carries no coworker identity and was not performed." }], isError: true });
+      }
       const args = message.params?.arguments && typeof message.params.arguments === "object" ? message.params.arguments : {};
       try {
         const outcome = await handler(slug, args);
@@ -365,8 +373,10 @@ function sendJson(response, status, payload) {
 
 /**
  * Start the loopback MCP server. `resolveSlug(token)` names the coworker a
- * bearer token belongs to (null rejects the request). Returns the base URL the
- * engine connects to and the config to register in a workspace.
+ * bearer token belongs to, or answers `TEAM_SCOPE` for the team token so
+ * `onContextTool` resolves the owner from the call's session (null rejects the
+ * request). Returns the base URL the engine connects to and the config to
+ * register in a workspace.
  */
 export async function createCoworkerToolsServer({ resolveSlug, handlers, onContextTool, tools = toolCatalog(), instructions = DEFAULT_INSTRUCTIONS, version = "0.0.0", host = "127.0.0.1", port = 0 }) {
   const serverInfo = { name: "open-coworker", version };

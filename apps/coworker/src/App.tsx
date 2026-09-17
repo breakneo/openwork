@@ -573,9 +573,8 @@ export default function App() {
     const account = sessionRef.current;
     // The organization's capabilities leave with the account.
     if (runtime) {
-      await Promise.all(coworkers
-        .filter((coworker) => coworker.workspaceId)
-        .map((coworker) => removeConnect(runtime, coworker.workspaceId).catch(() => undefined)));
+      const workspaces = new Set([runtime.teamWorkspaceId, ...coworkers.map((coworker) => coworker.workspaceId)].filter((id): id is string => Boolean(id)));
+      await Promise.all([...workspaces].map((id) => removeConnect(runtime, id).catch(() => undefined)));
     }
     await coworkerBridge.den.clearSession();
     clearAccountPresentation();
@@ -616,7 +615,7 @@ export default function App() {
     const targets = coworkers.filter((coworker) =>
       coworker.workspaceId
       && (!options.slug || coworker.slug === options.slug)
-      && (options.force || !connectedWorkspacesRef.current.has(`${key}\u0000${coworker.workspaceId}`)),
+      && (options.force || !connectedWorkspacesRef.current.has(`${key}\u0000${runtime.teamWorkspaceId ?? coworker.workspaceId}`)),
     );
     if (targets.length === 0) return;
     for (const coworker of targets) {
@@ -647,17 +646,29 @@ export default function App() {
       return;
     }
     const minted = token;
-    await Promise.all(targets.map(async (coworker) => {
-      const payload = connectReconcilePayload({ workspaceId: coworker.workspaceId, session, token: minted, appVersion: runtime.version });
-      let state: ConnectState;
-      try {
-        if (!payload) throw new Error("OpenWork did not name a gateway for this organization.");
-        state = connectStateFromHealth(await reconcileConnect(runtime, coworker.workspaceId, payload));
-        if (!isCurrentAccount()) return;
-        connectedWorkspacesRef.current.add(`${key}\u0000${coworker.workspaceId}`);
-      } catch (cause) {
-        state = { status: "unavailable", message: cause instanceof Error ? cause.message : String(cause) };
+    // The team shares one workspace: register the gateway once per workspace and
+    // give every coworker in it the same outcome.
+    const registrations = new Map<string, Promise<ConnectState>>();
+    const register = (workspaceId: string) => {
+      let pending = registrations.get(workspaceId);
+      if (!pending) {
+        pending = (async (): Promise<ConnectState> => {
+          const payload = connectReconcilePayload({ workspaceId, session, token: minted, appVersion: runtime.version });
+          try {
+            if (!payload) throw new Error("OpenWork did not name a gateway for this organization.");
+            const state = connectStateFromHealth(await reconcileConnect(runtime, workspaceId, payload));
+            if (isCurrentAccount()) connectedWorkspacesRef.current.add(`${key}\u0000${workspaceId}`);
+            return state;
+          } catch (cause) {
+            return { status: "unavailable", message: cause instanceof Error ? cause.message : String(cause) };
+          }
+        })();
+        registrations.set(workspaceId, pending);
       }
+      return pending;
+    };
+    await Promise.all(targets.map(async (coworker) => {
+      const state = await register(runtime.teamWorkspaceId ?? coworker.workspaceId);
       if (!isCurrentAccount()) return;
       setConnectBySlug((current) => ({ ...current, [coworker.slug]: state }));
       // Right after a coworker is created its AI service may still be starting, so the first
@@ -695,6 +706,7 @@ export default function App() {
       const [threadActivity, localResponsibilities] = await Promise.all([
         readCoworkerActivity({
           serverUrl: info.serverUrl, workspaceId: coworker.workspaceId, token: info.ownerToken,
+          owner: { slug: coworker.slug, createdAt: coworker.createdAt },
           conversationThreadId: coworker.conversationThreadId,
           workerThreadIds: workers.map((worker) => worker.threadId).filter(Boolean), preparationScope,
         }),

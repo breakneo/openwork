@@ -3,7 +3,8 @@ import { nativeModelVariants } from "@openwork/types/cloud-model-fast";
 // Provider injection uses v2's watched config, without disposing live sessions.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { nativeProviderPackage, type NativeApiContract } from "./native-api-profile.js";
 import { join } from "node:path";
 import { appendEngineOutputTail, createEngineStartupLineReader } from "./engine-output.js";
 
@@ -95,6 +96,7 @@ export interface ManagedOpencodeV2ServerOptions {
   config?: Record<string, unknown>;
   bootTimeoutMs?: number;
   expectedVersion?: string;
+  apiContract?: NativeApiContract;
   permissions?: () => Promise<EnginePermissionRule[]>;
 }
 
@@ -110,6 +112,7 @@ export interface ManagedOpencodeV2Server {
   password: string;
   childPid: number | undefined;
   readonly exitCode: number | null;
+  readonly configurationRevision?: number;
   readonly stdout: string;
   readonly stderr: string;
   isAlive(): boolean;
@@ -143,6 +146,7 @@ export function renderOpencodeV2Config(input: {
   permissions?: EnginePermissionRule[];
   skills: string[];
   nativeCatalogMetadata?: boolean;
+  apiContract?: NativeApiContract;
 }): Record<string, unknown> {
   const providerConfig: Record<string, unknown> = {};
   for (const provider of input.providers) {
@@ -173,7 +177,7 @@ export function renderOpencodeV2Config(input: {
     }
     providerConfig[provider.id] = {
       name: provider.name,
-      package: provider.package ?? "@opencode-ai/ai/providers/openai-compatible",
+      package: nativeProviderPackage(provider.package, input.apiContract),
       settings: {
         ...provider.settings,
         ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
@@ -205,6 +209,7 @@ export async function createManagedOpencodeV2Server(
   const providers = new Map<string, OpencodeV2ProviderSpec>();
   let skills: string[] = [];
   let writes: Promise<void> = Promise.resolve();
+  let configurationRevision = 0;
   const opencodeModelsUrl = (options.env?.OPENCODE_MODELS_URL ?? process.env.OPENCODE_MODELS_URL)?.replace(/\/+$/, "");
   // The engine needs OS paths and locale settings, not the server's provider,
   // cloud, database, or control-plane credentials. Unknown keys stay private.
@@ -302,11 +307,12 @@ export async function createManagedOpencodeV2Server(
   }
 
   async function health(): Promise<OpencodeV2Health> {
-    const response = await fetchJson("/api/health", { timeoutMs: 5_000 });
+    const response = await fetchJson(options.apiContract === "native-2" ? "/api/info" : "/api/health", { timeoutMs: 5_000 });
     if (response.status !== 200 || !isRecord(response.json)) {
       throw new Error(`OpenCode v2 health returned HTTP ${response.status}`);
     }
-    const { healthy, version, pid } = response.json;
+    const { version, pid } = response.json;
+    const healthy = options.apiContract === "native-2" ? Array.isArray(response.json.urls) && response.json.urls.includes(url) : response.json.healthy;
     if (typeof healthy !== "boolean" || typeof version !== "string" || typeof pid !== "number") {
       throw new Error("OpenCode v2 health returned an invalid payload");
     }
@@ -329,10 +335,11 @@ export async function createManagedOpencodeV2Server(
     const generated = renderOpencodeV2Config({
       providers: [...providers.values()],
       nativeCatalogMetadata: options.nativeCatalogMetadata,
+      apiContract: options.apiContract,
       ...(options.permissions ? { permissions: await options.permissions() } : {}),
       skills,
     });
-    await writeFile(temporary, `${JSON.stringify({
+    const content = `${JSON.stringify({
       ...hostConfig,
       ...generated,
       ...((Array.isArray(configuredSkills) && configuredSkills.length) || skills.length
@@ -342,8 +349,11 @@ export async function createManagedOpencodeV2Server(
         ...(Array.isArray(hostConfig.permissions) ? hostConfig.permissions : []),
         ...(Array.isArray(generated.permissions) ? generated.permissions : []),
       ] } : {}),
-    }, null, 2)}\n`, { mode: 0o600 });
+    }, null, 2)}\n`;
+    if (await readFile(target, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return ""; }) === content) return;
+    await writeFile(temporary, content, { mode: 0o600 });
     await rename(temporary, target);
+    configurationRevision++;
   }
 
   async function close(): Promise<void> {
@@ -368,6 +378,7 @@ export async function createManagedOpencodeV2Server(
 
   const managed: ManagedOpencodeV2Server = {
     get url() { return url; },
+    get configurationRevision() { return configurationRevision; },
     username,
     password,
     childPid: child.pid,

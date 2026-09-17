@@ -1,4 +1,5 @@
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
+import { nativeInstructionPath, nativeProxyPolicyPath } from "./native-api-profile.js";
 import { createTaskRecovery, setTaskRecovery } from "./task-recovery.js";
 import { managedPolicyActionSchema } from "./managed-policy-rules.js";
 import { readFile, realpath, writeFile, rm, stat } from "node:fs/promises";
@@ -921,6 +922,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult & {
           const actor = await requireClient(request, config, tokens);
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
+          assertNativeProxyManagementAllowed(request.method, nativeProxyPolicyPath(mount.restPath.slice("/opencode2".length), config.opencodeV2?.apiContract));
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
           const connection = engineV2Preview.connection();
           if (!connection) {
@@ -932,8 +934,11 @@ export async function startServer(config: ServerConfig): Promise<ServeResult & {
             /^\/opencode2\/api\/(?:event|session(?:\/active)?)$/.test(mount.restPath)
             || /^\/opencode2\/api\/session\/ses_[A-Za-z0-9_-]+(?:\/message(?:\/msg_[A-Za-z0-9_-]+)?|\/inbox|\/permission(?:\/per[A-Za-z0-9_-]+)?|\/form(?:\/frm_[A-Za-z0-9_-]+)?)?$/.test(mount.restPath)
           );
+          const waitPath = config.opencodeV2?.apiContract === "native-2"
+            ? /^\/opencode2\/api\/experimental\/session\/ses_[A-Za-z0-9_-]+\/wait$/
+            : /^\/opencode2\/api\/session\/ses_[A-Za-z0-9_-]+\/wait$/;
           const isStop = request.method === "POST" && (
-            /^\/opencode2\/api\/session\/ses_[A-Za-z0-9_-]+\/wait$/.test(mount.restPath)
+            (waitPath.test(mount.restPath) && (config.opencodeV2?.apiContract !== "native-2" || !url.search))
             || (/^\/opencode2\/api\/session\/ses_[A-Za-z0-9_-]+\/interrupt$/.test(mount.restPath)
               && url.searchParams.getAll("continue").length === 1 && url.searchParams.get("continue") === "false")
           );
@@ -1238,6 +1243,13 @@ function buildOpencodeProxyUrl(baseUrl: string, path: string, search: string) {
   return target.toString();
 }
 
+function assertNativeProxyManagementAllowed(method: string, path: string): void {
+  if (/^\/api\/config(?:\/|$)/.test(path)) throw new ApiError(403, "engine_config_private", "Engine configuration is private");
+  if (method !== "GET" && method !== "HEAD" && /^\/api\/mcp(?:\/|$)/.test(path)) {
+    throw new ApiError(403, "engine_mcp_managed", "Manage connections through OpenWork");
+  }
+}
+
 export async function proxyOpencodeV2Request(input: {
   actor: Actor;
   config: ServerConfig;
@@ -1253,6 +1265,10 @@ export async function proxyOpencodeV2Request(input: {
   recoverySignal?: AbortSignal;
 }): Promise<Response> {
   const method = input.request.method.toUpperCase();
+  const signal = method === "GET"
+    ? input.recoverySignal ? AbortSignal.any([input.request.signal, input.recoverySignal]) : input.request.signal
+    : input.recoverySignal;
+  if (method === "GET") signal?.throwIfAborted();
   const mandatory = input.config.engine === "v2";
   if (method !== "GET" && method !== "HEAD") ensureWritable(input.config);
 
@@ -1260,12 +1276,8 @@ export async function proxyOpencodeV2Request(input: {
   const forwardedPath = withoutPrefix || "/";
   // Runtime provider configuration contains server-owned credentials. The
   // renderer uses the catalog/status APIs; it must not read or mutate this file.
-  if (/^\/api\/config(?:\/|$)/.test(decodeURIComponent(forwardedPath))) {
-    throw new ApiError(403, "engine_config_private", "Engine configuration is private");
-  }
-  if (method !== "GET" && method !== "HEAD" && /^\/api\/mcp(?:\/|$)/.test(decodeURIComponent(forwardedPath))) {
-    throw new ApiError(403, "engine_mcp_managed", "Manage connections through OpenWork");
-  }
+  const policyPath = nativeProxyPolicyPath(forwardedPath, input.config.opencodeV2?.apiContract);
+  assertNativeProxyManagementAllowed(method, policyPath);
   const target = new URL(input.connection.url);
   target.pathname = forwardedPath;
   target.search = input.url.search;
@@ -1288,7 +1300,7 @@ export async function proxyOpencodeV2Request(input: {
   // The v2 daemon has a global session namespace: a location query does not
   // prevent reading a session owned by another workspace. Match the v1 mount's
   // ownership boundary before forwarding session reads or mutations.
-  const sessionMatch = forwardedPath.match(/^\/api\/session\/([^/]+)(?:\/|$)/);
+  const sessionMatch = policyPath.match(/^\/api\/session\/([^/]+)(?:\/|$)/);
   const sessionId = sessionMatch?.[1] ? decodeURIComponent(sessionMatch[1]) : null;
   if (sessionId?.startsWith("ses_")) {
     const sessionUrl = new URL(target);
@@ -1300,7 +1312,9 @@ export async function proxyOpencodeV2Request(input: {
     sessionHeaders.delete("transfer-encoding");
     const sessionResponse = await loopbackFetch(sessionUrl.toString(), {
       headers: sessionHeaders,
-      signal: AbortSignal.timeout(10_000),
+      signal: method === "GET"
+        ? AbortSignal.any([input.request.signal, AbortSignal.timeout(10_000)])
+        : AbortSignal.timeout(10_000),
     });
     if (!sessionResponse.ok) return sanitizeProxyResponse(sessionResponse);
     const payload: unknown = await sessionResponse.json();
@@ -1398,7 +1412,7 @@ export async function proxyOpencodeV2Request(input: {
     }
     const value = buildOpenWorkV2Instructions(connectReady, mandatory ? "native" : "preview");
     const instructionUrl = new URL(target);
-    instructionUrl.pathname = `/api/session/${encodeURIComponent(sessionId)}/instructions/entries/${OPENWORK_V2_INSTRUCTION_KEY}`;
+    instructionUrl.pathname = nativeInstructionPath(sessionId, OPENWORK_V2_INSTRUCTION_KEY, input.config.opencodeV2?.apiContract);
     const synced = await loopbackFetch(instructionUrl.toString(), {
       method: "PUT", headers: internalHeaders, body: JSON.stringify({ value }), signal: AbortSignal.timeout(15_000),
     });
@@ -1465,7 +1479,7 @@ export async function proxyOpencodeV2Request(input: {
     }
     await input.assertSkillsCurrent?.();
   }
-  const response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
+  const response = await loopbackFetch(target.toString(), { method, headers, body, signal });
   if (method === "GET" && /^\/api\/skill(?:\/|$)/.test(decodeURIComponent(forwardedPath))
     && input.actor.scope !== "owner" && response.ok) {
     // A shared client token is not authorization to bulk-read the owner's Cloud
@@ -1596,15 +1610,25 @@ export async function proxyOpencodeV2Request(input: {
     const data = isRecord(payload) && "data" in payload ? payload.data : payload;
     const items = Array.isArray(data) ? data : isRecord(data) && Array.isArray(data.items) ? data.items : null;
     if (!items) throw new ApiError(502, "invalid_engine_response", "Invalid session list response");
-    const expected = await realpath(input.workspace.path).catch(() => input.workspace.path);
+    const directories = new Map<string, Promise<string>>();
+    const resolveDirectory = (directory: string) => {
+      let resolved = directories.get(directory);
+      if (!resolved) {
+        resolved = realpath(directory).catch(() => directory);
+        directories.set(directory, resolved);
+      }
+      return resolved;
+    };
+    const expected = await resolveDirectory(input.workspace.path);
     const scoped = (await Promise.all(items.map(async (item: unknown) => {
       const session = isRecord(item) && isRecord(item.info) ? item.info : item;
       const location = isRecord(session) && isRecord(session.location) ? session.location : null;
       const directory = location && typeof location.directory === "string" ? location.directory : null;
       if (!directory) return null;
-      const actual = await realpath(directory).catch(() => directory);
+      const actual = await resolveDirectory(directory);
       return actual === expected ? item : null;
     }))).filter((item) => item !== null);
+    signal?.throwIfAborted();
     const scopedData = isRecord(data) ? { ...data, items: scoped } : scoped;
     const scopedPayload = isRecord(payload) && "data" in payload ? { ...payload, data: scopedData } : scopedData;
     const responseHeaders = new Headers(response.headers);

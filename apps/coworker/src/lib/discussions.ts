@@ -1,7 +1,7 @@
 /**
  * A coworker can hold several discussions at once. Each one is a native
  * engine thread; this registry, kept as `discussions.json` beside
- * `coworker.md`, records which of the workspace's threads are discussions so
+ * `coworker.md`, records which of the coworker's threads are discussions so
  * they never show up as assignments. The coworker record's
  * `conversationThreadId` stays the pointer to the discussion that is open.
  */
@@ -117,12 +117,10 @@ export type DiscussionStoreIO = {
 
 let io: DiscussionStoreIO | null = null;
 const registryBySlug = new Map<string, string[]>();
-let slugByWorkspace = new Map<string, string>();
 
 export function configureDiscussionStore(next: DiscussionStoreIO | null): void {
   io = next;
   registryBySlug.clear();
-  slugByWorkspace = new Map();
 }
 
 function isMissingFile(cause: unknown): boolean {
@@ -156,27 +154,8 @@ export async function registerDiscussion(slug: string, threadId: string): Promis
   return next;
 }
 
-/** Let activity reads find a coworker's registry when they only know the workspace. */
-export function rememberWorkspaceSlug(workspaceId: string, slug: string): void {
-  if (workspaceId && slug) slugByWorkspace.set(workspaceId, slug);
-}
-
-async function slugForWorkspace(workspaceId: string): Promise<string | undefined> {
-  const known = slugByWorkspace.get(workspaceId);
-  if (known) return known;
-  if (!io) return undefined;
-  const coworkers = await io.listCoworkers();
-  const refreshed = new Map(slugByWorkspace);
-  for (const coworker of coworkers) {
-    if (coworker.workspaceId) refreshed.set(coworker.workspaceId, coworker.slug);
-  }
-  slugByWorkspace = refreshed;
-  return slugByWorkspace.get(workspaceId);
-}
-
-/** Every discussion thread id for a workspace, including the open one. */
-export async function discussionIdsForWorkspace(workspaceId: string, conversationThreadId?: string): Promise<string[]> {
-  const slug = await slugForWorkspace(workspaceId);
+/** Every discussion thread id of one coworker, including the open one. The team shares one workspace, so the slug names the registry. */
+export async function discussionIdsForCoworker(slug: string, conversationThreadId?: string): Promise<string[]> {
   const registry = slug ? await loadDiscussionRegistry(slug) : [];
   return discussionIds(registry, conversationThreadId);
 }

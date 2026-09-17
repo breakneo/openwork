@@ -6,6 +6,7 @@ import type { ServerConfig } from "./types.js";
 import { isRecord } from "./workspace-kv-store.js";
 import { externalFetch } from "./server-fetch.js";
 import { ApiError } from "./errors.js";
+import { nativeProxyPolicyPath } from "./native-api-profile.js";
 import { readGlobalRuntimeOpencodeConfig, writeManagedDesktopPolicy, runtimeProviderMap } from "./runtime-opencode-config-store.js";
 import { policyDenial, policyRequestActions, type ManagedPolicyAction } from "./managed-policy-rules.js";
 
@@ -182,7 +183,7 @@ class ManagedDesktopPolicy {
       }
       return;
     }
-    const enginePath = decoded.replace(/^\/opencode2?/, "").replace(/^\/api/, "");
+    const enginePath = nativeProxyPolicyPath(path, this.config.opencodeV2?.apiContract).replace(/^\/opencode2?/, "").replace(/^\/api/, "");
     let input: Record<string, unknown> = {};
     if (request.body) {
       // The HTTP adapter exposes a stream even for a bodyless POST (session

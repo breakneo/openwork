@@ -7,7 +7,9 @@ import { runInNewContext } from "node:vm";
 import { marked } from "marked";
 import { z } from "zod";
 import { createCollaboration, nativeMessageId, withAbort } from "./collaboration.mjs";
-import { nativeTurnAgent } from "./native-turns.mjs";
+import { nativeTurnAgent, coworkerAgent } from "./native-turns.mjs";
+import { createTeamSessionRegistry } from "./team-sessions.mjs";
+import { awaitNativePluginActivation } from "./turn-roles-plugin.mjs";
 import { dispatchNativeTurn, nativeAdmissionRefusal } from "./native-recovery.mjs";
 import { HeadlessThreadError } from "@openwork/headless-threads/v2";
 import { createActivityInbox, mentionsYou, recordActivity, MAX_ACTIVITY_ITEMS, EVENT_REMINDER_LEAD_MS } from "./activity-inbox.mjs";
@@ -55,6 +57,109 @@ async function withHome(run) {
     await rm(home, { recursive: true, force: true });
   }
 }
+
+function mainFunction(source, name) {
+  const declaration = source.match(new RegExp(`^(?:async )?function ${name}\\([\\s\\S]*?^\\}`, "m"))?.[0];
+  assert.ok(declaration, `Missing main function ${name}`);
+  return declaration;
+}
+
+test("host session creation retains the caller's exact reconciliation id", async () => {
+  const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+  const start = source.indexOf('  "sessions.create":');
+  const end = source.indexOf('  "reactions:read":', start);
+  assert.ok(start > 0 && end > start);
+  const requests = [];
+  const model = { providerId: "fixture", modelId: "text" };
+  const create = runInNewContext(`({${source.slice(start, end)}})["sessions.create"]`, {
+    checkedSessionCoworker: async () => ({ workspaceId: "ws_team" }), warmCoworkerWorkspace: async () => {},
+    ensurePlatformServer: async () => ({ url: "http://127.0.0.1:1" }), ownerToken: "fixture",
+    ownedSessionClient: () => ({ createThread: async (input) => { requests.push(input); return { id: input.threadId }; } }),
+  });
+  const input = { threadId: "ses_reconcile", title: "Retain identity", model };
+  assert.equal((await create({ input })).id, input.threadId);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [input]);
+});
+
+test("shared session input intents preserve classification and original native location", async () => {
+  await withHome(async (home) => {
+    const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+    const coworker = { slug: "scout", createdAt: "2026-09-11T00:00:00.000Z", workspaceId: "ws_legacy", path: path.join(home, "scout") };
+    const team = { workspaceId: "ws_team", path: path.join(home, ".runtime") };
+    let current = coworker;
+    const file = path.join(home, "owners.json");
+    const registry = createTeamSessionRegistry({ file, coworkerFor: async () => current });
+    const sent = [], intents = [];
+    const create = runInNewContext(`${mainFunction(source, "ownedSessionClient")}\nownedSessionClient`, {
+      URL, path, teamSessions: registry, teamWorkspace: () => team, coworkerAgent, nativeRuntime: { apiContract: "native-2" },
+      skillAwareClient: (options) => ({ onIntent: options.onIntent, transport: options.fetch }), sessionBinding: (owner, id) => registry.resolve(id, owner),
+    });
+    const options = { baseUrl: "http://127.0.0.1:1", workspaceId: coworker.workspaceId, fetch: async (url) => { sent.push(url); }, onIntent: async (intent) => { intents.push(intent); } };
+    const client = create(coworker, options);
+    for (const kind of ["group", "consultation", "assignment", "worker", "legacy", "private"]) for (const shared of [true, false]) {
+      const binding = await registry.bind({ ...coworker, sessionId: `ses_${kind}_${shared}`, nativeWorkspaceId: shared ? team.workspaceId : coworker.workspaceId, directory: shared ? team.path : coworker.path, kind });
+      const before = await readFile(file, "utf8");
+      const intent = { threadId: binding.sessionId, messageId: `msg_${kind}_${shared}` };
+      await client.onIntent(intent);
+      assert.equal(intents.at(-1), intent);
+      assert.equal(await readFile(file, "utf8"), before);
+      await client.transport(`${options.baseUrl}/workspace/${coworker.workspaceId}/opencode2/api/session/${binding.sessionId}/message`, { method: "GET" });
+      assert.equal(new URL(sent.at(-1)).pathname, `/workspace/${binding.nativeWorkspaceId}/opencode2/api/session/${binding.sessionId}/message`);
+    }
+    const before = await readFile(file, "utf8");
+    await assert.rejects(client.onIntent({ threadId: "ses_unknown", messageId: "msg_unknown" }), /matching host owner/);
+    current = { ...coworker, createdAt: "2026-09-12T00:00:00.000Z" };
+    await assert.rejects(client.onIntent({ threadId: "ses_group_true", messageId: "msg_replaced" }), /retired or replaced/);
+    assert.equal(await readFile(file, "utf8"), before);
+    current = coworker;
+    const creation = { threadId: "ses_created" };
+    await create(coworker, options, "unassigned").onIntent(creation);
+    assert.equal(intents.at(-1), creation);
+    assert.deepEqual(await registry.resolve(creation.threadId, coworker), { slug: coworker.slug, createdAt: coworker.createdAt, sessionId: creation.threadId,
+      workspaceId: coworker.workspaceId, nativeWorkspaceId: team.workspaceId, directory: team.path, kind: "unassigned" });
+  });
+});
+
+test("shared session inventory isolates uncertain creation and unavailable reads without changing bindings", async () => {
+  await withHome(async (home) => {
+    const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+    const owner = { slug: "scout", createdAt: "2026-09-11T00:00:00.000Z", workspaceId: "ws_legacy", path: path.join(home, "scout") };
+    const team = { workspaceId: "ws_team", path: path.join(home, ".runtime") };
+    const file = path.join(home, "owners.json");
+    const registry = createTeamSessionRegistry({ file, coworkerFor: async () => owner });
+    const sessions = new Map(), errors = new Map(), reads = [];
+    const failure = (id, status, code = "request_failed") => new HeadlessThreadError({ code, status, method: "GET", path: `/api/session/${id}`, message: `Unavailable ${id}` });
+    for (const id of ["ses_ready", "ses_creation", "ses_unavailable", "ses_legacy"]) {
+      const legacy = id === "ses_legacy";
+      const binding = await registry.bind({ ...owner, sessionId: id, nativeWorkspaceId: legacy ? owner.workspaceId : team.workspaceId, directory: legacy ? owner.path : team.path, kind: legacy ? "legacy" : "private" });
+      sessions.set(id, { id, location: { directory: binding.directory }, time: { created: Date.parse(owner.createdAt) + 1 } });
+    }
+    errors.set("ses_creation", failure("ses_creation", 404));
+    errors.set("ses_unavailable", failure("ses_unavailable", 503));
+    const inventory = runInNewContext(`${mainFunction(source, "ownedNativeSessions")}\nownedNativeSessions`, {
+      path, teamSessions: registry, teamWorkspace: () => team, ownerToken: "fixture-owner", ensurePlatformServer: async () => ({ url: "http://127.0.0.1:1", config: { workspaces: [] } }),
+      collaboration: { read: (reader) => reader({ executions: { legacy: { owner: { slug: owner.slug, threadId: "ses_legacy" }, state: "running" } } }) },
+      createNativeV2Client: ({ workspaceId }) => ({ getSession: async (id) => { reads.push({ id, workspaceId }); if (errors.has(id)) throw errors.get(id); return sessions.get(id); } }),
+    });
+    const before = await readFile(file, "utf8");
+    assert.deepEqual(Array.from(await inventory(owner), (session) => session.id), ["ses_ready", "ses_legacy"]);
+    assert.ok(reads.some((read) => read.id === "ses_legacy" && read.workspaceId === owner.workspaceId));
+    assert.equal(await readFile(file, "utf8"), before);
+    await assert.rejects(registry.route("ses_creation", owner, async () => ({ getSession: async () => { throw errors.get("ses_creation"); } })), { status: 404 });
+    errors.delete("ses_creation");
+    assert.deepEqual(Array.from(await inventory(owner), (session) => session.id), ["ses_ready", "ses_creation", "ses_legacy"]);
+    for (const error of [failure("ses_unavailable", 200, "invalid_response"), failure("ses_unavailable", 403), new Error("corrupt record")]) {
+      errors.set("ses_unavailable", error);
+      await assert.rejects(inventory(owner), (actual) => actual === error);
+    }
+    errors.clear();
+    sessions.get("ses_ready").location.directory = owner.path;
+    await assert.rejects(inventory(owner), /original host binding/);
+    assert.equal(await readFile(file, "utf8"), before);
+    await writeFile(file, "{");
+    await assert.rejects(inventory(owner), SyntaxError);
+  });
+});
 
 test("native questions get a client default without overriding explicit tool rules", () => {
   assert.deepEqual(withInteractiveQuestionDefault({}), { permissions: [{ action: "question", resource: "*", effect: "allow" }] });
@@ -321,6 +426,69 @@ async function eventually(check) {
   assert.fail("The collaboration did not settle within the module check's deadline.");
 }
 
+test("shared group bootstrap preserves unresolved historical owners and validates live admission independently", async () => {
+  await withHome(async (home) => {
+    const source = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
+    const owners = new Map(await Promise.all(["scout", "editor", "retired", "replaced"].map(async (slug) => [slug, { ...await fixtureCoworker(slug), path: path.join(home, slug) }])));
+    const coworkerFor = async (slug) => {
+      const owner = owners.get(slug);
+      if (owner instanceof Error) throw owner;
+      if (!owner) throw Object.assign(new Error("The original coworker is missing."), { code: "ENOENT" });
+      return owner;
+    };
+    const file = path.join(home, "owners.json");
+    const registry = createTeamSessionRegistry({ file, coworkerFor });
+    const groups = {};
+    for (const slug of ["scout", "retired", "replaced", "missing"]) {
+      const group = await createGroup(home, { name: slug, participantSlugs: [slug, "editor"] });
+      groups[slug] = await updateGroup(home, group.id, { participantThreadIds: { [slug]: `ses_${slug}` } });
+      if (owners.has(slug)) await registry.bind({ ...owners.get(slug), sessionId: `ses_${slug}`, nativeWorkspaceId: "ws_team", directory: path.join(home, ".runtime"), kind: "group" });
+    }
+    await archiveGroup(home, groups.retired.id);
+    owners.delete("retired");
+    owners.set("replaced", { ...owners.get("replaced"), createdAt: "2026-09-12T00:00:00.000Z" });
+    const first = source.indexOf("  resolveOwner:", source.indexOf("const collaboration ="));
+    const validation = source.indexOf("  validateOwner:", first);
+    const helper = source.match(/^async function resolveSessionOwner\([\s\S]*?^\}/m)?.[0] ?? "";
+    const callbacks = runInNewContext(`${helper}\n({${source.slice(first, source.indexOf("  acceptanceTimeoutMs:", first))}${source.slice(validation, source.indexOf("  consult:", validation))}})`, {
+      coworkersDir: home, getCoworker: (_directory, slug) => coworkerFor(slug), sessionBinding: (owner, id) => registry.resolve(id, owner),
+      teamWorkspace: () => ({ workspaceId: "ws_team" }), coworkerAgent, events: { validateOwner: async () => {} },
+    });
+    const fixture = nativeFixture();
+    const service = createCollaboration({ directory: home, ...callbacks, clientFor: fixture.clientFor, pollMs: 5 });
+    const execution = createGroupExecution({ directory: home, collaboration: service, coworkerFor, clientFor: fixture.clientFor, pollMs: 60_000 });
+    try {
+      await service.change((state) => { state.owners["replaced:ses_replaced"] = { slug: "replaced", threadId: "ses_replaced", conversationId: groups.replaced.id, groupId: groups.replaced.id, kind: "group", coworkerCreatedAt: fixtureCreatedAt }; });
+      const before = await readFile(file, "utf8");
+      await execution.start();
+      for (const slug of ["retired", "replaced", "missing"]) {
+        const historical = await service.owner(slug, `ses_${slug}`);
+        assert.equal(historical.kind, "group");
+        assert.equal(historical.conversationId, groups[slug].id);
+        assert.equal(historical.coworkerCreatedAt, slug === "replaced" ? fixtureCreatedAt : undefined);
+        await assert.rejects(callbacks.validateOwner(historical), /missing|matching host owner|original session owner/);
+      }
+      await assert.rejects(execution.participant(groups.replaced.id, "replaced"), /matching host owner|original coworker/);
+      assert.equal(await readFile(file, "utf8"), before);
+      assert.equal(fixture.requests.length, 0);
+      const live = await execution.participant(groups.scout.id, "scout");
+      assert.equal(live.coworkerCreatedAt, fixtureCreatedAt);
+      assert.equal(live.agent, coworkerAgent("scout"));
+      const stale = await service.submit({ owner: await service.owner("replaced", "ses_replaced"), messageId: "msg_stale", prompt: "Do not run for a replacement" });
+      const healthy = await service.submit({ owner: live, messageId: "msg_healthy", prompt: "Continue verified work" });
+      await service.start();
+      await eventually(async () => (await service.read((state) => state.executions[stale.id])).state === "failed" && (await service.read((state) => state.executions[healthy.id])).state === "succeeded");
+      assert.deepEqual(fixture.requests.map((request) => request.threadId), [live.threadId]);
+      const corruption = new Error("Corrupt coworker record");
+      owners.set("scout", corruption);
+      await assert.rejects(callbacks.validateOwner(live), (error) => error === corruption);
+      await service.change((state) => { state.owners["missing:ses_missing"].kind = "private"; });
+      await assert.rejects(execution.start(), /another conversation/);
+      assert.equal(await readFile(file, "utf8"), before);
+    } finally { await execution.stop(); await service.stop(); }
+  });
+});
+
 async function publishFixture(home, source) {
   const executionId = source.executionId ?? source.id;
   const event = await appendGroupEvent(home, source.owner.groupId, { id: `evt_${executionId}`, executionId, kind: source.state === "succeeded" ? "coworker" : "status", slug: source.owner.slug, threadId: source.owner.threadId, text: source.result || source.error });
@@ -573,10 +741,12 @@ test("turn submission preserves definitive refusal and generation checks without
     };
     const context = {
       Error, AbortSignal, withAbort, serverHandle: handle, denSession: null, coworkersDir: home, settingsPath,
-      toolsRegistered: new Set([coworker.slug, other.slug]), ensureToolsServer: async () => ({}), installNativeCoworkerPlugins: async () => {}, prepareNativeTurnRoles: async () => {},
+      teamWorkspace: () => ({ path: home, workspaceId: coworker.workspaceId, name: "Team" }), installedTeamRevision: "fixture-team", awaitNativePluginActivation, nativeRuntime: {},
+      toolsRegistered: new Set([coworker.workspaceId, other.workspaceId]), ensureToolsServer: async () => ({}), installNativeCoworkerPlugins: async () => {}, prepareNativeTurnRoles: async () => {},
       nativeWorkspaceRequest: async (_handle, _workspaceId, _method, route) => {
         if (route === "/api/plugin/await-activation" && warmGate) { warmGate.entered.resolve(); await warmGate.release.promise; }
-        if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "events", "abilities", "turn-roles"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
+        if (route === "/api/agent/build") return { data: { permissions: [] } };
+        if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "events", "abilities", "turn-roles", "progress-summary", "auto-memory"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
       },
       denSessionHandoff: Promise.resolve(), storedSkillSession: null, appliedSkillSession: null,
       getCoworker: async (...args) => {
@@ -680,7 +850,7 @@ test("turn submission preserves definitive refusal and generation checks without
     assert.equal(posts, 0);
     assert.throws(() => readiness.assertExpectedReadiness(prepared, owner), { code: "readiness_changed" });
     assert.equal(readiness.readinessKey(), prepared.readinessKey, "a coworker-only change preserves the global runtime stamp");
-    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), false);
+    assert.equal(readiness.warmedCoworkerWorkspaces.has(coworker.workspaceId), true, "model selection changes retain native preparation");
     assert.equal(readiness.warmedCoworkerWorkspaces.has(other.workspaceId), true);
     assert.equal(readiness.warmedCoworkerScopes.get(other.workspaceId), "neighbor-prepared");
     assert.doesNotThrow(() => readiness.assertExpectedReadiness(otherPrepared, otherOwner));
@@ -688,25 +858,25 @@ test("turn submission preserves definitive refusal and generation checks without
       ["settings.update", { modelDefaults: { conversation: { modelVariant: "high" } } }],
       ["coworkers.update", { slug: coworker.slug, patch: { model: "fixture/replacement", modelChosenBy: "person" } }],
     ]) {
-      const before = JSON.stringify([readiness.readinessKey(), readiness.workspaceRevision(coworker.workspaceId)]);
+      const before = JSON.stringify([readiness.readinessKey(), readiness.workspaceRevision(coworker.workspaceId, coworker.slug)]);
       assert.equal((await invoke(command, payload)).ok, true);
-      assert.notEqual(JSON.stringify([readiness.readinessKey(), readiness.workspaceRevision(coworker.workspaceId)]), before, "saved effective changes still invalidate readiness");
+      assert.notEqual(JSON.stringify([readiness.readinessKey(), readiness.workspaceRevision(coworker.workspaceId, coworker.slug)]), before, "saved effective changes still invalidate readiness");
       if (command === "settings.update") {
         assert.notEqual(readiness.readinessKey(), otherPrepared.readinessKey);
         assert.equal(readiness.warmedCoworkerWorkspaces.size, 0, "app defaults still invalidate all warm scopes");
       }
     }
     failSave = true;
-    const beforeFailure = readiness.workspaceRevision(coworker.workspaceId);
+    const beforeFailure = readiness.workspaceRevision(coworker.workspaceId, coworker.slug);
     assert.equal((await invoke("coworkers.update", { slug: coworker.slug, patch: { modelVariant: "high" } })).ok, false);
-    assert.notEqual(readiness.workspaceRevision(coworker.workspaceId), beforeFailure);
+    assert.notEqual(readiness.workspaceRevision(coworker.workspaceId, coworker.slug), beforeFailure);
     failSave = false;
     context.denSession = { orgId: "fixture" };
     const nativeNoChange = { fingerprintChanged: false, providerStateChanged: false, envUpserts: 0, envDeletes: 0,
       cleanupChanged: false, cleanupRuntimeChanged: false, fileChanged: false, reloadDeferred: false, nativeReloadAttempted: false, nativeReloadPending: false };
     syncOutcome = { status: "noop", detail: nativeNoChange };
     syncGate = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
-    const signedInStamp = { ...prepared, readinessKey: readiness.readinessKey(), workspaceRevision: readiness.workspaceRevision(coworker.workspaceId) };
+    const signedInStamp = { ...prepared, readinessKey: readiness.readinessKey(), workspaceRevision: readiness.workspaceRevision(coworker.workspaceId, coworker.slug) };
     const otherSignedInStamp = { ...otherPrepared, readinessKey: readiness.readinessKey(), workspaceRevision: readiness.workspaceRevision(other.workspaceId) };
     const beforeNotifications = notifications;
     let refreshing, refreshed;
@@ -737,7 +907,7 @@ test("turn submission preserves definitive refusal and generation checks without
     const staleWarmup = readiness.warmCoworkerWorkspace(await getCoworker(home, coworker.slug));
     const staleResult = assert.rejects(staleWarmup, /changed during workspace preparation/);
     await warmGate.entered.promise;
-    assert.equal((await invoke("coworkers.update", { slug: coworker.slug, patch: { effortPreference: "thorough" } })).ok, true);
+    assert.equal((await invoke("settings.update", { modelDefaults: { conversation: { model: "fixture/after-warm" } } })).ok, true);
     warmGate.release.resolve();
     await staleResult;
     warmGate = null;

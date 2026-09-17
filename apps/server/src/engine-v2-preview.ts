@@ -6,7 +6,7 @@ import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { loopbackFetch } from "./server-fetch.js";
 
-import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
+import { nativeHostVersion, verifyNativeSourceBuild, awaitNativePlugins, nativeProviderPackage, nativeMcpMutationPath } from "./native-api-profile.js";
 import { waitForNativeOpenWorkV2Skills } from "./opencode-v2-instructions.js";
 import {
   CloudNativeSkillSyncError,
@@ -180,8 +180,11 @@ function exec(file: string, args: string[], options: { cwd?: string; timeout?: n
 }
 
 async function resolveBinary(config: ServerConfig): Promise<ResolvedBinary> {
-  const selectedVersion = resolveOpencodeV2Version(config.opencodeV2?.version);
-  if (config.opencodeV2?.bin) return { bin: config.opencodeV2.bin, source: "explicit" };
+  const selectedVersion = nativeHostVersion(config.opencodeV2, config.opencodeV2?.bin);
+  if (config.opencodeV2?.bin) {
+    await verifyNativeSourceBuild(config.opencodeV2, config.opencodeV2.bin);
+    return { bin: config.opencodeV2.bin, source: "explicit" };
+  }
   // Mandatory hosts and explicit versions use only their binary or verified pin. PATH
   // and preview environment overrides must never downgrade the selected engine.
   if (config.engine === "v2" || config.opencodeV2?.version !== undefined) {
@@ -350,7 +353,7 @@ export function mapRuntimeMcpToV2(value: unknown): Record<string, unknown> | und
     ...(oauth === undefined ? {} : { oauth }), ...shared };
 }
 
-function nativeCleanupRoute(method: string, path: string) {
+function nativeCleanupRoute(method: string, path: string, apiContract: "beta19271" | "native-2" = "beta19271") {
   const denied = () => new Error("Only native session cleanup operations are allowed");
   if (typeof path !== "string" || path.length > 8192 || /[\\#\u0000-\u0020\u007f]/.test(path)) throw denied();
   const [pathname, search, extra] = path.split("?");
@@ -360,6 +363,10 @@ function nativeCleanupRoute(method: string, path: string) {
   if (new Set(supplied.keys()).size !== supplied.size) throw denied();
   if (method === "GET" && pathname === "/api/session/active" && search === undefined) {
     return { pathname, query, sessionId: null };
+  }
+  if (apiContract === "native-2" && method === "POST" && search === undefined) {
+    const wait = pathname.match(/^\/api\/experimental\/session\/(ses_[A-Za-z0-9_]{1,256})\/wait$/);
+    if (wait) return { pathname, query, sessionId: wait[1] };
   }
   const match = pathname.match(/^\/api\/session\/(ses_[A-Za-z0-9_]{1,256})(?:\/(message|inbox|interrupt|wait)(?:\/(msg_[A-Za-z0-9_]{1,256}))?)?$/);
   if (!match) throw denied();
@@ -379,7 +386,7 @@ function nativeCleanupRoute(method: string, path: string) {
     query.set("continue", "false");
   } else if (search !== undefined || !(
     (method === "GET" && (!resource || resource === "inbox") && !messageId)
-    || (method === "POST" && resource === "wait" && !messageId)
+    || (method === "POST" && resource === "wait" && !messageId && apiContract === "beta19271")
     || (method === "DELETE" && resource === "inbox" && messageId)
   )) throw denied();
   return { pathname, query, sessionId };
@@ -389,7 +396,8 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
   const { config } = options;
   const mandatory = config.engine === "v2";
   const rootDir = config.opencodeV2?.rootDir ?? join(runtimeStorageDir(config), "opencode-v2", "state");
-  const workspaceDir = join(rootDir, "workspace");
+  const workspaceDir = config.opencodeV2?.workspaceDirectory ?? join(rootDir, "workspace");
+  if (!isAbsolute(workspaceDir)) throw new Error("The native primary directory must be absolute.");
   const initialState = mandatory ? { enabled: true, chatRouting: true }
     : resolveInitialEngineV2PreviewState(process.env, readEngineV2PreviewState(config));
   let enabled = initialState.enabled;
@@ -578,7 +586,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       // revoked tool active. Only touch registrations owned by this mirror.
       for (const [name, fingerprint] of applied) {
         if (desired.has(name) && JSON.stringify(desired.get(name)) === fingerprint) continue;
-        const result = await active.fetchJson(`/api/mcp/${encodeURIComponent(name)}`, {
+        const result = await active.fetchJson(nativeMcpMutationPath(name, config.opencodeV2?.apiContract), {
           method: "DELETE", directory, timeoutMs: 15_000,
         });
         if (result.status !== 204 && result.status !== 404) throw new Error(`OpenCode v2 MCP removal failed (${result.status})`);
@@ -588,7 +596,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       for (const [name, mcpConfig] of desired) {
         const fingerprint = JSON.stringify(mcpConfig);
         if (applied.get(name) === fingerprint) continue;
-        const result = await active.fetchJson(`/api/mcp/${encodeURIComponent(name)}`, {
+        const result = await active.fetchJson(nativeMcpMutationPath(name, config.opencodeV2?.apiContract), {
           method: "PUT", body: { config: mcpConfig }, directory, timeoutMs: 30_000,
         });
         if (result.status !== 204) throw new Error(`OpenCode v2 MCP registration failed (${result.status})`);
@@ -653,10 +661,12 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     const providerMap = runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config));
     const credentials = new Map((await options.env?.list() ?? []).map((entry) => [entry.key, entry.value]));
     const mapped = mapRuntimeProvidersToV2Specs(providerMap, credentials);
+    if (config.opencodeV2?.apiContract === "native-2") mapped.specs = mapped.specs.map((spec) => ({ ...spec, package: nativeProviderPackage(spec.package, "native-2") }));
     const nextMirroredProviderIds = mapped.specs.map((spec) => spec.id);
+    const beforeRevision = active.configurationRevision;
     await active.setProviders(mapped.specs);
     mirroredSpecs = mapped.specs;
-    workspaceReadiness.clear();
+    if (beforeRevision === undefined || active.configurationRevision !== beforeRevision) workspaceReadiness.clear();
     removedProviderIds = [...new Set([...removedProviderIds, ...mirroredProviderIds])]
       .filter((id) => !nextMirroredProviderIds.includes(id));
     mirroredProviderIds = nextMirroredProviderIds;
@@ -750,7 +760,8 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       nativeSkills: mandatory,
       nativeCatalogMetadata: mandatory,
       bootTimeoutMs: config.opencodeV2?.bootTimeoutMs,
-      expectedVersion: mandatory || config.opencodeV2?.version !== undefined ? resolveOpencodeV2Version(config.opencodeV2?.version) : undefined,
+      expectedVersion: mandatory || config.opencodeV2?.version !== undefined || config.opencodeV2?.sourceBuild ? nativeHostVersion(config.opencodeV2, resolved.bin) : undefined,
+      apiContract: config.opencodeV2?.apiContract,
       env: {
         ...config.opencodeV2?.env,
         OPENCODE_MODELS_URL: opencodeModelsUrl,
@@ -796,7 +807,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       if (mandatory && mirrorError) throw mirrorError;
       if (mandatory) {
         await ensureWorkspaceReady(workspaceDir);
-        for (const workspace of config.workspaces) {
+        if (!config.opencodeV2?.workspaceDirectory) for (const workspace of config.workspaces) {
           if (workspace.workspaceType === "local") await ensureWorkspaceReady(workspace.path);
         }
       }
@@ -907,7 +918,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         if (method !== "GET" && config.readOnly) throw new Error("Native cleanup server is read-only");
       };
       assertCurrent();
-      const route = nativeCleanupRoute(method, path);
+      const route = nativeCleanupRoute(method, path, config.opencodeV2?.apiContract);
       const scopeError = () => new Error("Native cleanup workspace is unavailable or changed");
       const run = async (): Promise<Response> => {
         const workspace = config.workspaces.find((entry) => entry.id === workspaceId);
@@ -1061,14 +1072,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     // initial catalog can be empty even after the preview location is ready.
     const pending = (async () => {
       if (mandatory) {
-        const activated = await active.fetchJson("/api/plugin/await-activation", { method: "POST", directory, timeoutMs: 30_000 });
-        if (activated.status !== 204) throw new Error("OpenCode v2 plugin activation did not settle");
-        const plugins = await active.fetchJson("/api/plugin", { directory, timeoutMs: 5_000 });
-        const entries = isRecord(plugins.json) ? plugins.json.data : undefined;
-        if (plugins.status !== 200 || !Array.isArray(entries)
-          || entries.some((entry) => !isRecord(entry) || !isRecord(entry.state) || entry.state.status !== "active")) {
-          throw new Error("OpenCode v2 has an inactive or failed configured plugin");
-        }
+        await awaitNativePlugins(active.fetchJson, directory, config.opencodeV2?.apiContract);
       }
       const deadline = Date.now() + 8_000;
       do {

@@ -57,7 +57,6 @@ import {
   discussionTitleFromPrompt,
   loadDiscussionRegistry,
   registerDiscussion,
-  rememberWorkspaceSlug,
 } from "@/lib/discussions";
 import type { EffortStop } from "@/lib/effort";
 import { EffortDial } from "@/ui/effort-dial";
@@ -417,9 +416,10 @@ export function ThreadsPanel({
             conversationThreadId: discussionThreadId,
             discussionThreadIds,
             workerThreadIds,
+            owner: { slug: coworker.slug, createdAt: coworker.createdAt },
           })
         : null,
-    [runtime.serverUrl, runtime.ownerToken, coworker.workspaceId, coworker.model, coworker.modelVariant, discussionThreadId, discussionThreadIds, workerThreadIds],
+    [runtime.serverUrl, runtime.ownerToken, coworker.workspaceId, coworker.slug, coworker.createdAt, coworker.model, coworker.modelVariant, discussionThreadId, discussionThreadIds, workerThreadIds],
   );
   const [openThreadId, setOpenThreadId] = useState("");
   const [preparationAttempt, setPreparationAttempt] = useState(0);
@@ -427,11 +427,11 @@ export function ThreadsPanel({
   const preparationScope = workspacePreparationScope(runtime, preparationOwner, session);
   const readiness = useMemo(() => workspaceReadinessCache.get(preparationScope, async (signal) => {
     if (!runtime.engineManaged || !coworker.workspaceId || !runtime.readinessKey) throw new Error("AI is unavailable. Restart AI in Settings. Your draft is kept.");
-    const expected = { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey, workspaceRevision: runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0 };
+    const expected = { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey, workspaceRevision: runtime.workspaceReadinessRevisions?.[`coworker:${coworker.slug}`] ?? runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0 };
     const [prepared, settings] = await Promise.all([coworkerBridge.coworkers.ensureWorkspace(coworker.slug, expected), coworkerBridge.settings.get()]);
     signal.throwIfAborted();
     if (prepared.readinessKey !== expected.readinessKey || (prepared.workspaceRevision ?? 0) !== expected.workspaceRevision || prepared.workspaceId !== expected.workspaceId || prepared.createdAt !== expected.createdAt) throw new Error("The AI workspace changed. Retry preparation; your draft is kept.");
-    await createCoworkerThreads({ serverUrl: runtime.serverUrl, token: runtime.ownerToken, workspaceId: coworker.workspaceId }).prepare(signal, { coworker: preparationOwner, defaults: settings.modelDefaults });
+    await createCoworkerThreads({ serverUrl: runtime.serverUrl, token: runtime.ownerToken, workspaceId: coworker.workspaceId, owner: { slug: coworker.slug, createdAt: coworker.createdAt } }).prepare(signal, { coworker: preparationOwner, defaults: settings.modelDefaults });
   }), [preparationScope.runtimeKey, preparationScope.workspaceKey, preparationScope.configurationKey, preparationAttempt]);
   const retryPreparation = useCallback(() => {
     workspaceReadinessCache.invalidate(preparationScope, readiness);
@@ -444,7 +444,7 @@ export function ThreadsPanel({
   const currentReadiness = useRef(readiness);
   currentReadiness.current = readiness;
   const readinessScope = useRef<WorkspaceReadinessScope>({ readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "" } });
-  readinessScope.current = { readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "", workspaceRevision: runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0 } };
+  readinessScope.current = { readiness, expected: { workspaceId: coworker.workspaceId, createdAt: coworker.createdAt, readinessKey: runtime.readinessKey ?? "", workspaceRevision: runtime.workspaceReadinessRevisions?.[`coworker:${coworker.slug}`] ?? runtime.workspaceReadinessRevisions?.[coworker.workspaceId] ?? 0 } };
   const readReadiness = useCallback(() => readinessScope.current, []);
   const reportActivity = useCallback((activity: CoworkerActivity | null) => {
     if (currentReadiness.current !== readiness) return;
@@ -476,7 +476,6 @@ export function ThreadsPanel({
 
   useEffect(() => {
     let cancelled = false;
-    rememberWorkspaceSlug(coworker.workspaceId, coworker.slug);
     loadDiscussionRegistry(coworker.slug)
       .then((ids) => {
         if (!cancelled) setRegisteredDiscussions(ids);
@@ -1530,8 +1529,11 @@ function ThreadView({
     viewMounted.current = true;
     return () => {
       viewMounted.current = false;
-      waitControllerRef.current?.abort();
-      if (appRetryTimerRef.current !== null) window.clearTimeout(appRetryTimerRef.current);
+      queueMicrotask(() => {
+        if (viewMounted.current) return;
+        waitControllerRef.current?.abort();
+        if (appRetryTimerRef.current !== null) window.clearTimeout(appRetryTimerRef.current);
+      });
     };
   }, []);
 

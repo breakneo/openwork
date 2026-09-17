@@ -37,11 +37,13 @@ export async function readExecutionActivity(input: {
   threadId: string;
   messageId: string;
   signal: AbortSignal;
+  apiContract?: "beta19271" | "native-2";
 }): Promise<Pick<ExecutionActivity, "replies" | "tools" | "completedSteps" | "failedSteps" | "nativeStatus">> {
   const client = createHeadlessThreadClientV2({
     baseUrl: input.serverUrl,
     workspaceId: input.workspaceId,
     token: input.token,
+    apiContract: input.apiContract,
   });
   // The shared projection verifies the complete native admission interval;
   // v2 events and assistant messages do not carry a trustworthy parent ID.

@@ -143,14 +143,14 @@ test("prepared workspaces survive navigation, isolate coworker changes and dispo
 test("workspace preparation validates the effective conversation default and effort with the send resolver", async () => {
   const source = await readFile(new URL("./threads.ts", import.meta.url), "utf8");
   const start = source.indexOf("  async function prepare(signal:");
-  const end = source.indexOf("  async function listAllThreads()", start);
+  const end = source.indexOf("  async function listAllThreads(", start);
   assert.ok(start > 0 && end > start);
   const script = await transform(`${source.slice(start, end)}\nprepare`, { loader: "ts", target: "es2022" });
   const catalog = connectedModelCatalog(fixtureCatalog({ connected: ["fixture"], all: [fixtureProvider({ id: "fixture", name: "Fixture", models: { model: { name: "Model", variants: { low: {}, high: {} } } } })] }));
   const defaults = { ...DEFAULT_MODEL_DEFAULTS, conversation: { model: "fixture/model", modelVariant: "low" } };
   const owner = { model: "stale/missing", modelVariant: "unavailable", useAppModelDefaults: true, effortPreference: "balanced" };
   const native = { getAgent: async () => ({ id: "build" }), defaultModel: async () => assert.fail("The saved engine default must not override the effective role default") };
-  const prepare = runInNewContext(script.code, { createNativeV2Client: () => native, options: {}, parsedModel: parseModelPreference(owner.model), WORKSPACE_STARTUP_TIMEOUT_MS, listModelCatalog: async () => catalog, resolveDiscussionModel, Error, Promise });
+  const prepare = runInNewContext(script.code, { createNativeV2Client: () => native, nativeOptions: {}, options: {}, agentId: "build", parsedModel: parseModelPreference(owner.model), WORKSPACE_STARTUP_TIMEOUT_MS, listModelCatalog: async () => catalog, resolveDiscussionModel, Error, Promise });
   await prepare(new AbortController().signal, { coworker: owner, defaults });
   assert.equal(resolveDiscussionModel(catalog, owner, "", defaults).variant, "low");
   await assert.rejects(prepare(new AbortController().signal, { coworker: { ...owner, useAppModelDefaults: false }, defaults }), /not available/);

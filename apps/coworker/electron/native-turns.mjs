@@ -3,6 +3,7 @@ import { workerTurnTools } from "./workers.mjs";
 import { nativePermissions } from "./native-config.mjs";
 import { COORDINATOR_AGENT as NATIVE_COORDINATOR_AGENT } from "./coordinator.mjs";
 import { EVENT_WRITE_DENY, EVENT_SCHEDULE_DENY } from "./event-execution.mjs";
+import { COWORKER_ROLE_SEPARATOR, coworkerAgent, coworkerAgentOwner as sharedAgentOwner, coworkerRoleAgentId } from "../src/lib/coworker-agents.ts";
 
 export { NATIVE_COORDINATOR_AGENT };
 
@@ -46,14 +47,45 @@ function maskKey(tools) {
   return JSON.stringify(Object.entries(tools).sort(([a], [b]) => a.localeCompare(b)));
 }
 
+// One team workspace hosts every coworker as its own native agent; the shared
+// naming lives in src/lib/coworker-agents.ts so the renderer filters the same way.
+const GENERIC_ROLE_IDS = new Set(NATIVE_TURN_ROLES.map((role) => role.id));
+export { COWORKER_ROLE_SEPARATOR, coworkerAgent };
+
+/** A role variant of one coworker's agent, derived by the turn-role plugin from that agent. */
+export function coworkerRoleAgent(slug, roleId) {
+  if (!GENERIC_ROLE_IDS.has(roleId)) throw new Error("Unknown native turn role.");
+  return coworkerRoleAgentId(slug, roleId);
+}
+
+/** Every agent id a coworker's sessions may carry: its primary agent and each role variant. */
+export function coworkerAgentIds(slug) {
+  return [coworkerAgent(slug), ...NATIVE_TURN_ROLES.map((role) => coworkerRoleAgent(slug, role.id))];
+}
+
+/** The slug an agent id names, or null for the coordinator, generic roles and foreign agents. */
+export function coworkerAgentOwner(agent) {
+  return sharedAgentOwner(agent, GENERIC_ROLE_IDS);
+}
+
 /** Resolve before native admission. Unknown masks/custom masked bases fail closed.
- * Passing an already-pinned role without tools returns the identical role. */
-export function nativeTurnAgent({ tools, agent = "build" } = {}) {
+ * Passing an already-pinned role without tools returns the identical role. With a
+ * slug the roles derive from that coworker's own agent; without one, from `build`. */
+export function nativeTurnAgent({ tools, agent, slug } = {}) {
+  const base = slug === undefined || slug === null ? "build" : coworkerAgent(slug);
+  agent ??= base;
   if (typeof agent !== "string" || !agent.trim() || agent !== agent.trim()) throw new Error("A native turn agent is required.");
   const key = maskKey(tools);
   if (key === "[]") return agent;
   if (agent === NATIVE_COORDINATOR_AGENT && [COMPUTER_DENY, { ...COMPUTER_DENY, ...EVENT_WRITE_DENY }, { ...COMPUTER_DENY, ...EVENT_SCHEDULE_DENY }].some((mask) => key === maskKey(mask) || key === maskKey({ ...mask, coworker_react: false }))) return agent;
   const role = NATIVE_TURN_ROLES.find((role) => maskKey(role.tools) === key);
-  if (!role || (agent !== "build" && agent !== role.id)) throw new Error("Unsupported native turn tool mask or conflicting agent pin.");
+  if (!role) throw new Error("Unsupported native turn tool mask or conflicting agent pin.");
+  const owner = coworkerAgentOwner(agent);
+  if (owner !== null) {
+    const pinned = coworkerRoleAgent(owner, role.id);
+    if (agent !== coworkerAgent(owner) && agent !== pinned) throw new Error("Unsupported native turn tool mask or conflicting agent pin.");
+    return pinned;
+  }
+  if (agent !== "build" && agent !== role.id) throw new Error("Unsupported native turn tool mask or conflicting agent pin.");
   return role.id;
 }

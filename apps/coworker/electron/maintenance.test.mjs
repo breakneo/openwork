@@ -708,7 +708,7 @@ test("Windows engine directory queries use serialized slashes without accepting 
   assert.equal(unc.nativeDirectory("//host/share/coworkers/writer"), "\\\\host\\share\\coworkers\\writer");
 });
 
-async function mainFixture(t) {
+async function mainFixture(t, apiContract = "beta19271") {
   const mainUrl = new URL("./main.mjs", import.meta.url);
   const source = await readFile(mainUrl, "utf8");
   const declaration = (name) => {
@@ -758,6 +758,7 @@ async function mainFixture(t) {
     setTimeout: later, clearTimeout, clearInterval, setImmediate: (work) => exitTasks.push(work),
     process: { argv: ["fixture-node", "fixture-main.mjs"] }, userDataDir: "/fixture/electron-userdata", coworkersDir: "/fixture/coworkers",
     serverHandle: handle, ownerToken: "fixture-owner", denSession: null,
+    nativeRuntime: { apiContract }, teamSessions: { list: async () => [] },
     maintenanceAdmission: admission, resetExitReady: false, resetInProgress: false, resetRetryReady: false, resetBlockedReason: "", quitting: false, quitReady: false,
     localResponsibilitiesTimer: null, responsibilityAbort: new AbortController(), queuedLocalRuns: [], liveWorkerTurns: new Map(), localRunAdmission: Promise.resolve(),
     activeLocalRuns: new Set(), startingServer: null, startingToolsServer: null, responsibilityCleanupError: null, nativeProviderGeneration: null, signInAttempts: new Set(),
@@ -862,8 +863,8 @@ const assertNoResetWrites = (f) => {
   assert.equal(f.effects.resetWrites, 0);
 };
 
-test("main cleanup stays identity-scoped behind closed admission without preparing or admitting work", async (t) => {
-  const f = await mainFixture(t);
+for (const apiContract of ["beta19271", "native-2"]) test(`main cleanup stays identity-scoped behind closed admission without preparing or admitting work (${apiContract})`, async (t) => {
+  const f = await mainFixture(t, apiContract);
   f.admission.close();
   const client = await f.client();
   assert.equal((await client.getThreadSnapshot(f.owner.threadId)).status.type, "idle");
@@ -871,7 +872,17 @@ test("main cleanup stays identity-scoped behind closed admission without prepari
   assert.equal(client.sendTurn, undefined);
   assert.equal(client.nativeSkills.admitInput, undefined);
   assert.equal(client.nativeSkills.listSkills, undefined);
+  const wait = `/api/${apiContract === "native-2" ? "experimental/" : ""}session/${f.owner.threadId}/wait`;
+  assert.deepEqual(f.effects.requests.filter((request) => request.method === "POST").map(({ path }) => path), [`/api/session/${f.owner.threadId}/interrupt?continue=false`, wait]);
   const before = f.effects.requests.length;
+  const mount = `${f.handle.url}/workspace/${f.coworker.workspaceId}/opencode2`;
+  for (const [method, route] of [
+    ["POST", `/api/${apiContract === "native-2" ? "" : "experimental/"}session/${f.owner.threadId}/wait`],
+    ["POST", wait.replace(f.owner.threadId, "ses_other")], ["GET", wait], ["DELETE", wait],
+    ["POST", `${wait}?continue=false`], ["POST", `${wait}/extra`],
+    ["POST", `/api/experimental/session/${f.owner.threadId}/interrupt?continue=false`],
+  ]) await assert.rejects(f.transport().fetch(mount + route, { method }), /cleanup operations/);
+  await assert.rejects(f.transport().fetch(mount + wait, { method: "POST", body: "{}" }), /cleanup operations/);
   await assert.rejects(f.transport().fetch(`${f.handle.url}/workspace/${f.coworker.workspaceId}/opencode2/api/session/${f.owner.threadId}/prompt`, { method: "POST" }), /cleanup operations/);
   await assert.rejects(client.getThreadSnapshot("ses_other"), /cleanup operations/);
   f.replaceCoworker({ ...f.coworker, createdAt: "replacement" });

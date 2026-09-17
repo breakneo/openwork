@@ -2,7 +2,9 @@ import { lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } fro
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
-import { NATIVE_PLUGIN_DEPENDENCIES, NATIVE_PLUGIN_FILES, NATIVE_PLUGIN_VERSION, validateNativePluginManifest } from "../electron/native-plugin.mjs";
+import { fileURLToPath } from "node:url";
+import { NATIVE_PLUGIN_FILES, validateNativePluginManifest } from "../electron/native-plugin.mjs";
+import { nativeSource, verifyPackagedNativeRuntime } from "../electron/packaged-native-runtime.mjs";
 import nativeRuntime from "../native-runtime.json" with { type: "json" };
 
 const MiB = 1024 ** 2;
@@ -156,20 +158,25 @@ function main() {
       failures.push("Packaged shared server constants must retain the source Desktop defaults");
     }
     const packagedRuntime = readJson("electron-dist/native-runtime.json", () => archiveBytes("electron-dist/native-runtime.json"));
-    const pin = nativeRuntime.opencodeV2Version;
-    if (typeof pin !== "string" || !pin || packagedRuntime?.opencodeV2Version !== pin ||
+    const pin = nativeSource.version;
+    const packagedSource = readJson("electron-dist/native-source.json", () => archiveBytes("electron-dist/native-source.json"));
+    if (JSON.stringify(packagedRuntime) !== JSON.stringify(nativeRuntime) || JSON.stringify(packagedSource) !== JSON.stringify(nativeSource) ||
         sidecar?.version !== pin || Object.keys(metadata ?? {}).length !== 1 ||
         sidecar?.platform !== platform || !engineArch || (options["--arch"] && engineArch !== options["--arch"])) {
-      failures.push(`Native sidecar metadata and packaged Coworker runtime must match pin ${pin ?? "missing"} and target ${platform}/${options["--arch"] ?? "arm64 or x64"}, with native-only metadata`);
+      failures.push(`Native sidecar metadata and packaged Coworker runtime must match pin ${pin} and target ${platform}/${options["--arch"] ?? "arm64 or x64"}, with native-only metadata`);
     }
-    reject("Unexpected sidecar resources", [...disk.keys()].filter((path) => path.startsWith(sidecars) && path !== engine && path !== `${sidecars}versions.json`));
+    let profile;
+    try { profile = verifyPackagedNativeRuntime(join(app, resources), { platform, arch: options["--arch"] ?? engineArch }); }
+    catch (error) { failures.push(`Packaged native source preflight: ${error.message}`); }
+    reject("Unexpected sidecar resources", [...disk.keys()].filter((path) => path.startsWith(sidecars) && path !== engine && path !== `${sidecars}versions.json` && path !== `${sidecars}native-receipt.json`));
+    reject("Source-only native build inputs", allPaths.filter((path) => /(?:^|\/)(?:\.native-source|native-source-fixture\.mjs|prepare-native-plugins\.mjs|build-native-source\.mjs|bun\.lock|opencode-invocation-filesystem-scope\.patch)(?:\/|$)/.test(path)));
     reject("Legacy OpenCode executables", allPaths.filter((path) => basename(path).match(executablePattern)?.[1] === "opencode" &&
       !disk.get(path)?.isDirectory() && !archive.get(path)?.files));
     reject("Legacy plugin resources", allPaths.filter((path) => /(?:^|\/)opencode-plugins(?:\/|$)/.test(path)));
     reject("Duplicate ASAR native plugin bundles", [...archive.keys()].filter((path) => /(?:^|\/)native-plugins(?:\/|$)/.test(path)));
     // Native plugin/schema dependencies are bundled at build time. Shipping a
     // legacy runtime closure is a release blocker, not permission to prune imports.
-    const forbidden = ["@opencode-ai/sdk", "@opencode-ai/plugin", "opencode-chrome-devtools", "better-sqlite3", "drizzle-orm"];
+    const forbidden = ["@opencode-ai/sdk", "@opencode-ai/plugin", "@opencode/sdk", "@opencode/plugin", "@opencode/schema", "esbuild", "typescript", "opencode-chrome-devtools", "better-sqlite3", "drizzle-orm"];
     reject("Forbidden packaged legacy dependencies", allPaths.filter((path) =>
       [...path.matchAll(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/g)].some((match) => forbidden.includes(match[1]))));
     function checkPackage(path, read) {
@@ -196,20 +203,28 @@ function main() {
     // The complete source set emitted by prepareNativePluginBundles. Checking
     // only declared files lets an omitted mandatory plugin disappear unnoticed.
     const requiredPlugins = NATIVE_PLUGIN_FILES;
-    try { validateNativePluginManifest(manifest); }
+    try { validateNativePluginManifest(manifest, profile?.sourceBuild); }
     catch (error) { failures.push(`Native startup preflight: ${error.message}`); }
     function hasExactKeys(value, keys) {
       return value !== null && typeof value === "object" && !Array.isArray(value) &&
         Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
     }
-    if (manifest?.format !== "coworker-native-plugins/v1" || manifest.opencodeVersion !== pin || pin !== NATIVE_PLUGIN_VERSION ||
-        !hasExactKeys(manifest.dependencies, Object.keys(NATIVE_PLUGIN_DEPENDENCIES)) ||
-        Object.entries(NATIVE_PLUGIN_DEPENDENCIES).some(([name, version]) => manifest.dependencies[name] !== version)) {
-      failures.push("Native plugin manifest must declare the exact runtime version and dependency set, including the pinned plugin/schema, Effect and Zod versions");
+    if (manifest?.format !== "coworker-native-source-plugins/v1" || manifest.opencodeVersion !== pin) {
+      failures.push("Native plugin manifest must declare the exact source runtime version and matching SDK");
     }
     if (!hasExactKeys(manifest?.entries, requiredPlugins)) {
       failures.push(`Native plugin manifest must declare exactly these ${requiredPlugins.length} source entries: ${requiredPlugins.join(", ")}`);
     }
+    const buildRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const privatePaths = [buildRoot, buildRoot.replaceAll("\\", "/")];
+    function rejectPrivatePaths(bytes) {
+      if (privatePaths.some((directory) => bytes.includes(Buffer.from(directory)))) throw new Error("private source build path in packaged payload");
+    }
+    try {
+      rejectPrivatePaths(archiveBytes("electron-dist/main.mjs"));
+      rejectPrivatePaths(resourceBytes(`sidecars/${platform === "win32" ? "opencode2.exe" : "opencode2"}`));
+      rejectPrivatePaths(resourceBytes("sidecars/native-receipt.json"));
+    } catch (error) { failures.push(`Native source packaging boundary: ${error.message}`); }
     const pluginFiles = new Set([`${resources}${pluginRoot}manifest.json`]);
     for (const [name, entry] of Object.entries(manifest?.entries ?? {})) {
       if (!/^[a-z0-9-]+\.js$/.test(name) || entry?.file !== name.replace(/\.js$/, ".mjs") ||
@@ -221,6 +236,7 @@ function main() {
       pluginFiles.add(`${resources}${path}`);
       try {
         const bytes = resourceBytes(path);
+        rejectPrivatePaths(bytes);
         if (bytes.length !== entry.bytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) throw new Error("size or SHA-256 mismatch");
       } catch (error) {
         failures.push(`Invalid or missing native plugin bundle ${path}: ${error.message}`);
@@ -240,7 +256,7 @@ function main() {
     }
     for (const path of [
       "package.json", "dist/index.html", "electron-dist/main.mjs", "electron-dist/preload.mjs", "electron-dist/native-runtime.json",
-      "electron-dist/browser-content-preload.cjs", "electron-dist/maintenance-helper.mjs", "electron-dist/THIRD-PARTY-NOTICES",
+      "electron-dist/browser-content-preload.cjs", "electron-dist/maintenance-helper.mjs", "electron-dist/THIRD-PARTY-NOTICES", "electron-dist/OPENCODE-LICENSE", "electron-dist/native-source.json",
       "server/package.json", "server/dist/embedded.js", "server/dist/embedded-native.js", "server/dist/constants.json",
     ]) {
       const entry = archive.get(path);
@@ -266,7 +282,7 @@ function main() {
     platform,
     engineArch,
     engineVersion: sidecar?.version ?? null,
-    expectedEngineVersion: nativeRuntime.opencodeV2Version,
+    expectedEngineVersion: nativeSource.version,
     expectedArch: options["--arch"] ?? null,
     totalBytes,
     totalMiB: totalBytes / MiB,

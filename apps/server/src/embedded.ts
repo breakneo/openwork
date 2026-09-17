@@ -38,7 +38,7 @@ import { keepOpenworkRuntimeConfigFileFresh, writeOpenworkRuntimeConfigFile } fr
 import { migrateOpenworkCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
 import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
-import { resolveOpencodeV2Version } from "./opencode-v2-binary.js";
+import { nativeHostVersion } from "./native-api-profile.js";
 import { engineV2ByConfig, type NativeCleanupRequest, type NativeSkillOriginInput, type NativeSkillOriginSnapshot } from "./engine-v2-preview.js";
 import type { EmbeddedOpencodeV2Options, LocalManagedMcpVaultKeyProvider, ServerConfig } from "./types.js";
 
@@ -84,7 +84,7 @@ export type EmbeddedServerHandle = {
 };
 
 export async function startEmbeddedServer(options: EmbeddedServerOptions): Promise<EmbeddedServerHandle> {
-  if (options.opencodeV2?.version !== undefined) resolveOpencodeV2Version(options.opencodeV2.version);
+  if (options.opencodeV2?.version !== undefined || options.opencodeV2?.sourceBuild) nativeHostVersion(options.opencodeV2, options.opencodeV2Bin);
   if (options.engine === "v2" && (options.manageOpencode === false || options.opencodeBin || options.opencodeBaseUrl)) {
     throw new Error("Mandatory OpenCode v2 cannot attach to or configure an OpenCode v1 engine");
   }

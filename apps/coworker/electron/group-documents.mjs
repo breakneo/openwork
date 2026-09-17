@@ -250,7 +250,7 @@ export function assertGroupDocumentToolContext({ slug, context, name, args, entr
 }
 
 /** The only transport entry points: trusted person IPC or admitted native group tools. */
-export function createGroupDocumentService({ coworkersDir, coworkerFor, resolveContext, captureArtifact = async () => {}, publish = (groupId, event) => appendGroupEvent(coworkersDir, groupId, event) }) {
+export function createGroupDocumentService({ coworkersDir, coworkerFor, sessionBindingFor, resolveContext, captureArtifact = async () => {}, publish = (groupId, event) => appendGroupEvent(coworkersDir, groupId, event) }) {
   const callers = new WeakMap();
   const person = Object.freeze({});
   callers.set(person, async () => ({ kind: "person" }));
@@ -284,6 +284,7 @@ export function createGroupDocumentService({ coworkersDir, coworkerFor, resolveC
     restore: async (groupId, id, revision, expectedRevision) => announce(await store.restore(groupId, id, revision, expectedRevision, person)),
     async executeNative(slug, { name, args, context }) {
       args = validateGroupDocumentArguments(name, args);
+      if (typeof sessionBindingFor !== "function") throw new Error("Native shared documents require a trusted host session binding.");
       const native = { sessionID: context?.sessionID, messageID: context?.messageID, callID: context?.callID, directory: context?.directory };
       const trusted = await resolveContext(slug, native, { name: `coworker_${name}`, args });
       const groupId = trusted.entry.owner.conversationId;
@@ -292,12 +293,25 @@ export function createGroupDocumentService({ coworkersDir, coworkerFor, resolveC
       callers.set(identity, async () => {
         trusted.assertActive();
         const coworker = await coworkerFor(slug);
-        // Native sessions canonicalize paths; macOS /var and /private/var can name the same workspace.
-        const [coworkerPath, nativePath] = await Promise.all([realpath(coworker.path), realpath(native.directory)]);
-        trusted.assertActive();
-        if (coworker.slug !== slug || coworker.workspaceId !== trusted.entry.workspaceId || coworkerPath !== nativePath) {
+        if (!coworker || !SLUG.test(slug) || coworker.slug !== slug || coworker.workspaceId !== trusted.entry.workspaceId
+          || typeof coworker.createdAt !== "string" || !coworker.createdAt || coworker.createdAt !== trusted.entry.coworkerCreatedAt) {
           throw new Error("The originating coworker's workspace changed.");
         }
+        const binding = await sessionBindingFor(coworker, native.sessionID);
+        if (!binding || binding.slug !== slug || binding.slug !== trusted.entry.owner.slug
+          || binding.sessionId !== native.sessionID || binding.sessionId !== trusted.entry.owner.threadId
+          || binding.workspaceId !== coworker.workspaceId || binding.createdAt !== coworker.createdAt
+          || !["group", "consultation", "legacy"].includes(binding.kind) || (binding.kind !== "legacy" && binding.kind !== trusted.entry.owner.kind)
+          || typeof binding.directory !== "string" || !path.isAbsolute(binding.directory)) {
+          throw new Error("The native session does not match its host binding.");
+        }
+        // Native sessions canonicalize paths; macOS /var and /private/var can name the same workspace.
+        const [coworkerPath, homePath, nativePath, bindingPath] = await Promise.all([
+          realpath(coworker.path), realpath(path.join(coworkersDir, slug)), realpath(native.directory), realpath(binding.directory),
+        ]);
+        trusted.assertActive();
+        if (coworkerPath !== homePath) throw new Error("The originating coworker's workspace changed.");
+        if (nativePath !== bindingPath) throw new Error("The native session location does not match its host binding.");
         return { kind: "coworker", slug: coworker.slug, name: coworker.name, groupId };
       });
       try {

@@ -109,6 +109,27 @@ async function boundary(t: TestContext) {
 
 const postCount = (state: BoundaryState) => state.requests.filter((request) => request.method === "POST" && /\/(prompt|synthetic)$/.test(request.path)).length;
 
+test("source native queued context and renaming use the selected wire contract without replay", async (t) => {
+  const { state, options, client: beta } = await boundary(t);
+  const client = createNativeV2Client({ ...options, apiContract: "native-2" });
+  const context = { id: "msg_context", type: "synthetic", text: "Reference" } satisfies Parameters<typeof client.admitInput>[1];
+  const receipt = { id: context.id, sessionID: sid, type: context.type, time: { created: 3 }, delivery: "queue", payload: { text: context.text } };
+  state.overrides.set(`POST ${mount}/session/${sid}/synthetic`, { status: 200, body: { data: receipt } });
+  const accepted = await client.admitInput(sid, context);
+  assert.equal(accepted.state, "accepted");
+  if (accepted.state === "accepted") assert.equal(accepted.receipt.timeCreated, 3);
+  state.inbox = [receipt];
+  assert.equal((await client.admitInput(sid, context)).state, "queued");
+  assert.equal(postCount(state), 1);
+  await assert.rejects(beta.readInbox(sid), { code: "invalid_response" });
+  state.inbox = [{ ...receipt, time: { created: null } }];
+  await assert.rejects(client.readInbox(sid), { code: "invalid_response" });
+  state.overrides.set(`PATCH ${mount}/session/${sid}`, { status: 204 });
+  await client.renameSession(sid, "Updated title");
+  assert.deepEqual(state.requests.at(-1)?.body, { title: "Updated title" });
+  assert.equal(state.requests.at(-1)?.method, "PATCH");
+});
+
 test("native create binding, workspace mount and existing token headers; no v1 fallback", async (t) => {
   const { state, options } = await boundary(t);
   const client = createNativeV2Client({ ...options, hostToken: "fixture-host-token" });

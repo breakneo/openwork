@@ -24,7 +24,7 @@ import { MEMORY_PLUGIN, installMemoryPlugin } from "./memory-model.mjs";
 import { coordinatorConfig } from "./coordinator.mjs";
 import { nativeConfig, updateNativeConfig } from "./native-config.mjs";
 import { NATIVE_PLUGIN_DEPENDENCIES, NATIVE_PLUGIN_VERSION, configureNativePluginBundles, validateNativePluginManifest, verifyNativePluginBundles } from "./native-plugin.mjs";
-import { TURN_ROLES_PLUGIN, prepareNativeTurnRoles } from "./turn-roles-plugin.mjs";
+import { TURN_ROLES_PLUGIN, awaitNativePluginActivation, prepareNativeTurnRoles } from "./turn-roles-plugin.mjs";
 import { NATIVE_TURN_ROLES } from "./native-turns.mjs";
 import { createCoworkerToolsServer } from "./coworker-tools.mjs";
 import { assertWorkerToolContext, WORKER_MANAGEMENT } from "./worker-controls.mjs";
@@ -95,7 +95,7 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
   // Exercise the real main warmup body: readiness must be awaited, and a failed
   // or incomplete RPC receipt must never put a workspace in the warmed set.
   const main = await readFile(new URL("./main.mjs", import.meta.url), "utf8");
-  const source = main.slice(main.indexOf("async function runCoworkerWorkspaceWarmup("), main.indexOf("\nfunction warmCoworkerWorkspace("));
+  const source = main.slice(main.indexOf("async function runCoworkerWorkspaceWarmup("), main.indexOf("\nasync function warmCoworkerWorkspace("));
   const ready = Promise.withResolvers();
   const reached = Promise.withResolvers();
   const calls = [];
@@ -105,14 +105,15 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
   let reply = () => ready.promise;
   let generation = "fixture-generation";
   const warm = runInNewContext(`${source}\nrunCoworkerWorkspaceWarmup`, {
-    ensureToolsServer: async () => ({}), installNativeCoworkerPlugins: async () => undefined,
+    teamWorkspace: () => coworker, ensureToolsServer: async () => ({}), installNativeCoworkerPlugins: async () => undefined,
     ensurePlatformServer: async () => handle, registerCoworkerTools: async () => undefined,
-    toolsRegistered: new Set(), serverHandle: handle, warmedCoworkerWorkspaces, prepareNativeTurnRoles,
+    toolsRegistered: new Set(), serverHandle: handle, warmedCoworkerWorkspaces, prepareNativeTurnRoles, awaitNativePluginActivation, nativeRuntime: {},
     AbortSignal, warmedCoworkerScopes: new Map(), workspaceReadinessScope: () => generation,
     pendingWorkspaceReadinessChanges: () => [], coworkersDir: "/workspace", getCoworker: async () => coworker,
     nativeWorkspaceRequest: async (_handle, _workspaceId, method, route, body) => {
       calls.push({ method, route, body });
-      if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "turn-roles", "events", "abilities"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
+      if (route === "/api/plugin") return { data: ["collaboration", "computer", "browser", "group-documents", "turn-roles", "events", "abilities", "progress-summary", "auto-memory"].map((id) => ({ id: `coworker.${id}`, state: { status: "active" } })) };
+      if (route === "/api/agent/build") return { data: { permissions: [] } };
       if (route === "/api/rpc/coworker.turn-roles/prepare") { reached.resolve(); return reply(); }
     },
   });
@@ -132,7 +133,7 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
   assert.equal(warmedCoworkerWorkspaces.size, 0);
   assert.deepEqual(calls.map((call) => call.route), ["/api/plugin/await-activation", "/api/plugin", "/api/rpc/coworker.turn-roles/prepare"]);
   assert.deepEqual(calls.at(-1).body, { input: {} });
-  ready.resolve({ output: { ready: true } });
+  ready.resolve({ output: { ready: true, filesystemScopeRequired: true } });
   await warming;
   assert.equal(readiness.snapshot().state, "ready");
   assert.deepEqual(submissions, ["Original request"]);
@@ -145,7 +146,7 @@ test("native launch scripts finish prerequisite builds before loading plugin pre
   reply = async () => { throw new Error("Readiness failed"); };
   await assert.rejects(warm(coworker), /Readiness failed/);
   assert.equal(warmedCoworkerWorkspaces.size, 0);
-  reply = async () => { generation = "replacement-generation"; return { output: { ready: true } }; };
+  reply = async () => { generation = "replacement-generation"; return { output: { ready: true, filesystemScopeRequired: true } }; };
   await assert.rejects(warm(coworker), /changed during workspace preparation/);
   assert.equal(warmedCoworkerWorkspaces.size, 0);
 });
@@ -163,7 +164,7 @@ async function fixture(t, source, options = {}) {
   let refreshMcp = () => {};
   const ctx = {
     location: { directory: root },
-    agent: { get: ({ agentID }) => Effect.succeed({ data: agents.get(agentID) }), transform: (fn) => Effect.sync(() => fn({ get: (id) => agents.get(id), update: (id, update) => { const item = agents.get(id) ?? Agent.Info.default(id); update(item); agents.set(id, item); } })) },
+    agent: { get: ({ agentID }) => Effect.succeed({ data: agents.get(agentID) }), transform: (fn) => Effect.sync(() => fn({ list: () => [...agents.values()], get: (id) => agents.get(id), update: (id, update) => { const item = agents.get(id) ?? Agent.Info.default(id); update(item); agents.set(id, item); } })) },
     plugin: { list: () => Effect.succeed({ data: options.configActive === false ? [] : [{ id: "opencode.config.agent", state: { status: "active" } }] }) },
     rpc: { register: (_definition, handlers) => Effect.sync(() => { for (const [name, handler] of Object.entries(handlers)) hooks.set(`rpc.${name}`, handler); return { dispose: Effect.void }; }) },
     tool: { transform: (fn) => Effect.sync(() => fn(editor)), hook: register("tool") },
@@ -300,7 +301,7 @@ test("published native tools preserve trusted identity, broker payloads, file im
   await assert.rejects(Effect.runPromise(f.tools.get("coworker_document_read").execute({}, { ...context, agent: "coworker-worker" })), /cannot use/);
   // Configuration arrives after plugin setup, before host readiness/preflight.
   f.agents.get("build").permissions.push({ action: "skill", resource: "approved", effect: "allow" }, { action: "skill", resource: "private", effect: "deny" });
-  assert.deepEqual(await f.run("rpc", "prepare", {}), { ready: true });
+  assert.deepEqual(await f.run("rpc", "prepare", {}), { ready: true, filesystemScopeRequired: false });
   assert.deepEqual(f.agents.get("coworker-worker").permissions, [...f.agents.get("build").permissions, ...NATIVE_TURN_ROLES.find((role) => role.id === "coworker-worker").permissions]);
   const inherited = structuredClone(f.agents.get("coworker-worker"));
   await f.run("rpc", "prepare", {});
@@ -473,7 +474,8 @@ test("native main binds Worker skills to admitted provenance and consultations t
       return Response.json({ user: { id: account(sandbox.denSession).accountId } });
     },
     maintenanceAdmission: { run: (work) => work() }, COMPUTER_TOOLS: {}, BROWSER_TOOLS: {}, groupDocumentTools: new Set(), eventNativeSchemas: {},
-    WORKER_MANAGEMENT, assertWorkerToolContext, assertTeamConsultToolContext,
+    ownedSessionClient: (_coworker, options) => api.skillAwareClient(options),
+    TEAM_SCOPE: Object.freeze({ team: true }), WORKER_MANAGEMENT, assertWorkerToolContext, assertTeamConsultToolContext,
     listCoworkers: async () => { rosterReads++; return [{ slug: "teammate", name: "Teammate" }]; },
     collaboration: {
       change: async (change) => change({ executions: { [entry.id]: entry } }),

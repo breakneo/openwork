@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { verifyPackagedNativeRuntime } from "../electron/packaged-native-runtime.mjs";
 import nativeRuntime from "../native-runtime.json" with { type: "json" };
 
 const dirnameHere = dirname(fileURLToPath(import.meta.url));
@@ -55,18 +56,10 @@ async function buildElectron() {
   run(pnpmCommand, ["--filter", "@openwork/automations", "build"]);
   run(pnpmCommand, ["--filter", "@openwork/headless-threads", "build"]);
   run(pnpmCommand, ["--filter", "openwork-server", "build"]);
-  // Preparation imports the memory plugin's built headless v2 client.
-  const { prepareNativePluginBundles } = await import("../electron/prepare-native-plugins.mjs");
-  await prepareNativePluginBundles({
-    outputDirectory: resolve(coworkerRoot, "resources", "native-plugins"),
-    dependencyDirectory: resolve(sidecarDir, `.native-plugin-sdk-${nativeRuntime.opencodeV2Version}`),
-  });
-  const { installOpencodeV2Binary } = await import(pathToFileURL(resolve(repoRoot, "apps/server/dist/opencode-v2-binary.js")).href);
-  const binary = await installOpencodeV2Binary(resolve(sidecarDir, ".verified-v2"), nativeRuntime.opencodeV2Version);
-  copyFileSync(binary, resolve(sidecarDir, process.platform === "win32" ? "opencode2.exe" : "opencode2"));
-  writeFileSync(resolve(sidecarDir, "versions.json"), `${JSON.stringify({
-    opencode2: { version: nativeRuntime.opencodeV2Version, platform: process.platform, arch: process.arch },
-  }, null, 2)}\n`);
+  const { prepareNativeSourcePluginBundles } = await import("../electron/prepare-native-plugins.mjs");
+  const { stageNativeSource } = await import("./build-native-source.mjs");
+  const nativeBuild = await stageNativeSource({ resources: resolve(coworkerRoot, "resources"), prepareBundles: prepareNativeSourcePluginBundles, requireCached: Boolean(process.env.CSC_LINK || process.env.APPLE_API_KEY || process.env.MACOS_NOTARIZE === "true") });
+  verifyPackagedNativeRuntime(resolve(coworkerRoot, "resources"));
   run(process.execPath, [
     resolve(repoRoot, "apps", "desktop", "scripts", "prepare-computer-use-helper.mjs"),
     "--force",
@@ -78,19 +71,16 @@ async function buildElectron() {
   rmSync(packagedElectronRoot, { recursive: true, force: true });
   mkdirSync(packagedElectronRoot, { recursive: true });
   copyFileSync(resolve(coworkerRoot, "native-runtime.json"), resolve(packagedElectronRoot, "native-runtime.json"));
-  run(pnpmCommand, [
-    "exec",
-    "esbuild",
-    resolve(coworkerRoot, "electron", "main.mjs"),
-    "--bundle",
-    "--platform=node",
-    "--format=esm",
-    "--target=node24",
-    "--external:electron",
-    "--external:@modelcontextprotocol/sdk",
-    "--external:ws",
-    `--outfile=${resolve(packagedElectronRoot, "main.mjs")}`,
-  ], coworkerRoot);
+  copyFileSync(resolve(coworkerRoot, "native-source.json"), resolve(packagedElectronRoot, "native-source.json"));
+  writeFileSync(resolve(packagedElectronRoot, "OPENCODE-LICENSE"), nativeBuild.license);
+  const { build } = await import("esbuild");
+  const mainBuild = await build({ entryPoints: [resolve(coworkerRoot, "electron/main.mjs")], bundle: true, platform: "node", format: "esm", target: "node24",
+    external: ["electron", "@modelcontextprotocol/sdk", "ws"], outfile: resolve(packagedElectronRoot, "main.mjs"), metafile: true,
+    plugins: [{ name: "exclude-source-development-tools", setup(plugin) {
+      plugin.onLoad({ filter: /[/\\]native-source-fixture\.mjs$/ }, () => ({ contents: 'export function readNativeSourceFixture() { throw new Error("Source fixtures are unavailable in packaged apps."); } export const prepareNativeSourceBundles = readNativeSourceFixture;', loader: "js" }));
+    } }],
+  });
+  if (Object.keys(mainBuild.metafile.inputs).some((name) => /(?:node_modules\/(?:esbuild|typescript)|prepare-native-plugins\.mjs|build-native-source\.mjs)/.test(name.replaceAll("\\", "/")))) throw new Error("Source build tooling leaked into Electron main.");
   run(pnpmCommand, [
     "exec", "esbuild", resolve(coworkerRoot, "electron", "maintenance-helper.mjs"),
     "--bundle", "--platform=node", "--format=esm", "--target=node24",
@@ -138,14 +128,9 @@ export async function beforePack(context) {
     const stat = lstatSync(resolve(staging, name), { throwIfNoEntry: false });
     if (!stat?.isFile() || stat.size === 0) throw new Error(`Missing nonempty Coworker native target resource: ${name}`);
   }
-  const metadata = JSON.parse(readFileSync(resolve(staging, "versions.json"), "utf8"));
-  const sidecar = metadata?.opencode2;
   const runtime = JSON.parse(readFileSync(resolve(projectDir, "native-runtime.json"), "utf8"));
-  if (runtime.opencodeV2Version !== nativeRuntime.opencodeV2Version ||
-      Object.keys(metadata).length !== 1 || sidecar?.version !== runtime.opencodeV2Version ||
-      sidecar.platform !== platform || sidecar.arch !== targetArch) {
-    throw new Error("The verified OpenCode v2 sidecar must match the exact version pin, target platform and architecture, with native-only metadata.");
-  }
+  if (runtime.opencodeV2Version !== nativeRuntime.opencodeV2Version) throw new Error("The development native pin must remain separate from the packaged source profile.");
+  verifyPackagedNativeRuntime(resolve(projectDir, "resources"), { platform, arch: targetArch });
   // Select before copying, including repeated targets; never prune shared staging.
   const config = context.packager.config;
   for (const scope of [config, config[{ darwin: "mac", win32: "win", linux: "linux" }[platform]]]) {
@@ -160,7 +145,7 @@ export async function beforePack(context) {
     ...(config.extraResources ?? []),
     // Directory copying retains Windows executable-signing transformations;
     // electron-builder's single-file fast path bypasses that transformer.
-    { from: staging, to: "sidecars", filter: [engine, "versions.json"] },
+    { from: staging, to: "sidecars", filter: [engine, "versions.json", "native-receipt.json"] },
   ];
 }
 

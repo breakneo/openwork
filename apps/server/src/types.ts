@@ -84,6 +84,9 @@ export interface ApprovalConfig {
 export type LocalManagedMcpVaultKeyProvider = () => Promise<Uint8Array>;
 
 export interface EmbeddedOpencodeV2Options {
+  apiContract?: import("./native-api-profile.js").NativeApiContract;
+  sourceBuild?: import("./native-api-profile.js").NativeSourceBuild;
+  workspaceDirectory?: string;
   /** Known exact release selected by the embedding host; omission preserves Desktop's v2 pin. */
   version?: string;
   /** Owned engine state directory; defaults beside the server runtime database. */

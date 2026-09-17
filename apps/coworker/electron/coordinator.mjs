@@ -1,16 +1,15 @@
 /**
- * The coordinator: an app-owned, hidden workspace where the silent facilitator
- * of every group chat runs. It lives under the coworkers home as
- * `.coordinator/` — no `coworker.md`, so it never appears in the rail,
- * discussions, or Activity — with every tool switched off, no MCP servers, and
- * no memory files. It only ever reads what it is told and answers with JSON.
+ * The coordinator: the silent facilitator of every group chat. It is a hidden,
+ * tool-less native agent (`coworker-coordinator`) inside the team workspace —
+ * no `coworker.md`, so it never appears in the rail, discussions, or Activity —
+ * and its record under `.coordinator/` only remembers the team workspace id.
+ * It only ever reads what it is told and answers with JSON.
  *
  * No Electron imports here: this module is exercised directly by
  * `node --test electron/coordinator.test.mjs`.
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { updateNativeConfig } from "./native-config.mjs";
 
 export const COORDINATOR_DIR = ".coordinator";
 export const COORDINATOR_SCHEMA_VERSION = 1;
@@ -21,16 +20,13 @@ export function coordinatorPath(coworkersDir) {
   return path.join(coworkersDir, COORDINATOR_DIR);
 }
 
+/** The coordinator's agent entries, merged into the team root `opencode.json` by the team workspace writer. */
 export function coordinatorConfig() {
   return {
     $schema: "https://opencode.ai/config.json",
-    instructions: [],
-    permissions: [{ action: "*", resource: "*", effect: "deny" }],
-    default_agent: COORDINATOR_AGENT,
+    instructions: [], permissions: [{ action: "*", resource: "*", effect: "deny" }],
+    default_agent: COORDINATOR_AGENT, plugins: [], mcp: {}, warming: false,
     agents: { [COORDINATOR_AGENT]: { mode: "primary", hidden: true, permissions: [{ action: "*", resource: "*", effect: "deny" }] } },
-    plugins: [],
-    mcp: {},
-    warming: false,
   };
 }
 
@@ -63,15 +59,13 @@ async function writeRecord(coworkersDir, record) {
 }
 
 /**
- * Make sure the coordinator home exists with its locked-down configuration.
- * The configuration files are rewritten every time so a hand edit can never
- * quietly hand the facilitator a tool; the record (its workspace id) is kept.
+ * Make sure the coordinator record exists. Its agent lives in the team root
+ * configuration, rewritten by the team workspace writer so a hand edit can never
+ * quietly hand the facilitator a tool; the record (the team workspace id) is kept.
  */
 export async function ensureCoordinatorHome(coworkersDir) {
   const root = coordinatorPath(coworkersDir);
   await mkdir(root, { recursive: true });
-  await updateNativeConfig(root, () => coordinatorConfig());
-  await writeFile(path.join(root, "AGENTS.md"), coordinatorContract(), "utf8");
   const existing = await readRecord(coworkersDir);
   const record = existing ?? (await writeRecord(coworkersDir, { workspaceId: "" }));
   return { path: root, name: "Coordinator", workspaceId: record.workspaceId };

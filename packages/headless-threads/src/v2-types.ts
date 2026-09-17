@@ -8,6 +8,8 @@ export interface CreateThreadInput extends Shared.CreateThreadInput {
   threadId?: string;
   /** Native agent bound at creation. */
   agent?: string;
+  /** Owner metadata stored on the native session at creation (for example the coworker that owns it). */
+  metadata?: Record<string, unknown>;
   /** Selected native IDs attached to the optional first prompt. */
   skills?: Array<{ id: string }>;
 }
@@ -65,5 +67,6 @@ export type HeadlessFetch = (
 export interface HeadlessThreadClientOptions extends Omit<Shared.HeadlessThreadClientOptions, "fetch"> {
   /** Positive bound for every native request. Defaults to 15 seconds. */
   requestTimeoutMs?: number;
+  apiContract?: "beta19271" | "native-2";
   fetch?: HeadlessFetch;
 }

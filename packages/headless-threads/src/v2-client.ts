@@ -81,6 +81,7 @@ const message = z.union([
     z.object({ status: z.literal("failed"), reason: z.enum(["auto", "manual"]), error: nativeError }).passthrough(),
   ])),
 ]);
+const scopedMessage = z.union([message, z.object({ ...baseMessage, type: z.literal("idle"), outcome: z.enum(["succeeded", "failed", "interrupted"]) }).passthrough()]);
 const session = z.object({
   id: sessionID, location, projectID: z.string(), title: z.string().optional(),
   parentID: sessionID.optional(), metadata: fields.optional(),
@@ -143,7 +144,7 @@ const skillSchema = z.object({
 
 export type NativeV2Model = z.infer<typeof model>;
 export type NativeV2Session = z.infer<typeof session>;
-export type NativeV2Message = z.infer<typeof message>;
+export type NativeV2Message = z.infer<typeof scopedMessage>;
 export type NativeV2InboxItem = z.infer<typeof inboxItem>;
 export type NativeV2Input = z.infer<typeof inputSchema>;
 export type NativeV2Receipt = z.infer<typeof userReceipt> | z.infer<typeof syntheticReceipt>;
@@ -211,11 +212,17 @@ export interface NativeV2ClientOptions {
   /** Bounds a request and the complete reconciliation/stop operation. Default 15s. */
   requestTimeoutMs?: number;
   admissionTimeoutMs?: number;
+  apiContract?: "beta19271" | "native-2";
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export function createNativeV2Client(options: NativeV2ClientOptions) {
+  const wireHistoryPage = options.apiContract === "native-2" ? historyPage.extend({ data: z.array(scopedMessage) }) : historyPage;
+  const inboxTime = z.object({ time: z.object({ created: z.number() }) }).passthrough().transform((item): unknown => ({ ...item, timeCreated: item.time.created }));
+  const wireInboxItem = options.apiContract === "native-2" ? inboxTime.pipe(inboxItem) : inboxItem;
+  const receipt = z.union([userReceipt, syntheticReceipt]);
+  const wireReceipt = options.apiContract === "native-2" ? inboxTime.pipe(receipt) : receipt;
   const url = new URL(options.baseUrl);
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("Expected an OpenWork server base URL without credentials, query, or fragment.");
   if (!options.workspaceId.trim() || [".", ".."].includes(options.workspaceId) || !options.token.trim()) throw new Error("Workspace and OpenWork client token are required.");
@@ -299,7 +306,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
 
   async function readInbox(id: string, signal?: AbortSignal): Promise<NativeV2InboxItem[]> {
     const path = `${sessionPath(id)}/inbox`;
-    const result = await request("GET", path, z.object({ data: z.array(inboxItem) }), signal);
+    const result = await request("GET", path, z.object({ data: z.array(wireInboxItem) }), signal);
     if (result.data.some((item) => item.sessionID !== id) || new Set(result.data.map((item) => item.id)).size !== result.data.length) throw failure("invalid_response", "GET", path, "Inbox identities did not match.");
     return result.data;
   }
@@ -308,7 +315,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
     const query = new URLSearchParams({ limit: "200" });
     if (input.cursor !== undefined) query.set("cursor", z.string().min(1).parse(input.cursor));
     else query.set("order", "asc");
-    return request("GET", `${sessionPath(id)}/message?${query}`, historyPage, input.signal);
+    return request("GET", `${sessionPath(id)}/message?${query}`, wireHistoryPage, input.signal);
   }
 
   /** Read only. Recovery must use this method, never a new admission based on an unobserved result. */
@@ -380,7 +387,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
     options.signal?.throwIfAborted();
     preparing.add(key);
     try {
-      const result = await request("POST", path, z.object({ data: z.union([userReceipt, syntheticReceipt]) }), signal, {
+      const result = await request("POST", path, z.object({ data: wireReceipt }), signal, {
         id: input.id, text: input.text, delivery: input.delivery ?? "queue", resume: input.resume ?? input.type === "user",
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
         ...(input.skills?.length ? { skills: input.skills } : {}),
@@ -424,7 +431,7 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
     signal = bounded(signal);
     const path = sessionPath(id);
     const receipt = await request("POST", `${path}/interrupt?continue=false`, z.object({ interrupted: z.boolean() }), signal);
-    await request("POST", `${path}/wait`, z.undefined(), signal, undefined, 204);
+    await request("POST", `${options.apiContract === "native-2" ? "/experimental" : ""}${path}/wait`, z.undefined(), signal, undefined, 204);
     const pending = await readInbox(id, signal);
     const active = await request("GET", "/session/active", z.object({ data: z.record(sessionID, z.object({ type: z.literal("running") })) }), signal);
     if (Object.hasOwn(active.data, id)) throw failure("stop_unconfirmed", "POST", `${path}/interrupt`, "Native execution is still active after waiting; stop is unconfirmed.");
@@ -510,7 +517,9 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
     }
     throw failure("history_limit", "GET", path, "Session listing did not reach its boundary.");
   }
-  const renameSession = (id: string, title: string, signal?: AbortSignal) => request("POST", `${sessionPath(id)}/rename`, z.undefined(), signal, { title }, 204);
+  const renameSession = (id: string, title: string, signal?: AbortSignal) => options.apiContract === "native-2"
+    ? request("PATCH", sessionPath(id), z.undefined(), signal, { title }, 204)
+    : request("POST", `${sessionPath(id)}/rename`, z.undefined(), signal, { title }, 204);
   const switchModel = (id: string, value: NativeV2Model, signal?: AbortSignal) => request("POST", `${sessionPath(id)}/model`, z.undefined(), signal, { model: model.parse(value) }, 204);
   const switchAgent = (id: string, agent: string, signal?: AbortSignal) => request("POST", `${sessionPath(id)}/agent`, z.undefined(), signal, { agent: z.string().min(1).parse(agent) }, 204);
   const getAgent = async (id: string, signal?: AbortSignal) => (await request("GET", `/agent/${encodeURIComponent(id)}`, z.object({ data: agentSchema }), signal)).data;
@@ -564,7 +573,8 @@ export function createNativeV2Client(options: NativeV2ClientOptions) {
     const path = `${sessionPath(expected.sessionID)}/permission/${encodeURIComponent(expected.id)}`;
     const current = (await request("GET", path, z.object({ data: permission }), signal)).data;
     if (JSON.stringify(current) !== JSON.stringify(expected) || (reply === "always" && !current.save?.length)) throw failure("stale_request", "POST", path, "Permission changed or cannot be saved. Read it again.");
-    return request("POST", `${path}/reply`, z.undefined(), signal, { reply: z.enum(["once", "always", "reject"]).parse(reply) }, 204);
+    const decision = z.enum(["once", "always", "reject"]).parse(reply);
+    return request("POST", `${path}/reply`, z.undefined(), signal, options.apiContract === "native-2" ? { decision } : { reply: decision }, 204);
   }
   async function replyForm(value: NativeV2Form, answer: Record<string, string | string[] | number | boolean> | null, signal?: AbortSignal) {
     const expected = form.parse(value);
