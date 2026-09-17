@@ -4,6 +4,7 @@ import { normalizeDenTypeId } from "@openwork-ee/utils/typeid"
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import type { Context, MiddlewareHandler } from "hono"
 import { getSignedCookie } from "hono/cookie"
+import { getPath } from "hono/utils/url"
 import { DEN_API_KEY_HEADER, getApiKeySessionById, type DenApiKeySession } from "./api-keys.js"
 import { auth } from "./auth.js"
 import { cache, type CachedAuthSession } from "./cache.js"
@@ -421,8 +422,21 @@ export async function getRequestSession(headers: Headers, context?: Context): Pr
 }
 
 export function shouldSkipRequestSession(request: Request) {
-  return request.method.toUpperCase() === "POST"
-    && new URL(request.url).pathname === "/api/auth/sign-out"
+  // Use Hono's path normalization so encoded aliases match the same routes.
+  const path = getPath(request)
+  // MCP transports authenticate independently with verifyMcpRequest. Their
+  // bearer tokens are not login sessions; hydrating one here adds a redundant
+  // session-cache/DB lookup. Keep this scoped to the mounted transport routes:
+  // REST calls made by MCP and /v1/mcp/token still need session hydration.
+  if (
+    path === "/mcp"
+    || path === "/mcp/agent"
+    || path === "/mcp/admin"
+    || /^\/mcp\/agent\/connections\/[^/]+$/.test(path)
+  ) {
+    return true
+  }
+  return request.method.toUpperCase() === "POST" && path === "/api/auth/sign-out"
 }
 
 export const sessionMiddleware: MiddlewareHandler<{ Variables: AuthContextVariables }> = async (c, next) => {

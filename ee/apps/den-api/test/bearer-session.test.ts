@@ -784,7 +784,65 @@ test("desktop bearer sign-out deletes the exact server session", async () => {
   expect(cacheDeletes).toEqual([token, sessionId])
 })
 
-test("only the Better Auth POST sign-out bypasses session resolution", () => {
+test("MCP transports leave authentication to their verifier without hydrating login credentials", async () => {
+  const now = new Date("2026-07-09T12:00:00.000Z")
+  enableApiKeySession(now)
+  const cookie = await generateSignedCookie("openwork-den.session_token", token, process.env.BETTER_AUTH_SECRET ?? "")
+  const app = new Hono<{ Variables: AuthContextVariables }>()
+  app.use("*", sessionModule.sessionMiddleware)
+  app.all("*", (c) => c.json({
+    user: c.get("user"),
+    session: c.get("session"),
+    apiKey: c.get("apiKey"),
+  }))
+
+  for (const path of ["/mcp", "/mcp/agent", "/mcp/admin", "/mcp/agent/connections/test-connection"]) {
+    for (const method of ["GET", "POST", "DELETE"]) {
+      for (const headers of [
+        { authorization: "Bearer ow_mcp_at_test-secret" },
+        { authorization: `Bearer ${token}`, cookie },
+        { "x-api-key": apiKeySecret },
+      ]) {
+        const response = await app.request(`${path}?transport=test`, { method, headers })
+        expect(response.status).toBe(200)
+        await expect(response.json()).resolves.toEqual({ user: null, session: null, apiKey: null })
+      }
+    }
+  }
+  expect(selects).toBe(0)
+  expect(updates).toHaveLength(0)
+  expect(cacheSets).toHaveLength(0)
+})
+
+test("MCP transport exclusions do not swallow REST, discovery, or neighboring routes", async () => {
+  const now = new Date("2026-07-09T12:00:00.000Z")
+  setSystemTime(now)
+  stored = makeStoredSession({ now, updatedAt: now, expiresAt: getDenSessionExpiresAt(now) })
+  const app = new Hono<{ Variables: AuthContextVariables }>()
+  app.use("*", sessionModule.sessionMiddleware)
+  app.all("*", routeAccessModule.userSessionRoute(), (c) => c.json({ sessionId: c.get("session")?.id }))
+
+  const paths = [
+    "/v1/mcp/token",
+    "/v1/me",
+    "/mcp-other",
+    "/mcp/agent-other",
+    "/mcp/admin-other",
+    "/mcp/agent/",
+    "/mcp/agent/connections",
+    "/mcp/agent/connections/",
+    "/mcp/agent/connections/test-connection/extra",
+    "/mcp/agent/.well-known/oauth-protected-resource",
+  ]
+  for (const path of paths) {
+    const response = await app.request(path, { method: "POST", headers: { authorization: `Bearer ${token}` } })
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ sessionId })
+  }
+  expect(selects).toBe(paths.length)
+})
+
+test("the Better Auth sign-out bypass remains POST-only and exact", () => {
   expect(sessionModule.shouldSkipRequestSession(new Request("http://den.local/api/auth/sign-out", {
     method: "POST",
   }))).toBe(true)

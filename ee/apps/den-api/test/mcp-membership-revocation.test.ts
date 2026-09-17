@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, expect, mock, spyOn, test } from "bun:test"
 import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import { Hono } from "hono"
 import type { MiddlewareHandler } from "hono"
 import type { McpAuthResourceContext } from "../src/mcp/auth.js"
+import type { AuthContextVariables } from "../src/session.js"
 
 function seedRequiredEnv() {
   process.env.DATABASE_URL = process.env.DATABASE_URL ?? "mysql://root:password@127.0.0.1:3306/openwork_test"
@@ -33,6 +34,8 @@ let mcpAuth: typeof import("../src/mcp/auth.js")
 let registerMcpRoutes: typeof import("../src/mcp/index.js")["registerMcpRoutes"]
 let registerAgentMcpRoutes: typeof import("../src/mcp/agent.js")["registerAgentMcpRoutes"]
 let registerAdminMcpRoutes: typeof import("../src/mcp/admin.js")["registerAdminMcpRoutes"]
+let registerExternalConnectionProxyRoutes: typeof import("../src/mcp/external-connection-proxy.js")["registerExternalConnectionProxyRoutes"]
+let sessionMiddleware: typeof import("../src/session.js")["sessionMiddleware"]
 
 const OPAQUE_SECRET = "mcp_test_secret"
 const OPAQUE_TOKEN = `ow_mcp_at_${OPAQUE_SECRET}`
@@ -100,6 +103,8 @@ beforeAll(async () => {
   registerMcpRoutes = (await import("../src/mcp/index.js")).registerMcpRoutes
   registerAgentMcpRoutes = (await import("../src/mcp/agent.js")).registerAgentMcpRoutes
   registerAdminMcpRoutes = (await import("../src/mcp/admin.js")).registerAdminMcpRoutes
+  registerExternalConnectionProxyRoutes = (await import("../src/mcp/external-connection-proxy.js")).registerExternalConnectionProxyRoutes
+  sessionMiddleware = (await import("../src/session.js")).sessionMiddleware
 })
 
 afterAll(() => {
@@ -220,16 +225,23 @@ function selectActiveOpaqueTokenSessionAndMembership() {
 }
 
 function buildMcpRouteApp(requestId: string) {
-  const app = new Hono<{ Variables: { requestId: string } }>()
+  const app = new Hono<{ Variables: AuthContextVariables & { requestId: string } }>()
   app.use("*", async (c, next) => {
     c.set("requestId", requestId)
     await next()
   })
+  app.use("*", sessionMiddleware)
   return app
 }
 
+function requestAgentMcpAuth(headers: Headers, requestId: string) {
+  const app = buildMcpRouteApp(requestId)
+  registerAgentMcpRoutes(app)
+  return app.request("http://127.0.0.1:8790/mcp/agent", { method: "POST", headers })
+}
+
 test("MCP requests without bearer tokens return discovery challenges", async () => {
-  const response = await mcpAuth.verifyMcpRequest(new Headers(), agentResourceContext("req_missing"))
+  const response = await requestAgentMcpAuth(new Headers(), "req_missing")
 
   expect(response).toBeInstanceOf(Response)
   if (response instanceof Response) {
@@ -242,9 +254,9 @@ test("MCP requests without bearer tokens return discovery challenges", async () 
 })
 
 test("invalid MCP bearer tokens return invalid_token with references", async () => {
-  const response = await mcpAuth.verifyMcpRequest(new Headers({
+  const response = await requestAgentMcpAuth(new Headers({
     authorization: "Bearer not-an-mcp-token",
-  }), agentResourceContext("req_invalid"))
+  }), "req_invalid")
 
   expect(response).toBeInstanceOf(Response)
   if (response instanceof Response) {
@@ -268,9 +280,9 @@ test("MCP JWTs without required scopes return insufficient_scope", async () => {
     sid: createDenTypeId("session"),
   }
 
-  const response = await mcpAuth.verifyMcpRequest(new Headers({
+  const response = await requestAgentMcpAuth(new Headers({
     authorization: "Bearer header.payload.signature",
-  }), agentResourceContext("req_scope"))
+  }), "req_scope")
 
   expect(response).toBeInstanceOf(Response)
   if (response instanceof Response) {
@@ -355,9 +367,9 @@ test("MCP JWTs tied to revoked sessions retain the established body code", async
   selectedRows = []
   selectedRowBatches = [[]]
 
-  const response = await mcpAuth.verifyMcpRequest(new Headers({
+  const response = await requestAgentMcpAuth(new Headers({
     authorization: "Bearer header.payload.signature",
-  }), agentResourceContext("req_revoked_session"))
+  }), "req_revoked_session")
 
   expect(response).toBeInstanceOf(Response)
   if (response instanceof Response) {
@@ -445,6 +457,53 @@ test("public MCP JWTs issued for /mcp/agent are rejected on /mcp/admin", async (
   const challenge = response.headers.get("www-authenticate") ?? ""
   expect(challenge).toContain("resource_metadata=\"http://127.0.0.1:8790/.well-known/oauth-protected-resource/mcp\"")
   await expect(response.json()).resolves.toMatchObject({ error: "wrong_mcp_resource", oauthError: "invalid_token", referenceId: "req_admin_jwt_resource" })
+})
+
+test("mounted MCP routes verify opaque bearers without consulting session hydration", async () => {
+  const { cache } = await import("../src/cache.js")
+  const sessionLookup = spyOn(cache.auth, "sessionResult").mockImplementation(() => {
+    throw new Error("MCP requests must not hydrate ordinary sessions")
+  })
+  platformAdmin = true
+  try {
+    const app = buildMcpRouteApp("req_opaque_no_hydration")
+    registerMcpRoutes(app)
+    registerAgentMcpRoutes(app)
+    registerAdminMcpRoutes(app)
+    registerExternalConnectionProxyRoutes(app)
+
+    const connectionId = createDenTypeId("externalMcpConnection")
+    for (const path of [
+      "/mcp",
+      "/mcp/agent",
+      "/mcp/admin",
+      `/mcp/agent/connections/${connectionId}`,
+      "/%6dcp",
+      "/mcp/%61gent",
+      "/mcp/%61dmin",
+      `/mcp/agent/%63onnections/${connectionId}`,
+    ]) {
+      selectActiveOpaqueTokenSessionAndMembership()
+      sessionUpdates = []
+      const response = await app.request(`http://127.0.0.1:8790${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${OPAQUE_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, params: {} }),
+      })
+
+      expect(sessionLookup).not.toHaveBeenCalled()
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({
+        jsonrpc: "2.0",
+        error: { code: -32600, message: "Invalid Request", data: { referenceId: "req_opaque_no_hydration" } },
+      })
+      expect(selectedRowBatches).toHaveLength(0)
+      expect(sessionUpdates).toHaveLength(1)
+    }
+  } finally {
+    sessionLookup.mockRestore()
+    platformAdmin = false
+  }
 })
 
 test("authenticated /mcp malformed JSON-RPC is rejected before transport", async () => {
@@ -540,9 +599,9 @@ test("MCP JWTs tied to revoked memberships stay forbidden", async () => {
   selectedRows = []
   selectedRowBatches = [[{ id: createDenTypeId("session") }], []]
 
-  const response = await mcpAuth.verifyMcpRequest(new Headers({
+  const response = await requestAgentMcpAuth(new Headers({
     authorization: "Bearer header.payload.signature",
-  }), agentResourceContext("req_membership"))
+  }), "req_membership")
 
   expect(response).toBeInstanceOf(Response)
   if (response instanceof Response) {
