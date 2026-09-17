@@ -252,7 +252,12 @@ function NotificationRow({
         ) : null}
         {notification.action && notification.actionLabel ? (
           <div className="mt-1.5">
-            <Button variant="outline" size="sm" onClick={() => onAction(notification)}>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid={`notification-action-${notification.id}`}
+              onClick={() => onAction(notification)}
+            >
               {notification.actionLabel}
             </Button>
           </div>

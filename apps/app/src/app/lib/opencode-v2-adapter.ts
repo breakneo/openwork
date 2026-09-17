@@ -16,6 +16,7 @@ import type {
 } from "@opencode-ai/sdk/v2/client";
 
 import { createClient, createDesktopFetch, type FieldsResult } from "./opencode";
+import type { OpenworkSessionHistory } from "./openwork-server";
 import { isDesktopRuntime } from "./runtime-env";
 import type { OpencodeEvent } from "../types";
 import { normalizeDirectoryPath } from "../utils";
@@ -43,12 +44,18 @@ type ModelBinding = {
 type PromptPart = {
   type?: unknown;
   text?: unknown;
+  synthetic?: unknown;
+  metadata?: unknown;
 };
+
+function selectedSkill(part: PromptPart): Record<string, unknown> | null {
+  return part.type === "text" && part.synthetic === true ? readRecord(part.metadata, "openworkSelectedSkill") : null;
+}
 
 /** The exact native prompt body, also used to correlate text-only user acknowledgements. */
 export function v2PromptText(parts: readonly PromptPart[]): string {
   return parts
-    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .filter((part) => part.type === "text" && typeof part.text === "string" && !selectedSkill(part))
     .map((part) => typeof part.text === "string" ? part.text : "")
     .join("");
 }
@@ -1839,22 +1846,57 @@ export function createClientV2(
     messages: async (
       parameters: SessionParameters & { limit?: number; before?: string },
       options?: RequestOptions,
-    ): Promise<FieldsResult<V2MappedMessage[]>> => {
-      const query = new URLSearchParams();
-      if (parameters.limit !== undefined) query.set("limit", String(parameters.limit));
-      const suffix = query.size ? `?${query.toString()}` : "";
-      const result = await request(
-        "GET",
-        `/api/session/${encodeURIComponent(parameters.sessionID)}/message${suffix}`,
-        undefined,
-        options?.signal,
-      );
-      if (!result.response.ok) return failedResult(result);
-      const data = responseItems(result.payload).flatMap((item) => {
-        const mapped = mapV2Message(item, parameters.sessionID, taskSessions);
-        return mapped ? [mapped] : [];
-      });
-      return successfulResult(result, data);
+    ): Promise<FieldsResult<V2MappedMessage[]> & Pick<OpenworkSessionHistory, "pagination">> => {
+      const limit = parameters.limit === undefined ? undefined : Math.min(parameters.limit, 200);
+      if ((parameters.limit !== undefined && (!Number.isInteger(parameters.limit) || parameters.limit <= 0))
+        || (parameters.before !== undefined && limit === undefined)) {
+        throw new Error("A session history page requires a positive integer limit.");
+      }
+      let before = parameters.before;
+      const seen = new Set<string>();
+      if (before !== undefined) seen.add(before);
+      const data: V2MappedMessage[] = [];
+      while (true) {
+        options?.signal?.throwIfAborted();
+        const query = new URLSearchParams();
+        if (limit !== undefined) query.set("limit", String(limit));
+        if (before !== undefined) query.set("cursor", before);
+        const suffix = query.size ? `?${query.toString()}` : "";
+        const result = await request(
+          "GET",
+          `/api/session/${encodeURIComponent(parameters.sessionID)}/message${suffix}`,
+          undefined,
+          options?.signal,
+        );
+        options?.signal?.throwIfAborted();
+        if (!result.response.ok) return failedResult(result);
+        const items = responseData(result.payload);
+        const hasCursor = isRecord(result.payload) && "cursor" in result.payload;
+        const cursor = readRecord(result.payload, "cursor");
+        const next = cursor?.next;
+        if (!Array.isArray(items)
+          || (hasCursor && (!cursor || (next !== undefined && (typeof next !== "string" || !next))))
+          || (hasCursor && Array.isArray(items) && (items.length > 0) !== (next !== undefined))
+          || (!hasCursor && before !== undefined)) {
+          return failedResult({ ...result, payload: { name: "InvalidV2MessagePageResponse" } });
+        }
+        if (typeof next === "string" && seen.has(next)) {
+          return failedResult({ ...result, payload: { name: "InvalidV2MessagePageResponse", message: "Session history pagination cursor did not advance." } });
+        }
+        data.push(...items.flatMap((item) => {
+          const mapped = mapV2Message(item, parameters.sessionID, taskSessions);
+          return mapped ? [mapped] : [];
+        }));
+        if (limit !== undefined) {
+          return {
+            ...successfulResult(result, hasCursor ? data.toReversed() : data),
+            ...(hasCursor ? { pagination: { before: parameters.before, nextCursor: typeof next === "string" ? next : null, limit } } : {}),
+          };
+        }
+        if (typeof next !== "string") return successfulResult(result, hasCursor ? data.toReversed() : data);
+        seen.add(next);
+        before = next;
+      }
     },
     todo: async (parameters: SessionParameters): Promise<FieldsResult<never[]>> =>
       localResult(baseUrl, `/api/session/${encodeURIComponent(parameters.sessionID)}/todo`, []),
@@ -1883,6 +1925,43 @@ export function createClientV2(
           response: new Response(null, { status: 400 }),
         };
       }
+      const selections = (parameters.parts ?? []).flatMap((part) => {
+        const selection = selectedSkill(part);
+        return selection ? [selection] : [];
+      });
+      const skills: { id: string }[] = [];
+      if (selections.length) {
+        // Resolve against the same workspace's live registry, never guess an ID
+        // from prose or silently fall back to asking the model to load a skill.
+        const catalog = await request("GET", "/api/skill", undefined, options?.signal);
+        if (!catalog.response.ok) return failedResult(catalog);
+        for (const selection of selections) {
+          const id = readString(selection, "id");
+          const name = readString(selection, "name");
+          const matches = responseItems(catalog.payload).filter((skill) => id
+            ? readString(skill, "id") === id : Boolean(name) && readString(skill, "name") === name);
+          const resolvedID = matches.length === 1 ? readString(matches[0], "id") : undefined;
+          if (!resolvedID) {
+            return unsupportedResult(baseUrl, "skill.attachment", `Selected skill ${name ?? id ?? "(unknown)"} is unavailable or ambiguous in OpenCode v2. Nothing was sent.`);
+          }
+          if (!skills.some((skill) => skill.id === resolvedID)) skills.push({ id: resolvedID });
+        }
+        // The pinned native prompt materializes attachments without running the
+        // skill tool's permission check. Ask the engine (including its policy
+        // hooks) rather than treating catalog membership as authorization.
+        const permission = await request("POST",
+          `/api/session/${encodeURIComponent(parameters.sessionID)}/permission`,
+          { action: "skill", resources: skills.map((skill) => skill.id), save: skills.map((skill) => skill.id) },
+          options?.signal);
+        if (!permission.response.ok) return failedResult(permission);
+        const effect = readString(responseData(permission.payload), "effect");
+        if (effect !== "allow") {
+          const message = effect === "ask"
+            ? "Selected skills require permission. Nothing was sent. Choose Always allow for these skills in the permission request, then send again."
+            : "Selected skills are not permitted in OpenCode v2. Nothing was sent.";
+          return unsupportedResult(baseUrl, "skill.attachment", message);
+        }
+      }
       const modelResult = await request(
         "POST",
         `/api/session/${encodeURIComponent(parameters.sessionID)}/model`,
@@ -1904,7 +1983,7 @@ export function createClientV2(
       const promptResult = await request(
         "POST",
         `/api/session/${encodeURIComponent(parameters.sessionID)}/prompt`,
-        { text },
+        { text, ...(skills.length ? { skills } : {}) },
         options?.signal,
       );
       return promptResult.response.ok ? successfulResult(promptResult, {}) : failedResult(promptResult);
@@ -2101,7 +2180,7 @@ export function createClientV2(
   Object.assign(compatibilityClient.mcp, adapter.mcp);
   Object.assign(compatibilityClient.event, adapter.event);
   v2Clients.add(compatibilityClient);
-  return Object.assign(compatibilityClient, { listSessionsPage: session.list });
+  return Object.assign(compatibilityClient, { listSessionsPage: session.list, listMessagesPage: session.messages });
 }
 
 export type OpencodeV2Client = ReturnType<typeof createClientV2>;

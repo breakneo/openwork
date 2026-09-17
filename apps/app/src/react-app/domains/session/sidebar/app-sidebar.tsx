@@ -115,9 +115,11 @@ import type { SidebarContextValue } from "./app-sidebar-provider";
 import {
   MAX_SESSIONS_PREVIEW,
   buildGlobalArchivedSessions,
+  buildGlobalPinnedSessions,
   flattenSessionRows,
   formatSessionRelativeTime,
   getRootSessions,
+  groupSessionRows,
   isActiveWorkSessionStatus,
   isNeedsAttentionSessionStatus,
   isSessionArchived,
@@ -125,7 +127,7 @@ import {
   workspaceKindLabel,
   workspaceLabel,
 } from "./utils";
-import type { FlattenedSessionRow, GlobalArchivedSessionEntry, SessionListItem } from "./utils";
+import type { FlattenedSessionRow, GlobalArchivedSessionEntry, GlobalPinnedSessionEntry, SessionListItem } from "./utils";
 import {
   useSessionManagementStore,
   usePinnedSessionIds,
@@ -225,6 +227,9 @@ interface SessionStatusIndicatorProps {
   status?: string;
   isActiveWork: boolean;
   isUnread: boolean;
+  /** Names the delegated child asking, e.g. "Needs permission: Audit four open PRs". */
+  attentionLabel?: string;
+  attentionSource?: "child" | "descendant";
 }
 
 function ShowMoreSessionsButton({
@@ -249,7 +254,7 @@ function ShowMoreSessionsButton({
 }
 
 /** Activity and outcomes share the fixed glyph slot before the session title. */
-function SessionStatusIndicator({ status, isActiveWork, isUnread }: SessionStatusIndicatorProps) {
+function SessionStatusIndicator({ status, isActiveWork, isUnread, attentionLabel, attentionSource }: SessionStatusIndicatorProps) {
   return (
     <SidebarGlyphSlot>
       {isActiveWork ? (
@@ -257,21 +262,23 @@ function SessionStatusIndicator({ status, isActiveWork, isUnread }: SessionStatu
           ? getSessionActivityStatusLabel(status)
           : t("workspace_list.session_streaming")} />
       ) : (
-        <SessionOutcomeIndicator status={status} isUnread={isUnread} />
+        <SessionOutcomeIndicator status={status} isUnread={isUnread} attentionLabel={attentionLabel} attentionSource={attentionSource} />
       )}
     </SidebarGlyphSlot>
   );
 }
 
 /** Orange = needs you, green = unread result, none = read/idle. */
-function SessionOutcomeIndicator({ status, isUnread }: { status?: string; isUnread: boolean }) {
+function SessionOutcomeIndicator({ status, isUnread, attentionLabel, attentionSource }: Omit<SessionStatusIndicatorProps, "isActiveWork">) {
   if (isNeedsAttentionSessionStatus(status)) {
-    const title = isSessionActivityStatus(status)
-      ? getSessionActivityStatusLabel(status)
-      : t("workspace_list.session_needs_attention");
+    const title = attentionLabel
+      ?? (isSessionActivityStatus(status)
+        ? getSessionActivityStatusLabel(status)
+        : t("workspace_list.session_needs_attention"));
     return (
       <span
         data-session-attention-indicator
+        data-session-attention-source={attentionSource ?? "self"}
         className="size-2 shrink-0 rounded-full"
         style={{ backgroundColor: OUTCOME_DOT_NEEDS_ACTION }}
         title={title}
@@ -758,7 +765,13 @@ function SessionSideChatControl({ workspaceId, sessionId, title }: {
       }}
     >
       {isActiveWork || isNeedsAttentionSessionStatus(status) || isUnread
-        ? <SessionStatusIndicator status={status} isActiveWork={isActiveWork} isUnread={isUnread} />
+        ? <SessionStatusIndicator
+            status={status}
+            isActiveWork={isActiveWork}
+            isUnread={isUnread}
+            attentionLabel={sideChat ? ctx.sessionAttentionLabelById?.[sideChat.sessionId] : undefined}
+            attentionSource={sideChat ? ctx.sessionAttentionSourceById?.[sideChat.sessionId] : undefined}
+          />
         : <Plus className="size-3" />}
       {sideChat ? <span>{t("session_management.split_view")}</span> : null}
     </button>
@@ -773,6 +786,8 @@ export type AppSidebarProps = {
   selectedSessionId: string | null;
   showSessionActions?: boolean;
   sessionStatusById?: Record<string, string>;
+  sessionAttentionLabelById?: Record<string, string>;
+  sessionAttentionSourceById?: Record<string, "child" | "descendant">;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
   newTaskDisabled: boolean;
@@ -886,6 +901,8 @@ export function AppSidebar(props: AppSidebarProps) {
     developerMode: props.developerMode,
     showSessionActions: props.showSessionActions,
     sessionStatusById: props.sessionStatusById,
+    sessionAttentionLabelById: props.sessionAttentionLabelById,
+    sessionAttentionSourceById: props.sessionAttentionSourceById,
     newTaskDisabled: props.newTaskDisabled,
     connectingWorkspaceId: props.connectingWorkspaceId,
     workspaceConnectionStateById: props.workspaceConnectionStateById,
@@ -916,19 +933,10 @@ export function AppSidebar(props: AppSidebarProps) {
   const brandLogoUrl = useBrandLogoUrl();
   const brandAppName = useBrandAppName();
   const pinnedIds = useSessionManagementStore((state) => state.pinnedIds);
-  const pinnedSessions = React.useMemo(() => {
-    const sessionsById = new Map<string, GlobalPinnedSessionEntry>();
-    for (const group of props.workspaceSessionGroups) {
-      const roots = getRootSessions(partitionArchivedSessions(group.sessions).active);
-      for (const session of roots) {
-        sessionsById.set(session.id, { group, sessionId: session.id });
-      }
-    }
-    return pinnedIds.flatMap((sessionId) => {
-      const entry = sessionsById.get(sessionId);
-      return entry ? [entry] : [];
-    });
-  }, [pinnedIds, props.workspaceSessionGroups]);
+  const pinnedSessions = React.useMemo(
+    () => buildGlobalPinnedSessions(props.workspaceSessionGroups, pinnedIds),
+    [pinnedIds, props.workspaceSessionGroups],
+  );
   const archivedSessions = React.useMemo(
     () => buildGlobalArchivedSessions(props.workspaceSessionGroups),
     [props.workspaceSessionGroups],
@@ -1131,11 +1139,6 @@ export function AppSidebar(props: AppSidebarProps) {
   );
 }
 
-type GlobalPinnedSessionEntry = {
-  group: WorkspaceSessionGroup;
-  sessionId: string;
-};
-
 function GlobalPinnedSessions({ entries }: { entries: GlobalPinnedSessionEntry[] }) {
   return (
     <SidebarGroup data-global-pinned-sessions className="pb-0 pt-4">
@@ -1147,10 +1150,12 @@ function GlobalPinnedSessions({ entries }: { entries: GlobalPinnedSessionEntry[]
           <SidebarMenuItem>
             <SidebarMenuSub>
               {entries.map((entry) => (
-                <GlobalPinnedSessionTree
-                  key={`${entry.group.workspace.id}:${entry.sessionId}`}
-                  group={entry.group}
-                  sessionId={entry.sessionId}
+                <SessionMenuItem
+                  key={`${entry.group.workspace.id}:${entry.session.id}`}
+                  session={entry.session}
+                  workspaceId={entry.group.workspace.id}
+                  isPinned
+                  workspaceName={workspaceLabel(entry.group.workspace)}
                 />
               ))}
             </SidebarMenuSub>
@@ -1217,28 +1222,6 @@ function GlobalArchivedSessionItem({ group, session }: GlobalArchivedSessionEntr
       workspaceName={workspaceLabel(group.workspace)}
     />
   );
-}
-
-function GlobalPinnedSessionTree({ group, sessionId }: GlobalPinnedSessionEntry) {
-  const pinnedIds = usePinnedSessionIds();
-  const rootIds = React.useMemo(() => new Set([sessionId]), [sessionId]);
-  const rows = flattenSessionRows(
-    group.sessions,
-    1,
-    pinnedIds,
-    [],
-    { include: rootIds },
-  );
-
-  return rows.map((row) => (
-    <SessionMenuItem
-      key={row.session.id}
-      session={row.session}
-      workspaceId={group.workspace.id}
-      isPinned={pinnedIds.has(row.session.id)}
-      workspaceName={workspaceLabel(group.workspace)}
-    />
-  ));
 }
 
 type WorkspaceReorderItemProps = {
@@ -1398,7 +1381,8 @@ function WorkspaceSidebarGroup({
     return workspaceKindLabel(workspace);
   })();
 
-  const pinnedIds = usePinnedSessionIds();
+  const pinnedIdList = useSessionManagementStore((state) => state.pinnedIds);
+  const pinnedIds = React.useMemo(() => new Set(pinnedIdList), [pinnedIdList]);
   const orderIds = useSessionOrder(workspace.id);
   const { groups: wsGroups, assignments: wsAssignments } = useWorkspaceGroups(workspace.id);
   const store = useSessionManagementStore;
@@ -1407,13 +1391,13 @@ function WorkspaceSidebarGroup({
     () => partitionArchivedSessions(group.sessions),
     [group.sessions],
   );
-  const sessionRows = flattenSessionRows(
+  const sessionRows = React.useMemo(() => flattenSessionRows(
     group.sessions,
     wsGroups.length > 0 ? Number.MAX_SAFE_INTEGER : previewCount,
     EMPTY_PINNED_IDS,
     orderIds,
     { exclude: pinnedIds },
-  );
+  ), [group.sessions, orderIds, pinnedIds, previewCount, wsGroups.length]);
   const visibleRootIds = React.useMemo(
     () => sessionRows.map((row) => row.session.id),
     [sessionRows],
@@ -1869,20 +1853,10 @@ function GroupedSessionList({ sessionRows, groups, assignments, pinnedIds, works
     }));
   }, []);
 
-  // Partition root rows into per-group buckets + ungrouped.
-  const rootRowsByGroup = new Map<string, FlattenedSessionRow[]>();
-  const ungroupedRows: FlattenedSessionRow[] = [];
-
-  for (const row of sessionRows) {
-    const groupId = assignments[row.session.id];
-    if (groupId && groups.some((g) => g.id === groupId)) {
-      const bucket = rootRowsByGroup.get(groupId) ?? [];
-      bucket.push(row);
-      rootRowsByGroup.set(groupId, bucket);
-    } else {
-      ungroupedRows.push(row);
-    }
-  }
+  const { groupIds, rootRowsByGroup, ungroupedRows } = React.useMemo(
+    () => groupSessionRows(sessionRows, groups, assignments),
+    [sessionRows, groups, assignments],
+  );
 
   const renderRow = (row: FlattenedSessionRow) => (
     <SessionMenuItem
@@ -1924,7 +1898,7 @@ function GroupedSessionList({ sessionRows, groups, assignments, pinnedIds, works
       <Reorder.Group
         as="div"
         axis="y"
-        values={groups.map((group) => group.id)}
+        values={groupIds}
         onReorder={(ids) => store.getState().reorderGroups(workspaceId, ids)}
         className="flex flex-col gap-0.5"
       >
@@ -2097,6 +2071,7 @@ function SessionMenuItem({
   const displayTitle = getDisplaySessionTitle(session.title);
   const itemTitle = workspaceName ? `${displayTitle} — ${workspaceName}` : displayTitle;
   const sessionActivityStatus = ctx.sessionStatusById?.[session.id];
+  const sessionAttentionLabel = ctx.sessionAttentionLabelById?.[session.id];
   const resolvedActiveWork = isActiveWorkSessionStatus(sessionActivityStatus);
   const isUnread = unreadIds.has(session.id) && !isSelected;
   const isArchived = isSessionArchived(session);
@@ -2140,7 +2115,7 @@ function SessionMenuItem({
   const accessibleState = resolvedActiveWork && isSessionActivityStatus(sessionActivityStatus)
     ? `${displayTitle}, ${getSessionActivityStatusLabel(sessionActivityStatus)}`
     : isNeedsAttentionSessionStatus(sessionActivityStatus)
-      ? `${displayTitle}, ${t("workspace_list.session_needs_attention")}`
+      ? `${displayTitle}, ${sessionAttentionLabel ?? t("workspace_list.session_needs_attention")}`
       : isUnread
         ? `${displayTitle}, ${t("workspace_list.session_unread")}`
         : itemTitle;
@@ -2159,7 +2134,13 @@ function SessionMenuItem({
   // Pinned/archived rows identify their workspace via the tooltip title
   // only — no workspace color dot in these sections.
   const leading = (
-    <SessionStatusIndicator status={sessionActivityStatus} isActiveWork={resolvedActiveWork} isUnread={isUnread} />
+    <SessionStatusIndicator
+      status={sessionActivityStatus}
+      isActiveWork={resolvedActiveWork}
+      isUnread={isUnread}
+      attentionLabel={sessionAttentionLabel}
+      attentionSource={ctx.sessionAttentionSourceById?.[session.id]}
+    />
   );
 
   const trailing = (

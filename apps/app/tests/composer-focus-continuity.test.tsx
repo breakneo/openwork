@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { expect, mock, spyOn, test } from "bun:test";
+import { afterAll, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRequire } from "node:module";
@@ -10,12 +10,19 @@ import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
 
 import type { OpenworkSessionSnapshot } from "../src/app/lib/openwork-server";
 import type { NativeContextMenuRequest } from "../src/app/lib/desktop-types";
-import type { ComposerAttachment, ComposerDraft } from "../src/app/types";
+import type { ComposerAttachment, ComposerDraft, PendingPermission, PendingQuestion } from "../src/app/types";
 import type { CloudMcpSubmissionResult } from "../src/react-app/domains/connections/cloud-mcp-submit-readiness";
+import type { ArchiveSessionOutcome } from "../src/react-app/domains/session/sidebar/use-session-archive";
 import type {
   NewTaskComposerContext,
   NewTaskComposerHandoff,
 } from "../src/react-app/domains/session/chat/new-task-composer";
+
+const registeredDom = typeof globalThis.window === "undefined" || typeof globalThis.document === "undefined";
+if (registeredDom) GlobalRegistrator.register({ url: "http://localhost/" });
+afterAll(async () => {
+  if (registeredDom) await GlobalRegistrator.unregister();
+});
 
 const workspaceId = "workspace-focus-continuity";
 const sessionId = "session-focus-continuity";
@@ -77,7 +84,16 @@ async function waitFor(predicate: () => boolean, label: string) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-test("composer focus, shared Restore, pending stops, and optimistic sends preserve drafts through snapshots and first-message handoff", async () => {
+test.each([
+  { name: "composer focus, shared Restore, pending stops, and optimistic sends preserve drafts through snapshots and first-message handoff", queueRegression: false, modeRegression: false },
+  { name: "busy Enter clears persisted composer text and attachments without losing queued messages or newer typing", queueRegression: true, modeRegression: false },
+  { name: "busy mode selection preserves the running turn and composer draft", queueRegression: false, modeRegression: true },
+  { name: "new thread keeps the prompt before early assistant output through late native acknowledgement and settlement", orderingRegression: "empty" },
+  { name: "follow-up keeps history before the prompt and early assistant output through settlement", orderingRegression: "history" },
+  { name: "multiple identical pending prompts keep submission order as native siblings settle", orderingRegression: "siblings" },
+])("$name", async ({ queueRegression, modeRegression, orderingRegression }) => {
+  const sessionId = `session-focus-continuity${orderingRegression ? `-${orderingRegression}` : ""}`;
+  window.localStorage.clear();
   const require = createRequire(import.meta.url);
   // Bun's isolated test loader cycles Lexical's ESM entries; use their real CJS entries before the app imports the editor.
   for (const moduleId of [
@@ -114,8 +130,6 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     import("../src/react-app/domains/cloud/den-auth-provider"),
     import("../src/react-app/domains/cloud/desktop-config-provider"),
   ]);
-  const registeredDom = typeof globalThis.window === "undefined" || typeof globalThis.document === "undefined";
-  if (registeredDom) GlobalRegistrator.register({ url: "http://localhost/" });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
     configurable: true,
     value: true,
@@ -128,11 +142,16 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
   const acceptanceRequests: Request[] = [];
   const restoreRequests: Request[] = [];
   const nativePromptTexts: string[] = [];
-  const nativeMessages: { id: string; role: "user"; text: string }[] = [];
+  const nativeMessages: { id: string; role: "user"; text: string; time: { created: number } }[] = [];
   const forkRequests: Request[] = [];
+  const admissionStatusRequests: Request[] = [];
   const fetchStub = async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
+    if (request.method === "GET" && path.endsWith("/session/status")) {
+      admissionStatusRequests.push(request);
+      return Response.json({});
+    }
     if (request.method === "POST" && path.endsWith("/fork")) {
       forkRequests.push(request);
       await forkCompletion;
@@ -159,6 +178,7 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
   window.localStorage.setItem("openwork.shell-config", JSON.stringify({ starterCards: false }));
   let fetchedSnapshot = createSnapshot({ type: "busy" }, 1);
   let snapshotRead: Promise<OpenworkSessionSnapshot> | null = null;
+  let historyOnly = false;
   const otherSessionId = `${sessionId}-other`;
   const otherSnapshot = createSnapshot({ type: "busy" }, 1, otherSessionId);
   const interruptionModule = await import("../src/app/lib/opencode-interruption");
@@ -173,7 +193,10 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
   const nativeSessionModule = await import("../src/app/lib/opencode-session-native");
   mock.module("@/app/lib/opencode-session-native", () => ({
     ...nativeSessionModule,
-    composeNativeSessionSnapshot: async (_target: unknown, id: string) => id === otherSessionId ? otherSnapshot : snapshotRead ?? fetchedSnapshot,
+    composeNativeSessionHistory: async (_target: unknown, id: string) => {
+      const value = await (id === otherSessionId ? otherSnapshot : snapshotRead ?? fetchedSnapshot);
+      return historyOnly ? { session: value.session, messages: value.messages } : value;
+    },
   }));
   const { SessionSurface } = await import("../src/react-app/domains/session/surface/session-surface");
   const { snapshotKey, statusKey, transcriptKey } = await import("../src/react-app/domains/session/sync/session-sync");
@@ -239,7 +262,7 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     return nativeMenuRequests.at(-1)?.items;
   };
   const routeWorkspaceId = `rem_${workspaceId}`;
-  let restoreShared = async () => false;
+  let restoreShared = async (): Promise<ArchiveSessionOutcome> => ({ kind: "cancelled" });
   let updateRouteArchived = (_archived: boolean) => {};
   function ArchiveOwner({ children }: { children: (archived: boolean) => ReactNode }) {
     const [archived, setArchived] = useState(false);
@@ -254,7 +277,7 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
         workspaceId, baseUrl: "http://127.0.0.1:1", token: "test-token", isRemote: true,
         client, mountedBaseUrl: "http://127.0.0.1:1", opencodeBaseUrl: "http://127.0.0.1:1/opencode",
       }),
-      selectedWorkspaceId: routeWorkspaceId, selectedSessionId: sessionId, draftScope: "local",
+      selectedWorkspaceId: routeWorkspaceId, routeWorkspaceId, selectedSessionId: sessionId, draftScope: "local",
       navigateToWorkspaceSession: () => { throw new Error("Shared Restore must not navigate"); },
       reloadWorkspaceSessions: async () => {},
       onArchivedChange: (workspace, id, value) => {
@@ -267,6 +290,8 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     return children(archived);
   }
 
+  let activePermission: PendingPermission | null = null;
+  let activeQuestion: PendingQuestion | null = null;
   const renderSurface = (opencodeBaseUrl = "http://127.0.0.1:1/opencode", activeSessionId = sessionId, isControlTarget = false) => root.render(
     <PlatformProvider value={platform}>
       <MemoryRouter>
@@ -277,6 +302,8 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
               <ArchiveOwner>{archived => (
               <SessionSurface
                 archived={archived}
+                activePermission={activePermission}
+                activeQuestion={activeQuestion}
                 client={client}
                 workspaceId={workspaceId}
                 workspaceRoot="/tmp/project-focus-continuity"
@@ -307,9 +334,12 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
                 modelVariantLabel="Default"
                 modelVariant={null}
                 onModelVariantChange={() => {}}
-                agentLabel="OpenWork"
-                selectedAgent={null}
-                listAgents={async () => []}
+                agentLabel="Build"
+                selectedAgent="build"
+                listAgents={async () => [
+                  { name: "build", mode: "primary", permission: [], options: {} },
+                  { name: "plan", mode: "primary", permission: [], options: {} },
+                ]}
                 onSelectAgent={() => {}}
                 listCommands={async () => []}
                 recentFiles={[]}
@@ -328,6 +358,100 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
   );
   const renderSession = (activeSessionId = sessionId) => renderSurface(undefined, activeSessionId);
   try {
+    if (orderingRegression) {
+      const { __applySessionSyncEventForTest, __createWorkspaceSessionSyncForTest, trackWorkspaceSessionSync } = await import("../src/react-app/domains/session/sync/session-sync");
+      const { createV2EventTranslationState, translateV2Event } = await import("../src/app/lib/opencode-v2-adapter");
+      const { snapshotToUIMessages } = await import("../src/react-app/domains/session/sync/usechat-adapter");
+      const { markComposerAutoSend } = await import("../src/react-app/domains/session/surface/composer-auto-send");
+      const nativeBaseUrl = "http://127.0.0.1:1/opencode2";
+      const syncInput = { workspaceId, baseUrl: nativeBaseUrl, openworkToken: "test-token" };
+      const cleanupSync = __createWorkspaceSessionSyncForTest(syncInput);
+      const release = trackWorkspaceSessionSync(syncInput, sessionId);
+      try {
+        fetchedSnapshot = createSnapshot({ type: "idle" }, 2, sessionId);
+        if (orderingRegression !== "history") fetchedSnapshot.messages = [];
+        const history = snapshotToUIMessages(fetchedSnapshot);
+        if (orderingRegression === "history") history.push({
+          id: "historical-answer", role: "assistant", metadata: { opencode: { created: 2 } },
+          parts: [{ type: "text", text: "Previous answer" }],
+        });
+        queryClient.setQueryData(snapshotKey(workspaceId, sessionId), fetchedSnapshot);
+        queryClient.setQueryData(transcriptKey(workspaceId, sessionId), history);
+        queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" });
+        await act(async () => {
+          markComposerAutoSend(sessionId);
+          useComposerStateStore.getState().setDraft(sessionId, "Order this response");
+          renderSurface(nativeBaseUrl);
+        });
+        await waitFor(() => sentDrafts.length === 1, "the ordering auto-send");
+        expect(sentDrafts[0]?.resolvedText ?? sentDrafts[0]?.text).toBe("Order this response");
+        const pendingId = sentDrafts[0]?.messageId;
+        if (!pendingId) throw new Error("Expected a pending message identity");
+        let secondPendingId: string | undefined;
+        if (orderingRegression === "siblings") {
+          await act(async () => submission.resolve({ outcome: "accepted" }));
+          submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+          await act(async () => {
+            markComposerAutoSend(sessionId);
+            useComposerStateStore.getState().setDraft(sessionId, "Order this response");
+          });
+          await waitFor(() => sentDrafts.length === 2, "the identical pending sibling");
+          secondPendingId = sentDrafts[1]?.messageId;
+          expect(secondPendingId).toBeString();
+        }
+        const rows = () => [...container.querySelectorAll("[data-message-id]")].map((row) => row.getAttribute("data-message-id"));
+        const expected = (userId: string) => [...history.map((message) => message.id), userId, ...(secondPendingId ? [secondPendingId] : []), "early-answer"];
+        await act(async () => {
+          __applySessionSyncEventForTest(syncInput, { type: "message.updated", properties: {
+            info: { id: "early-answer", role: "assistant", sessionID: sessionId, time: { created: 20 } },
+          } });
+          __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: { part: {
+            id: "early-text", messageID: "early-answer", sessionID: sessionId, type: "text", text: "Already working",
+          } } });
+          __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: { part: {
+            id: "early-tool", messageID: "early-answer", sessionID: sessionId, type: "tool", callID: "early-call", tool: "read",
+            state: { status: "running", input: { filePath: "package.json" }, time: { start: 21 } },
+          } } });
+        });
+        await waitFor(() => container.textContent?.includes("Already working") === true, "early assistant output");
+        expect(rows()).toEqual(expected(pendingId));
+        const nativeEvents = translateV2Event({ type: "session.inbox.enqueued", created: 10, properties: {
+          sessionID: sessionId, inboxID: "native-ordered-user", item: { type: "user", payload: { text: "Order this response" } },
+        } }, createV2EventTranslationState());
+        if (!nativeEvents?.length) throw new Error("Expected native acknowledgement events");
+        await act(async () => {
+          for (const event of nativeEvents) __applySessionSyncEventForTest(syncInput, event);
+        });
+        await waitFor(() => rows().includes("native-ordered-user") && !Object.values(useComposerStateStore.getState().pendingMessages).flat()
+          .some((item) => item.draft.messageId === pendingId && item.serverMessageId !== "native-ordered-user"), "late native acknowledgement");
+        expect(rows()).toEqual(expected("native-ordered-user"));
+        if (secondPendingId) {
+          await waitFor(() => Object.values(useComposerStateStore.getState().pendingMessages).flat().length === 1, "the first sibling to settle");
+          expect(rows()).toEqual(expected("native-ordered-user"));
+          const secondEvents = translateV2Event({ type: "session.inbox.enqueued", created: 15, properties: {
+            sessionID: sessionId, inboxID: "native-second-user", item: { type: "user", payload: { text: "Order this response" } },
+          } }, createV2EventTranslationState());
+          if (!secondEvents?.length) throw new Error("Expected the second native acknowledgement");
+          await act(async () => {
+            for (const event of secondEvents) __applySessionSyncEventForTest(syncInput, event);
+          });
+          secondPendingId = "native-second-user";
+          await waitFor(() => rows().includes("native-second-user"), "the second native acknowledgement");
+          expect(rows()).toEqual(expected("native-ordered-user"));
+        }
+        await act(async () => submission.resolve({ outcome: "accepted" }));
+        await waitFor(() => Object.values(useComposerStateStore.getState().pendingMessages).flat().length === 0, "pending cleanup");
+        expect(rows()).toEqual(expected("native-ordered-user"));
+        await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" }));
+        expect(rows()).toEqual(expected("native-ordered-user"));
+        expect(queryClient.getQueryData<import("ai").UIMessage[]>(transcriptKey(workspaceId, sessionId))?.map((message) => message.id))
+          .toEqual(expected("native-ordered-user"));
+      } finally {
+        release();
+        cleanupSync();
+      }
+      return;
+    }
     await act(async () => renderSurface());
     await waitFor(
       () => container.querySelector('[contenteditable="true"][data-lexical-editor="true"]') !== null,
@@ -344,6 +468,83 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     if (!editor) throw new Error("Expected the Lexical editor");
     editor.focus();
     expect(document.activeElement).toBe(editor);
+
+    if (queueRegression) {
+      const { getSessionDraft } = await import("../src/react-app/domains/session/sync/draft-store");
+      const { startQueuedDraftPersistence } = await import("../src/react-app/domains/session/sync/queued-draft-persistence");
+      const { $getRoot, getNearestEditorFromDOMNode } = await import("lexical");
+      const stopQueuedPersistence = startQueuedDraftPersistence();
+      const queuedFile = new File(["queued image"], "queued.png", { type: "image/png" });
+      const previewUrl = URL.createObjectURL(queuedFile);
+      const queuedAttachment: ComposerAttachment = {
+        id: "queued-image", name: queuedFile.name, mimeType: queuedFile.type, size: queuedFile.size,
+        kind: "image", file: queuedFile, previewUrl,
+      };
+      const queuedTexts: string[] = [];
+      try {
+        for (const withAttachment of [false, true]) {
+          const text = withAttachment ? "Queued with image" : "Queued text";
+          const composerText = withAttachment ? `${text}[attachment queued-image]` : text;
+          await act(async () => {
+            useComposerStateStore.getState().setAttachments(sessionId, withAttachment ? [queuedAttachment] : []);
+            useComposerStateStore.getState().setDraft(sessionId, composerText);
+          });
+          const lexicalEditor = getNearestEditorFromDOMNode(editor);
+          if (!lexicalEditor) throw new Error("Expected the mounted Lexical editor");
+          await act(async () => lexicalEditor.update(() => { $getRoot().selectEnd(); }, { discrete: true }));
+          expect(getSessionDraft("local", workspaceId, sessionId)?.text).toBe(text);
+          expect(container.querySelector('button[aria-label="Stop"]')).not.toBeNull();
+          await act(async () => {
+            editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+          });
+          queuedTexts.push(text);
+          const queued = useComposerStateStore.getState().queuedDrafts[sessionId];
+          expect(queued).toHaveLength(queuedTexts.length);
+          expect(editor.textContent).toBe("");
+          expect(useComposerStateStore.getState().sessions[sessionId]?.draft ?? "").toBe("");
+          expect(useComposerStateStore.getState().sessions[sessionId]?.attachments ?? []).toEqual([]);
+          expect(container.querySelector("[data-attachment-id]")).toBeNull();
+          expect(getSessionDraft("local", workspaceId, sessionId)).toEqual({ text: "", mode: "prompt", queued: queuedTexts });
+          expect(queued?.at(-1)?.draft.text).toBe(composerText);
+          expect(queued?.at(-1)?.draft.attachments).toEqual(withAttachment ? [queuedAttachment] : []);
+          expect(sentDrafts).toHaveLength(0);
+          expect(revokePreview).not.toHaveBeenCalledWith(previewUrl);
+          await act(async () => lexicalEditor.update(() => {
+            $getRoot().selectEnd().insertText("Newer typing after queue");
+          }, { discrete: true }));
+          await act(async () => renderSurface());
+          expect(container.querySelector('[data-lexical-editor="true"]')).toBe(editor);
+          expect(editor.textContent).toBe("Newer typing after queue");
+          expect(useComposerStateStore.getState().sessions[sessionId]?.draft).toBe("Newer typing after queue");
+          expect(getSessionDraft("local", workspaceId, sessionId)).toEqual({ text: "Newer typing after queue", mode: "prompt", queued: queuedTexts });
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBe(queued);
+        }
+      } finally {
+        stopQueuedPersistence();
+        URL.revokeObjectURL(previewUrl);
+      }
+      return;
+    }
+
+    // A selection changes future submissions, not the busy turn or its draft.
+    for (const next of ["Plan", "Build"]) {
+      const picker = container.querySelector<HTMLButtonElement>('[data-composer-settings] button[title="Agent"]');
+      expect(picker?.disabled).toBe(false);
+      await act(async () => picker?.click());
+      const option = () => [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === next && button !== picker);
+      await waitFor(() => option() !== undefined, `the ${next} option`);
+      await act(async () => {
+        option()?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      });
+      expect(picker?.textContent).toBe(next);
+      expect(picker?.getAttribute("aria-expanded")).toBe("false");
+      expect(container.querySelector('button[aria-label="Stop"]')).not.toBeNull();
+      expect(editor.textContent).toBe(draft);
+      expect(sentDrafts).toHaveLength(0);
+      expect(interrupt).not.toHaveBeenCalled();
+    }
+    if (modeRegression) return;
 
     // Hold both async boundaries: idle alone must not release Stop's feedback.
     let snapshotRefresh = Promise.withResolvers<void>();
@@ -518,7 +719,7 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     const freshRead = Promise.withResolvers<OpenworkSessionSnapshot>();
     snapshotRead = freshRead.promise;
     fetchedSnapshot = createSnapshot({ type: "idle" }, 4);
-    await act(async () => { expect(await restoreShared()).toBe(true); });
+    await act(async () => { expect(await restoreShared()).toEqual({ kind: "done" }); });
     await waitFor(() => container.querySelector('[contenteditable="true"][data-lexical-editor="true"]') !== null, "shared Restore to enable the composer before refetch completes");
     expect(queryClient.getQueryState(key)?.fetchStatus).toBe("fetching");
     expect(container.querySelector('[data-testid="archived-session"]')).toBeNull();
@@ -840,14 +1041,30 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
         role: "user",
         parts: [{ type: "text", text: "First message auto-send" }],
       }]);
-      submission.resolve({ outcome: "accepted" });
     });
+    await waitFor(() => Object.values(useComposerStateStore.getState().pendingMessages).flat()
+      .some((item) => item.serverMessageId === messageId), "the user message to be observed before acceptance returns");
+    expectStarting();
+    await act(async () => submission.resolve({ outcome: "accepted" }));
     expect(editor.textContent).toBe("");
     expect(container.textContent?.split("First message auto-send").length).toBe(2);
     expect(Object.values(useComposerStateStore.getState().pendingMessages).flat()).toHaveLength(0);
 
-    const { PromptAdmissionUnknownError } = await import("../src/app/lib/opencode");
+    expect(getQueuedDrainState(sessionId).phase.kind).toBe("awaiting_observation");
+    expectStarting();
+    await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "busy" }));
+    await waitFor(() => container.querySelector('[data-loading-message="working"]') !== null, "confirmed activity after accepted auto-send");
+    expect(container.querySelector('[data-loading-message="starting"]')).toBeNull();
+    await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), {
+      type: "retry", attempt: 1, message: "Retrying accepted request", next: Date.now() + 10_000,
+    }));
+    await waitFor(() => container.textContent?.includes("Retrying accepted request") === true, "retry feedback after accepted auto-send");
     expectSettled();
+    await act(async () => queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" }));
+    await waitFor(() => getQueuedDrainState(sessionId).phase.kind === "ready", "the accepted auto-send to finish");
+    expectSettled();
+
+    const { PromptAdmissionUnknownError } = await import("../src/app/lib/opencode");
     submission = Promise.withResolvers<CloudMcpSubmissionResult>();
     await act(async () => useComposerStateStore.getState().setDraft(sessionId, "Uncertain send"));
     await act(async () => send());
@@ -860,6 +1077,7 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     await act(async () => submission.reject(new PromptAdmissionUnknownError({ messageID: uncertainId })));
     expect(editor.textContent).toBe("Newer uncertain draft");
     expect(getQueuedDrainState(sessionId).phase).toMatchObject({ kind: "admission_unknown", messageID: uncertainId });
+    expectSettled();
     expect(Object.values(useComposerStateStore.getState().failedDrafts).flat()).toHaveLength(0);
     expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
     await act(async () => queryClient.setQueryData(transcriptKey(workspaceId, sessionId), [{
@@ -1001,7 +1219,8 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     // Native v2 returns admission without an ID and normalizes user turns to text only.
     const { createClientV2, v2PromptText } = await import("../src/app/lib/opencode-v2-adapter");
     const { draftToParts } = await import("../src/react-app/domains/session/sync/draft-parts");
-    const { snapshotToUIMessages } = await import("../src/react-app/domains/session/sync/usechat-adapter");
+    const { snapshotToUIMessages, createSessionErrorUIMessage } = await import("../src/react-app/domains/session/sync/usechat-adapter");
+    const { presentOpencodeSessionError } = await import("../src/react-app/domains/session/sync/session-error");
     const nativeBaseUrl = "http://127.0.0.1:1/opencode2";
     const nativeClient = createClientV2(nativeBaseUrl, "/tmp/project-focus-continuity", {});
     const nativeOwner = composerAutoSendScopeKey({ draftScope: "local", opencodeBaseUrl: nativeBaseUrl, workspaceId, sessionId });
@@ -1019,9 +1238,15 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
           parts,
         })),
       };
-      await act(async () => queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(nativeSnapshot)));
+      // A base-URL switch refetches history. Keep that mocked source aligned
+      // with the native transcript instead of restoring the earlier v1 fixture.
+      fetchedSnapshot = nativeSnapshot;
+      await act(async () => {
+        queryClient.setQueryData(snapshotKey(workspaceId, sessionId), nativeSnapshot);
+        queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(nativeSnapshot));
+      });
     };
-    nativeMessages.push({ id: "native-historical", role: "user", text: "Historical attachment" });
+    nativeMessages.push({ id: "native-historical", role: "user", text: "Historical attachment", time: { created: 100 } });
     await refreshNativeTranscript();
     await act(async () => {
       useComposerStateStore.getState().clearSession(sessionId);
@@ -1068,12 +1293,17 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     expect(nativePromptTexts[0]).not.toBe(nativePromptTexts[1]);
     expect(nativePending()).toHaveLength(2);
     expect(nativePending().map((item) => item.preparedText)).toEqual(nativePromptTexts);
+    const nativeRowIds = () => [...container.querySelectorAll('[data-message-role="user"]')].map((row) => row.getAttribute("data-message-id"));
+    const firstPendingId = nativeDrafts[0]?.messageId;
+    const secondPendingId = nativeDrafts[1]?.messageId;
+    if (!firstPendingId || !secondPendingId) throw new Error("Expected both pending attachment identities");
+    expect(nativeRowIds().indexOf(firstPendingId)).toBeLessThan(nativeRowIds().indexOf(secondPendingId));
     const firstText = nativePromptTexts[0];
     const secondText = nativePromptTexts[1];
     if (!firstText || !secondText) throw new Error("Expected exact native prompt bodies");
     // Neither an already-known ID nor similar text may take ownership of a preview.
-    nativeMessages[0] = { id: "native-historical", role: "user", text: firstText };
-    nativeMessages.push({ id: "native-unrelated", role: "user", text: `${firstText}\nA different turn` });
+    nativeMessages[0] = { id: "native-historical", role: "user", text: firstText, time: { created: 100 } };
+    nativeMessages.push({ id: "native-unrelated", role: "user", text: `${firstText}\nA different turn`, time: { created: 150 } });
     await refreshNativeTranscript();
     await waitFor(() => nativeRow("native-unrelated") !== null, "the unrelated native turn");
     expect(nativePending().every((item) => !item.serverMessageId)).toBe(true);
@@ -1081,12 +1311,15 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     expect(nativeRow("native-unrelated")?.querySelector("img")).toBeNull();
 
     // Observe the sibling first: equal filenames must not make the first upload claim it.
-    nativeMessages.push({ id: "native-second", role: "user", text: secondText });
+    nativeMessages.push({ id: "native-second", role: "user", text: secondText, time: { created: 300 } });
     await refreshNativeTranscript();
     await waitFor(() => nativePending()[1]?.serverMessageId === "native-second", "the second upload's exact text-only acknowledgement");
     expect(nativePending()[0]?.serverMessageId).toBeUndefined();
+    expect(nativePending()[0]?.previousMessageIds).toContain("native-second");
+    expect(nativeRowIds().indexOf("native-historical")).toBeLessThan(nativeRowIds().indexOf(firstPendingId));
+    expect(nativeRowIds().indexOf(firstPendingId)).toBeLessThan(nativeRowIds().indexOf("native-second"));
     expect(nativeRow("native-second")?.querySelector("img")?.getAttribute("src")).toBe(nativeAttachments[1]?.previewUrl);
-    nativeMessages.push({ id: "native-first", role: "user", text: firstText });
+    nativeMessages.push({ id: "native-first", role: "user", text: firstText, time: { created: 200 } });
     await refreshNativeTranscript();
     await waitFor(() => nativePending()[0]?.serverMessageId === "native-first", "the first upload's exact text-only acknowledgement");
     expect(nativeRow("native-first")?.querySelector("img")?.getAttribute("src")).toBe(nativeAttachments[0]?.previewUrl);
@@ -1138,18 +1371,41 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
       expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Composer continuation beside queue");
     };
     submission = Promise.withResolvers<CloudMcpSubmissionResult>();
-    const queuedHistory = Promise.withResolvers<OpenworkSessionSnapshot>();
-    const ensureSnapshot = spyOn(queryClient, "ensureQueryData").mockImplementation(() => queuedHistory.promise);
+    // Sends now read cached complete history or bounded newest history, not
+    // ensureQueryData. Hold the actual send-history boundary while preserving
+    // its real messages and the navigation/double-click ownership assertions.
+    const queuedHistory = Promise.withResolvers<void>();
+    const historyModule = await import("../src/react-app/domains/session/surface/session-history");
+    const useOpeningHistory = historyModule.useOpeningSessionHistory;
+    type SendHistoryReader = ReturnType<typeof useOpeningHistory>["readSendHistory"];
+    const heldReaders = new WeakMap<SendHistoryReader, SendHistoryReader>();
+    let heldHistoryReads = 0;
+    const holdSendHistory = spyOn(historyModule, "useOpeningSessionHistory").mockImplementation((...args) => {
+      const history = useOpeningHistory(...args);
+      let reader = heldReaders.get(history.readSendHistory);
+      if (!reader) {
+        reader = async (...readArgs) => {
+          const messages = await history.readSendHistory(...readArgs);
+          heldHistoryReads++;
+          await queuedHistory.promise;
+          return messages;
+        };
+        heldReaders.set(history.readSendHistory, reader);
+      }
+      return { ...history, readSendHistory: reader };
+    });
+    await act(async () => renderSession());
     const sendsBeforeQueue = sentDrafts.length;
     await act(async () => sendNow());
     expectQueuedSending();
+    expect(heldHistoryReads).toBe(1);
     expect(sentDrafts).toHaveLength(sendsBeforeQueue);
     await act(async () => renderSession(otherSessionId));
     expect(container.querySelector('button[aria-label="Sending..."]')).toBeNull();
     await act(async () => renderSession());
     expectQueuedSending();
-    await act(async () => queuedHistory.resolve(fetchedSnapshot));
-    ensureSnapshot.mockRestore();
+    await act(async () => queuedHistory.resolve());
+    holdSendHistory.mockRestore();
     expectQueuedSending();
     expect(sentDrafts).toHaveLength(sendsBeforeQueue + 1);
     expect(sentDrafts.at(-1)?.text).toBe("Promote this queued message");
@@ -1218,6 +1474,8 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
     expect(sentDrafts).toHaveLength(sendsBeforeQueue + 4);
     await act(async () => useComposerStateStore.getState().appendQueuedDraft(sessionId, queueDraft("Uncertain queued message")));
+    const uncertainQueueId = useComposerStateStore.getState().queuedDrafts[sessionId]?.[0]?.id;
+    if (!uncertainQueueId) throw new Error("Expected the uncertain queue row");
 
     submission = Promise.withResolvers<CloudMcpSubmissionResult>();
     await act(async () => sendNow());
@@ -1227,7 +1485,12 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     await act(async () => submission.reject(new PromptAdmissionUnknownError({ messageID: queuedUnknownId })));
     expect(getQueuedDrainState(sessionId).phase).toMatchObject({ kind: "admission_unknown", messageID: queuedUnknownId });
     expect(container.textContent).toContain("It may already be running");
-    expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
+    // Unknown admission retains the exact recoverable row without resending it.
+    expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toEqual([{
+      id: uncertainQueueId,
+      draft: { ...queueDraft("Uncertain queued message"), messageId: queuedUnknownId },
+    }]);
+    expect(sentDrafts).toHaveLength(sendsBeforeQueue + 5);
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Newer composer edits during queue send");
     await act(async () => {
       useComposerStateStore.getState().appendQueuedDraft(sessionId, queueDraft("Do not retry uncertain admission"));
@@ -1239,6 +1502,157 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     expect(sentDrafts).toHaveLength(sendsBeforeQueue + 5);
     expect(getQueuedDrainState(sessionId).phase.kind).toBe("admission_unknown");
 
+    // A send without queued drafts must still recover a missed busy edge from
+    // fresh status plus a correlated terminal reply, not history.status.
+    await act(async () => {
+      resetQueuedDrainForTests();
+      useComposerStateStore.setState({ queuedDrafts: {}, pendingMessages: {}, failedDrafts: {} });
+      historyOnly = true;
+      fetchedSnapshot = createSnapshot({ type: "idle" }, 32);
+      fetchedSnapshot.messages.push({
+        info: {
+          id: "terminal-command-reply", sessionID: sessionId, role: "assistant", parentID: "existing-user-message",
+          time: { created: 32, completed: 33 }, finish: "stop", modelID: "test-model", providerID: "test",
+          mode: "build", agent: "build", path: { cwd: "/tmp/project-focus-continuity", root: "/tmp/project-focus-continuity" },
+          cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [],
+      });
+      queryClient.setQueryData(snapshotKey(workspaceId, sessionId), { session: fetchedSnapshot.session, messages: fetchedSnapshot.messages });
+      queryClient.setQueryData(statusKey(workspaceId, sessionId), { type: "idle" });
+      renderSurface();
+    });
+    const statusReadsBeforeProbe = admissionStatusRequests.length;
+    const sendsBeforeProbe = sentDrafts.length;
+    await act(async () => {
+      dispatchQueuedDrain(sessionId, { type: "send_started", itemId: "deferred-command-probe" });
+      dispatchQueuedDrain(sessionId, {
+        type: "send_result", itemId: "deferred-command-probe", outcome: "accepted", at: Date.now() - 20_000,
+        deferredMessageID: "existing-user-message",
+      });
+    });
+    await waitFor(() => getQueuedDrainState(sessionId).phase.kind === "ready", "a terminal command to settle from independent status and history");
+    expect(admissionStatusRequests.length).toBeGreaterThan(statusReadsBeforeProbe);
+    expect(queryClient.getQueryData<OpenworkSessionSnapshot>(snapshotKey(workspaceId, sessionId))?.status).toBeUndefined();
+    expect(sentDrafts).toHaveLength(sendsBeforeProbe);
+    expect(getQueuedDrainState(sessionId).lastResolution).toEqual({ itemId: "deferred-command-probe", resolution: "completed" });
+    expectSettled();
+
+    await act(async () => root.render(null));
+    await act(async () => {
+      fetchedSnapshot = createSnapshot({ type: "idle" }, 34);
+      queryClient.setQueryData(snapshotKey(workspaceId, sessionId), fetchedSnapshot);
+      queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(fetchedSnapshot));
+      renderSession();
+    });
+    for (const outcome of ["answered", "failed", "stopped", "question", "permission", "unresolved"]) {
+      await act(async () => {
+        queryClient.setQueryData(transcriptKey(workspaceId, sessionId), snapshotToUIMessages(fetchedSnapshot));
+        dispatchQueuedDrain(sessionId, { type: "send_started", itemId: outcome });
+        dispatchQueuedDrain(sessionId, {
+          type: "send_result", itemId: outcome, outcome: "accepted", at: Date.now(),
+          deferredMessageID: "existing-user-message",
+        });
+      });
+      await waitFor(() => container.querySelector('[data-loading-message="starting"]') !== null, `${outcome} admission feedback`);
+      expectStarting();
+      if (outcome === "answered") {
+        await act(async () => queryClient.setQueryData(transcriptKey(workspaceId, sessionId), [
+          ...snapshotToUIMessages(fetchedSnapshot),
+          { id: "completed-without-busy", role: "assistant", parts: [{ type: "text", text: "Completed without a busy event." }],
+            metadata: { opencode: { created: 35, completed: 36 } } },
+        ]));
+        await waitFor(() => container.textContent?.includes("Completed without a busy event.") === true, "the terminal reply without busy");
+      } else if (outcome === "failed") {
+        const presentation = presentOpencodeSessionError("Provider rejected the request.");
+        const failure = createSessionErrorUIMessage("failed-without-busy", presentation);
+        await act(async () => queryClient.setQueryData(transcriptKey(workspaceId, sessionId), [
+          ...snapshotToUIMessages(fetchedSnapshot), failure,
+        ]));
+        await waitFor(() => container.textContent?.includes(presentation.title) === true, "the terminal error without busy");
+      } else if (outcome === "stopped") {
+        await act(async () => dispatchQueuedDrain(sessionId, { type: "stop_confirmed" }));
+      } else if (outcome === "question") {
+        activeQuestion = { id: "question-without-busy", sessionID: sessionId, receivedAt: Date.now(),
+          questions: [{ header: "Choice", question: "Pick one", options: [{ label: "Yes", description: "Proceed" }] }] };
+        await act(async () => renderSession());
+      } else if (outcome === "permission") {
+        activePermission = { id: "permission-without-busy", sessionID: sessionId, receivedAt: Date.now(),
+          protocol: "legacy", permission: "read", patterns: ["/tmp/project-focus-continuity"], metadata: {}, always: [] };
+        await act(async () => renderSession());
+      } else {
+        await waitFor(() => container.querySelector('[data-testid="admission-outcome-unknown"]') !== null, "bounded admission recovery");
+      }
+      expectSettled();
+      expect(getQueuedDrainState(sessionId).phase.kind).toBe(outcome === "stopped" ? "ready" : "awaiting_observation");
+      await act(async () => {
+        dispatchQueuedDrain(sessionId, { type: "stop_confirmed" });
+        activeQuestion = null;
+        activePermission = null;
+        renderSession();
+      });
+    }
+    expect(sentDrafts).toHaveLength(sendsBeforeProbe);
+  } finally {
+    await act(async () => root.unmount());
+    resetQueuedDrainForTests();
+    useComposerStateStore.setState({ sessions: {}, queuedDrafts: {}, pendingMessages: {}, failedDrafts: {} });
+    queryClient.clear();
+    container.remove();
+    mock.restore();
+  }
+}, 10_000);
+
+test("new-task composer keeps stable presentation and preserves submission ownership and recovery", async () => {
+  const require = createRequire(import.meta.url);
+  for (const moduleId of [
+    "lexical",
+    "@lexical/react/LexicalComposer.js",
+    "@lexical/react/LexicalPlainTextPlugin.js",
+    "@lexical/react/LexicalContentEditable.js",
+    "@lexical/react/LexicalErrorBoundary.js",
+    "@lexical/react/LexicalOnChangePlugin.js",
+    "@lexical/react/LexicalHistoryPlugin.js",
+    "@lexical/react/LexicalComposerContext.js",
+  ]) {
+    const moduleExports = require(moduleId);
+    mock.module(moduleId, () => moduleExports);
+  }
+  const registeredDom = typeof globalThis.window === "undefined" || typeof globalThis.document === "undefined";
+  if (registeredDom) GlobalRegistrator.register({ url: "http://localhost/" });
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+  document.open();
+  document.write("<!doctype html><html><body></body></html>");
+  document.close();
+  Object.defineProperty(document, "compatMode", { configurable: true, value: "CSS1Compat" });
+  mock.module("@/components/model-select", () => ({ ModelSelect: () => null }));
+  mock.module("@/react-app/domains/session/surface/composer/workspace-run-mode-menu", () => ({ WorkspaceRunModeMenu: () => null }));
+  const { LocalProvider } = await import("../src/react-app/kernel/local-provider");
+  const { ShellConfigProvider } = await import("../src/react-app/shell/shell-config");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const revokePreview = spyOn(URL, "revokeObjectURL");
+  const attachment = { file: new File(["png"], "photo.png", { type: "image/png" }) };
+  const continuationFile = new File(["next"], "continuation.png", { type: "image/png" });
+  const send = () => {
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Run task"]');
+    if (!button || button.disabled) throw new Error("Expected an enabled hero send button");
+    button.click();
+    button.click();
+  };
+  const expectPendingHero = () => {
+    expect(container.querySelector('[data-message-role="user"]')).toBeNull();
+    expect(container.querySelector('[data-loading-message="starting"]')).toBeNull();
+    expect(container.textContent).not.toContain("Starting");
+    expect(container.querySelector('[data-loading-message="working"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Creating conversation..."]')?.getAttribute("aria-busy")).toBe("true");
+  };
+  const expectSettled = () => {
+    expect(container.querySelector('[data-loading-message="starting"]')).toBeNull();
+    expect(container.querySelector('[data-loading-message="working"]')).toBeNull();
+  };
+  try {
     const { NewTaskComposer } = await import("../src/react-app/domains/session/chat/new-task-composer");
     let creation = Promise.withResolvers<void>();
     let creations = 0;
@@ -1257,14 +1671,29 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
       }} />;
     }
     await act(async () => root.render(<LocalProvider><ShellConfigProvider><Hero /></ShellConfigProvider></LocalProvider>));
+    const heroWrapper = container.firstElementChild;
+    const heroEditor = container.querySelector<HTMLElement>('[contenteditable="true"][data-lexical-editor="true"]');
+    if (!heroEditor) throw new Error("Expected the hero editor");
+    const heroChildCount = container.childElementCount;
     await act(async () => send());
     expect(creations).toBe(1);
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("");
-    expect(container.querySelector('[data-message-role="user"]')?.textContent).toBe("First hero message");
-    expectStarting();
+    expect(container.querySelector('[data-message-role="user"]')).toBeNull();
+    expect(container.firstElementChild).toBe(heroWrapper);
+    expect(container.childElementCount).toBe(heroChildCount);
+    expect(container.querySelector('[data-lexical-editor="true"]')).toBe(heroEditor);
+    expect(heroEditor.getAttribute("contenteditable")).toBe("true");
+    expect(capturedHandoff?.submitted.draft).toBe("First hero message");
+    expectPendingHero();
     expect(container.querySelector('button[aria-label="Creating conversation..."]')?.getAttribute("aria-busy")).toBe("true");
     expect(container.querySelector('button[aria-label="Preparing connected service tools…"]')).toBeNull();
     await act(async () => updateHeroDraft("Newer hero draft"));
+    expect(capturedHandoff?.getContinuation().draft).toBe("Newer hero draft");
+    await act(async () => {
+      heroEditor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      heroEditor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(creations).toBe(1);
     expect(capturedHandoff?.getContinuation().draft).toBe("Newer hero draft");
     await act(async () => creation.reject(new Error("Session creation failed")));
     expectSettled();
@@ -1286,17 +1715,23 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     });
     await act(async () => send());
     expect(creations).toBe(2);
-    expect(container.querySelector('[role="status"]')?.textContent).toBe("Starting…");
+    expect(container.querySelector('[data-lexical-editor="true"]')).toBe(heroEditor);
+    expect(heroEditor.getAttribute("contenteditable")).toBe("true");
     expect(container.querySelector('button[aria-label="Creating conversation..."]')?.getAttribute("aria-busy")).toBe("true");
     expect(container.querySelector('button[aria-label="Preparing connected service tools…"]')).toBeNull();
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("");
-    expect(container.querySelector('[data-message-role="user"]')?.textContent).toContain("First hero message");
-    expect(container.querySelector('[data-message-role="user"] img[alt="photo.png"]')).not.toBeNull();
-    expectStarting();
+    expect(container.querySelector('[data-message-role="user"]')).toBeNull();
+    expect(container.querySelector('img[alt="photo.png"]')).toBeNull();
+    expectPendingHero();
     expect(container.querySelector("[data-attachment-id]")).toBeNull();
     expect(capturedHandoff?.getContinuation()).toEqual({ draft: "", attachments: [], mentions: {}, pasteParts: [], revertMessageId: null });
     expect(capturedHandoff?.submitted.attachments[0]?.file).toBe(attachment.file);
+    const submittedImage = capturedHandoff?.submitted.attachments[0];
+    expect(submittedImage?.previewUrl).toStartWith("blob:");
+    expect(capturedHandoff?.submitted.draft).toBe(`First hero message[attachment ${submittedImage?.id}]`);
+    expect(revokePreview).not.toHaveBeenCalledWith(submittedImage?.previewUrl);
     await act(async () => creation.reject(new Error("Image session creation failed")));
+    expectSettled();
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toContain("First hero message");
     expect(container.querySelector('[data-attachment-id]')).not.toBeNull();
 
@@ -1305,6 +1740,9 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     const attachmentHandoff = capturedHandoff;
     if (!attachmentHandoff) throw new Error("Expected the attachment handoff");
     const heroPreview = attachmentHandoff.submitted.attachments[0]?.previewUrl;
+    expect(attachmentHandoff.submitted.attachments[0]).toEqual(submittedImage);
+    expect(attachmentHandoff.submitted.attachments[0]?.file).toBe(attachment.file);
+    expect(revokePreview).not.toHaveBeenCalledWith(heroPreview);
     await act(async () => {
       const input = container.querySelector<HTMLInputElement>('input[type="file"][multiple]');
       if (!input) throw new Error("Expected the continuation attachment input");
@@ -1344,11 +1782,7 @@ test("composer focus, shared Restore, pending stops, and optimistic sends preser
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Foreign owner draft");
   } finally {
     await act(async () => root.unmount());
-    resetQueuedDrainForTests();
-    useComposerStateStore.setState({ sessions: {}, queuedDrafts: {}, pendingMessages: {}, failedDrafts: {} });
-    queryClient.clear();
     container.remove();
     mock.restore();
-    if (registeredDom) await GlobalRegistrator.unregister();
   }
-});
+}, 10_000);

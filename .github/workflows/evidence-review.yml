@@ -8,6 +8,7 @@ on:
       - apps/review/**
       - packages/review/**
       - evals/packages/test-artifacts/**
+      - evals/scripts/publish-review*.mjs
       - evals/packages/test-evidence/src/vitest.ts
       - evals/bin/evals.mjs
       - evals/docs-shots/run.ts
@@ -24,10 +25,32 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: evidence-review-${{ github.event.workflow_run.pull_requests[0].number || github.run_id }}
-  cancel-in-progress: true
+  # Serialize publishers before resolving provenance; never key off an unvalidated PR.
+  group: evidence-review-${{ github.event_name }}-${{ github.event_name == 'workflow_run' && github.repository || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  check-publisher:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+      - name: Install only publisher dependencies
+        run: |
+          pnpm --filter @openwork/review... install --frozen-lockfile --ignore-scripts
+          pnpm --dir evals --filter @openwork/test-artifacts install --frozen-lockfile --ignore-scripts
+      - name: Test publisher without publishing credentials or journey infrastructure
+        run: node --test evals/packages/test-artifacts/test/*.test.ts evals/scripts/publish-review.test.mjs
   check-app:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -50,7 +73,7 @@ jobs:
           OPENWORK_EVAL_REVIEW: "1"
         run: |
           pnpm --filter @openwork/review-app build
-          node --test evals/packages/test-artifacts/test/*.test.ts evals/bin/evals.test.mjs
+          node --test evals/bin/evals.test.mjs
           pnpm evals:pr specs/evidence-review.test.ts
       - name: Save review journey evidence
         if: always()
@@ -61,9 +84,8 @@ jobs:
           retention-days: 7
   publish:
     if: >-
+      github.event_name == 'workflow_run' &&
       vars.OPENWORK_REVIEW_URL != '' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.pull_requests[0].number != null &&
       (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -91,6 +113,4 @@ jobs:
           BLOB_READ_WRITE_TOKEN: ${{ secrets.OPENWORK_REVIEW_BLOB_TOKEN }}
           OPENWORK_REVIEW_URL: ${{ vars.OPENWORK_REVIEW_URL }}
           REVIEW_RUN_ID: ${{ github.event.workflow_run.id }}
-          REVIEW_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
-          REVIEW_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
         run: node evals/scripts/publish-review.mjs

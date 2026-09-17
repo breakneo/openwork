@@ -85,6 +85,58 @@ test("userinfo cut by the work bound before its @ cannot survive into any bounde
   expect(redactCrashText(exact)).toBe(exact);
 });
 
+test.each([
+  ["double-quoted value", 'token="DEMO_SECRET"', "token=[redacted]"],
+  ["single-quoted value", "key='abc'", "key=[redacted]"],
+  ["double-quoted value containing & and )", 'secret="a&b)")', "secret=[redacted])"],
+  ["single-quoted value containing & and )", "code='x&y)')", "code=[redacted])"],
+  ["unquoted value followed by )", "grant=abc)", "grant=[redacted])"],
+  ["unquoted value followed by ) in a stack frame", "at fn (file?token=abc)", "at fn (file?token=[redacted])"],
+])("redacts %s", (_label, input, expected) => {
+  expect(redactCrashText(input)).toBe(expected);
+  expect(redactCrashText(input)).not.toContain("DEMO_SECRET");
+  expect(redactCrashText(input)).not.toContain("abc");
+});
+
+test("JSON colon syntax redacts the value while retaining the key", () => {
+  expect(redactCrashText('{"token":"abc"}')).toBe('{"token":"[redacted]"}');
+});
+
+test.each(["token", "grant", "code", "secret", "key", "password", "authorization"])("JSON redacts %s across quote and scalar forms", (key) => {
+  for (const quote of ['"', "'"]) {
+    for (const value of ['"OPAQUE_VALUE"', "'OPAQUE_VALUE'", "OPAQUE_VALUE", "123", "false", '""']) {
+      const prefix = `{${quote}${key.toUpperCase()}${quote} : `;
+      const clean = redactCrashText(`${prefix}${value}, "status":"useful"}`);
+      expect(clean).toBe(`${prefix}"[redacted]", "status":"useful"}`);
+      expect(redactCrashText(clean)).toBe(clean);
+    }
+  }
+});
+
+test("JSON quoted secrets include escaped quotes and do not mask unrelated keys", () => {
+  expect(redactCrashText(String.raw`{"token":"opaque\"remainder", "status":"useful"}`))
+    .toBe('{"token":"[redacted]", "status":"useful"}');
+  expect(redactCrashText(String.raw`{'secret':'opaque\'remainder', 'status':'useful'}`))
+    .toBe(`{'secret':"[redacted]", 'status':'useful'}`);
+  expect(redactCrashText('{"tokenCount":3,"monkey":"useful"}')).toBe('{"tokenCount":3,"monkey":"useful"}');
+});
+
+test.each(["Authorization: Bearer", "authorization: bEaReR", "Bearer"])("redacts %s header credentials", (prefix) => {
+  const clean = redactCrashText(`${prefix} OPAQUE_HEADER+/==`);
+  expect(clean).toBe(`${prefix.replace(/bearer/i, "Bearer")} [REDACTED]`);
+});
+
+test.each(['"', "'"])("quoted secrets with %s closing beyond the work cutoff fail closed", (quote) => {
+  for (const prefix of [`token=${quote}`, `{"token":${quote}`]) {
+    const source = prefix + "OPAQUE_CUTOFF_" + "x".repeat(17000) + quote;
+    expect(source.lastIndexOf(quote)).toBeGreaterThan(16000);
+    const expected = prefix.startsWith("{") ? '{"token":"[redacted]"' : "token=[redacted]";
+    expect(redactCrashText(source)).toBe(expected);
+    expect(formatCrashDiagnostic({ name: source, message: source, stack: source }))
+      .toEqual({ name: expected, message: expected, stack: expected });
+  }
+});
+
 test("long diagnostics are bounded after sanitizing, without masking ordinary text or HTML", () => {
   const diagnostic = formatCrashDiagnostic({ name: "N".repeat(50000), message: "m".repeat(50000), stack: "s".repeat(50000) });
   expect(diagnostic.name).toHaveLength(100);
@@ -93,5 +145,12 @@ test("long diagnostics are bounded after sanitizing, without masking ordinary te
   const html = '<img src=x onerror="synthetic()"><script>synthetic()</script>';
   expect(redactCrashText(html)).toBe(html);
   expect(redactCrashText("Useful error: loading model, status=502" )).toBe("Useful error: loading model, status=502");
-  expect(redactCrashText("x".repeat(995) + " Bearer FAKE_TRAILING_TOKEN").slice(0, 1000)).not.toContain("FAKE_");
+  const prefix = "x".repeat(940) + ' token="';
+  const source = prefix + "OPAQUE_RETAINED_" + "s".repeat(200) + '" useful suffix ' + "z".repeat(2000);
+  expect(source.indexOf("OPAQUE_RETAINED_")).toBeLessThan(1000);
+  expect(source.lastIndexOf('"')).toBeGreaterThan(1000);
+  const message = formatCrashDiagnostic({ message: source }).message;
+  expect(message).toBe(("x".repeat(940) + " token=[redacted] useful suffix " + "z".repeat(2000)).slice(0, 1000));
+  expect(message).toHaveLength(1000);
+  expect(message).not.toContain("OPAQUE_RETAINED_");
 });
