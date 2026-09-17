@@ -1,5 +1,5 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CancelledError, queryOptions, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { CancelledError, hashKey, QueryObserver, queryOptions, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { LoaderCircle } from "lucide-react";
 import type { UIMessage } from "ai";
 import { applyHistorySourceChanges, mergeHistoryWindow, projectHistoryRead, reconcileHistoryRead, type LatestSessionHistory } from "./session-render-state";
@@ -13,6 +13,14 @@ import { readSessionHistoryPage, useSessionHistoryPages } from "./session-histor
 
 export type OpeningHistoryWindow = { limit?: number; before?: string; messageIds?: readonly string[] };
 
+export function sessionHistoryRuntimeOwner(input: {
+  draftScope: string | null;
+  opencodeBaseUrl: string;
+  runtimeWorkspaceId: string;
+}) {
+  return hashKey([input.draftScope, input.opencodeBaseUrl, input.runtimeWorkspaceId]);
+}
+
 export function sessionHistoryIdentity(input: {
   draftScope: string | null;
   opencodeBaseUrl: string;
@@ -22,6 +30,7 @@ export function sessionHistoryIdentity(input: {
   // Sidebar aliases (rem_*) are navigation identities, not runtime cache owners.
   return {
     owner: composerAutoSendScopeKey({ ...input, workspaceId: input.runtimeWorkspaceId }),
+    runtimeOwner: sessionHistoryRuntimeOwner(input),
     snapshotQueryKey: snapshotKey(input.runtimeWorkspaceId, input.sessionId),
   };
 }
@@ -45,12 +54,14 @@ export function openingHistoryWindow(saved: SessionScrollState): OpeningHistoryW
 
 type OpeningHistoryInput = {
   owner: string;
+  runtimeOwner?: string;
   sessionId: string;
   authToken?: string | null;
   ignoreCached?: boolean;
   metadataQueryKey?: readonly unknown[];
   snapshotQueryKey: readonly unknown[];
   readSnapshot: (signal: AbortSignal, window?: OpeningHistoryWindow, options?: { desktopTransport: "main" }) => Promise<OpenworkSessionHistory>;
+  readOpening?: (signal: AbortSignal, window: OpeningHistoryWindow) => Promise<OpenworkSessionHistory>;
 };
 
 const hydratingTranscripts = new WeakSet<object>();
@@ -112,6 +123,149 @@ async function readLatestHistory<T>(read: (signal: AbortSignal) => Promise<T>, s
   }
 }
 
+type OpeningCompletion = {
+  runtimeOwner?: string;
+  snapshotHash: string;
+  workspaceHash: string;
+  authToken: string | null;
+  identity: string;
+  background: boolean;
+  retained: boolean;
+  cancel: () => void;
+  dispose: () => void;
+};
+const openingCompletions = new WeakMap<QueryClient, Map<string, OpeningCompletion>>();
+type RuntimeAuthority = { owner: string; authToken: string | null };
+const openingRuntimeOwners = new WeakMap<QueryClient, Map<object, readonly RuntimeAuthority[]>>();
+
+export function useSessionHistoryRuntimeOwners(owners: readonly { owner: string; authToken?: string | null }[]) {
+  const client = useQueryClient();
+  const registration = useMemo(() => ({}), [client]);
+  const previous = useRef<readonly RuntimeAuthority[]>([]);
+  if (previous.current.length !== owners.length || owners.some((owner, index) =>
+    owner.owner !== previous.current[index].owner || (owner.authToken ?? null) !== previous.current[index].authToken)) {
+    previous.current = owners.map(({ owner, authToken }) => ({ owner, authToken: authToken ?? null }));
+  }
+  const identities = previous.current;
+  useLayoutEffect(() => {
+    let registrations = openingRuntimeOwners.get(client);
+    if (!registrations) { registrations = new Map(); openingRuntimeOwners.set(client, registrations); }
+    const active = registrations;
+    const revoke = () => {
+      const allowed = [...active.values()].flat();
+      for (const entry of openingCompletions.get(client)?.values() ?? []) {
+        if (entry.runtimeOwner && !allowed.some((authority) => authority.owner === entry.runtimeOwner && authority.authToken === entry.authToken)) entry.cancel();
+      }
+    };
+    active.set(registration, identities);
+    revoke();
+    return () => {
+      active.delete(registration);
+      queueMicrotask(revoke);
+    };
+  }, [client, registration, identities]);
+}
+
+function retainOpeningHistory(client: QueryClient, input: OpeningHistoryInput, queryKey: readonly unknown[], readKey: readonly unknown[], signal: AbortSignal) {
+  const cache = client.getQueryCache();
+  const query = cache.find({ queryKey, exact: true });
+  if (!query) throw new CancelledError();
+  let entries = openingCompletions.get(client);
+  if (!entries) { entries = new Map(); openingCompletions.set(client, entries); }
+  const records = entries;
+  const snapshotHash = hashKey(input.snapshotQueryKey);
+  const readHash = hashKey(readKey);
+  const workspaceHash = hashKey(input.snapshotQueryKey.slice(0, -1));
+  const authToken = input.authToken ?? null;
+  const identity = input.owner;
+  const authorities = openingRuntimeOwners.get(client);
+  if (input.runtimeOwner && authorities !== undefined
+    && ![...authorities.values()].some((allowed) => allowed.some((authority) => authority.owner === input.runtimeOwner && authority.authToken === authToken))) {
+    throw new Error("Conversation history is unavailable for this runtime.");
+  }
+  records.get(query.queryHash)?.dispose();
+  for (const entry of records.values()) {
+    if (input.runtimeOwner && entry.runtimeOwner && authorities !== undefined) {
+      if (entry.runtimeOwner === input.runtimeOwner && entry.authToken !== authToken) entry.cancel();
+    } else if (entry.snapshotHash === snapshotHash && entry.identity !== identity
+      || entry.workspaceHash === workspaceHash && entry.authToken !== authToken) entry.cancel();
+  }
+  const observer = new QueryObserver(client, { ...query.options, queryKey, enabled: false, gcTime: 15_000 });
+  let release = observer.subscribe(() => {});
+  let unsubscribe = () => {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  const finish = () => {
+    entry.retained = false;
+    entry.background = false;
+    clearTimeout(timer);
+    const stop = release;
+    release = () => {};
+    stop();
+  };
+  const entry: OpeningCompletion = {
+    runtimeOwner: input.runtimeOwner, snapshotHash, workspaceHash, authToken, identity, background: false, retained: true,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      unsubscribe();
+      signal.removeEventListener("abort", finish);
+      records.delete(query.queryHash);
+      finish();
+    },
+    cancel: () => {
+      entry.dispose();
+      void client.cancelQueries({ queryKey, exact: true });
+      client.removeQueries({ queryKey: readKey, exact: true });
+      void client.invalidateQueries({ queryKey, exact: true, refetchType: "none" });
+    },
+  };
+  const update = () => {
+    if (!entry.retained || disposed) return;
+    const background = query.getObserversCount() === 1;
+    if (background === entry.background) return;
+    entry.background = background;
+    clearTimeout(timer);
+    if (!background) return;
+    records.delete(query.queryHash);
+    records.set(query.queryHash, entry);
+    queueMicrotask(() => {
+      const abandoned = [...records.values()].filter((record) => record.retained && record.background);
+      for (const other of abandoned.slice(0, -1)) other.cancel();
+    });
+    timer = setTimeout(entry.cancel, 5_000);
+  };
+  records.set(query.queryHash, entry);
+  signal.addEventListener("abort", finish, { once: true });
+  unsubscribe = cache.subscribe((event) => {
+    if (event.query === query) {
+      if (event.type === "removed") { entry.dispose(); return; }
+      if (event.type === "observerAdded" || event.type === "observerRemoved") update();
+      if (event.type === "updated" && (event.action.type === "success" || event.action.type === "error")) finish();
+    }
+    const reset = event.type === "updated" && event.action.type === "setState" && event.action.state === event.query.resetState;
+    if ((event.query === query || event.query.queryHash === snapshotHash || event.query.queryHash === readHash)
+      && (event.type === "removed" || reset || event.type === "updated" && event.action.type === "invalidate")) {
+      const restart = event.type !== "removed" && (reset || entry.retained) && query.isActive();
+      entry.cancel();
+      if (restart) queueMicrotask(() => {
+        if (cache.find({ queryKey, exact: true }) === query && query.isActive() && query.state.fetchStatus !== "fetching") {
+          void client.refetchQueries({ queryKey, exact: true });
+        }
+      });
+    }
+  });
+  update();
+}
+
+function canRecoverSavedOpening(window: OpeningHistoryWindow, error: unknown) {
+  if (!window.messageIds || !(error instanceof Error)) return false;
+  if ("code" in error && error.code === "session_not_found") return false;
+  return "code" in error && error.code === "message_not_found"
+    || "status" in error && (error.status === 404 || error.status === 405 || error.status === 501)
+    || error.message === "Native single-message reads are unavailable.";
+}
+
 export function openingSessionHistoryOptions(input: OpeningHistoryInput, saved = getSessionScrollState(
   useSessionScrollStore.getState().sessions, input.sessionId, input.owner,
 ), cache?: QueryClient) {
@@ -120,36 +274,47 @@ export function openingSessionHistoryOptions(input: OpeningHistoryInput, saved =
   const readKey = ["react-session-latest", ...input.snapshotQueryKey, input.owner, credential, "opening-read", window];
   return queryOptions({
     queryKey: ["react-session-opening", input.owner, credential, window],
-    queryFn: async ({ signal, client }): Promise<{ snapshot: OpenworkSessionHistory | null }> => {
-      try {
-        const read = () => readSessionHistoryPage(client, {
-          queryKey: readKey,
-          signal, sessionId: input.sessionId, read: (signal) => input.readSnapshot(signal, window),
-        });
-        const snapshot = await read().catch((error: unknown) => {
-          signal.throwIfAborted();
-          if (error instanceof CancelledError) return read();
-          throw error;
-        });
+    queryFn: async ({ signal, client, queryKey }): Promise<{ snapshot: OpenworkSessionHistory | null; baseline: UIMessage[] }> => {
+      const baseline = client.getQueryData<LatestSessionHistory>([
+        "react-session-latest", ...input.snapshotQueryKey, input.owner, credential, "pages",
+      ])?.messages ?? EMPTY_HISTORY;
+      if (input.ignoreCached) await Promise.resolve();
+      signal.throwIfAborted();
+      retainOpeningHistory(client, input, queryKey, readKey, signal);
+      let readWindow = window;
+      const read = () => readSessionHistoryPage(client, {
+        queryKey: readKey,
+        signal, sessionId: input.sessionId, read: (signal) => (input.readOpening ?? input.readSnapshot)(signal, readWindow),
+      });
+      let snapshot = await read().catch((error: unknown) => {
         signal.throwIfAborted();
-        if (snapshot.session.id !== input.sessionId || snapshot.messages.some(({ info, parts }) =>
-          info.sessionID !== input.sessionId || parts.some((part) => part.sessionID !== input.sessionId || part.messageID !== info.id))) {
-          throw new Error("Conversation history belongs to another session.");
+        if (error instanceof CancelledError) return read();
+        if (canRecoverSavedOpening(window, error)) {
+          readWindow = { limit: LATEST_HISTORY_WINDOW };
+          return read();
         }
-        if (snapshot.pagination && ((snapshot.pagination.before ?? null) !== (openingHistoryWindow(saved).before ?? null)
-          || snapshot.pagination.nextCursor !== null && snapshot.pagination.nextCursor === snapshot.pagination.before)) {
-          throw new Error("Conversation pagination did not advance.");
-        }
-        return { snapshot };
-      } catch {
+        throw error;
+      });
+      signal.throwIfAborted();
+      if (readWindow.messageIds?.length && snapshot.messages.length === 0) {
+        readWindow = { limit: LATEST_HISTORY_WINDOW };
+        snapshot = await read();
         signal.throwIfAborted();
-        // A preview is optional (e.g. a deleted anchor or an older server).
-        // The uncapped authoritative query owns errors and the retry UI.
-        return { snapshot: null };
       }
+      if (snapshot.session.id !== input.sessionId || snapshot.messages.some(({ info, parts }) =>
+        info.sessionID !== input.sessionId || parts.some((part) => part.sessionID !== input.sessionId || part.messageID !== info.id))) {
+        throw new Error("Conversation history belongs to another session.");
+      }
+      if (snapshot.pagination && (!Number.isInteger(snapshot.pagination.limit) || snapshot.pagination.limit <= 0
+        || snapshot.pagination.nextCursor !== null && typeof snapshot.pagination.nextCursor !== "string"
+        || (snapshot.pagination.before ?? null) !== (readWindow.before ?? null)
+        || snapshot.pagination.nextCursor !== null && snapshot.pagination.nextCursor === snapshot.pagination.before)) {
+        throw new Error("Conversation pagination did not advance.");
+      }
+      return { snapshot, baseline };
     },
     staleTime: (query) => query.state.data?.snapshot && (!cache
-      || cache.getQueryData<{ snapshot?: OpenworkSessionHistory }>(readKey)?.snapshot === query.state.data.snapshot) ? Infinity : 0,
+      || cache.getQueryData<{ snapshot?: OpenworkSessionHistory }>(readKey)?.snapshot === query.state.data.snapshot) ? 2_000 : 0,
     structuralSharing: false,
     gcTime: 15_000,
     retry: false,
@@ -168,7 +333,9 @@ export function prefetchOpeningSessionHistory(client: QueryClient, input: Openin
   return () => {
     const query = client.getQueryCache().find({ queryKey: options.queryKey, exact: true });
     // Click may already have adopted this exact query. Never cancel its read.
-    if (query?.getObserversCount() === 0) void client.cancelQueries({ queryKey: options.queryKey, exact: true });
+    if (query && query.getObserversCount() === (openingCompletions.get(client)?.get(query.queryHash)?.retained ? 1 : 0)) {
+      void client.cancelQueries({ queryKey: options.queryKey, exact: true });
+    }
   };
 }
 
@@ -199,9 +366,6 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   const hasFullSnapshot = !input.ignoreCached && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.id === input.sessionId;
   const options = openingSessionHistoryOptions(input, saved, client);
   const query = useQuery({ ...options, enabled: !hasFullSnapshot });
-  useEffect(() => () => {
-    void client.invalidateQueries({ queryKey: options.queryKey, exact: true, refetchType: "none" });
-  }, [client, input.owner, input.authToken, input.sessionId]);
   const credential = options.queryKey[2];
   const openingRead = client.getQueryData<{ snapshot?: OpenworkSessionHistory }>([
     "react-session-latest", ...input.snapshotQueryKey, input.owner, credential, "opening-read", openingHistoryWindow(saved),
@@ -211,16 +375,19 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   const entry = useMemo<{
     warm: boolean;
     fullRead: { baseline: UIMessage[]; updateCount: number } | null;
-    /** The latest newest read matched the cached complete history's tail. */
-    fullConfirmed: boolean;
+    /**
+     * The exact cached complete history whose tail the latest newest read
+     * matched. Weak so a replaced snapshot is not kept alive by this record.
+     */
+    confirmedFull: WeakRef<OpenworkSessionHistory> | null;
     readers: Set<AbortController>;
   }>(() => ({
     warm: !input.ignoreCached && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.id === input.sessionId,
     fullRead: null,
-    fullConfirmed: false,
+    confirmedFull: null,
     readers: new Set<AbortController>(),
   }), [client, input.owner, input.sessionId, credential]);
-  const pages = useSessionHistoryPages({ ...input, credential, initial: openingSnapshot, saved, complete: hasFullSnapshot });
+  const pages = useSessionHistoryPages({ ...input, credential, initial: openingSnapshot, initialBaseline: query.data?.baseline, saved, complete: hasFullSnapshot });
   const readSource = useCallback(() => input.transcriptQueryKey
     ? client.getQueryData<UIMessage[]>(input.transcriptQueryKey) ?? EMPTY_HISTORY : EMPTY_HISTORY,
   [client, input.transcriptQueryKey]);
@@ -233,7 +400,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       const initial = client.getQueryData<LatestSessionHistory>(latestKey) ?? {
         messages: mergeHistoryWindow(projectHistoryRead(full), readSource()), source: readSource(),
       };
-      entry.fullConfirmed = false;
+      entry.confirmedFull = null;
       const history = await readLatestHistory(input.readLatest, signal);
       signal.throwIfAborted();
       if (history.session.id !== input.sessionId || history.messages.some(({ info, parts }) =>
@@ -243,7 +410,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       }
       // Judge the cache as it stands now: live events may have changed it during the read.
       const cachedNow = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
-      entry.fullConfirmed = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history);
+      entry.confirmedFull = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history) ? new WeakRef(cachedNow) : null;
       const current = applyHistorySourceChanges(client.getQueryData<LatestSessionHistory>(latestKey) ?? initial, readSource());
       if (history.session.revert?.messageID || client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.revert?.messageID) return current;
       return {
@@ -435,10 +602,19 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   }, [entry, query.isSuccess, query.isFetching, hasFullSnapshot, paginated, needsRevertHistory]);
   const snapshot = hasFullSnapshot ? null : pages.snapshot ?? openingSnapshot;
   const limit = openingHistoryWindow(saved).limit;
+  const openingError = !hasFullSnapshot && !query.isFetching
+    ? query.error ?? (!snapshot ? new Error("Conversation history loading was interrupted.") : null) : null;
+  const retryOpening = useCallback(async () => {
+    if (activeOwner.current !== entry) throw new CancelledError();
+    return query.refetch({ throwOnError: true });
+  }, [entry, query.refetch]);
   return {
     saved,
     options,
     snapshot,
+    openingError,
+    openingLoading: !hasFullSnapshot && query.isFetching,
+    retryOpening,
     latestHistory,
     readFullSnapshot: fullReader,
     seedSnapshot,
@@ -448,10 +624,12 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     partial: paginated ? !pages.complete : snapshot === null || limit === undefined || snapshot.messages.length >= limit,
     backgroundReady: paginated && !needsRevertHistory ? false : hasFullSnapshot
       ? !entry.warm || !input.readLatest || !latestQuery.isFetching
-      : backgroundOwner === entry,
-    // Cached complete history whose tail the newest read just matched needs no
-    // uncapped re-read; terminal-edge invalidation still refreshes it later.
-    fullCurrent: hasFullSnapshot && entry.warm && latestQuery.isSuccess && entry.fullConfirmed,
+      : query.isSuccess && snapshot !== null && backgroundOwner === entry,
+    // The cached complete history whose tail the newest read matched needs no
+    // uncapped re-read. Only that exact object is current: a later refresh or
+    // terminal-edge invalidation replaces it and returns to the default policy.
+    fullCurrent: hasFullSnapshot && entry.warm && latestQuery.isSuccess && entry.confirmedFull !== null
+      && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey) === entry.confirmedFull.deref(),
     pages,
     complete: hasFullSnapshot || pages.complete,
     paginated,

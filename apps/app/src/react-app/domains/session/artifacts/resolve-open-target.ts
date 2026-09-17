@@ -1,6 +1,27 @@
 import type { OpenworkServerClient } from "@/app/lib/openwork-server";
 
-import { isOpenableFileTarget, type OpenTarget } from "./open-target";
+import { classifyOpenTarget, isOpenableFileTarget, openTargetFromUrl, type OpenTarget } from "./open-target";
+
+export function openTargetForHref(href: string, targets: OpenTarget[], root?: string): OpenTarget | null {
+  const url = openTargetFromUrl(href);
+  if (url) return url;
+  if (!href.trim() || href.trim().startsWith("#")) return null;
+  const value = href.trim().replace(/^\.\//, "");
+  const path = localArtifactPath(root, value);
+  if (!path && !localArtifactPath("/", value)) return null;
+  const exact = targets.find((target) => target.kind === "file"
+    && (target.value === value || (path !== null && localArtifactPath(root, target.value) === path)));
+  if (exact) return exact;
+  return {
+    id: `file:${value}`,
+    kind: "file",
+    value,
+    name: (path ?? value).split(/[/\\]/).pop() || value,
+    preview: classifyOpenTarget(path ?? value, "file"),
+    confidence: 100,
+    reason: "explicit link",
+  };
+}
 
 type ArtifactTargetResolver = Pick<OpenworkServerClient, "resolveArtifacts">;
 
@@ -67,6 +88,11 @@ export type NativeFileAction = { path: string; action: "open" | "reveal" };
  * Decide what an explicit native action may do with a referenced path. Only files inside
  * the workspace are handed to their default application. Anything else is shown in the
  * file manager and never launched, so a referenced path cannot start a program.
+ *
+ * This is a string-level pre-check for menu affordances. The desktop process makes the
+ * final decision on disk (`__openWorkspaceFile` / `__openWithApp`): it resolves symlinks
+ * for both the workspace root and the file and launches only a real file that stays inside
+ * the real workspace, revealing anything else instead.
  */
 export function nativeFileAction(
   root: string | null | undefined,
