@@ -406,13 +406,36 @@ test("a long conversation pages on demand, restores its saved page cold and load
   });
 
   await step("reading deeper history unmounts earlier rows without growing the transcript DOM", async () => {
+    const focusedGroups = () => probe.dom(`${surface} [data-thread-group]:focus-within`);
     await user.click({ text: longHistoryFirst });
+    const initialFocus = await focusedGroups();
+    expect(initialFocus.elements).toHaveLength(1);
+    expect(initialFocus.elements[0].text).toContain(longHistoryFirst);
     for (let page = 0; page < 8; page++) {
       await user.press("PageDown");
       await expectReadingWindow(40);
     }
+    const deeper = await expectReadingWindow(40);
+    const retainedFocus = await focusedGroups();
+    expect(retainedFocus.elements).toHaveLength(1);
+    expect(retainedFocus.elements[0].text).toContain(longHistoryFirst);
+    const retainedFirst = deeper.rows.find((row) => row.text.includes(longHistoryFirst));
+    if (!retainedFirst) throw new Error("The focused first message was unmounted while reading deeper history");
+    expect(retainedFirst.rect.height).toBeGreaterThan(0);
+    expect(retainedFirst.rect.bottom).toBeLessThanOrEqual(deeper.viewport.rect.top);
+    const laterRow = deeper.rows.find((row) => !row.text.includes(longHistoryFirst)
+      && row.rect.width > 0 && row.rect.height > 0
+      && row.rect.top >= deeper.viewport.rect.top && row.rect.bottom <= deeper.viewport.rect.bottom
+      && row.rect.left >= deeper.viewport.rect.left && row.rect.right <= deeper.viewport.rect.right);
+    const laterText = laterRow && persisted.find((text) => text !== longHistoryFirst && laterRow.text.includes(text));
+    if (!laterText) throw new Error("No fully visible later history message is available for moving focus");
+    await user.click({ text: laterText });
+    await probe.eventually(focusedGroups, { within: 5_000, label: "user focus moves from the first group to the visible later message",
+      until: ({ elements }) => elements.length === 1 && elements[0].text.includes(laterText)
+        && !elements[0].text.includes(longHistoryFirst) });
     await probe.eventually(() => historyDom(), { within: 5_000, label: "the earlier message leaves the mounted window",
       until: ({ rows }) => !rows.some((row) => row.text.includes(longHistoryFirst)) });
+    await expectReadingWindow(40);
     expect(renderedCount(await agent.run("session.read_transcript", { count: 1 }))).toBe(longHistoryCount);
     await user.screenshot();
     expect(await agent.run("session.scroll_top")).toMatchObject({ ok: true, position: "top" });
