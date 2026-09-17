@@ -9,6 +9,15 @@ import { complete, optionalPublication, readBinding, requiredStatus } from './re
 const repo = 'sample-org/sample-project';
 const sha = '1'.repeat(40);
 const repository = { id: 10, full_name: repo };
+test('verification workflows pin every setup-node action to an immutable commit', async () => {
+  for (const workflow of ['required-verification.yml', 'evidence-review.yml', 'daytona-e2e.yml']) {
+    const source = await readFile(new URL(`../workflows/${workflow}`, import.meta.url), 'utf8');
+    const pins = [...source.matchAll(/uses:\s*actions\/setup-node@([^\s#]+)/g)].map(match => match[1]);
+    assert.ok(pins.includes('49933ea5288caeca8642d1e84afbd3f7d6820020'), `${workflow}: expected verified v4 pin`);
+    for (const pin of pins) assert.match(pin, /^[a-f0-9]{40}$/, `${workflow}: mutable setup-node reference`);
+  }
+});
+
 const workflows = { upstream: { id: 20, path: '.github/workflows/warden.yml' }, producer: { id: 21, path: '.github/workflows/daytona-e2e.yml' } };
 function fixture() {
   const current = { number: 7, state: 'open', base: { repo: repository }, head: { repo: repository, sha } };
