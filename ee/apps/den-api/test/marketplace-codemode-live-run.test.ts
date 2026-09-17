@@ -144,7 +144,6 @@ const database = {
 
 beforeAll(async () => {
   process.env.DEN_GENERATED_ARTIFACT_VIEWS_ENABLED = "true"
-  process.env.DEN_DASHBOARD_ADMIN_ONLY_FROM_DESKTOP_VERSION = "0.17.0"
   process.env.DATABASE_URL ??= "mysql://fixture:fixture@127.0.0.1:3306/not_connected"
   process.env.DEN_DB_ENCRYPTION_KEY ??= "x".repeat(32)
   process.env.BETTER_AUTH_SECRET ??= "y".repeat(32)
@@ -562,7 +561,7 @@ test("an app creator and workflow manager loses all app mutations when demoted t
   expect(await run.json()).toMatchObject({ value: { count: 2 } })
 })
 
-test.each(["admin", "owner"])("%s can create, revise, activate, place, share and retire an app only within its organization", async (role) => {
+test.each(["admin", "owner", "super-admin", "member,admin"])("%s can create, revise, activate, place, share and retire an app only within its organization", async (role) => {
   const saved = seed("return { count: 2 }", { requiredCapabilities: [] })
   context = adminContext(role)
   const draft = { context, configObjectId: saved.configObjectId, title: "Team report",

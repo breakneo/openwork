@@ -14,7 +14,6 @@ import {
 } from "@openwork-ee/den-db/schema"
 import type { MemberTeamSummary, OrganizationContext } from "../../../orgs.js"
 import { db } from "../../../db.js"
-import { dashboardAdminOnlyEnforced } from "../../../dashboard-admin-policy.js"
 import { getFreshPrivilegedSessionRequiredResponse, hasFreshPrivilegedSession, memberHasRole } from "../shared.js"
 
 export type PluginArchResourceKind = "config_object" | "connector_instance" | "marketplace" | "plugin"
@@ -108,25 +107,14 @@ export function isPluginArchOrgAdmin(context: PluginArchActorContext) {
   return context.organizationContext.currentMember.isOwner || memberHasRole(context.organizationContext.currentMember.role, "admin")
 }
 
-/**
- * Whether generated apps, and the Workflows and access that back them, may be
- * managed by this member. Administrator-only management activates only once
- * every supported desktop release carries the matching controls (see
- * dashboard-admin-policy.ts); until then the previous manager-based rules
- * apply unchanged.
- */
-export function canManageDashboardApps(context: PluginArchActorContext) {
-  return !dashboardAdminOnlyEnforced() || isPluginArchOrgAdmin(context)
-}
-
 export function requireDashboardAdmin(context: PluginArchActorContext) {
-  if (!canManageDashboardApps(context)) {
+  if (!isPluginArchOrgAdmin(context)) {
     throw new PluginArchAuthorizationError(403, "forbidden", "Only organization owners and admins can manage dashboards and apps.")
   }
 }
 
 export async function requirePluginArchAppAdmin(input: ResourceLookupInput) {
-  if (canManageDashboardApps(input.context) || input.resourceKind === "connector_instance") return
+  if (isPluginArchOrgAdmin(input.context) || input.resourceKind === "connector_instance") return
   const organizationId = input.context.organizationContext.organization.id
   const appScope = eq(ArtifactViewTable.organization_id, organizationId)
   const bound = input.resourceKind === "config_object"

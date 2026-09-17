@@ -7949,7 +7949,7 @@ export type PostV1AppsByAppIdShareData = {
 
 export type PostV1AppsByAppIdShareErrors = {
   /**
-   * Only app managers can share; organization owners and admins only when administrator-only app management is enabled.
+   * Only organization owners and admins with manager access to the Workflow can share.
    */
   403: ForbiddenError;
   /**

@@ -7,7 +7,7 @@ import { getWorkflowDetail, getWorkflowSnapshot } from "./workflows.js"
 import type { PluginArchActorContext } from "./routes/org/plugin-system/access.js"
 import { and, eq, isNull } from "@openwork-ee/den-db/drizzle"
 import { AuthUserTable, DashboardAppTable, MemberTable } from "@openwork-ee/den-db/schema"
-import { canManageDashboardApps, requirePluginArchResourceRole } from "./routes/org/plugin-system/access.js"
+import { isPluginArchOrgAdmin, requirePluginArchResourceRole } from "./routes/org/plugin-system/access.js"
 import { createResourceAccessGrant, listResourceAccess } from "./routes/org/plugin-system/store.js"
 import { normalizeDenTypeId, type DenTypeId } from "@openwork-ee/utils/typeid"
 import { db } from "./db.js"
@@ -66,7 +66,7 @@ export async function listSavedApps(context: PluginArchActorContext): Promise<Sa
   const placements = await db.select().from(DashboardAppTable).where(dashboardScope(context))
   const onDashboard = new Set(placements.map((entry) => entry.artifact_view_id))
   return entries.filter(({ view }) => view.activeRevisionId !== null).map(({ view, workflow }) => {
-    return { view, workflowTitle: workflow.title, canManage: canManageDashboardApps(context) && workflow.canManage, onDashboard: onDashboard.has(normalizeDenTypeId("artifactView", view.id)) }
+    return { view, workflowTitle: workflow.title, canManage: isPluginArchOrgAdmin(context) && workflow.canManage, onDashboard: onDashboard.has(normalizeDenTypeId("artifactView", view.id)) }
   })
 }
 
@@ -89,7 +89,7 @@ export async function getSavedApp(input: {
   const revision = view.revisions.find((entry) => entry.id === revisionId) ?? null
   const placements = await db.select().from(DashboardAppTable).where(and(dashboardScope(input.context),
     eq(DashboardAppTable.artifact_view_id, normalizeDenTypeId("artifactView", view.id)))).limit(1)
-  const base = { view, workflowTitle: workflow.title, canManage: canManageDashboardApps(input.context) && workflow.canManage, onDashboard: placements.length > 0, revision }
+  const base = { view, workflowTitle: workflow.title, canManage: isPluginArchOrgAdmin(input.context) && workflow.canManage, onDashboard: placements.length > 0, revision }
   if (!revision || revision.buildStatus !== "ready" || revision.retiredAt) {
     return { ...base, html: null, payload: null, previewNotice: "This app is still being prepared. Ask OpenWork to finish its preview." }
   }
