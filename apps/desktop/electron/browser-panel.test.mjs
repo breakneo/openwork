@@ -1657,6 +1657,85 @@ test("in-flight viewport resets stop after backgrounding or destruction without 
   }
 });
 
+test("hide-show recovery at newer bounds waits for an app-owned reset but respects an external debugger", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, commands, children } = harness;
+  const pending = gate();
+  t.after(async () => { pending.finish(); panel.destroy(); await flush(); });
+  invoke("openwork:browser:setVisibleSession", "A");
+  const a = invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:createTab", "about:blank", "B");
+  await flush();
+  const [view, backgroundView] = views();
+  const targetId = view.webContents.targetId;
+  const loads = views().map(candidate => [...candidate.webContents.loads]);
+  const backgroundCommands = [...commands(backgroundView)];
+  const cdp = view.webContents.debugger;
+  const attach = t.mock.method(cdp, "attach");
+  const detach = t.mock.method(cdp, "detach");
+  const commandBounds = [];
+  let delayed = false;
+  const debuggerState = enforceDebuggerAttachment(t, view, async (method) => {
+    commandBounds.push({ ...view.getBounds() });
+    if (!delayed && method === "Emulation.setDeviceMetricsOverride") {
+      delayed = true;
+      await pending.promise;
+    }
+  });
+  const initial = { x: 692, y: 90, width: 310, height: 721 };
+  const latest = { ...initial, width: 447 };
+  invoke("openwork:browser:show", initial, "A");
+  await flush();
+  assert.deepEqual(commands(view), [RESET_SEQUENCE[0]]);
+  assert.equal(cdp.isAttached(), true);
+  const verify = watchNativePlacement(t, harness);
+  invoke("openwork:browser:hide");
+  verify(null, null);
+  invoke("openwork:browser:show", latest, "A");
+  verify(view, latest);
+  invoke("openwork:browser:bounds", latest);
+  await flush();
+  assert.deepEqual(commands(view), [RESET_SEQUENCE[0]], "new show intent waits without concurrent commands");
+  assert.equal(attach.mock.callCount(), 1);
+  assert.equal(detach.mock.callCount(), 0);
+  pending.finish();
+  await flush();
+  verify(view, latest);
+  assert.deepEqual(commands(view), [...RESET_SEQUENCE, ...RESET_SEQUENCE], "the newer show must not lose its recovery reset");
+  assert.deepEqual(commandBounds, [initial, latest, latest, latest], "the queued recovery executes at the latest native bounds");
+  assert.equal(attach.mock.callCount(), 2);
+  assert.equal(detach.mock.callCount(), 2);
+  assert.equal(cdp.isAttached(), false);
+  assert.equal(debuggerState.maxInFlight, 1);
+  assert.equal(debuggerState.detachedCommands, 0);
+  const completed = [...commands(view)];
+  for (const timing of ["before-show", "after-show"]) {
+    invoke("openwork:browser:hide");
+    verify(null, null);
+    if (timing === "before-show") cdp.attach("1.3");
+    invoke("openwork:browser:show", latest, "A");
+    if (timing === "after-show") cdp.attach("1.3");
+    const attached = attach.mock.callCount();
+    const detached = detach.mock.callCount();
+    await flush();
+    verify(view, latest);
+    assert.deepEqual(commands(view), completed, "an external debugger present when the queue runs is left untouched");
+    assert.equal(cdp.isAttached(), true);
+    assert.equal(attach.mock.callCount(), attached);
+    assert.equal(detach.mock.callCount(), detached);
+    cdp.detach();
+  }
+  assert.equal(view.webContents.isFocused(), false, "recovery needs no page focus event");
+  assert.equal(view.webContents.targetId, targetId);
+  assert.equal(invoke("openwork:browser:state").activeTabId, a.tabId);
+  assert.deepEqual(children, [view]);
+  assert.deepEqual(views().map(candidate => candidate.webContents.loads), loads);
+  assert.deepEqual(commands(backgroundView), backgroundCommands);
+  assert.deepEqual(backgroundView.getBounds(), { x: 0, y: 0, width: 1280, height: 800 });
+  assert.equal(views().length, 2);
+  assert.ok(views().every(candidate => !candidate.webContents.isDestroyed()));
+});
+
 test("delayed background metrics serialize an A-B-A round trip without detached commands or a poisoned queue", async (t) => {
   const harness = createPanel();
   const { invoke, panel, views, commands, children } = harness;
@@ -1735,7 +1814,8 @@ test("failed emulation transitions log their own error and later background init
     const debuggerState = enforceDebuggerAttachment(t, bView, async (method) => {
       if (!failed && method.startsWith("Emulation.")) { failed = true; throw failure; }
     });
-    invoke("openwork:browser:show", PANEL_BOUNDS, phase === "background" ? "A" : "B");
+    if (phase === "foreground") invoke("openwork:browser:setVisibleSession", "B");
+    else invoke("openwork:browser:show", PANEL_BOUNDS, phase === "background" ? "A" : "B");
     await flush();
     assert.equal(failed, true);
     await assert.rejects(invoke("openwork:browser:restoreTab", b.tabId, "B"), error => error === failure,
