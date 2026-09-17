@@ -448,6 +448,7 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
       gatewayDashboard: orgContext?.capabilities.gatewayDashboard === true,
     },
     gatewayAccess,
+    modelRoutingEnabled: orgContext?.organization.id === activeOrg?.id && orgContext?.deploymentCapabilities.aiGateway === true,
     orgMode: runtimeConfig.orgMode,
     runtimeConfigLoaded,
   });
