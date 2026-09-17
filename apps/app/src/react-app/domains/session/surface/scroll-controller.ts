@@ -46,16 +46,19 @@ function messageElementById(container: HTMLElement, messageId: string) {
   return null;
 }
 
-function readingAnchor(container: HTMLElement): SessionScrollAnchor | undefined {
+function readingAnchor(container: HTMLElement, preferredMessageId?: string): SessionScrollAnchor | undefined {
   const viewport = container.getBoundingClientRect();
+  let firstVisible: SessionScrollAnchor | undefined;
   for (const element of container.querySelectorAll<HTMLElement>("[data-message-id]")) {
     const rect = element.getBoundingClientRect();
     const messageId = messageIdForElement(element);
     if (messageId && rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom) {
-      return { messageId, offset: rect.top - viewport.top };
+      const anchor = { messageId, offset: rect.top - viewport.top };
+      if (!preferredMessageId || messageId === preferredMessageId) return anchor;
+      firstVisible ??= anchor;
     }
   }
-  return undefined;
+  return firstVisible;
 }
 
 function latestMessageTopClippedId(container: HTMLElement) {
@@ -102,6 +105,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     let active = true;
     let historyReady = false;
     let pendingRestore = true;
+    let pendingReadingAnchor = false;
     let pendingSubmittedMessageId: string | null = null;
     let cancelledWhileLoading = false;
     let smoothJump = false;
@@ -112,7 +116,9 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     let lastKnownScrollTop = container.scrollTop;
     let pageVersion: unknown;
     let pageAnchor: SessionScrollAnchor | undefined;
+    let restoredPageAnchorId: string | undefined;
     let pagePending = false;
+    let pendingHistoryDemand: "older" | "newer" | null = null;
     let pendingTop: ((completed: boolean) => void) | null = null;
     let topLoadReady = false;
     const cancelTop = () => { pendingTop?.(false); pendingTop = null; };
@@ -129,24 +135,50 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       for (const id of frames) window.cancelAnimationFrame(id);
       frames.clear();
     };
+    const hasPendingPlaceholders = () => {
+      const viewport = container.getBoundingClientRect();
+      return [...content.querySelectorAll<HTMLElement>('[data-thread-placeholder]:not([data-thread-placeholder="history-prefix"]):not([data-thread-placeholder="history-suffix"])')].some((placeholder) => {
+        if (!placeholder.closest('[data-thread-virtualized="true"]')) return true;
+        const rect = placeholder.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom;
+      });
+    };
+    const currentReadingAnchor = () => {
+      const anchor = readingAnchor(container, restoredPageAnchorId);
+      if (anchor?.messageId !== restoredPageAnchorId) restoredPageAnchorId = undefined;
+      return anchor;
+    };
     const rememberGeometry = () => {
       if (!geometryOwner || !scrollKey || !historyReady || pendingRestore || cancelledWhileLoading
-        || container.clientWidth <= 0 || container.clientHeight <= 0
-        || !content.querySelector('[data-thread-history-complete="true"]') && (!optionsRef.current.windowReady
-          || content.querySelector('[data-thread-placeholder]:not([data-thread-placeholder="history-prefix"]):not([data-thread-placeholder="history-suffix"])'))) return;
+        || container.clientWidth <= 0 || container.clientHeight <= 0 || hasPendingPlaceholders()
+        || !content.querySelector('[data-thread-history-complete="true"]') && !optionsRef.current.windowReady) return;
       const viewport = container.getBoundingClientRect();
       const messages = [...container.querySelectorAll<HTMLElement>("[data-message-id]")];
-      const firstVisible = messages.findIndex((message) => {
-        const rect = message.getBoundingClientRect();
-        return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom;
-      });
+      const anchor = currentReadingAnchor();
+      const firstVisible = anchor ? messages.findIndex((message) => messageIdForElement(message) === anchor.messageId) : -1;
       if (firstVisible < 0) return;
       const id = messageIdForElement(messages[firstVisible]);
       const page = id ? optionsRef.current.pageForAnchor?.(id) : undefined;
-      const nearby = page ? messages.filter((message) => {
+      const readingGroup = messages[firstVisible].closest('[data-thread-virtualized="true"] [data-thread-group]');
+      const contiguous = new Set<Element>();
+      if (readingGroup) {
+        contiguous.add(readingGroup);
+        for (const direction of ["previousElementSibling", "nextElementSibling"] as const) {
+          let sibling = readingGroup[direction];
+          while (sibling?.hasAttribute("data-thread-group")) {
+            contiguous.add(sibling);
+            sibling = sibling[direction];
+          }
+        }
+      }
+      const candidates = readingGroup ? messages.filter((message) => {
+        const group = message.closest("[data-thread-group]");
+        return group && contiguous.has(group);
+      }) : messages;
+      const nearby = page ? candidates.filter((message) => {
         const messageId = messageIdForElement(message);
         return messageId && optionsRef.current.pageForAnchor?.(messageId)?.before === page.before;
-      }) : messages.slice(Math.max(0, firstVisible - 4), firstVisible + 20);
+      }) : readingGroup ? candidates : messages.slice(Math.max(0, firstVisible - 4), firstVisible + 20);
       const first = nearby[0];
       const last = nearby.at(-1);
       if (!first || !last) return;
@@ -165,6 +197,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     };
     const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
       if (!active) return;
+      restoredPageAnchorId = undefined;
       cancelTop();
       cancelFrames();
       pendingRestore = false;
@@ -193,11 +226,21 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       const first = messages[0];
       const last = messages.at(-1);
       const viewport = container.getBoundingClientRect();
-      const older = pages.hasOlder && (!first || first.getBoundingClientRect().top >= viewport.top - 240);
+      const prefix = content.querySelector<HTMLElement>('[data-thread-placeholder="history-prefix"]');
+      const skipped = first?.closest("[data-thread-group]")?.previousElementSibling;
+      const olderBoundary = prefix ? prefix.getBoundingClientRect().bottom
+        : skipped?.hasAttribute("data-thread-placeholder") ? skipped.getBoundingClientRect().top
+        : first?.getBoundingClientRect().top;
+      const older = pages.hasOlder && (olderBoundary === undefined || olderBoundary >= viewport.top - 240);
       const newer = pages.hasNewer && (!last || last.getBoundingClientRect().bottom <= viewport.bottom + 240);
       const next = direction === "newer" ? newer ? "newer" : undefined : older ? "older" : newer ? "newer" : undefined;
       if (!next) return;
-      pageAnchor = readingAnchor(container);
+      if (hasPendingPlaceholders()) {
+        pendingHistoryDemand = next;
+        return;
+      }
+      pendingHistoryDemand = null;
+      pageAnchor = currentReadingAnchor();
       pagePending = true;
       void pages.load(next).catch(() => undefined).finally(() => { pagePending = false; });
     };
@@ -208,9 +251,10 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         container.scrollTo({ top: 0, behavior: "instant" });
         lastKnownScrollTop = container.scrollTop;
         store.setManualScroll(scrollKey, container.scrollTop, latestMessageTopClippedId(container), readingAnchor(container));
+        container.dispatchEvent(new Event("scroll"));
+        if (hasPendingPlaceholders()) return;
         const finish = pendingTop;
         pendingTop = null;
-        container.dispatchEvent(new Event("scroll"));
         finish(true);
         return;
       }
@@ -223,6 +267,8 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
             container.scrollTop = top;
             lastKnownScrollTop = container.scrollTop;
             store.setManualScroll(scrollKey, container.scrollTop, latestMessageTopClippedId(container), pageAnchor);
+            restoredPageAnchorId = pageAnchor.messageId;
+            pendingReadingAnchor = false;
           }
         }
         pageAnchor = undefined;
@@ -237,6 +283,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         // Sending is explicit navigation, even while history loads. Align an
         // oversized prompt's start; a short prompt clamps to the bottom.
         pendingSubmittedMessageId = null;
+        restoredPageAnchorId = undefined;
         pendingRestore = false;
         cancelledWhileLoading = false;
         cancelFrames();
@@ -266,7 +313,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
           const top = saved.anchor ? anchorTop(saved.anchor) : null;
           // A live tail/partial preview is not proof the old anchor is gone.
           const partial = content.querySelector('[data-thread-history-complete="false"]');
-          const stableWindow = optionsRef.current.windowReady && !content.querySelector('[data-thread-placeholder]:not([data-thread-placeholder="history-prefix"]):not([data-thread-placeholder="history-suffix"])');
+          const stableWindow = optionsRef.current.windowReady && !hasPendingPlaceholders();
           if (partial && !stableWindow && (top === null || top < 0 || top > container.scrollHeight - container.clientHeight + EXACT_BOTTOM_GAP_PX)) return;
           pendingRestore = false;
           container.scrollTop = top ?? saved.scrollTop;
@@ -283,10 +330,23 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         }
       }
       refreshTopClippedMessage();
+      if (pendingReadingAnchor && !cancelledWhileLoading && readState().mode === "manual" && !hasPendingPlaceholders()) {
+        const anchor = readingAnchor(container);
+        if (anchor) {
+          pendingReadingAnchor = false;
+          store.setManualScroll(scrollKey, container.scrollTop, latestMessageTopClippedId(container), anchor);
+        }
+      }
       rememberGeometry();
+      if (pendingHistoryDemand) {
+        const direction = pendingHistoryDemand;
+        pendingHistoryDemand = null;
+        if (hasScrollGesture()) demandHistory(direction);
+      }
     };
     const scrollToTop = async () => {
       if (!active) return false;
+      restoredPageAnchorId = undefined;
       cancelTop();
       cancelFrames();
       optionsRef.current.historyPages?.cancelRestore?.();
@@ -318,6 +378,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       // Pointer presses may just be clicks. Defer cancelling restoration until
       // they actually scroll; release without scrolling resumes pending follow.
       if (activePointerId === null) {
+        restoredPageAnchorId = undefined;
         cancelledWhileLoading ||= pendingRestore;
         pendingRestore = false;
         pendingSubmittedMessageId = null;
@@ -339,7 +400,10 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       if (hasScrollGesture() && container.scrollTop !== lastKnownScrollTop) {
         // Trackpad momentum can outlast the original wheel/touch event.
         lastGestureAt = Date.now();
-        if (activePointerId !== null) pointerScrolled = true;
+        if (activePointerId !== null) {
+          pointerScrolled = true;
+          restoredPageAnchorId = undefined;
+        }
         pendingRestore = false;
         pendingSubmittedMessageId = null;
         if (!historyReady) {
@@ -352,9 +416,11 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         if (isExactlyAtBottom(container) && !optionsRef.current.historyPages?.hasNewer) {
           store.setStickyBottom(scrollKey, clipped);
         } else {
-          store.setManualScroll(scrollKey, container.scrollTop, clipped, readingAnchor(container));
+          const anchor = currentReadingAnchor();
+          pendingReadingAnchor = !anchor || !restoredPageAnchorId && hasPendingPlaceholders();
+          store.setManualScroll(scrollKey, container.scrollTop, clipped, anchor);
         }
-        if (pagePending || pageAnchor) pageAnchor = readingAnchor(container);
+        if (pagePending || pageAnchor) pageAnchor = currentReadingAnchor();
         demandHistory(container.scrollTop > lastKnownScrollTop ? "newer" : "older");
       } else {
         const saved = readState();
@@ -364,7 +430,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
           // visit, but never persist the initial restore's clamp or missing anchor.
           if (saved.mode === "manual") {
             if (saved.anchor && messageElementById(container, saved.anchor.messageId)) {
-              store.setManualScroll(scrollKey, container.scrollTop, latestMessageTopClippedId(container), readingAnchor(container));
+              store.setManualScroll(scrollKey, container.scrollTop, latestMessageTopClippedId(container), currentReadingAnchor());
             }
           } else if (!smoothJump && !isExactlyAtBottom(container)) {
             // Keyboard focus and other reveals scroll an older message into view
@@ -384,6 +450,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       const messageId = readState().topClippedMessageId;
       if (!messageId) return;
       const anchor = { messageId, offset: 0 };
+      restoredPageAnchorId = undefined;
       const top = anchorTop(anchor);
       if (top === null) return;
       cancelFrames();

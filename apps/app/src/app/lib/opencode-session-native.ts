@@ -153,26 +153,41 @@ async function readNativeSessionHistory(
   sessionId: string,
   options?: HistoryReadOptions,
 ): Promise<OpenworkSessionHistory> {
+  options?.signal?.throwIfAborted();
   if (options?.messageIds === undefined) validateMessageRead(options);
+  const controller = new AbortController();
+  const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const readOptions = { ...options, signal };
   let pagination: OpenworkSessionHistory["pagination"];
+  const readSession = async () => {
+    const result = await operations.get(sessionId, readOptions);
+    signal.throwIfAborted();
+    const session = unwrapSessionResult(result, "session_not_found");
+    if (session.id !== sessionId) throw new Error("Could not verify the session history owner.");
+    return session;
+  };
   const readMessages = async () => {
     if (options?.messageIds === undefined) {
-      const result = await operations.messages(sessionId, options?.limit, options);
+      const result = await operations.messages(sessionId, options?.limit, readOptions);
+      signal.throwIfAborted();
       const messages = unwrapSessionResult(result, "session_not_found");
+      if (messages.some((record) => record.info.sessionID !== sessionId
+        || record.parts.some((part) => part.sessionID !== sessionId || part.messageID !== record.info.id))) {
+        throw new Error("Could not verify the session history owner.");
+      }
       if (options?.limit !== undefined && Number.isInteger(options.limit) && options.limit > 0) pagination = result.pagination;
       return messages;
     }
-    // Saved IDs already follow the visible timeline, not lexical ID order.
     const ids = [...new Set(options.messageIds)].slice(0, 24);
     const records = await Promise.all(ids.map(async (messageId) => {
-      options.signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (!messageId.trim() || messageId === "." || messageId === "..") {
         throw new Error("Invalid saved session message ID.");
       }
       if (!operations.message) throw new Error("Native single-message reads are unavailable.");
-      const result = await operations.message(sessionId, messageId, options);
-      options.signal?.throwIfAborted();
-      if (result.response.status === 404) return [];
+      const result = await operations.message(sessionId, messageId, readOptions);
+      signal.throwIfAborted();
+      if (result.response?.status === 404) return [];
       const record = unwrapSessionResult(result, "message_not_found");
       if (record.info.id !== messageId || record.info.sessionID !== sessionId
         || record.parts.some((part) => part.messageID !== messageId || part.sessionID !== sessionId)) {
@@ -182,17 +197,13 @@ async function readNativeSessionHistory(
     }));
     return records.flat();
   };
-  const [sessionResult, messages] = await Promise.all([
-    operations.get(sessionId, options),
-    readMessages(),
-  ]);
-  options?.signal?.throwIfAborted();
-  const session = unwrapSessionResult(sessionResult, "session_not_found");
-  if (session.id !== sessionId || messages.some((record) => record.info.sessionID !== sessionId
-    || record.parts.some((part) => part.sessionID !== sessionId || part.messageID !== record.info.id))) {
-    throw new Error("Could not verify the session history owner.");
+  try {
+    const [session, messages] = await Promise.all([readSession(), readMessages()]);
+    signal.throwIfAborted();
+    return { session, messages, ...(pagination ? { pagination } : {}) };
+  } finally {
+    controller.abort();
   }
-  return { session, messages, ...(pagination ? { pagination } : {}) };
 }
 
 export async function composeNativeSessionHistory(
@@ -219,6 +230,20 @@ export async function composeNativeSessionSnapshot(
   const todos = unwrapSessionResult(todoResult, "session_not_found");
   const statuses = unwrapSessionResult(statusResult);
   return { ...history, todos, status: statuses[sessionId] ?? { type: "idle" } };
+}
+
+function isRetryableNativeSessionError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const status = "status" in error && typeof error.status === "number" ? error.status : undefined;
+  if (status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) return false;
+  const name = "name" in error && typeof error.name === "string" ? error.name : "";
+  const message = "message" in error && typeof error.message === "string" ? error.message : "";
+  const code = "code" in error && typeof error.code === "string" ? error.code : "";
+  const detail = `${name} ${code} ${message}`;
+  if (name === "AbortError" || name === "SyntaxError" || name === "RangeError"
+    || /invalid|malformed|pagination|positive integer limit|verify.*owner|owner changed|too[ _-]large|size.*exceed|exceed.*(?:size|limit)|single-message reads are unavailable/i.test(detail)) return false;
+  if (status !== undefined) return status === 408 || status === 429 || (status >= 500 && status < 600);
+  return /fetch failed|failed to fetch|load failed|network|connection|ECONN|ENET|EHOST|EAI_AGAIN|ETIMEDOUT|timed? ?out|unavailable|reloading/i.test(detail);
 }
 
 async function readOwnedNativeSessionWithRetry<T>(
@@ -248,7 +273,7 @@ async function readOwnedNativeSessionWithRetry<T>(
       signal.throwIfAborted();
       readOwnedSnapshotTarget(expectedOwner, readCurrentTarget);
       const delayMs = SNAPSHOT_RETRY_DELAYS_MS[attempt];
-      if (delayMs === undefined) throw error;
+      if (delayMs === undefined || !isRetryableNativeSessionError(error)) throw error;
       attempt += 1;
       await waitForRetry(delayMs, signal);
     }

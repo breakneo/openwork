@@ -346,7 +346,7 @@ function renderLink(profile: MarkdownProfile, href: string, title: string | null
 
   if (profile.linkPresentation === "chat") {
     const originalHref = escapeAttribute(href);
-    const isFilePath = !/^(https?|wss?|ftp|mailto|tel|file):/i.test(href);
+    const isFilePath = !/^(https?|wss?|ftp|mailto|tel):/i.test(href);
 
     if (isFilePath) {
       const fileIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-muted-foreground"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v5h5"/></svg>`;

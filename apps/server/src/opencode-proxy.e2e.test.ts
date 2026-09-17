@@ -392,7 +392,6 @@ describe("workspace OpenCode proxy", () => {
       // The requested read reaches the engine while its proof is still pending.
       expect(await waitUntil(() => engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign/message"), 100)).toBe(true);
       expect(engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign")).toBe(true);
-      await new Promise((resolve) => setTimeout(resolve, 20));
       // Nothing is released before the proof settles, even though the engine already answered.
       expect(await Promise.race([foreign.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 20))])).toBe("pending");
     } finally {

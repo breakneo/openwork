@@ -194,7 +194,11 @@ const COMMAND_ADMISSION_TTL_MS = 24 * 60 * 60 * 1_000;
 
 function rethrowMcpAppHostError(error: unknown): never {
   if (!(error instanceof McpAppHostError)) throw error;
-  const status = error.code === "invalid_tool_name" || error.code.startsWith("invalid_resource")
+  const status = error.code === "mcp_auth_required"
+    ? 401
+    : error.code === "mcp_access_denied"
+      ? 403
+      : error.code === "invalid_tool_name" || error.code.startsWith("invalid_resource")
     ? 400
     : error.code === "tool_not_found" || error.code === "server_unavailable"
       ? 404
@@ -809,6 +813,9 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const cloudProviderSync = new CloudProviderSync({
     config,
     env,
+    onModelsRemoved: (impact) => {
+      reloadEvents.record(impact.workspaceId, "config", { type: "config", action: "removed", name: "models", modelRemoval: impact });
+    },
     reloadEngine: () => reloadOpencodeEngine(
       config,
       resolveEngineRuntimeWorkspace(config),
@@ -1937,13 +1944,14 @@ function mergedEventBody(input: {
             const chunk = await entry.reader.read();
             if (chunk.done) break;
             const parsed = frameBuffer.push(chunk.value);
-            // Parsing every event on the main event loop competes with the
-            // history reads it also serves; only a rollover needs the payload.
-            const mode = parsed.frames.length ? input.pool.eventForwardMode(entry.connection.generationId) : "drop";
-            for (const frame of parsed.frames) {
-              if (mode === "forward"
-                || mode === "filter" && input.pool.shouldForwardEvent(entry.connection.generationId, parseSsePayload(frame))) {
-                controller.enqueue(encoder.encode(`${frame}\n\n`));
+            if (parsed.frames.length > 0) {
+              // Parsing every event on the main event loop competes with the
+              // history reads it also serves; only a rollover needs the payload.
+              const mode = input.pool.eventForwardMode(entry.connection.generationId);
+              for (const frame of parsed.frames) {
+                const forward = mode === "forward"
+                  || (mode === "filter" && input.pool.shouldForwardEvent(entry.connection.generationId, parseSsePayload(frame)));
+                if (forward) controller.enqueue(encoder.encode(`${frame}\n\n`));
               }
             }
             if (parsed.overflow) {

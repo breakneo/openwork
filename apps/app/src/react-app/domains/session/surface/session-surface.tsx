@@ -95,7 +95,7 @@ import { deriveSessionRenderModel } from "@/react-app/domains/session/sync/trans
 import { setQueuedSendContext } from "@/react-app/domains/session/sync/queued-send-context";
 import { useSessionScrollController } from "./scroll-controller";
 import { getSessionScrollState, useSessionScrollStore } from "./scroll-store";
-import { sessionHistoryIdentity, SessionHistoryBoundary, SessionHistoryStatus, useOpeningSessionHistory, type OpeningHistoryWindow } from "./session-history";
+import { LATEST_HISTORY_WINDOW, sessionHistoryIdentity, SessionHistoryBoundary, SessionHistoryStatus, useOpeningSessionHistory, type OpeningHistoryWindow } from "./session-history";
 import { SessionScrollOverlay } from "./scroll-overlay";
 import { SessionFindBar } from "./find-bar";
 import { useSessionFindStore } from "./find-store";
@@ -229,7 +229,7 @@ type SessionError = {
   suggestions?: Array<{ providerID: string; modelID: string }>;
 };
 
-function createMarkdownPrimitiveEvalMessages(sessionId: string) {
+function createMarkdownPrimitiveEvalMessages(sessionId: string, text?: string) {
   const userMessageId = `${sessionId}:eval-markdown-user`;
   const assistantMessageId = `${sessionId}:eval-markdown-assistant`;
   const guardedDiagram = [
@@ -261,7 +261,7 @@ ${guardedDiagram}
     {
       id: assistantMessageId,
       role: "assistant",
-      parts: [{ type: "text", text: proofText }],
+      parts: [{ type: "text", text: text ?? proofText }],
       metadata: { opencode: { created: Date.now() + 1 } },
     },
   ];
@@ -590,6 +590,8 @@ export type SessionSurfaceProps = {
   modelLabel: string;
   onModelClick: (sessionId?: string) => void;
   modelPickerOpen: boolean;
+  rendererWorkspaceId?: string;
+  engineModelSelection?: (sessionId: string) => import("./session-model-store").SessionModelSelection | null;
   modelUnavailable?: boolean;
   modelUnavailableMessage?: string | null;
   /**
@@ -1126,6 +1128,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (queuedItems.length === 0) return;
     setQueuedSendContext(props.sessionId, {
       workspaceId: props.workspaceId,
+      rendererWorkspaceId: props.rendererWorkspaceId,
       workspaceRoot: props.workspaceRoot,
       opencodeBaseUrl: props.opencodeBaseUrl,
       openworkToken: props.openworkToken,
@@ -1146,6 +1149,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     props.sessionId,
     props.workspaceId,
     props.workspaceRoot,
+    props.rendererWorkspaceId,
     queuedItems.length,
   ]);
   const appendQueuedDraft = useComposerStateStore((state) => state.appendQueuedDraft);
@@ -1158,6 +1162,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   // state, so split panes never control each other's model picker.
   const sessionModel = useSessionModelSelection({
     sessionId: props.sessionId,
+    engineSelection: props.engineModelSelection?.(props.sessionId),
     fallbackModel: props.selectedModel,
     fallbackModelLabel: props.modelLabel,
     fallbackVariant: props.modelVariant,
@@ -1173,13 +1178,16 @@ export function SessionSurface(props: SessionSurfaceProps) {
     props.onModelPickerOpenChange(open);
   }, [props.onModelPickerOpenChange]);
   const handleModelChange = useCallback((nextModel: ModelRef, variant?: string | null) => {
+    if (props.resolveModelAvailability ? props.resolveModelAvailability(sessionModel.selectedModel).status === "unavailable" : props.modelUnavailable) {
+      props.onModelClick(props.sessionId);
+      setModelPickerOpen(false);
+      return;
+    }
     sessionModel.setModel(nextModel, variant);
-    props.onModelChange(nextModel, variant);
     setModelPickerOpen(false);
-  }, [props.onModelChange, sessionModel]);
+  }, [props.resolveModelAvailability, props.modelUnavailable, props.onModelClick, props.sessionId, sessionModel]);
   const handleModelVariantChange = useCallback((value: string | null) => {
     sessionModel.setVariant(value);
-    props.onModelVariantChange(value);
   }, [props.onModelVariantChange, sessionModel]);
   const handleOpenModelPicker = useCallback(() => {
     props.onModelClick(props.sessionId);
@@ -1193,7 +1201,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     : Boolean(props.modelUnavailable);
   // This surface is retained across navigation. Async completions must keep
   // their original owner, including when different servers reuse session IDs.
-  const { owner: sessionOwner, snapshotQueryKey } = useMemo(() => sessionHistoryIdentity({
+  const { owner: sessionOwner, runtimeOwner, snapshotQueryKey } = useMemo(() => sessionHistoryIdentity({
     draftScope: props.draftScope,
     opencodeBaseUrl: props.opencodeBaseUrl,
     runtimeWorkspaceId: props.workspaceId,
@@ -1305,11 +1313,23 @@ export function SessionSurface(props: SessionSurfaceProps) {
       markSessionSnapshotFetchStart(item, startedAt);
       return item;
   }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner, useDesktopLoopbackSnapshotRetry]);
+  const readOpening = useCallback(async (signal: AbortSignal, window: OpeningHistoryWindow) => {
+    if (evalSnapshotFailureRef.current) throw new Error("eval: forced session snapshot failure");
+    const startedAt = Date.now();
+    // The opening read keeps its original endpoint for its whole lifetime, so a
+    // retained read never follows a later owner. Its bounded retry only covers
+    // transient failures; permanent ones settle immediately into Retry.
+    const target = { owner: sessionOwner, sessionId: props.sessionId,
+      endpoint: { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken } };
+    const item = await opencodeSessionNative.composeNativeSessionHistoryWithRetry(sessionOwner, () => target, { ...window, signal });
+    markSessionSnapshotFetchStart(item, startedAt);
+    return item;
+  }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner]);
   const readLatest = useCallback(async (signal: AbortSignal, options?: { desktopTransport: "main" }) => {
     const endpoint = { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, ...options };
     const [session, messages] = await Promise.all([
       opencodeSessionNative.getNativeSession(endpoint, props.sessionId, { signal }),
-      opencodeSessionNative.getNativeSessionMessages(endpoint, props.sessionId, { signal, limit: 24 }),
+      opencodeSessionNative.getNativeSessionMessages(endpoint, props.sessionId, { signal, limit: LATEST_HISTORY_WINDOW }),
     ]);
     return { session, messages };
   }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId]);
@@ -1319,8 +1339,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const metadataQueryKey = useMemo(() => sessionMetadataKey({ workspaceId: props.workspaceId,
     baseUrl: props.opencodeBaseUrl, openworkToken: props.openworkToken }, props.sessionId),
   [props.workspaceId, props.opencodeBaseUrl, props.openworkToken, props.sessionId]);
-  const openingHistory = useOpeningSessionHistory({ owner: sessionOwner, sessionId: props.sessionId, authToken: props.openworkToken,
-    ignoreCached: !snapshotOwnerMatches, metadataQueryKey, snapshotQueryKey, transcriptQueryKey, readSnapshot, readLatest });
+  const openingHistory = useOpeningSessionHistory({ owner: sessionOwner, runtimeOwner, sessionId: props.sessionId, authToken: props.openworkToken,
+    ignoreCached: !snapshotOwnerMatches, metadataQueryKey, snapshotQueryKey, transcriptQueryKey, readSnapshot, readOpening, readLatest });
   const snapshotQuery = useQuery<OpenworkSessionHistory>({
     queryKey: snapshotQueryKey,
     queryFn: ({ signal }) => openingHistory.readFullSnapshot(signal),
@@ -1605,8 +1625,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
       description: "Dev-only eval hook that renders deterministic Markdown in the active conversation.",
       sideEffect: "mutation",
       disabled: !props.sessionId,
-      execute: () => {
-        const seeded = createMarkdownPrimitiveEvalMessages(props.sessionId);
+      execute: (args) => {
+        const text = args && typeof args === "object" && "text" in args && typeof args.text === "string" ? args.text : undefined;
+        const seeded = createMarkdownPrimitiveEvalMessages(props.sessionId, text);
         setEvalMarkdownMessages(seeded.messages);
         return {
           ok: true,
@@ -1975,9 +1996,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
     intendedSessionId: props.sessionId,
     renderedSessionId: renderedMessages.length > 0 || snapshot ? props.sessionId : null,
     hasSnapshot: Boolean(snapshot) || renderedMessages.length > 0,
-    isFetching: snapshotQuery.isFetching,
+    isFetching: snapshotQuery.isFetching || openingHistory.openingLoading,
     // A failed send stays visible for composer recovery; only snapshot failure invalidates the session transition.
-    isError: snapshotQuery.isError,
+    isError: snapshotQuery.isError || Boolean(openingHistory.openingError),
   });
   const failSessionSnapshotControlAction = useMemo<OpenworkControlAction | null>(() => {
     if (!import.meta.env.DEV) return null;
@@ -3311,10 +3332,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
       onFocusCapture={handleFindSurfaceInteraction}
       className="flex h-full min-h-0 flex-col"
     >
-      <SessionHistoryStatus key={sessionOwner} complete={hasFullHistory} pending={pendingSessionLoad}
-         loading={snapshotQuery.isFetching && openingHistory.partial || openingHistory.pages.loading}
-         failed={snapshotQuery.isError && !snapshotQuery.isFetching || openingHistory.pages.failed}
-         onRetry={() => openingHistory.pages.failed ? openingHistory.pages.retry() : snapshotQuery.refetch()} />
+      <SessionHistoryStatus key={sessionOwner} complete={hasFullHistory && !openingHistory.openingError} pending={pendingSessionLoad}
+         loading={openingHistory.openingLoading || snapshotQuery.isFetching && openingHistory.partial || openingHistory.pages.loading}
+         failed={Boolean(openingHistory.openingError) || snapshotQuery.isError && !snapshotQuery.isFetching || openingHistory.pages.failed}
+         onRetry={() => openingHistory.openingError ? openingHistory.retryOpening()
+           : openingHistory.pages.failed ? openingHistory.pages.retry() : snapshotQuery.refetch()} />
       <div className="relative min-h-0 flex-1">
         <div
           ref={scrollRef}
@@ -3371,7 +3393,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
               />
             ) : null}
             <SessionHistoryBoundary owner={sessionOwner} pending={pendingSessionLoad}
-              failed={snapshotQuery.isError && !snapshotQuery.isFetching} saved={initialScroll}>
+              failed={Boolean(openingHistory.openingError) || snapshotQuery.isError && !snapshotQuery.isFetching} saved={initialScroll}>
             {renderedMessages.length === 0 && effectiveActivityStatus !== "idle" && !error ? (
               <div className="px-6 py-12">
                 <AssistantWaitingCard label={getSessionActivityStatusLabel(effectiveActivityStatus)} />
@@ -3392,6 +3414,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                   client={props.client}
                   workspaceId={props.workspaceId}
                   workspaceRoot={props.workspaceRoot}
+                  isLocalWorkspace={!props.isRemoteWorkspace}
                   openTargets={verifiedOpenTargets}
                   onOpenTarget={handleOpenTarget}
                 >
