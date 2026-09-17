@@ -386,6 +386,12 @@ test("session.read and session.activity expose a real isolated headless shell ca
     expect(records(defaultRead.messages).every((message) => message.tools === undefined && message.reasoning === undefined)).toBe(true);
     expect(JSON.stringify(defaultRead)).not.toContain(outputMarker);
     const newest = await query("session.read", { sessionId, count: 1, parts: ["text", "tool"] });
+    const newestMessages = records(newest.messages);
+    expect(newest.returned).toBe(1);
+    expect(newestMessages).toHaveLength(1);
+    expect(records(newestMessages[0]?.tools)).toHaveLength(1);
+    expect(records(newestMessages[0]?.tools)[0]).toMatchObject({ callId, tool: "bash", status: "completed" });
+    evidence.recordAssertionEvidence("Newest count-one page retains the persisted tool", "The bounded newest page returned exactly one message containing exactly the persisted bash call ID, not only continuation metadata; an empty or dropped page fails this witness.", true);
     const history = record(newest.history);
     expect(history.complete).toBe(false);
     if (typeof history.nextBefore === "string") {
