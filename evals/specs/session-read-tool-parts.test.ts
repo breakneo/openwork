@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
+import { OPENWORK_SESSION_DETAIL_LIMITS, openworkSessionActivityResultSchema, openworkSessionPartPageSchema, openworkSessionToolProjectionSchema } from "../../packages/types/src/openwork-affordance";
 import { appWeb, eventually, needs, SkipError, test } from "@openwork/testkit";
 import { readHeadlessRuntimeManifest, resolveHeadlessWorldRuntimePaths } from "@openwork/world";
 import { OpenWorkExtensionsPreview } from "../../apps/server/src/opencode-plugins/openwork-extensions-preview";
@@ -53,7 +54,7 @@ test("session tool descriptors advertise accepted enums, text defaults, caps and
   expect(sessionActivityArgsSchema.safeParse({ sessionId: "ses_fixture", since: "invalid" }).success).toBe(false);
   expect(activity?.arguments.map((argument) => argument.name).sort()).toEqual(Object.keys(sessionActivityArgsSchema.shape).sort());
   expect(activity).toMatchObject({ kind: "query", effects: { data: "read", ui: "none", external: false }, executor: { kind: "openwork" } });
-  for (const value of ["300", "byAffordanceId", "ok: false", "callId", "not capped"]) expect(activity?.description).toContain(value);
+  for (const value of ["300", "byAffordanceId", "ok: false", "callId", "scope.complete", "fixed labels"]) expect(activity?.description).toContain(value);
   evidence.recordAssertionEvidence("Tool opt-in and activity contracts are discoverable", "Descriptors match accepted enum values and text defaults, advertise redaction and field caps, reject unsupported scopes and invalid timestamps, and declare activity read-only.", true);
 });
 

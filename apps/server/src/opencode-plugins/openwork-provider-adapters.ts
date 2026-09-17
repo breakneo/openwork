@@ -1,4 +1,6 @@
 import {
+  OPENWORK_SESSION_DETAIL_LIMITS,
+  openworkSessionDetailPageArgsSchema,
   openworkModelSelectorSchema,
   openworkModelsListArgsSchema,
   openworkSessionSetModelArgsSchema,
@@ -38,6 +40,7 @@ export const sessionSearchArgsSchema = z.object({
 });
 
 export const sessionReadArgsSchema = z.object({
+  ...openworkSessionDetailPageArgsSchema.shape,
   sessionId: z.string().trim().min(1).describe("OpenWork/OpenCode session ID returned by session.search."),
   workspaceId: z.string().trim().optional().describe("Optional OpenWork workspace id/name. Omit to resolve the session across all workspaces."),
   count: z.number().int().positive().max(100).optional().describe("Number of transcript messages to return. Defaults to 30, max 100."),
@@ -47,6 +50,8 @@ export const sessionReadArgsSchema = z.object({
 });
 
 export const sessionActivityArgsSchema = z.object({
+  ...openworkSessionDetailPageArgsSchema.shape,
+  errorOffset: z.number().int().nonnegative().max(1000000).optional(),
   sessionId: sessionReadArgsSchema.shape.sessionId,
   workspaceId: sessionReadArgsSchema.shape.workspaceId,
   since: sessionTimestampArgSchema.optional().describe("Inclusive epoch milliseconds or ISO-8601 timestamp. Messages use creation time; calls use end, then start, then message creation time. Undated events are excluded when since is set."),
@@ -192,8 +197,10 @@ function sessionContribution(): OpenworkFeatureContribution {
           argument("workspaceId", "string", false, "Optional workspace id or name."),
           argument("count", "number", false, "Number of messages to return. Defaults to 30, max 100."),
           argument("from", "string", false, "end (default): the last `count` messages; start: the first `count` messages."),
-          argument("parts", "array", false, "Parts to return: text (default [text]), tool, reasoning. Adds tools [{type: tool, tool, callId, status, input, output, error, truncated?: true}] and reasoning string when requested. Tool fields are redacted then JSON-stringified, each capped at 2000 characters; truncated flags clipping. Tool-only messages are retained."),
-          argument("summary", "boolean", false, "Return the first user and last assistant with text, excluding a sole text part immediately preceding a tool part. No eligible assistant returns null; normal reads preserve that text."),
+          argument("parts", "array", false, `Parts to return: text (default [text]), tool, reasoning. Tool input/output/error are redacted before JSON encoding and capped at ${OPENWORK_SESSION_DETAIL_LIMITS.fieldChars} characters; truncated flags clipping. Identifiers are scrubbed/bounded to ${OPENWORK_SESSION_DETAIL_LIMITS.identifierChars}. Opt-in reads fetch at most count newest messages (including start/summary), returning at most ${OPENWORK_SESSION_DETAIL_LIMITS.readParts} tool/reasoning parts via partPage {offset, limit, returned, nextOffset, truncated}. Reasoning is capped at ${OPENWORK_SESSION_DETAIL_LIMITS.fieldChars} characters per message with reasoningTruncated. history {limit, nextBefore, complete} describes the fetched page, not the full transcript; complete is conservative at the limit. Default text projection is unchanged. Tool-only messages are retained.`),
+          argument("summary", "boolean", false, "Return the first user and last assistant with text, excluding a sole text part immediately preceding a tool part. No eligible assistant returns null; normal reads preserve that text. With tool/reasoning opt-in, summarizes only this bounded history page."),
+          argument("before", "string", false, "Native history cursor (max 512 characters) from history.nextBefore. Only with tool/reasoning opt-in. Keep count and parts unchanged; reset partOffset when advancing history."),
+          argument("partOffset", "number", false, "Offset into requested tool/reasoning parts on this history page (default 0, max 1000000). Use partPage.nextOffset before advancing history; offsets are snapshot-relative, restart if the transcript changes."),
         ],
         effects: readEffects,
       }),
@@ -201,12 +208,15 @@ function sessionContribution(): OpenworkFeatureContribution {
         id: "session.activity",
         kind: "query",
         title: "Read session activity counts",
-        description: "Read the full session transcript without opening it, using session.read workspace ownership checks. Returns toolCalls {total, byTool, byAffordanceId} (openwork_execute/openwork_query input.id), errors {total, list: [{callId, tool, affordanceId?, message, at}]}, firstAt, lastAt and messages {user, assistant}. Each callId counts once; both tool state error and completed JSON output with ok: false (including result.ok: false) count as failed outcomes, once per call. Error messages are redacted before the 300-character cap. Counts and error list are not capped. firstAt/lastAt are the earliest/latest included message or tool start/end timestamps (epoch milliseconds), null when none are dated.",
+        description: `Read bounded session activity without opening it, using session.read ownership checks. Scans at most ${OPENWORK_SESSION_DETAIL_LIMITS.activityMessages} newest messages and ${OPENWORK_SESSION_DETAIL_LIMITS.activityParts} raw parts per request. Returns toolCalls {total, byTool, byAffordanceId}, errors {total, list, truncated, nextOffset}, firstAt, lastAt, messages {user, assistant}, and scope {complete, truncated, scannedMessages, scannedParts, uninspectedOutputs, next}. Totals are observed within this scan, NOT full-session totals unless scope.complete. callId deduplication is scan-local; do not blindly sum pages. Known tools/affordance IDs are allowlisted, others grouped as other/unknown. Failures (tool state error or completed JSON ok: false including result.ok: false) return fixed labels and allowlisted codes only, never arbitrary errors, prompt text, titles or output objects. Labels are under 300 characters; identifiers are scrubbed/bounded to ${OPENWORK_SESSION_DETAIL_LIMITS.identifierChars}. Error list is capped at ${OPENWORK_SESSION_DETAIL_LIMITS.activityErrors}; use errorOffset on the same scan before scope.next. Completed outputs over ${OPENWORK_SESSION_DETAIL_LIMITS.outcomeChars} characters are uninspected and make scope incomplete, not successful. HTTP pages are capped at ${OPENWORK_SESSION_DETAIL_LIMITS.responseBytes} bytes. Missing cursors at the message cap remain incomplete with no invented continuation. firstAt/lastAt are earliest/latest included message or tool start/end timestamps, null when undated.`,
         provider,
         arguments: [
           argument("sessionId", "string", true, "Session id returned by session.search."),
           argument("workspaceId", "string", false, "Optional workspace id or name. Omit to resolve across workspaces."),
-          argument("since", "unknown", false, "Inclusive epoch milliseconds or ISO-8601 timestamp. Messages use creation time; calls use end, then start, then message creation time. Undated events are excluded when since is set. firstAt/lastAt include only timestamps at or after since. Omit for the full transcript."),
+          argument("since", "unknown", false, "Inclusive epoch milliseconds or ISO-8601 timestamp within the bounded scan. Messages use creation time; calls use end, then start, then message creation time. Undated events are excluded when since is set. firstAt/lastAt include only timestamps at or after since."),
+          argument("before", "string", false, "Native history cursor (max 512 characters) from scope.next.before. No cursor is guessed when the server does not advertise one."),
+          argument("partOffset", "number", false, "Raw-part offset (default 0, max 1000000) from scope.next.partOffset. Keep before and since unchanged within a page. Offsets are snapshot-relative; restart if the transcript changes."),
+          argument("errorOffset", "number", false, "Failure-list offset (default 0, max 1000000) from errors.nextOffset. Replay the same before/partOffset/since to continue errors; reset when advancing scope.next."),
         ],
         effects: readEffects,
       }),

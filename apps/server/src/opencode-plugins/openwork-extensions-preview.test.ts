@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
-import { openworkCatalogModels, openworkEngineProviderCatalogSchema, openworkSessionActivityInventorySchema, openworkSessionModelPreflightArgsSchema, resolveOpenworkModel } from "@openwork/types/openwork-affordance";
+import { OPENWORK_SESSION_DETAIL_LIMITS, openworkSessionActivityResultSchema, openworkSessionPartPageSchema, openworkSessionToolProjectionSchema, openworkCatalogModels, openworkEngineProviderCatalogSchema, openworkSessionActivityInventorySchema, openworkSessionModelPreflightArgsSchema, resolveOpenworkModel } from "@openwork/types/openwork-affordance";
 
 import { OpenWorkExtensionsPreview } from "./openwork-extensions-preview.js";
 import * as OpenWorkExtensionsPreviewEntry from "./openwork-extensions-preview.js";
@@ -86,16 +86,12 @@ const readResultSchema = z.object({
   }).passthrough()),
 }).passthrough();
 
-const activityResultSchema = z.object({
-  ok: z.literal(true),
-  sessionId: z.string(),
-  workspaceId: z.string(),
-  toolCalls: z.object({ total: z.number(), byTool: z.record(z.string(), z.number()), byAffordanceId: z.record(z.string(), z.number()) }),
-  errors: z.object({ total: z.number(), list: z.array(z.object({ callId: z.string(), tool: z.string(), affordanceId: z.string().optional(), message: z.string().max(300), at: z.number().nullable() }).strict()) }),
-  firstAt: z.number().nullable(),
-  lastAt: z.number().nullable(),
-  messages: z.object({ user: z.number(), assistant: z.number() }).strict(),
-}).passthrough();
+const activityResultSchema = openworkSessionActivityResultSchema;
+const detailReadResultSchema = readResultSchema.extend({
+  messages: z.array(z.object({ id: z.string(), text: z.string(), tools: z.array(openworkSessionToolProjectionSchema).optional(), reasoning: z.string().max(2000).optional(), reasoningTruncated: z.boolean().optional() })),
+  partPage: openworkSessionPartPageSchema,
+  history: z.object({ limit: z.number(), nextBefore: z.string().nullable(), complete: z.boolean() }),
+});
 
 const createResultSchema = z.object({
   ok: z.boolean(),
@@ -184,6 +180,8 @@ function startFakeOpenWorkServer(options: {
   failSessionListWorkspaceId?: string;
   failMessages?: boolean;
   messages?: unknown[];
+  pagedMessages?: boolean;
+  repeatedCursor?: boolean;
   activityResponses?: Record<string, unknown>;
   failedActivityPaths?: string[];
   providerCatalogByWorkspace?: Record<string, unknown>;
@@ -361,8 +359,15 @@ function startFakeOpenWorkServer(options: {
       if (url.pathname === "/workspace/ws_1/opencode/session/ses_alpha/message") {
         if (options.failMessages) return Response.json({ message: "Unavailable" }, { status: 503 });
         if (options.messages) {
-          const limit = url.searchParams.get("limit");
-          return Response.json(limit === null ? options.messages : options.messages.slice(-Number(limit)));
+            const limit = url.searchParams.get("limit");
+            if (options.pagedMessages && limit !== null) {
+              if (url.searchParams.has("cursor")) return Response.json({ error: "Unsupported cursor" }, { status: 400 });
+              const end = Number(url.searchParams.get("before") ?? options.messages.length);
+              const start = Math.max(0, end - Number(limit));
+              const cursor = options.repeatedCursor ? url.searchParams.get("before") ?? "100" : start > 0 ? String(start) : null;
+              return Response.json(options.messages.slice(start, end), { headers: cursor === null ? {} : { "X-Next-Cursor": cursor } });
+            }
+            return Response.json(limit === null ? options.messages : options.messages.slice(-Number(limit)));
         }
         return Response.json([
           {
@@ -708,7 +713,8 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     expect(tools[1].error).toBe(JSON.stringify(redacted));
     expect(tools[2].output).toBe(JSON.stringify(JSON.stringify({ ok: false, error: { detail: redacted } })));
     const activity = affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha" } }))).result;
-    expect(activity.errors.list.map((failure) => failure.message)).toEqual([redacted, JSON.stringify({ detail: redacted })]);
+    expect(activity.errors.list.map((failure) => failure.message)).toEqual(["Tool execution failed", "Tool reported a failed outcome"]);
+    expect(JSON.stringify(activity)).not.toContain(source);
     const search = async (query: string) => affordanceResultSchema("session.search", searchResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.search", args: { workspaceId: "ws_1", query, in: ["tool"], match: "phrase" } }))).result;
     expect((await search(JSON.stringify(source).slice(1, -1))).results).toEqual([]);
     expect((await search(JSON.stringify(redacted).slice(1, -1))).results.length).toBeGreaterThan(0);
@@ -803,11 +809,11 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     expect(affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(raw)).result).toMatchObject({
       sessionId: "ses_alpha", workspaceId: "ws_1",
       toolCalls: { total: 3, byTool: { openwork_execute: 3 }, byAffordanceId: { "session.create": 3 } },
-      errors: { total: 1, list: [{ callId: "call_bad", tool: "openwork_execute", affordanceId: "session.create", message: "too_big: prompt exceeds 100000 characters", at: 331 }] },
+      errors: { total: 1, list: [{ callId: "call_bad", tool: "openwork_execute", affordanceId: "session.create", message: status === "error" ? "Tool execution failed" : "Tool reported a failed outcome", at: 331 }] },
       firstAt: 100, lastAt: 331, messages: { user: 1, assistant: 1 },
     });
     expect(fake.uiControlRequests).toHaveLength(0);
-    expect(fake.requests.find((request) => request.pathname.endsWith("/message"))?.search).toBe("");
+    expect(fake.requests.find((request) => request.pathname.endsWith("/message"))?.search).toBe("?limit=100");
   });
 
   test("session.activity deduplicates calls, groups only OpenWork input.id, and redacts bounded failures", async () => {
@@ -821,12 +827,11 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     const plugin = await OpenWorkExtensionsPreview();
     const raw = await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha" } });
     const result = affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(raw)).result;
-    expect(result.toolCalls).toEqual({ total: 2, byTool: { openwork_query: 1, external_tool: 1 }, byAffordanceId: { "session.read": 1 } });
+    expect(result.toolCalls).toEqual({ total: 2, byTool: { openwork_query: 1, other: 1 }, byAffordanceId: { "session.read": 1 } });
     expect(result.errors.total).toBe(1);
     expect(result.errors.list).toHaveLength(1);
     expect(result.errors.list[0]).toMatchObject({ callId: "call_bad", affordanceId: "session.read", at: 250 });
-    expect(result.errors.list[0].message).toHaveLength(300);
-    expect(raw).toContain("[redacted]");
+    expect(result.errors.list[0]).toMatchObject({ code: "failed_outcome", message: "Tool reported a failed outcome" });
     expect(raw).not.toContain("private");
   });
 
@@ -889,6 +894,132 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     const output = await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha", since: "invalid" } });
     expect(argumentErrorSchema.parse(JSON.parse(output)).issues.map((issue) => issue.path)).toEqual(["since"]);
     expect(fake.requests).toHaveLength(0);
+  });
+
+  test("activity omits arbitrary prompts and groups untrusted IDs while tool opt-in retains safe details", async () => {
+    const prompt = "PROMPT_CANARY_private_investigation";
+    const secret = "password=fixture7";
+    const badId = "token=identifier-private";
+    const benign = { monkey: "useful", statusCode: 422, exitCode: 1, tokenCount: 3 };
+    startFakeOpenWorkServer({ messages: [{ info: { id: "msg_safe", role: "assistant" }, parts: [
+      completedTool("call_safe", { id: "session.create", prompt, ...benign, password: "fixture7", api_key: "short", access_token: "short", authorization_code: "short", nested: { value: secret } }, JSON.stringify({ ok: false, code: "too_big", prompt })),
+      completedTool(badId, { id: badId }, JSON.stringify({ ok: false, error: { request: { prompt } } })),
+      { ...completedTool("x".repeat(200), {}, ""), tool: badId, state: { status: "error", input: {}, error: `${prompt} ${secret}`, time: { start: 310, end: 311 } } },
+      completedTool("call_echo", {}, JSON.stringify({ ok: false, message: prompt, code: prompt })),
+    ] }] });
+    const plugin = await OpenWorkExtensionsPreview();
+    const raw = await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha" } });
+    const activity = affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(raw)).result;
+    for (const value of [prompt, "fixture7", "identifier-private", "Alpha planning"]) expect(raw).not.toContain(value);
+    expect(activity.toolCalls).toEqual({ total: 4, byTool: { openwork_execute: 3, other: 1 }, byAffordanceId: { "session.create": 1, unknown: 2 } });
+    expect(activity.errors.list.map(({ code, message }) => ({ code, message }))).toEqual([
+      { code: "too_big", message: "Tool input exceeded a size limit" },
+      { code: "failed_outcome", message: "Tool reported a failed outcome" },
+      { code: "tool_error", message: "Tool execution failed" },
+      { code: "failed_outcome", message: "Tool reported a failed outcome" },
+    ]);
+    expect(activity.errors.list.slice(1, 3).map((error) => error.callId)).toEqual(["[redacted-id]", "[redacted-id]"]);
+    const readRaw = await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: "ses_alpha", parts: ["tool"] } });
+    const read = affordanceResultSchema("session.read", detailReadResultSchema).parse(JSON.parse(readRaw)).result;
+    const tool = read.messages[0].tools?.[0];
+    expect(JSON.parse(tool?.input ?? "null")).toMatchObject({ ...benign, prompt, password: "[redacted]", api_key: "[redacted]", access_token: "[redacted]", authorization_code: "[redacted]", nested: { value: "password=[redacted]" } });
+    expect(tool?.output).toContain(prompt);
+    expect(readRaw).not.toContain("fixture7");
+    expect(readRaw).not.toContain("identifier-private");
+    for (const query of ["fixture7", "identifier-private"]) {
+      const search = affordanceResultSchema("session.search", searchResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.search", args: { query, in: ["tool"] } }))).result;
+      expect(search.results).toEqual([]);
+    }
+    const control = affordanceResultSchema("session.search", searchResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.search", args: { query: "useful", in: ["tool"] } }))).result;
+    expect(control.results).toHaveLength(1);
+  });
+
+  test("1301 tool parts have bounded read continuation and honest activity/error windows", async () => {
+    const parts = Array.from({ length: 1301 }, (_, index) => completedTool(`call_${index}`, { id: "session.read" }, '{"ok":false}'));
+    const fake = startFakeOpenWorkServer({ messages: [{ info: { id: "msg_large", role: "assistant" }, parts }] });
+    const plugin = await OpenWorkExtensionsPreview();
+    const ids: string[] = [];
+    for (let offset = 0; offset < parts.length; offset += 100) {
+      const raw = await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: "ses_alpha", count: 1, parts: ["tool"], partOffset: offset } });
+      const result = affordanceResultSchema("session.read", detailReadResultSchema).parse(JSON.parse(raw)).result;
+      const tools = result.messages.flatMap((message) => message.tools ?? []);
+      ids.push(...tools.map((tool) => tool.callId));
+      expect(tools.length).toBeLessThanOrEqual(100);
+      expect(raw.length).toBeLessThan(700000);
+      expect(result.partPage.nextOffset).toBe(offset + 100 < parts.length ? offset + 100 : null);
+    }
+    expect(ids).toEqual(parts.map((part) => part.callID));
+    const activity = async (args: Record<string, unknown>) => affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha", ...args } }))).result;
+    const first = await activity({});
+    expect(first.toolCalls.total).toBe(1000);
+    expect(first.scope).toMatchObject({ complete: false, truncated: true, scannedParts: 1000, next: { partOffset: 1000 } });
+    expect(first.errors).toMatchObject({ total: 1000, truncated: true, nextOffset: 50 });
+    expect(first.errors.list).toHaveLength(50);
+    const errors = await activity({ errorOffset: first.errors.nextOffset });
+    expect(errors.errors.list[0]?.callId).toBe("call_50");
+    expect(errors.toolCalls).toEqual(first.toolCalls);
+    const last = await activity(first.scope.next ?? {});
+    expect(last.toolCalls.total).toBe(301);
+    expect(last.scope).toMatchObject({ complete: false, scannedParts: 301, next: null });
+    expect(last.errors.list[0]?.callId).toBe("call_1000");
+    expect(fake.requests.filter((request) => request.pathname.endsWith("/message")).every((request) => request.search === "?limit=1" || request.search === "?limit=100")).toBe(true);
+  });
+
+  test("reasoning has part and character caps without altering default text", async () => {
+    const parts = [{ type: "text", text: "Visible default" }, ...Array.from({ length: 1301 }, () => ({ type: "reasoning", text: `password=fixture7 ${"r".repeat(2200)}` }))];
+    startFakeOpenWorkServer({ messages: [{ info: { id: "msg_reason", role: "assistant" }, parts }] });
+    const plugin = await OpenWorkExtensionsPreview();
+    const raw = await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: "ses_alpha", parts: ["reasoning"] } });
+    const result = affordanceResultSchema("session.read", detailReadResultSchema).parse(JSON.parse(raw)).result;
+    expect(result.partPage).toMatchObject({ returned: 100, nextOffset: 100, truncated: true });
+    expect(result.messages[0]).toMatchObject({ reasoningTruncated: true });
+    expect(result.messages[0].reasoning).toHaveLength(2000);
+    expect(raw).not.toContain("fixture7");
+    const normal = affordanceResultSchema("session.read", readResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: "ses_alpha" } }))).result;
+    expect(normal.messages[0]).toMatchObject({ text: "Visible default" });
+    expect(normal).not.toHaveProperty("partPage");
+    expect(normal.messages[0]).not.toHaveProperty("reasoning");
+  });
+
+  test("activity follows native before headers over 1301 messages and refuses repeated cursors", async () => {
+    const messages = Array.from({ length: 1301 }, (_, index) => ({ info: { id: `msg_${index}`, role: "assistant" }, parts: [completedTool(`call_${index}`, {}, "ok")] }));
+    const fake = startFakeOpenWorkServer({ messages, pagedMessages: true });
+    const plugin = await OpenWorkExtensionsPreview();
+    let args: Record<string, unknown> = {};
+    let observed = 0;
+    for (let page = 0; page < 14; page += 1) {
+      const result = affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha", ...args } }))).result;
+      observed += result.toolCalls.total;
+      expect(result.scope.complete).toBe(false);
+      expect(result.scope.scannedMessages).toBeLessThanOrEqual(100);
+      if (page === 13) expect(result.scope.next).toBeNull();
+      else expect(result.scope.next).not.toBeNull();
+      args = result.scope.next ?? {};
+    }
+    expect(observed).toBe(1301);
+    const requests = fake.requests.filter((request) => request.pathname.endsWith("/message"));
+    expect(requests).toHaveLength(14);
+    expect(requests[1].search).toBe("?limit=100&before=1201");
+    expect(requests.every((request) => !request.search.includes("cursor="))).toBe(true);
+    startFakeOpenWorkServer({ messages, pagedMessages: true, repeatedCursor: true });
+    const refused = JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha", before: "100" } }));
+    expect(refused).toMatchObject({ ok: false });
+  });
+
+  test("missing cursor, oversized outcomes and oversized HTTP bodies cannot claim complete activity", async () => {
+    const plugin = await OpenWorkExtensionsPreview();
+    startFakeOpenWorkServer({ messages: Array.from({ length: 100 }, (_, index) => ({ info: { id: `msg_${index}`, role: "assistant" }, parts: [] })) });
+    const query = () => plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha" } });
+    const limited = affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(await query())).result;
+    expect(limited.scope).toMatchObject({ complete: false, truncated: true, next: null });
+    startFakeOpenWorkServer({ messages: [{ info: { id: "msg_large", role: "assistant" }, parts: [completedTool("call_large", {}, JSON.stringify({ ok: false, prompt: "p".repeat(OPENWORK_SESSION_DETAIL_LIMITS.outcomeChars) }))] }] });
+    const unknown = affordanceResultSchema("session.activity", activityResultSchema).parse(JSON.parse(await query())).result;
+    expect(unknown.scope).toMatchObject({ complete: false, uninspectedOutputs: 1 });
+    expect(unknown.toolCalls.total).toBe(1);
+    startFakeOpenWorkServer({ messages: [{ info: { id: "msg_huge", role: "assistant" }, parts: [completedTool("call_huge", {}, "x".repeat(OPENWORK_SESSION_DETAIL_LIMITS.responseBytes))] }] });
+    const refused = JSON.parse(await query());
+    expect(refused).toMatchObject({ ok: false });
+    expect(JSON.stringify(refused)).not.toContain("toolCalls");
   });
 
   test("session.read reports live status and working so agents can check before archiving", async () => {

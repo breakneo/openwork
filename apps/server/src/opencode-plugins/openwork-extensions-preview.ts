@@ -8,6 +8,10 @@ import { sessionActivityFrom, type SessionActivity } from "./session-activity.js
 import { redactSecretPatterns } from "./secret-patterns.js";
 import { visualizationSchema } from "@openwork/types/visualization";
 import {
+  OPENWORK_SESSION_DETAIL_LIMITS,
+  openworkSessionDetailPageArgsSchema,
+  openworkSessionActivityResultSchema,
+  openworkSessionToolFailureCodeSchema,
   openworkSessionModelSchema,
   openworkSessionModelPreflightResultSchema,
   openworkAffordanceResultSchema,
@@ -635,7 +639,7 @@ function redactSessionText(text: string): string {
     .replace(/\bow[thc]_[A-Za-z0-9_-]+\b/g, "[redacted]")
     .replace(/((["'])(?:token|grant|code|secret|key|password|authorization)\2\s*:\s*)("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^,\s"'{}\[\]]+)/gi,
       (assignment: string, prefix: string, _quote: string, value: string) => /^["']?\[redacted:[a-z-]+\]["']?$/.test(value) ? assignment : `${prefix}"[redacted]"`)
-    .replace(/(token|grant|code|secret|key)=("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^&\s"'<>()]+)/gi,
+    .replace(/\b((?:(?:api|access|refresh|client|authorization)[_-])?(?:token|grant|code|secret|key)|password|passwd|authorization|cookie)\s*[=:]\s*("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^&\s"'<>()]+)/gi,
       (assignment: string, key: string, value: string) => /^["']?\[redacted:[a-z-]+\]["']?$/.test(value) ? assignment : `${key}=[redacted]`);
 }
 
@@ -644,10 +648,18 @@ function redactSessionValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactSessionValue);
   if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([key, nested]) => [
     redactSessionText(key),
-    /(?:token|grant|code|secret|key|password|authorization|cookie)$/i.test(key.trim()) ? "[redacted]" : redactSessionValue(nested),
+    /^(?:(?:(?:api|access|refresh|client|authorization)[_-]?)?(?:token|grant|code|secret|key)|password|passwd|authorization|cookie)$/i.test(key.trim()) ? "[redacted]" : redactSessionValue(nested),
   ]));
   return value ?? null;
 }
+
+function sessionIdentifier(value: string): string {
+  if (value.length > OPENWORK_SESSION_DETAIL_LIMITS.identifierChars || !/^[A-Za-z0-9_.:-]+$/.test(value)) return "[redacted-id]";
+  return redactSessionText(value) === value ? value : "[redacted-id]";
+}
+
+const activityToolNames = new Set(["openwork_execute", "openwork_query", "openwork_context", "bash", "read", "write", "edit", "glob", "grep", "task", "question", "webfetch", "skill", "todowrite"]);
+const activityAffordanceIds = new Set(buildOpenworkProviderContributions([]).flatMap((entry) => entry.affordances.map((affordance) => affordance.id)));
 
 function sessionToolParts(message: SessionMessage) {
   return message.parts.flatMap((part) => part.type === "tool" && part.tool && part.callID && part.state
@@ -718,8 +730,8 @@ function messageSearchResult(workspace: OpenWorkWorkspace, session: SessionInfo,
         fallback = {
           ...sessionMetadata(workspace, session),
           kind: "tool",
-          tool: part.tool,
-          callId: part.callId,
+          tool: sessionIdentifier(part.tool),
+          callId: sessionIdentifier(part.callId),
           status: part.state.status,
           phrase: match.phrase,
           role,
@@ -856,6 +868,39 @@ async function readSessionMessages(workspace: OpenWorkWorkspace, sessionId: stri
   );
 }
 
+async function readSessionMessagePage(workspace: OpenWorkWorkspace, sessionId: string, limit: number, before?: string) {
+  const { url, token } = requireOpenWorkServer();
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (before !== undefined) query.set("before", before);
+  const response = await fetch(`${url}/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(sessionId)}/message?${query}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok || !response.body) throw new Error("Session history page unavailable");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let body = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > OPENWORK_SESSION_DETAIL_LIMITS.responseBytes) throw new Error("Session history page exceeds the byte limit");
+      body += decoder.decode(chunk.value, { stream: true });
+    }
+    body += decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  const messages = z.array(sessionMessageSchema).max(limit).parse(JSON.parse(body));
+  const cursor = response.headers.get("X-Next-Cursor");
+  const nextBefore = cursor === null ? null : openworkSessionDetailPageArgsSchema.shape.before.unwrap().parse(cursor);
+  if (nextBefore !== null && nextBefore === before) throw new Error("Session history cursor did not advance");
+  return { messages, history: { limit, nextBefore, complete: before === undefined && nextBefore === null && messages.length < limit } };
+}
+
 async function forEachWithConcurrency<T>(items: T[], concurrency: number, run: (item: T) => Promise<void>): Promise<void> {
   let index = 0;
   const worker = async () => {
@@ -959,32 +1004,50 @@ function lastAssistantError(messages: SessionMessage[]): { code: string; message
   return { code: "UnknownError", message: "The assistant reported an error; provider details are omitted" };
 }
 
-function readableMessages(messages: SessionMessage[], parts: z.infer<typeof sessionReadArgsSchema>["parts"]) {
-  return messages
-    .map((message, index) => ({
+function readableMessages(messages: SessionMessage[], parts: z.infer<typeof sessionReadArgsSchema>["parts"], offset = 0) {
+  let eligible = 0;
+  let returned = 0;
+  let clipped = false;
+  const limit = OPENWORK_SESSION_DETAIL_LIMITS.readParts;
+  const fieldLimit = OPENWORK_SESSION_DETAIL_LIMITS.fieldChars;
+  const readable = messages.map((message, index) => {
+    const selected = message.parts.filter((part) => {
+      const requested = (parts.includes("tool") && part.type === "tool" && part.tool && part.callID && part.state)
+        || (parts.includes("reasoning") && part.type === "reasoning" && !part.synthetic && !part.ignored && part.text?.trim());
+      if (!requested) return false;
+      const position = eligible++;
+      if (position < offset || returned >= limit) return false;
+      returned += 1;
+      return true;
+    });
+    const reasoning = selected.filter((part) => part.type === "reasoning")
+      .map((part) => redactSessionText(part.text?.trim() ?? "")).join("\n\n");
+    if (reasoning.length > fieldLimit) clipped = true;
+    return {
       index,
       id: message.info.id,
       role: message.info.role,
       createdAt: message.info.time?.created ?? null,
       text: parts.includes("text") ? messageText(message) : "",
-      ...(parts.includes("tool") ? { tools: sessionToolParts(message).map((part) => {
+      ...(parts.includes("tool") ? { tools: sessionToolParts({ ...message, parts: selected }).map((part) => {
         const fields = sessionToolFields(part.state);
+        const truncated = fields.some((field) => field.length > fieldLimit);
+        if (truncated) clipped = true;
         return {
           type: "tool",
-          tool: part.tool,
-          callId: part.callId,
+          tool: sessionIdentifier(part.tool),
+          callId: sessionIdentifier(part.callId),
           status: part.state.status,
-          input: fields[0].slice(0, 2000),
-          output: fields[1].slice(0, 2000),
-          error: fields[2].slice(0, 2000),
-          ...(fields.some((field) => field.length > 2000) ? { truncated: true } : {}),
+          input: fields[0].slice(0, fieldLimit),
+          output: fields[1].slice(0, fieldLimit),
+          error: fields[2].slice(0, fieldLimit),
+          ...(truncated ? { truncated: true } : {}),
         };
       }) } : {}),
-      ...(parts.includes("reasoning") ? { reasoning: message.parts
-        .filter((part) => part.type === "reasoning" && !part.synthetic && !part.ignored)
-        .map((part) => redactSessionText(part.text?.trim() ?? "")).filter(Boolean).join("\n\n") } : {}),
-    }))
-    .filter((message) => message.text.trim().length > 0 || message.tools?.length || message.reasoning);
+      ...(parts.includes("reasoning") ? { reasoning: reasoning.slice(0, fieldLimit), ...(reasoning.length > fieldLimit ? { reasoningTruncated: true } : {}) } : {}),
+    };
+  }).filter((message) => message.text.trim().length > 0 || message.tools?.length || message.reasoning);
+  return { readable, partPage: { offset, limit, returned, nextOffset: eligible > offset + returned ? offset + returned : null, truncated: clipped || eligible > offset + returned } };
 }
 
 async function readWorkspaceModels(workspace: OpenWorkWorkspace): Promise<OpenworkCatalogModel[]> {
@@ -1000,6 +1063,8 @@ async function readOpenWorkSession(rawArgs: unknown): Promise<object> {
   const count = args.count ?? 30;
   const from = args.from ?? "end";
   const summary = args.summary ?? false;
+  const details = args.parts.includes("tool") || args.parts.includes("reasoning");
+  if (!details && (args.before !== undefined || args.partOffset !== undefined)) return { ok: false, error: "before and partOffset require tool or reasoning parts" };
   const workspaces = filterWorkspaces(await listOpenWorkWorkspaces(), args.workspaceId);
   if (!workspaces.length) {
     return { ok: false, error: args.workspaceId ? `No workspace matched ${args.workspaceId}` : "No OpenWork workspaces are available" };
@@ -1010,17 +1075,20 @@ async function readOpenWorkSession(rawArgs: unknown): Promise<object> {
       const session = await readWorkspaceSession(workspace, args.sessionId);
       // Reading from the start or summarizing needs the whole transcript.
       const needsFullTranscript = summary || from === "start";
-      const [messages, activity, catalog] = await Promise.all([
-        readSessionMessages(workspace, args.sessionId, needsFullTranscript ? undefined : count),
+      const [page, activity, catalog] = await Promise.all([
+        details ? readSessionMessagePage(workspace, args.sessionId, count, args.before)
+          : readSessionMessages(workspace, args.sessionId, needsFullTranscript ? undefined : count).then((messages) => ({ messages, history: null })),
         readSessionActivity(workspace, session),
         readWorkspaceModels(workspace).catch(() => []),
       ]);
+      const messages = page.messages;
       const lastError = lastAssistantError(messages);
-      const readable = readableMessages(messages, args.parts);
+      const { readable, partPage } = readableMessages(messages, args.parts, args.partOffset);
       const metadata = {
         ...sessionMetadata(workspace, session),
         ...activity,
         lastError,
+        ...(details ? { history: page.history, partPage } : {}),
       };
       if (summary) {
         return {
@@ -1073,14 +1141,28 @@ async function locateOpenWorkSession(
   return { error: `Session ${sessionId} was not found in matching OpenWork workspaces` };
 }
 
-function sessionToolFailure(state: NonNullable<z.infer<typeof sessionPartSchema>["state"]>): unknown {
-  if (state.status === "error") return state.error ?? "Tool failed";
+const toolFailureLabels: Record<z.infer<typeof openworkSessionToolFailureCodeSchema>, string> = {
+  tool_error: "Tool execution failed",
+  failed_outcome: "Tool reported a failed outcome",
+  too_big: "Tool input exceeded a size limit",
+  "invalid-args": "Tool arguments were rejected",
+  unavailable: "Requested action is unavailable",
+  model_unavailable: "Requested model is unavailable",
+  conflict: "Requested action conflicted with current state",
+};
+
+function sessionToolFailure(state: NonNullable<z.infer<typeof sessionPartSchema>["state"]>) {
+  if (state.status === "error") return { code: openworkSessionToolFailureCodeSchema.enum.tool_error, message: toolFailureLabels.tool_error };
   if (state.status !== "completed" || state.output === undefined) return null;
+  if (state.output.length > OPENWORK_SESSION_DETAIL_LIMITS.outcomeChars) return "uninspected";
   try {
     const output: unknown = JSON.parse(state.output);
     if (!isRecord(output)) return null;
     const failure = output.ok === false ? output : isRecord(output.result) && output.result.ok === false ? output.result : null;
-    if (failure) return failure.error ?? failure.message ?? failure;
+    if (!failure) return null;
+    const parsed = openworkSessionToolFailureCodeSchema.safeParse(failure.code);
+    const code = parsed.success ? parsed.data : openworkSessionToolFailureCodeSchema.enum.failed_outcome;
+    return { code, message: toolFailureLabels[code] };
   } catch {}
   return null;
 }
@@ -1092,12 +1174,17 @@ async function readOpenWorkSessionActivity(rawArgs: unknown): Promise<object> {
   const located = await locateOpenWorkSession(args.sessionId, args.workspaceId);
   if ("error" in located) return { ok: false, error: located.error };
   const { workspace, session } = located;
-  let transcript: SessionMessage[];
+  let page: Awaited<ReturnType<typeof readSessionMessagePage>>;
   try {
-    transcript = await readSessionMessages(workspace, args.sessionId);
+    page = await readSessionMessagePage(workspace, args.sessionId, OPENWORK_SESSION_DETAIL_LIMITS.activityMessages, args.before);
   } catch {
-    return { ok: false, error: `Session ${args.sessionId} was not found in matching OpenWork workspaces` };
+    return { ok: false, error: "Session activity page unavailable or exceeds its size limit" };
   }
+  const transcript = page.messages;
+  const offset = args.partOffset ?? 0;
+  let position = 0;
+  let scannedParts = 0;
+  let scannedMessages = 0;
   const since = args.since === undefined ? undefined : sessionTimestampMs(args.since);
   const included = (at: number | null) => since === undefined || (at !== null && at >= since);
   const messages = { user: 0, assistant: 0 };
@@ -1112,43 +1199,66 @@ async function readOpenWorkSessionActivity(rawArgs: unknown): Promise<object> {
   for (const message of transcript) {
     const at = message.info.time?.created ?? null;
     const role = message.info.role;
-    if (included(at) && (role === "user" || role === "assistant")) {
+    const start = position;
+    position += message.parts.length;
+    if (position < offset || (position === offset && message.parts.length > 0) || scannedParts >= OPENWORK_SESSION_DETAIL_LIMITS.activityParts) continue;
+    scannedMessages += 1;
+    if (start >= offset && included(at) && (role === "user" || role === "assistant")) {
       messages[role] += 1;
       recordTime(at);
     }
-    for (const part of sessionToolParts(message)) calls.set(part.callId, { part, createdAt: at });
+    const selected = message.parts.slice(Math.max(0, offset - start), Math.max(0, offset - start) + OPENWORK_SESSION_DETAIL_LIMITS.activityParts - scannedParts);
+    scannedParts += selected.length;
+    for (const part of sessionToolParts({ ...message, parts: selected })) calls.set(part.callId, { part, createdAt: at });
   }
   const byTool = new Map<string, number>();
   const byAffordanceId = new Map<string, number>();
-  const errors: Array<{ callId: string; tool: string; affordanceId?: string; message: string; at: number | null }> = [];
+  const errors: z.infer<typeof openworkSessionActivityResultSchema>["errors"]["list"] = [];
   let total = 0;
+  let errorTotal = 0;
+  let uninspectedOutputs = 0;
+  const errorOffset = args.errorOffset ?? 0;
   for (const { part, createdAt } of calls.values()) {
     const at = part.state.time?.end ?? part.state.time?.start ?? createdAt;
     if (!included(at)) continue;
     total += 1;
     recordTime(part.state.time?.start ?? createdAt);
     recordTime(at);
-    byTool.set(part.tool, (byTool.get(part.tool) ?? 0) + 1);
-    const affordanceId = (part.tool === "openwork_execute" || part.tool === "openwork_query") && typeof part.state.input.id === "string" ? part.state.input.id : undefined;
+    const tool = activityToolNames.has(part.tool) ? part.tool : "other";
+    byTool.set(tool, (byTool.get(tool) ?? 0) + 1);
+    const id = part.state.input.id;
+    const affordanceId = (part.tool === "openwork_execute" || part.tool === "openwork_query")
+      ? typeof id === "string" && activityAffordanceIds.has(id) ? id : "unknown" : undefined;
     if (affordanceId !== undefined) byAffordanceId.set(affordanceId, (byAffordanceId.get(affordanceId) ?? 0) + 1);
     const failure = sessionToolFailure(part.state);
-    if (failure !== null) errors.push({
-      callId: part.callId,
-      tool: part.tool,
+    if (failure === "uninspected") { uninspectedOutputs += 1; continue; }
+    if (failure === null) continue;
+    errorTotal += 1;
+    if (errorTotal <= errorOffset || errors.length >= OPENWORK_SESSION_DETAIL_LIMITS.activityErrors) continue;
+    errors.push({
+      callId: sessionIdentifier(part.callId),
+      tool,
       ...(affordanceId === undefined ? {} : { affordanceId }),
-      message: (typeof failure === "string" ? redactSessionText(failure) : JSON.stringify(redactSessionValue(failure))).slice(0, 300),
+      ...failure,
       at,
     });
   }
-  return {
+  const moreParts = position > offset + scannedParts;
+  const complete = page.history.complete && offset === 0 && !moreParts && uninspectedOutputs === 0;
+  const next = moreParts ? { ...(args.before === undefined ? {} : { before: args.before }), partOffset: offset + scannedParts }
+    : page.history.nextBefore === null ? null : { before: page.history.nextBefore, partOffset: 0 };
+  return openworkSessionActivityResultSchema.parse({
     ok: true,
-    ...sessionMetadata(workspace, session),
+    sessionId: sessionIdentifier(session.id),
+    workspaceId: sessionIdentifier(workspace.id),
     toolCalls: { total, byTool: Object.fromEntries(byTool), byAffordanceId: Object.fromEntries(byAffordanceId) },
-    errors: { total: errors.length, list: errors },
+    errors: { total: errorTotal, list: errors, truncated: errorOffset > 0 || errorTotal > errors.length,
+      nextOffset: errorTotal > errorOffset + errors.length ? errorOffset + errors.length : null },
     firstAt,
     lastAt,
     messages,
-  };
+    scope: { complete, truncated: !complete, scannedMessages, scannedParts, uninspectedOutputs, next },
+  });
 }
 
 let lastSendMessageStamp = 0;

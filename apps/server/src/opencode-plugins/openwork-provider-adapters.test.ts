@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { openworkFeatureContributionSchema } from "@openwork/types/openwork-provider";
-import { labelOpenworkSessionModel, openworkCatalogModels, openworkModelSelectorSchema, resolveOpenworkModel } from "@openwork/types/openwork-affordance";
+import { OPENWORK_SESSION_DETAIL_LIMITS, openworkSessionDetailPageArgsSchema, openworkSessionActivityResultSchema, openworkSessionToolProjectionSchema, labelOpenworkSessionModel, openworkCatalogModels, openworkModelSelectorSchema, resolveOpenworkModel } from "@openwork/types/openwork-affordance";
 
 import { buildOpenworkProviderContributions, sessionAffordanceArgsSchemas } from "./openwork-provider-adapters.js";
 
@@ -113,10 +113,37 @@ describe("OpenWork provider adapters", () => {
     expect(create?.arguments.find((argument) => argument.name === "sessions")?.description).toContain("title (≤120 chars, longer is clipped)");
   });
 
+  test("detail contracts share cursor schemas and advertise numeric bounds and partial scope", () => {
+    const affordances = buildOpenworkProviderContributions([]).flatMap((entry) => entry.affordances);
+    const read = affordances.find((entry) => entry.id === "session.read");
+    const activity = affordances.find((entry) => entry.id === "session.activity");
+    for (const id of ["session.read", "session.activity"]) {
+      const schema = id === "session.read" ? sessionAffordanceArgsSchemas["session.read"] : sessionAffordanceArgsSchemas["session.activity"];
+      for (const [name, field] of Object.entries(openworkSessionDetailPageArgsSchema.shape)) {
+        expect(schema.shape[name === "before" ? "before" : "partOffset"]).toBe(field);
+        const argument = affordances.find((entry) => entry.id === id)?.arguments.find((entry) => entry.name === name);
+        expect(argument).toMatchObject({ type: name === "before" ? "string" : "number", required: false });
+        expect(argument?.description).toContain(name === "before" ? "512" : "1000000");
+      }
+      expect(schema.safeParse({ sessionId: "ses_fixture", before: "x".repeat(513) }).success).toBe(false);
+      expect(schema.safeParse({ sessionId: "ses_fixture", partOffset: 1000001 }).success).toBe(false);
+      expect(schema.safeParse({ sessionId: "ses_fixture", partOffset: -1 }).success).toBe(false);
+    }
+    const parts = read?.arguments.find((argument) => argument.name === "parts")?.description;
+    for (const value of [OPENWORK_SESSION_DETAIL_LIMITS.fieldChars, OPENWORK_SESSION_DETAIL_LIMITS.identifierChars, OPENWORK_SESSION_DETAIL_LIMITS.readParts]) expect(parts).toContain(String(value));
+    for (const value of [OPENWORK_SESSION_DETAIL_LIMITS.activityMessages, OPENWORK_SESSION_DETAIL_LIMITS.activityParts, OPENWORK_SESSION_DETAIL_LIMITS.activityErrors, OPENWORK_SESSION_DETAIL_LIMITS.outcomeChars, OPENWORK_SESSION_DETAIL_LIMITS.responseBytes]) expect(activity?.description).toContain(String(value));
+    for (const value of ["fixed labels", "scope.complete", "NOT full-session", "other/unknown", "uninspected"]) expect(activity?.description).toContain(value);
+    const tool = { type: "tool", tool: "bash", callId: "call_fixture", status: "completed", input: "null", output: "x".repeat(2000), error: "null" };
+    expect(openworkSessionToolProjectionSchema.safeParse(tool).success).toBe(true);
+    expect(openworkSessionToolProjectionSchema.safeParse({ ...tool, output: "x".repeat(2001) }).success).toBe(false);
+    expect(openworkSessionToolProjectionSchema.safeParse({ ...tool, callId: "x".repeat(129) }).success).toBe(false);
+    expect(openworkSessionActivityResultSchema.shape.errors.shape.list.safeParse(Array.from({ length: 51 }, () => ({ callId: "call", tool: "bash", code: "tool_error", message: "Tool execution failed", at: null }))).success).toBe(false);
+  });
+
   test("activity advertises its query, error cap and timestamp semantics", () => {
     const activity = buildOpenworkProviderContributions([]).flatMap((entry) => entry.affordances).find((entry) => entry.id === "session.activity");
     expect(activity).toMatchObject({ kind: "query", effects: { data: "read", ui: "none", external: false }, executor: { kind: "openwork" } });
-    for (const value of ["300", "byAffordanceId", "ok: false", "firstAt", "lastAt", "not capped", "callId"]) expect(activity?.description).toContain(value);
+    for (const value of ["300", "byAffordanceId", "ok: false", "firstAt", "lastAt", "scope.complete", "callId"]) expect(activity?.description).toContain(value);
     const since = activity?.arguments.find((argument) => argument.name === "since")?.description;
     for (const value of ["Inclusive", "ISO-8601", "end, then start", "Undated"]) expect(since).toContain(value);
   });
