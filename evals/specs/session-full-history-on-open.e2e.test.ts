@@ -191,10 +191,11 @@ test("a long conversation pages on demand, restores its saved page cold and load
     expect(indexes).toEqual(Array.from({ length: indexes.length }, (_, index) => indexes[0] + index));
     return window;
   };
-  const expectIdlePage = async (count: number) => {
-    const transcript = await agent.run("session.read_transcript", { count: 1 });
+  const expectIdlePage = async (count: number, expected = persisted.slice(-Math.min(count, 30))) => {
+    const transcript = await agent.run("session.read_transcript", { count: 30 });
     expect(renderedCount(transcript)).toBe(count);
-    expect(transcript).toMatchObject({ historyComplete: false });
+    expect(transcript).toMatchObject({ historyComplete: false, returned: expected.length,
+      messages: expected.map((text, index) => ({ index: count - expected.length + index, role: "user", text: `You\n${text}` })) });
     await expectReadingWindow(Math.min(count, 40));
     expect((await probe.dom(`${surface} [data-thread-loading], ${surface} [data-thread-history-status], ${surface} [data-testid="session-error-card"]`)).elements).toHaveLength(0);
     expect((await readFault()).history).toMatchObject({ full: 0, fullSucceeded: 0, single: 0 });
@@ -259,6 +260,7 @@ test("a long conversation pages on demand, restores its saved page cold and load
     await expectIdlePage(pageSize);
     const { rows } = await historyDom();
     rows.forEach((row) => expect(persisted.slice(-pageSize).some((text) => row.text.includes(text))).toBe(true));
+    expect(new Set(rows.map((row) => row.text)).size).toBe(rows.length);
     expect(rows.some((row) => row.text.includes(longHistoryFirst))).toBe(false);
     const fault = await readFault();
     expect(fault).toMatchObject({ workspaceId: world.workspace.workspaceId, sessionId: world.session.sessionId,
@@ -364,8 +366,9 @@ test("a long conversation pages on demand, restores its saved page cold and load
     expect(restored.fault.history.pageReads[0]).toEqual({ before: savedPage.before, limit: String(savedPage.limit), nextCursor: olderPage.nextCursor });
     for (const read of restored.fault.history.pageReads) expect(read).toMatchObject({ before: savedPage.before, limit: String(savedPage.limit) });
     restored.rows.forEach((row) => expect(persisted.slice(-pageSize * 2, -pageSize).some((text) => row.text.includes(text))).toBe(true));
+    expect(new Set(restored.rows.map((row) => row.text)).size).toBe(restored.rows.length);
     expect(restored.rows.some((row) => row.text.includes(longHistoryFirst) || row.text.includes(longHistoryLast))).toBe(false);
-    await expectIdlePage(pageSize);
+    await expectIdlePage(pageSize, persisted.slice(-pageSize * 2, -pageSize));
     expect(await agent.run("session.read_transcript", { count: 1 })).toMatchObject({ includesNewest: false });
     const saved = await savedScroll();
     expect(saved?.anchor.messageId).toBe(readingPosition.saved.anchor.messageId);
@@ -505,7 +508,9 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     if (first && viewport && first.rect.height > 0) {
       maxAnchorDrift = Math.max(maxAnchorDrift, Math.abs(first.rect.top - viewport.rect.top - cached.offset));
     }
-    return { viewport, rows };
+    const anchorVisible = Boolean(first && viewport && first.rect.height > 0
+      && first.rect.bottom > viewport.rect.top && first.rect.top < viewport.rect.bottom);
+    return { viewport, rows, anchorVisible };
   };
   const refreshed = await step("the warm newest-24 read adds the missing tail while the uncapped response stays held", async () => {
     await user.click({ role: "button", label: new RegExp(`^${longHistoryOtherTitle}`) });
@@ -526,7 +531,7 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     }, {
       within: 30_000,
       label: "persisted tail rendered before delivery of any warm uncapped response",
-      until: ({ rows, state, stableWindow }) => stableWindow >= 3 && rows.length > 0 && rows.length < 40
+      until: ({ rows, state, stableWindow, anchorVisible }) => anchorVisible && stableWindow >= 3 && rows.length > 0 && rows.length < 40
         && rows.some((row) => row.text.includes(longHistoryLast)) && state.held > 0,
     });
     expect(returned.state).toMatchObject({
@@ -541,6 +546,8 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     expect(new Set(returned.rows.map((row) => row.text)).size).toBe(returned.rows.length);
     expect(returned.rows.filter((row) => row.text.includes(longHistoryLast))).toHaveLength(1);
     expect(returned.rows.at(-1)?.text).toContain(longHistoryLast);
+    expect(returned.rows[0].text).toContain(longHistoryFirst);
+    expect(returned.anchorVisible).toBe(true);
     expect(returned.rows[0].rect.top).toBeGreaterThanOrEqual(returned.viewport.rect.top);
     expect(returned.rows[0].rect.bottom).toBeLessThanOrEqual(returned.viewport.rect.bottom);
     expect(maxAnchorDrift).toBeLessThanOrEqual(1);
@@ -558,7 +565,7 @@ warmTest("returning to a fully cached conversation refreshes its persisted tail 
     }, {
       within: 30_000,
       label: "the released full snapshot is applied without losing the fresh tail",
-      until: ({ state }) => state.held === 0 && state.snapshot?.count === longHistoryCount && state.snapshot.fetchStatus === "idle",
+      until: ({ state, anchorVisible }) => anchorVisible && state.held === 0 && state.snapshot?.count === longHistoryCount && state.snapshot.fetchStatus === "idle",
     });
     expect(complete.state).toMatchObject({ released: true, expired: false, mutations: 0 });
     expect(complete.state.reads).toContainEqual({ warm: true, limit: null, nativeCount: longHistoryCount, count: longHistoryCount, hasTail: true, delivered: true });
