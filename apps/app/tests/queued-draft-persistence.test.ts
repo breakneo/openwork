@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import type { ComposerDraft } from "../src/app/types";
+import { restartWaitingMessagesText } from "../src/i18n";
 import {
   claimComposerSessionDraftScope,
   countComposerQueuedDrafts,
@@ -101,6 +102,13 @@ describe("queued draft persistence", () => {
     if (!admitted) throw new Error("Expected a queued message");
     store.removeQueuedDraft("session-a", admitted.id);
     expect(countComposerQueuedDrafts(useComposerStateStore.getState())).toBe(1);
+  });
+
+  test("uses English restart-notice cardinal forms when untranslated locales fall back", () => {
+    expect(restartWaitingMessagesText(1, "en")).toBe("1 message waiting to be sent will be kept as a draft and won't be sent on its own after the restart.");
+    expect(restartWaitingMessagesText(2, "en")).toBe("2 messages waiting to be sent will be kept as drafts and won't be sent on their own after the restart.");
+    expect(restartWaitingMessagesText(21, "ru")).toBe("21 messages waiting to be sent will be kept as drafts and won't be sent on their own after the restart.");
+    expect(restartWaitingMessagesText(1, "ja")).toBe("1 message waiting to be sent will be kept as a draft and won't be sent on its own after the restart.");
   });
 
   test("ignores composer edits and conversations whose draft scope is unknown", () => {

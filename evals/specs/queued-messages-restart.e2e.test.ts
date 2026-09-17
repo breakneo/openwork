@@ -192,6 +192,15 @@ desktopTest("both restart dialogs count only waiting messages and a confirmed Se
     const elements = (await probe.dom('[data-testid="update-restart-waiting-messages"]')).elements;
     return { count: elements.length, text: elements.map((element) => element.text).join(" ") };
   };
+  const settleDialogScreenshot = () => probe.eventually(() => probe.eval(() => {
+    const content = document.querySelector('[data-slot="alert-dialog-content"]');
+    const overlay = document.querySelector('[data-slot="alert-dialog-overlay"]');
+    if (!content || !overlay) return false;
+    const animations = [...content.getAnimations({ subtree: true }), ...overlay.getAnimations({ subtree: true })];
+    return animations.every((animation) => animation.playState !== "running")
+      && getComputedStyle(content).opacity === "1"
+      && getComputedStyle(overlay).opacity === "1";
+  }), { within: 5_000, label: "the restart dialog entrance animation settles before screenshot capture", until: Boolean });
   const assertWaitingCount = async (dialog: "Settings" | "titlebar", count: number) => {
     const notice = await waitingNotice();
     const singular = count === 1;
@@ -199,6 +208,7 @@ desktopTest("both restart dialogs count only waiting messages and a confirmed Se
       : new RegExp(`${count} messages waiting to be sent will be kept as drafts`);
     assertObserved(`${dialog} restart dialog shows ${count === 0 ? "no waiting-message line" : `the ${count}-message ${singular ? "singular" : "plural"} line`}`,
       notice, count === 0 ? notice.count === 0 : notice.count === 1 && expected.test(notice.text) && /won't be sent/.test(notice.text));
+    await settleDialogScreenshot();
     await user.screenshot();
   };
   const openSettingsDialog = async () => {

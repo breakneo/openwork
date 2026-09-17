@@ -4,7 +4,7 @@ import { RotateCw } from "lucide-react";
 import { Button } from "../../../../components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../../components/ui/tooltip";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogTitle } from "../../../../components/ui/alert-dialog";
-import { t } from "../../../../i18n";
+import { restartWaitingMessagesText, t } from "../../../../i18n";
 import { useLocal } from "../../../kernel/local-provider";
 import { useDesktopConfig } from "../../cloud/desktop-config-provider";
 import { useEnterpriseActivationRequired } from "../../cloud/enterprise-activation-gate";
@@ -103,7 +103,7 @@ export function DesktopUpdateButton() {
           <AlertDialogDescription className="text-xs leading-[1.75]">{t("settings.update_restart_now_message", undefined, { appName })}</AlertDialogDescription>
           {waitingMessages > 0 ? (
             <AlertDialogDescription data-testid="update-restart-waiting-messages" className="mt-2 text-xs leading-[1.75]">
-              {t("settings.update_restart_waiting_messages", { count: waitingMessages })}
+              {restartWaitingMessagesText(waitingMessages)}
             </AlertDialogDescription>
           ) : null}
           <AlertDialogFooter className="mt-5">

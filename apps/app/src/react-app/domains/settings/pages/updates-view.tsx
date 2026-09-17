@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { formatBytes, formatRelativeTime } from "../../../../app/utils";
-import { t } from "../../../../i18n";
+import { restartWaitingMessagesText, t } from "../../../../i18n";
 import type { ReleaseChannel } from "../../../../app/types";
 import type { SettingsUpdateStatus } from "../state/electron-updater-state";
 import { countComposerQueuedDrafts, useComposerStateStore } from "../../session/surface/composer-state-store";
@@ -255,7 +255,7 @@ export function UpdatesView(props: UpdatesViewProps) {
                     {t("settings.update_restart_confirm_message")}
                     {waitingMessages > 0 ? (
                       <span data-testid="update-restart-waiting-messages" className="mt-2 block">
-                        {t("settings.update_restart_waiting_messages", { count: waitingMessages })}
+                        {restartWaitingMessagesText(waitingMessages)}
                       </span>
                     ) : null}
                   </>

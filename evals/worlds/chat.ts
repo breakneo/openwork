@@ -529,7 +529,8 @@ export async function restartUpdateTaskWorld(seed: Seed, context: { place: Place
     async mirrorActiveStatusForSettingsRoute() {
       // Settings remounts and reads a fresh v1 session list, whose native rows
       // omit transient run status. Mirror the separately asserted live engine
-      // status onto that list so this journey stays scoped to restart-dialog copy.
+      // status onto that list so this journey stays scoped to restart-dialog
+      // copy/relaunch behavior; it does not prove normal Settings status discovery.
       await seed.evalIn(app, browserScript((sessionId) => {
         const originalFetch = window.fetch;
         window.fetch = async (...args) => {
