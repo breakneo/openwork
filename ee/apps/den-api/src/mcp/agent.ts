@@ -413,6 +413,16 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       return preflightResponse
     }
 
+    const requestInfo = await mcpRequestInfo(c.req.raw)
+    const method = requestInfo.method
+    const notificationScope = `${principal.organizationId}\0${principal.userId}`
+    if (method === "notifications/initialized") {
+      // Acknowledgments need no member catalog or tool/resource registrations.
+      // Keep the SDK transport in charge of HTTP and JSON-RPC validation rather
+      // than returning 202 for a payload merely claiming to be a notification.
+      return await handlers.fetch(notificationScope, c.req.raw, createAgentMcpServer())
+    }
+
     const catalog = await getCatalog(app as unknown as Hono, c.env)
     // External MCP connections are scoped to the calling MEMBER (grants +
     // per-member credentials), not just the org — resolve who this token's
@@ -421,7 +431,6 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       userId: principal.userId,
       organizationId: principal.organizationId,
     })
-    const notificationScope = `${principal.organizationId}\0${principal.userId}`
     const organizationId = normalizeDenTypeId("organization", principal.organizationId)
     const organizationRows = await db
       .select({ metadata: OrganizationTable.metadata })
@@ -432,8 +441,6 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
     const connectMcpAppHostSupported = supportsConnectMcpAppHost(
       c.req.header(CONNECT_MCP_APP_HOST_CAPABILITY_HEADER),
     ) && principal.scopes.has(DEN_MCP_APP_HOST_SCOPE)
-    const requestInfo = await mcpRequestInfo(c.req.raw)
-    const method = requestInfo.method
     const redirectUriBase = resolvePublicOrigin(c.req.raw, env.apiPublicUrl)
     const capabilityContext = createCapabilityRegistryContext({
       app: app as unknown as Hono,
