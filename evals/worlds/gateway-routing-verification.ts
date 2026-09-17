@@ -4,7 +4,7 @@ import type { VerificationDictionary, VerificationEvaluator } from "@openwork/te
 export const routingIntent = "Verify the Edit router heading is visible; the editor name is Daily work revised; category 1 is Code review and debugging; category 2 is Clear business writing; minimum confidence is 0.75; the saved API router revision is 2; the saved API router name is Daily work revised; the saved API categories are Code review and debugging and Clear business writing; the saved API minimum confidence is 0.75; the Gateway administrative link is absent; and the saved-configuration-only notice says no live request has been tested here.";
 export const unsupportedRoutingIntent = "Verify a PDF invoice was exported to disk.";
 export const routingDictionary: VerificationDictionary = {
-  id: "gateway-routing-saved-editor", version: "1",
+  id: "gateway-routing-saved-editor", version: "2",
   checks: [
     { id: "editor", description: "The Edit router heading is visible", assertion: { kind: "see", target: { role: "heading", text: "Edit router" } } },
     ...[
@@ -18,7 +18,7 @@ export const routingDictionary: VerificationDictionary = {
     { id: "api-category-1", description: "The saved API category 1 is Code review and debugging", assertion: { kind: "observe", observation: { id: "saved-router", version: "1" }, path: [0, "routes", 0, "description"], predicate: { kind: "equals", value: "Code review and debugging" } } },
     { id: "api-category-2", description: "The saved API category 2 is Clear business writing", assertion: { kind: "observe", observation: { id: "saved-router", version: "1" }, path: [0, "routes", 1, "description"], predicate: { kind: "equals", value: "Clear business writing" } } },
     { id: "api-confidence", description: "The saved API minimum confidence is 0.75", assertion: { kind: "observe", observation: { id: "saved-router", version: "1" }, path: [0, "minConfidence"], predicate: { kind: "equals", value: 0.75 } } },
-    { id: "no-admin", description: "The Gateway administrative link is absent", assertion: { kind: "notSee", target: { role: "link", text: "Gateway" } } },
+    { id: "no-admin", description: "The Gateway administrative link is absent", assertion: { kind: "notSee", target: { role: "link", label: "Gateway" } } },
     { id: "not-live-verified", description: "The saved-configuration-only notice says no live request has been tested here", assertion: { kind: "see", target: { text: "Saved configuration only. No live request has been tested here." } } },
   ],
 };

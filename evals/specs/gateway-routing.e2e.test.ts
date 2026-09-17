@@ -14,20 +14,20 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
   await step("create a router using accessible model choices", async () => {
     await user.see({ role: "heading", text: "Model routing" }, { timeoutMs: 90_000 });
     await user.see({ text: "No routers yet" }, { timeoutMs: 60_000 });
-    await user.notSee({ role: "link", text: "Gateway" });
+    await user.notSee({ role: "link", label: "Gateway" });
     await user.screenshot();
-    await user.click({ role: "button", text: "Create router" });
+    await user.click({ role: "button", label: "Create router" });
     await user.type({ label: "Name" }, "Daily work", { replace: true });
     await user.type({ label: "Prompt category 1" }, "Code review and debugging", { replace: true });
     await user.type({ label: "Prompt category 2" }, "Writing and editing", { replace: true });
     await user.click({ role: "button", label: "Model 1" });
-    await user.click({ role: "option", text: world.modelLabels[0] });
+    await user.click({ role: "option", label: world.modelLabels[0] });
     await user.click({ role: "button", label: "Model 2" });
-    await user.click({ role: "option", text: world.modelLabels[1] });
+    await user.click({ role: "option", label: world.modelLabels[1] });
     await user.see({ text: "Prompt text is sent to Jev to choose a model" });
     expect(await world.savedRouters()).toHaveLength(0);
     await user.click({ role: "switch", label: "Acknowledge prompt sharing with Jev" });
-    await user.click({ role: "button", text: "Save router" });
+    await user.click({ role: "button", label: "Save router" });
     await user.see({ text: "Router saved. Not live-verified." }, { timeoutMs: 30_000 });
     expect(await world.savedRouters()).toMatchObject([{ name: "Daily work", revision: 1 }]);
     await user.screenshot();
@@ -37,7 +37,7 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     await user.type({ label: "Prompt category 2" }, "Clear business writing", { replace: true });
     await user.click({ text: "Advanced" });
     await user.type({ label: "Minimum confidence" }, "0.75", { replace: true });
-    await user.click({ role: "button", text: "Save router" });
+    await user.click({ role: "button", label: "Save router" });
     await user.see({ text: "Router saved. Not live-verified." }, { timeoutMs: 30_000 });
     await user.reload();
     await user.see({ role: "button", label: "Edit Daily work revised" }, { timeoutMs: 60_000 });
@@ -53,7 +53,7 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     await user.click({ text: "Use this router" });
     await user.see({ text: /POST \/api\/v1\/routers\// });
     await user.see({ text: "Saved configuration only. No live request has been tested here." });
-    await user.notSee({ role: "link", text: "Gateway" });
+    await user.notSee({ role: "link", label: "Gateway" });
     const mode = liveJev ? "live Jev" : "deterministic offline selection fixture (not live Jev)";
     let evaluatorCalls = 0;
     const evaluator = liveJev ? createJevVerificationEvaluator({ onMetrics: metrics => {
