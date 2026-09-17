@@ -1531,6 +1531,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     selectedSessionId,
     loading,
     effectiveLoading,
+    connectionPending,
     client,
     baseUrl,
     token,

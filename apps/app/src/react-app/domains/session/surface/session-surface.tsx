@@ -1201,7 +1201,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     : Boolean(props.modelUnavailable);
   // This surface is retained across navigation. Async completions must keep
   // their original owner, including when different servers reuse session IDs.
-  const { owner: sessionOwner, snapshotQueryKey } = useMemo(() => sessionHistoryIdentity({
+  const { owner: sessionOwner, runtimeOwner, snapshotQueryKey } = useMemo(() => sessionHistoryIdentity({
     draftScope: props.draftScope,
     opencodeBaseUrl: props.opencodeBaseUrl,
     runtimeWorkspaceId: props.workspaceId,
@@ -1313,6 +1313,17 @@ export function SessionSurface(props: SessionSurfaceProps) {
       markSessionSnapshotFetchStart(item, startedAt);
       return item;
   }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner, useDesktopLoopbackSnapshotRetry]);
+  const readOpening = useCallback(async (signal: AbortSignal, window: OpeningHistoryWindow) => {
+    if (evalSnapshotFailureRef.current) throw new Error("eval: forced session snapshot failure");
+    const startedAt = Date.now();
+    const target = { owner: sessionOwner, sessionId: props.sessionId,
+      endpoint: { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken } };
+    const item = useDesktopLoopbackSnapshotRetry
+      ? await opencodeSessionNative.composeNativeSessionHistoryWithRetry(sessionOwner, () => target, { ...window, signal })
+      : await opencodeSessionNative.composeNativeSessionHistory(target.endpoint, target.sessionId, { ...window, signal });
+    markSessionSnapshotFetchStart(item, startedAt);
+    return item;
+  }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner, useDesktopLoopbackSnapshotRetry]);
   const readLatest = useCallback(async (signal: AbortSignal, options?: { desktopTransport: "main" }) => {
     const endpoint = { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, ...options };
     const [session, messages] = await Promise.all([
@@ -1327,8 +1338,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const metadataQueryKey = useMemo(() => sessionMetadataKey({ workspaceId: props.workspaceId,
     baseUrl: props.opencodeBaseUrl, openworkToken: props.openworkToken }, props.sessionId),
   [props.workspaceId, props.opencodeBaseUrl, props.openworkToken, props.sessionId]);
-  const openingHistory = useOpeningSessionHistory({ owner: sessionOwner, sessionId: props.sessionId, authToken: props.openworkToken,
-    ignoreCached: !snapshotOwnerMatches, metadataQueryKey, snapshotQueryKey, transcriptQueryKey, readSnapshot, readLatest });
+  const openingHistory = useOpeningSessionHistory({ owner: sessionOwner, runtimeOwner, sessionId: props.sessionId, authToken: props.openworkToken,
+    ignoreCached: !snapshotOwnerMatches, metadataQueryKey, snapshotQueryKey, transcriptQueryKey, readSnapshot, readOpening, readLatest });
   const snapshotQuery = useQuery<OpenworkSessionHistory>({
     queryKey: snapshotQueryKey,
     queryFn: ({ signal }) => openingHistory.readFullSnapshot(signal),
@@ -1984,9 +1995,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
     intendedSessionId: props.sessionId,
     renderedSessionId: renderedMessages.length > 0 || snapshot ? props.sessionId : null,
     hasSnapshot: Boolean(snapshot) || renderedMessages.length > 0,
-    isFetching: snapshotQuery.isFetching,
+    isFetching: snapshotQuery.isFetching || openingHistory.openingLoading,
     // A failed send stays visible for composer recovery; only snapshot failure invalidates the session transition.
-    isError: snapshotQuery.isError,
+    isError: snapshotQuery.isError || Boolean(openingHistory.openingError),
   });
   const failSessionSnapshotControlAction = useMemo<OpenworkControlAction | null>(() => {
     if (!import.meta.env.DEV) return null;
@@ -3306,10 +3317,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
       onFocusCapture={handleFindSurfaceInteraction}
       className="flex h-full min-h-0 flex-col"
     >
-      <SessionHistoryStatus key={sessionOwner} complete={hasFullHistory} pending={pendingSessionLoad}
-         loading={snapshotQuery.isFetching && openingHistory.partial || openingHistory.pages.loading}
-         failed={snapshotQuery.isError && !snapshotQuery.isFetching || openingHistory.pages.failed}
-         onRetry={() => openingHistory.pages.failed ? openingHistory.pages.retry() : snapshotQuery.refetch()} />
+      <SessionHistoryStatus key={sessionOwner} complete={hasFullHistory && !openingHistory.openingError} pending={pendingSessionLoad}
+         loading={openingHistory.openingLoading || snapshotQuery.isFetching && openingHistory.partial || openingHistory.pages.loading}
+         failed={Boolean(openingHistory.openingError) || snapshotQuery.isError && !snapshotQuery.isFetching || openingHistory.pages.failed}
+         onRetry={() => openingHistory.openingError ? openingHistory.retryOpening()
+           : openingHistory.pages.failed ? openingHistory.pages.retry() : snapshotQuery.refetch()} />
       <div className="relative min-h-0 flex-1">
         <div
           ref={scrollRef}
@@ -3366,7 +3378,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
               />
             ) : null}
             <SessionHistoryBoundary owner={sessionOwner} pending={pendingSessionLoad}
-              failed={snapshotQuery.isError && !snapshotQuery.isFetching} saved={initialScroll}>
+              failed={Boolean(openingHistory.openingError) || snapshotQuery.isError && !snapshotQuery.isFetching} saved={initialScroll}>
             {renderedMessages.length === 0 && effectiveActivityStatus !== "idle" && !error ? (
               <div className="px-6 py-12">
                 <AssistantWaitingCard label={getSessionActivityStatusLabel(effectiveActivityStatus)} />

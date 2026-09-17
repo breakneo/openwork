@@ -20,7 +20,7 @@ import { createClient, isPromptAdmissionUnknown, unwrap } from "@/app/lib/openco
 import { createClientV2, isOpencodeV2BaseUrl, v2PromptText, V2_SESSION_ARCHIVE_UNAVAILABLE } from "@/app/lib/opencode-v2-adapter";
 import { abortSessionSafe, forkSession, listCommands, revertSession, shellInSession, unrevertSession } from "@/app/lib/opencode-session";
 import { composeNativeSessionHistory, getNativeSessionMessages } from "@/app/lib/opencode-session-native";
-import { prefetchOpeningSessionHistory, sessionHistoryIdentity } from "@/react-app/domains/session/surface/session-history";
+import { prefetchOpeningSessionHistory, sessionHistoryIdentity, sessionHistoryRuntimeOwner, useSessionHistoryRuntimeOwners } from "@/react-app/domains/session/surface/session-history";
 import { sendSessionCommand, sessionWorkHeld } from "@/app/lib/opencode-interruption";
 import { useSessionManagementStore as sessionManagementStore } from "@/react-app/domains/session/sidebar/session-management-store";
 import { getSessionDescendantIds } from "@/react-app/domains/session/sidebar/utils";
@@ -483,6 +483,7 @@ export function SessionRoute() {
     selectedSessionId,
     loading,
     effectiveLoading,
+    connectionPending,
     client,
     baseUrl,
     token,
@@ -901,6 +902,21 @@ export function SessionRoute() {
     }
     return next;
   }, [errorsByWorkspaceId, workspaceConnectionOverrides, workspaces]);
+  useSessionHistoryRuntimeOwners(workspaces.flatMap((workspace) => {
+    if (connectionPending && workspace.workspaceType !== "remote") return [];
+    const connection = workspaceConnectionStateById[workspace.id];
+    const runtime = resolveWorkbenchPaneEndpoint({
+      workspaceId: workspace.id,
+      workspaceTitle: workspaceLabel(workspace),
+      workspace,
+      endpoint: endpointForSessionWorkspace(workspace),
+      connectionError: connection?.status === "error" ? connection.message : errorsByWorkspaceId[workspace.id]?.trim(),
+    });
+    if (runtime.status === "unavailable") return [];
+    return [{ owner: sessionHistoryRuntimeOwner({ draftScope: sessionDraftScope,
+      opencodeBaseUrl: runtime.endpoint.opencodeBaseUrl, runtimeWorkspaceId: runtime.endpoint.workspaceId }),
+      authToken: runtime.endpoint.token }];
+  }));
 
   const mcpConnectedCount = useMcpConnectedCount(opencodeClient, selectedWorkspaceRoot);
   const providerListQuery = useProviderListQuery({

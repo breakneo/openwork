@@ -223,14 +223,14 @@ describe("native OpenCode session operations", () => {
     let settled = false;
     const history = composeNativeSessionHistory(endpoint, session.id, { ...window, signal: controller.signal }, {
       createOperations: () => operations({
-        get: async (_id, options) => { expect(options?.signal).toBe(controller.signal); calls.push("get"); return metadata.promise; },
+        get: async (_id, options) => { expect(options?.signal?.aborted).toBe(false); calls.push("get"); return metadata.promise; },
         messages: async (_id, limit, options) => {
           expect(limit).toBe(window && "limit" in window ? window.limit : undefined);
-          expect(options?.signal).toBe(controller.signal);
+          expect(options?.signal?.aborted).toBe(false);
           calls.push("messages"); return result(messages);
         },
         message: async (_id, _messageId, options) => {
-          expect(options?.signal).toBe(controller.signal);
+          expect(options?.signal?.aborted).toBe(false);
           calls.push("message"); return result(messages[0]!);
         },
         todo: async () => { calls.push("todo"); throw new Error("Todos unavailable"); },
@@ -242,6 +242,178 @@ describe("native OpenCode session operations", () => {
     metadata.resolve(result(session));
     expect(await history).toEqual({ session, messages });
     expect(calls).toEqual(["get", window && "messageIds" in window ? "message" : "messages"]);
+  });
+
+  test.each(["metadata", "messages", "saved metadata", "saved message"])("a %s failure promptly cancels only its history siblings and preserves the cause", async (branch) => {
+    const controller = new AbortController();
+    const failure = Promise.withResolvers<FieldsResult<never>>();
+    const original = new Error("Connection lost");
+    const signals: AbortSignal[] = [];
+    let cancelled = 0;
+    const pending = <T>(signal?: AbortSignal): Promise<FieldsResult<T>> => {
+      if (!signal) throw new Error("Missing history cancellation signal");
+      signals.push(signal);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          cancelled += 1;
+          reject(new DOMException("Sibling cancelled", "AbortError"));
+        }, { once: true });
+      });
+    };
+    const unrelatedMetadata = Promise.withResolvers<FieldsResult<Session>>();
+    const unrelatedSignals: AbortSignal[] = [];
+    const unrelated = [session.id, "ses_other"].map((sessionId) => composeNativeSessionHistory(endpoint, sessionId, {
+      signal: controller.signal,
+    }, { createOperations: () => operations({
+      get: async (_id, options) => {
+        if (options?.signal) unrelatedSignals.push(options.signal);
+        await unrelatedMetadata.promise;
+        return result({ ...session, id: sessionId });
+      },
+      messages: async () => result([]),
+    }) }));
+    const saved = branch.startsWith("saved");
+    const metadataFails = branch.endsWith("metadata");
+    const history = composeNativeSessionHistory(endpoint, session.id, {
+      signal: controller.signal, ...(saved ? { messageIds: ["msg_1", "msg_2"] } : { limit: 24 }),
+    }, { createOperations: () => operations({
+      get: async (_id, options) => metadataFails ? failure.promise : pending<Session>(options?.signal),
+      messages: async (_id, _limit, options) => metadataFails ? pending<typeof messages>(options?.signal) : failure.promise,
+      message: async (_id, messageId, options) => !metadataFails && messageId === "msg_1"
+        ? failure.promise : pending<typeof messages[number]>(options?.signal),
+    }) });
+    failure.reject(original);
+    await expect(history).rejects.toBe(original);
+    expect(cancelled).toBe(saved ? 2 : 1);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(controller.signal.aborted).toBe(false);
+    expect(unrelatedSignals).toHaveLength(2);
+    expect(unrelatedSignals.every((signal) => !signal.aborted)).toBe(true);
+    unrelatedMetadata.resolve(result(session));
+    expect((await Promise.all(unrelated)).map((history) => history.session.id)).toEqual([session.id, "ses_other"]);
+  });
+
+  test("failed metadata responses are unwrapped before pending messages settle", async () => {
+    let cancelled = false;
+    await expect(composeNativeSessionHistory(endpoint, session.id, {}, { createOperations: () => operations({
+      get: async () => failedResult({ code: "access_denied" }, 401),
+      messages: (_id, _limit, options) => new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => {
+          cancelled = true;
+          reject(new DOMException("Cancelled", "AbortError"));
+        }, { once: true });
+      }),
+    }) })).rejects.toMatchObject({ status: 401, code: "access_denied" });
+    expect(cancelled).toBe(true);
+  });
+
+  test.each([false, true])("caller abort reaches all history reads and fences ignored completion (saved: %s)", async (saved) => {
+    const controller = new AbortController();
+    const original = new Error("History cancelled");
+    const gate = Promise.withResolvers<void>();
+    const signals: AbortSignal[] = [];
+    const track = async <T>(data: T, signal?: AbortSignal) => {
+      if (!signal) throw new Error("Missing history cancellation signal");
+      signals.push(signal);
+      await gate.promise;
+      return result(data);
+    };
+    const history = composeNativeSessionHistory(endpoint, session.id, {
+      signal: controller.signal, ...(saved ? { messageIds: ["msg_1"] } : {}),
+    }, { createOperations: () => operations({
+      get: (_id, options) => track(session, options?.signal),
+      messages: (_id, _limit, options) => track(messages, options?.signal),
+      message: (_id, _messageId, options) => track(messages[0]!, options?.signal),
+    }) });
+    expect(signals).toHaveLength(2);
+    expect(signals.every((signal) => !signal.aborted)).toBe(true);
+    controller.abort(original);
+    expect(signals.every((signal) => signal.aborted && signal.reason === original)).toBe(true);
+    gate.resolve();
+    await expect(history).rejects.toBe(original);
+  });
+
+  test.each([400, 401, 403, 404, 413, 422])("HTTP %s history failures are terminal after one attempt with no backoff", async (status) => {
+    let attempts = 0;
+    const delays: number[] = [];
+    await expect(composeNativeSessionHistoryWithRetry("owner", () => ({ owner: "owner", endpoint, sessionId: session.id }), {}, {
+      createOperations: () => {
+        attempts += 1;
+        return operations({ messages: async () => failedResult({ code: "read_failed" }, status) });
+      },
+      waitForSnapshotRetry: async (delay) => { delays.push(delay); },
+    })).rejects.toMatchObject({ status, code: "read_failed" });
+    expect(attempts).toBe(1);
+    expect(delays).toEqual([]);
+  });
+
+  test.each([
+    "Could not verify the session history owner.",
+    "Could not verify the saved session message owner.",
+    "Invalid session history pagination metadata.",
+    "Session history pagination cursor did not advance.",
+    "A session history cursor requires a positive integer limit.",
+    "Invalid saved session message ID.",
+    "Native single-message reads are unavailable.",
+    "Response payload too large.",
+    "Response size exceeded the limit.",
+    "Unexpected history failure.",
+  ])("deterministic history failures do not retry: %s", async (message) => {
+    const error = new Error(message);
+    let attempts = 0;
+    const delays: number[] = [];
+    await expect(composeNativeSessionHistoryWithRetry("owner", () => ({ owner: "owner", endpoint, sessionId: session.id }), {}, {
+      createOperations: () => {
+        attempts += 1;
+        return operations({ messages: async () => { throw error; } });
+      },
+      waitForSnapshotRetry: async (delay) => { delays.push(delay); },
+    })).rejects.toBe(error);
+    expect(attempts).toBe(1);
+    expect(delays).toEqual([]);
+  });
+
+  test.each([408, 429, 500, 503, "Failed to fetch", "Connection refused", "Local engine unavailable", "Request timed out."])("transient history failure %s retries with a fresh signal after sibling cleanup", async (failure) => {
+    let attempts = 0;
+    let active = 0;
+    const signals: AbortSignal[] = [];
+    const delays: number[] = [];
+    const history = await composeNativeSessionHistoryWithRetry("owner", () => ({ owner: "owner", endpoint, sessionId: session.id }), {}, {
+      createOperations: () => {
+        attempts += 1;
+        return operations({
+          get: async (_id, options) => {
+            const signal = options?.signal;
+            if (!signal) throw new Error("Missing history cancellation signal");
+            expect(signal.aborted).toBe(false);
+            signals.push(signal);
+            if (attempts > 1) return result(session);
+            active += 1;
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => {
+                active -= 1;
+                reject(new DOMException("Cancelled", "AbortError"));
+              }, { once: true });
+            });
+          },
+          messages: async () => {
+            if (attempts > 1) return result(messages);
+            if (typeof failure === "number") return failedResult({ code: "engine_reloading" }, failure);
+            throw new Error(failure);
+          },
+        });
+      },
+      waitForSnapshotRetry: async (delay) => {
+        expect(active).toBe(0);
+        expect(signals[0]?.aborted).toBe(true);
+        delays.push(delay);
+      },
+    });
+    expect(history).toEqual({ session, messages });
+    expect(attempts).toBe(2);
+    expect(delays).toEqual([100]);
+    expect(signals[0]).not.toBe(signals[1]);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
 
   test("history-only reads reject mismatched metadata, messages, and parts", async () => {
@@ -423,19 +595,19 @@ describe("native OpenCode session operations", () => {
     }, {
       createOperations: () => operations({
         get: async (_sessionId, options) => {
-          calls.push(options?.signal === controller.signal ? "get" : "bad-get");
+          calls.push(options?.signal?.aborted === false ? "get" : "bad-get");
           return result(session);
         },
         messages: async (_sessionId, limit, options) => {
-          calls.push(limit === 24 && options?.signal === controller.signal ? "messages" : "bad-messages");
+          calls.push(limit === 24 && options?.signal?.aborted === false ? "messages" : "bad-messages");
           return result(messages);
         },
         todo: async (_sessionId, options) => {
-          calls.push(options?.signal === controller.signal ? "todo" : "bad-todo");
+          calls.push(options?.signal?.aborted === false ? "todo" : "bad-todo");
           return result(todos);
         },
         status: async (options) => {
-          calls.push(options?.signal === controller.signal ? "status" : "bad-status");
+          calls.push(options?.signal?.aborted === false ? "status" : "bad-status");
           return result<Record<string, SessionStatus>>({});
         },
       }),
@@ -530,7 +702,7 @@ describe("native OpenCode session operations", () => {
       messages: async () => { throw new Error("Unexpected full message read"); },
       message: async (sessionId, messageId, options) => {
         expect(sessionId).toBe(session.id);
-        expect(options?.signal).toBe(controller.signal);
+        expect(options?.signal?.aborted).toBe(false);
         lookups.push(messageId);
         return result({ info: { ...messages[0]!.info, id: messageId }, parts: [] });
       },
