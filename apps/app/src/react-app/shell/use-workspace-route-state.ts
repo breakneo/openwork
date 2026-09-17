@@ -56,6 +56,7 @@ import {
   shouldAttemptDesktopLocalReconnect,
 } from "./desktop-local-openwork";
 import { resolveOpenworkConnection } from "./openwork-connection";
+import { createEngineRoutingPoller } from "./engine-routing-poller";
 import {
   commitRouteWorkspaceSelection,
   createRouteRefreshLifecycle,
@@ -206,6 +207,19 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const [token, setToken] = useState("");
   const [engineRoutingByServer, setEngineRoutingByServer] = useState<Record<string, boolean>>({});
   const engineRoutingByServerRef = useRef(engineRoutingByServer);
+  const [engineRoutingPoller] = useState(() => createEngineRoutingPoller({
+    publish: (key, routing) => {
+      if (engineRoutingByServerRef.current[key] === routing) return;
+      const next = { ...engineRoutingByServerRef.current, [key]: routing };
+      engineRoutingByServerRef.current = next;
+      setEngineRoutingByServer(next);
+    },
+    onError: (error) => console.warn("[opencode-v2] failed to read chat routing status; retaining the current engine", error),
+    schedule: (run, delay) => {
+      const timer = window.setTimeout(run, delay);
+      return () => window.clearTimeout(timer);
+    },
+  }));
   const [workspaces, setWorkspaces] = useState<RouteWorkspace[]>([]);
   const [workspaceOrderIds, setWorkspaceOrderIds] = useState<string[]>(() => readWorkspaceOrderIds());
   const [sessionsByWorkspaceId, setSessionsByWorkspaceId] = useState<Record<string, RouteSession[]>>({});
@@ -1221,8 +1235,14 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const engineRoutingReady = Boolean(routingServerUrl) && selectedEngineRouting !== undefined;
   const engineV2ChatRouting = selectedEngineRouting === true;
   useEffect(() => {
-    let cancelled = false;
-    const refreshers: Array<() => Promise<void>> = [];
+    window.addEventListener("openwork-server-settings-changed", engineRoutingPoller.refresh);
+    return () => {
+      engineRoutingPoller.dispose();
+      window.removeEventListener("openwork-server-settings-changed", engineRoutingPoller.refresh);
+    };
+  }, [engineRoutingPoller]);
+  useEffect(() => {
+    const sources: Array<{ key: string; read: () => Promise<boolean> }> = [];
     const serverKeys = new Set<string>();
     // Local inventories must not borrow the selected remote worker's routing
     // or wait for that worker to connect. The selected client still uses its owner.
@@ -1231,27 +1251,16 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
       if (!server.baseUrl || serverKeys.has(key)) continue;
       serverKeys.add(key);
       const openworkClient = createOpenworkServerClient(server);
-      let requestVersion = 0;
-      refreshers.push(async () => {
-        const version = ++requestVersion;
-        let routing: boolean;
+      sources.push({ key, read: async () => {
         try {
           const status = await withRouteRefreshTimeout(openworkClient.getEngineV2PreviewStatus(), "Engine routing status");
-          routing = status.enabled && status.chatRouting;
+          return status.enabled && status.chatRouting;
         } catch (error) {
-          if (cancelled || version !== requestVersion) return;
           // Only a legacy server's 404 establishes v1; transient failures stay unknown.
-          if (!(error instanceof OpenworkServerError && error.status === 404)) {
-            console.warn("[opencode-v2] failed to read chat routing status; retaining the current engine", error);
-            return;
-          }
-          routing = false;
+          if (error instanceof OpenworkServerError && error.status === 404) return false;
+          throw error;
         }
-        if (cancelled || version !== requestVersion || engineRoutingByServerRef.current[key] === routing) return;
-        const next = { ...engineRoutingByServerRef.current, [key]: routing };
-        engineRoutingByServerRef.current = next;
-        setEngineRoutingByServer(next);
-      });
+      } });
     }
     // A server that stopped being polled must revalidate when selected again.
     // Keep the local server's readiness while it remains in the polling set.
@@ -1261,18 +1270,8 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
       engineRoutingByServerRef.current = next;
       setEngineRoutingByServer(next);
     }
-    const refresh = () => {
-      for (const refreshRouting of refreshers) void refreshRouting();
-    };
-    refresh();
-    window.addEventListener("openwork-server-settings-changed", refresh);
-    const interval = window.setInterval(() => { void refresh(); }, 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("openwork-server-settings-changed", refresh);
-    };
-  }, [baseUrl, token, routingServerUrl, routingServerToken]);
+    engineRoutingPoller.reconcile(sources);
+  }, [baseUrl, token, routingServerUrl, routingServerToken, engineRoutingPoller]);
   useEffect(() => {
     const scopes = workspaceSessionLoadScopesRef.current;
     const changed: RouteWorkspace[] = [];
