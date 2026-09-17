@@ -1,8 +1,11 @@
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import DOMPurify from "dompurify";
 
+const sanitizerDescriptor = Object.getOwnPropertyDescriptor(DOMPurify, "sanitize");
 const ownedDom = typeof window === "undefined";
 if (ownedDom) GlobalRegistrator.register({ url: "http://localhost/" });
+Object.defineProperty(DOMPurify, "sanitize", { configurable: true, writable: true, value: DOMPurify(window).sanitize });
 const { act, StrictMode } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { deferTranscriptImage } = await import("../src/components/chat/transcript-image-loading");
@@ -56,6 +59,8 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 afterAll(async () => {
+  if (sanitizerDescriptor) Object.defineProperty(DOMPurify, "sanitize", sanitizerDescriptor);
+  else Reflect.deleteProperty(DOMPurify, "sanitize");
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", originalAct);
   if (ownedDom) await GlobalRegistrator.unregister();
 });
