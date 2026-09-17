@@ -31,7 +31,7 @@ export function Report({ report, id }: { report: ReviewReport; id: string }) {
         <h1>{report.title}</h1>
         <div className="summary">
           <span className={`badge ${summary.verdict.toLowerCase()}`}>
-            {summary.verdict}
+            Selected evidence: {summary.verdict}
           </span>
           {summary.tests > 0 && (
             <span>

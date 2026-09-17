@@ -22,14 +22,36 @@ on:
 permissions:
   contents: read
   actions: read
+  checks: read
   pull-requests: read
 
 concurrency:
-  # Serialize publishers before resolving provenance; never key off an unvalidated PR.
-  group: evidence-review-${{ github.event_name }}-${{ github.event_name == 'workflow_run' && github.repository || github.event.pull_request.number || github.run_id }}
+  # Required-check controllers must not displace unrelated pending completions.
+  group: evidence-review-${{ github.event_name }}-${{ github.event.workflow_run.id || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  required-verification:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Product journeys' && github.event.workflow_run.event == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Reconcile the authenticated current-head plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/required-verification-controller.mjs complete
   check-publisher:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -83,7 +105,13 @@ jobs:
           path: evals/results/test-runs/
           retention-days: 7
   publish:
+    needs: required-verification
+    # Only optional presentation is serialized across producer runs.
+    concurrency:
+      group: evidence-review-publish-${{ github.repository }}
+      cancel-in-progress: false
     if: >-
+      always() &&
       github.event_name == 'workflow_run' &&
       vars.OPENWORK_REVIEW_URL != '' &&
       (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
@@ -92,6 +120,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
       pull-requests: write
     steps:
       # Only trusted default-branch code runs with the publishing credentials.

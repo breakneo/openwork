@@ -13,7 +13,7 @@ const workflows = [
 ];
 function run(id = 30, producer = workflows[0]) {
   return {
-    id, workflow_id: producer.id, path: `.github/workflows/${producer.file}`, name: producer.name,
+    id, run_attempt: 1, workflow_id: producer.id, path: `.github/workflows/${producer.file}`, name: producer.name,
     event: producer.events[0], status: "completed", conclusion: "success",
     repository, head_repository: repository, head_sha: sha,
     pull_requests: [{ number: 7, base: { repo: { id: 10 } }, head: { repo: { id: 10 }, sha } }],
@@ -40,6 +40,8 @@ function harness(runs = [run()]) {
     logs, downloads, publications, current,
     dependencies: {
       api, log: (message) => logs.push(message),
+      required: async () => ({ state: "waiting", url: "https://github.com/sample-org/sample-project/actions/runs/31" }),
+      binding: async (_repo, id) => ({ producer: runs.find(item => item.id === id), receipt: { pr: 7, sha } }),
       download: async (id, directory) => {
         downloads.push(id);
         await mkdir(directory, { recursive: true });
@@ -85,12 +87,12 @@ test("missing, ambiguous, stale and invalid producer identities skip visibly", a
   assert.match(fixture.logs[0], /stale/);
 });
 
-test("chained producer retains explicit PR association, not its own default-branch SHA", () => {
+test("chained producer PR arrays are not authority without an authenticated upstream binding", () => {
   const chained = run(31, workflows[1]);
   chained.head_sha = "2".repeat(40);
-  assert.deepEqual(association(chained, repo, workflows), { pr: 7, sha });
+  assert.match(association(chained, repo, workflows).reason, /authenticated upstream binding/);
   chained.pull_requests = [];
-  assert.match(association(chained, repo, workflows).reason, /missing/);
+  assert.match(association(chained, repo, workflows).reason, /authenticated upstream binding/);
 });
 
 test("later publication gathers all verified producers, excluding untrusted runs", async () => {
@@ -102,6 +104,15 @@ test("later publication gathers all verified producers, excluding untrusted runs
   assert.deepEqual(fixture.downloads, [30, 31]);
   assert.equal(fixture.publications[0].testRunDirs.length, 2);
   assert.equal(fixture.publications[0].automatic, true);
+  assert.match(fixture.publications[0].gaps[0], /Required verification: waiting/);
+});
+
+test("unbound chained evidence cannot publish even with plausible artifact identities", async () => {
+  const fixture = harness([run(31, workflows[1])]);
+  fixture.dependencies.binding = async () => { throw new Error("unsupported chain"); };
+  await publishCompletedEvidence({ repo, runId: 31 }, fixture.dependencies);
+  assert.deepEqual(fixture.publications, []);
+  assert.deepEqual(fixture.downloads, []);
 });
 
 test("bounded history, expired artifacts and changed producer/current PR fail closed", async () => {
