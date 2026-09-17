@@ -1,4 +1,5 @@
 import { legacyExecutionPermissions } from "./managed-policy-rules.js";
+import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { materializeLegacyFastProviders } from "@openwork/types/cloud-model-fast";
 import { isManagedPolicyPlugin } from "./managed-policy-plugin.js";
 /**
@@ -53,12 +54,17 @@ export async function buildOpenworkRuntimeConfigObject(
   // engine-pool fingerprint. Per-workspace MCPs reach the engine through the
   // dynamic push path instead.
   const runtimeConfig = config ? await readGlobalRuntimeOpencodeConfig(config) : {};
-  return buildOpenworkRuntimeConfigObjectFromSnapshot(runtimeConfig);
+  return buildOpenworkRuntimeConfigObjectFromSnapshot(runtimeConfig, config ? managedDesktopPolicy(config).hasSession : false);
 }
 
 export function buildOpenworkRuntimeConfigObjectFromSnapshot(
   runtimeConfig: RuntimeOpencodeConfig,
+  hasCloudSession = true,
 ): Record<string, unknown> {
+  if (!hasCloudSession) {
+    const { managedPolicy: _cachedPolicy, ...localConfig } = runtimeConfig;
+    runtimeConfig = localConfig;
+  }
   const disabledProviders = runtimeDisabledProviderList(runtimeConfig);
   const permissions = legacyExecutionPermissions(runtimeConfig.managedPolicy?.execution);
   const { managedPolicy: _managedPolicy, ...engineConfig } = runtimeConfig;

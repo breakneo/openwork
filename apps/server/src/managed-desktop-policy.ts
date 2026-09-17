@@ -67,6 +67,9 @@ class ManagedDesktopPolicy {
   private fetching: { generation: number; promise: Promise<DesktopConfig | null> } | undefined;
   onChange: (() => void) | undefined;
   constructor(private readonly config: ServerConfig) {}
+  get hasSession(): boolean {
+    return this.session !== null;
+  }
   authenticatesEvaluation(request: Request): boolean {
     const supplied = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     if (!supplied) return false;
@@ -83,11 +86,15 @@ class ManagedDesktopPolicy {
     }
     this.session = session;
     await this.current();
+    // A cached policy may be unchanged, but its runtime projection is now active.
+    if (!current) this.onChange?.();
   }
   async clearSession(): Promise<void> {
+    const hadSession = this.hasSession;
     this.session = null;
     this.generation++;
-    // Keep the last managed restrictions until a fresh identity is verified.
+    // Retain the cache, but stop projecting organization restrictions locally.
+    if (hadSession) this.onChange?.();
   }
   current(): Promise<DesktopConfig | null> {
     if (this.fetching?.generation === this.generation) return this.fetching.promise;
@@ -153,10 +160,10 @@ class ManagedDesktopPolicy {
     const session = this.session;
     const generation = this.generation;
     if (!session) {
-      const persisted = await readGlobalRuntimeOpencodeConfig(this.config);
+      await readGlobalRuntimeOpencodeConfig(this.config);
       // A local-only read cannot grant access after a managed identity arrives.
       this.identityChanged(generation);
-      if (persisted.managedPolicy) throw new ApiError(403, "policy_unavailable", "Sign in to verify your organization's policy before continuing.");
+      // A cached policy is not device enrollment: enforcement follows the session.
       return null;
     }
     let policy: DesktopConfig;

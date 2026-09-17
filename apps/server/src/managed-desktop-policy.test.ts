@@ -72,11 +72,49 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
     expect(write).toHaveBeenCalledTimes(install ? 1 : 0);
   });
 
-  test("no-session browser evaluation keeps retained managed policy fail closed", async () => {
+  test("cached policy does not restrict signed-out local providers or models", async () => {
     read.mockResolvedValue({ managedPolicy: policy });
-    await expect(service.assert("browser", { url: "https://unapproved.example" })).rejects.toMatchObject({ code: "policy_unavailable", status: 403 });
+    await expect(service.assert("provider", { providerID: "ollama" })).resolves.toBeUndefined();
+    await expect(service.assert("model", { providerID: "ollama", modelID: "local-model" })).resolves.toBeUndefined();
     expect(externalFetch).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
+  });
+
+  test("signed-in model denial ends on signout and notifies runtime reload", async () => {
+    read.mockResolvedValue({ managedPolicy: policy });
+    externalFetch.mockImplementation(async (url) => Response.json(url.endsWith("/desktop-config")
+      ? policy : { llmProviders: [], inferenceProviders: [] }));
+    const changed = mock(() => {});
+    service.onChange = changed;
+    await service.setSession(session);
+    expect(service.hasSession).toBe(true);
+    await expect(service.assert("model", { providerID: "ollama", modelID: "local-model" }))
+      .rejects.toMatchObject({ code: "organization_model_denied", status: 403 });
+    changed.mockClear();
+    await service.clearSession();
+    expect(service.hasSession).toBe(false);
+    expect(changed).toHaveBeenCalledTimes(1);
+    await expect(service.assert("model", { providerID: "ollama", modelID: "local-model" })).resolves.toBeUndefined();
+  });
+
+  test("signout fences in-flight verification while permitting new local requests", async () => {
+    externalFetch.mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    const installing = service.setSession(session).catch((error: unknown) => error);
+    await waiting.promise;
+    await service.clearSession();
+    release.resolve();
+    expect(await installing).toMatchObject({ code: "policy_identity_changed", status: 409 });
+    await expect(service.assert("model", { providerID: "ollama", modelID: "local-model" })).resolves.toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test("signed-in local model access fails closed when verification fails", async () => {
+    await service.setSession(session);
+    read.mockResolvedValue({ managedPolicy: policy });
+    externalFetch.mockImplementation(async () => new Response(null, { status: 403 }));
+    await expect(service.assert("model", { providerID: "ollama", modelID: "local-model" }))
+      .rejects.toMatchObject({ code: "policy_unavailable", status: 403 });
+    expect(service.hasSession).toBe(true);
   });
 
   test("503 waits for the explicit 200ms release before the second read succeeds", async () => {

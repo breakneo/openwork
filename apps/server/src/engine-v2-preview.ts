@@ -531,7 +531,10 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       bin: resolved.bin,
       rootDir,
       env: { OPENCODE_MODELS_URL: opencodeModelsUrl },
-      permissions: async () => executionRules((await readGlobalRuntimeOpencodeConfig(config)).managedPolicy?.execution),
+      permissions: async () => {
+        const runtime = await readGlobalRuntimeOpencodeConfig(config);
+        return executionRules(managedDesktopPolicy(config).hasSession ? runtime.managedPolicy?.execution : undefined);
+      },
     });
     sidecar = managed;
     if (!enabled || !allowRunning) {

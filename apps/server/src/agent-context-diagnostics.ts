@@ -51,6 +51,7 @@ import {
 } from "./mcp.js";
 import { resolveWorkspaceOpencodeConnection } from "./opencode-connection.js";
 import { buildOpenworkRuntimeConfigObjectFromSnapshot } from "./openwork-runtime-config.js";
+import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import {
   ENGINE_GLOBAL_RUNTIME_CONFIG_ID,
   inspectRuntimeOpencodeConfigState,
@@ -1304,7 +1305,7 @@ export async function runAgentContextDiagnostics(input: {
   // The injected engine config file is rendered from the ENGINE_GLOBAL row
   // only; the merged per-workspace runtime row informs MCP inventory below
   // but is not part of the injected file.
-  const expectedRuntimeConfig = buildOpenworkRuntimeConfigObjectFromSnapshot(globalRuntimeInspection.config);
+  const expectedRuntimeConfig = buildOpenworkRuntimeConfigObjectFromSnapshot(globalRuntimeInspection.config, managedDesktopPolicy(input.config).hasSession);
   const expectedAgents = isRecord(expectedRuntimeConfig.agent) ? expectedRuntimeConfig.agent : {};
   const expectedAgent = isRecord(expectedAgents.openwork) ? expectedAgents.openwork : null;
   const effectiveOpenworkAgent = effectiveEngine?.agents.find((agent) => agent.name === "openwork") ?? null;

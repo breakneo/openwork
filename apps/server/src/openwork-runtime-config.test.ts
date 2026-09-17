@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { managedPolicyPluginPath } from "./managed-policy-plugin.js";
+import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { catalogFastVariants, fastVariantId } from "@openwork/types/cloud-model-fast";
 
 import {
@@ -13,7 +14,7 @@ import {
   openworkRuntimeConfigFilePath,
   writeOpenworkRuntimeConfigFile,
 } from "./openwork-runtime-config.js";
-import { writeGlobalRuntimeOpencodeConfig, writeRuntimeOpencodeConfig } from "./runtime-opencode-config-store.js";
+import { readGlobalRuntimeOpencodeConfig, writeManagedDesktopPolicy, writeGlobalRuntimeOpencodeConfig, writeRuntimeOpencodeConfig } from "./runtime-opencode-config-store.js";
 import type { ServerConfig } from "./types.js";
 
 const roots: string[] = [];
@@ -59,6 +60,37 @@ async function readConfigFile(config: ServerConfig): Promise<Record<string, unkn
 }
 
 describe("openwork runtime config file", () => {
+  test("signed-out runtime file ignores cached org restrictions and preserves local models", async () => {
+    const { config } = await setup();
+    const provider = { ollama: { models: { "local-model": { name: "Local model" } } } };
+    await writeGlobalRuntimeOpencodeConfig(config, (current) => ({ ...current, provider }));
+    await writeManagedDesktopPolicy(config, {
+      allowCustomProviders: false, allowZenModel: false, execution: { commands: "deny" },
+    });
+    const snapshot = await readGlobalRuntimeOpencodeConfig(config);
+    expect(buildOpenworkRuntimeConfigObjectFromSnapshot(snapshot, true).enabled_providers).toEqual([]);
+    expect(buildOpenworkRuntimeConfigObjectFromSnapshot(snapshot, false).enabled_providers).toBeUndefined();
+    await writeOpenworkRuntimeConfigFile(config);
+    const rendered = await readConfigFile(config);
+    expect(rendered.enabled_providers).toBeUndefined();
+    expect(rendered.provider).toEqual(provider);
+    expect(rendered.permission).toEqual({});
+    expect((await readGlobalRuntimeOpencodeConfig(config)).managedPolicy).toEqual(snapshot.managedPolicy);
+
+    const den = Bun.serve({ port: 0, fetch: () => Response.json(snapshot.managedPolicy) });
+    cleanups.push(() => den.stop(true));
+    const policy = managedDesktopPolicy(config);
+    await policy.setSession({ baseUrl: `http://127.0.0.1:${den.port}`, token: "test-token", orgId: "test-org" });
+    await expect(policy.assert("provider", { providerID: "ollama" })).rejects.toMatchObject({ code: "organization_policy_denied" });
+    await writeOpenworkRuntimeConfigFile(config);
+    expect((await readConfigFile(config)).enabled_providers).toEqual([]);
+    await policy.clearSession();
+    await expect(policy.assert("provider", { providerID: "ollama" })).resolves.toBeUndefined();
+    await expect(policy.assert("model", { providerID: "ollama", modelID: "local-model" })).resolves.toBeUndefined();
+    await writeOpenworkRuntimeConfigFile(config);
+    expect(await readConfigFile(config)).toEqual(rendered);
+  });
+
   test("restricted runtime enables materialized org gateway rows, not ordinary custom providers", () => {
     const provider = { lpr_legacy: {}, ipr_gateway: {}, openwork: {}, personal: {}, opencode: {} };
     const restricted = buildOpenworkRuntimeConfigObjectFromSnapshot({
