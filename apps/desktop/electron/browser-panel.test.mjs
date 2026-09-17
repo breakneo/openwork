@@ -222,6 +222,8 @@ function createPanel(checkPolicy = async (_request) => {}, remoteDebugPort = 0) 
   const sent = [];
   const menus = [];
   const mainWindow = Object.assign(new EventEmitter(), {
+    contentSize: [1600, 1200],
+    getContentSize() { return this.contentSize; },
     contentView: {
       children,
       addChildView(view, index) {
@@ -826,8 +828,8 @@ test("geometry updates scale fractional edges at changing zoom without replacing
   assert.equal(views().length, 2, "geometry never allocates a new page");
 });
 
-test("stale zoom snapshots cannot move a view, replace cached bounds, change ownership, or reopen a hidden panel", async () => {
-  const { invoke, mainContents, onScreen } = createPanel();
+test("stale zoom snapshots detach old geometry without changing ownership or reopening a hidden panel", async () => {
+  const { invoke, mainContents, onScreen, panel } = createPanel();
   const a = invoke("openwork:browser:createTab", "about:blank", "A");
   invoke("openwork:browser:createTab", "about:blank", "B");
   const stale = { ...PANEL_BOUNDS, zoomFactor: 1 };
@@ -837,41 +839,210 @@ test("stale zoom snapshots cannot move a view, replace cached bounds, change own
   assert.equal(invoke("openwork:browser:show", stale, "B"), false);
   assert.equal(invoke("openwork:browser:bounds", stale), false);
   assert.equal(invoke("openwork:browser:state").visibleSessionId, "A");
-  assert.equal(onScreen(), view);
+  assert.equal(onScreen(), null);
   assert.deepEqual(view.getBounds(), PANEL_BOUNDS);
+  await invoke("openwork:browser:selectTab", a.tabId);
+  assert.equal(onScreen(), null, "a rejected snapshot invalidates cached placement");
 
   const latest = { x: 640, y: 48, width: 320, height: 600, zoomFactor: 1.25 };
   assert.equal(invoke("openwork:browser:bounds", latest), true);
+  assert.equal(onScreen(), view, "fresh bounds restore an intended-visible page");
   const nativeBounds = { x: 800, y: 60, width: 400, height: 750 };
   assert.deepEqual(view.getBounds(), nativeBounds);
-  assert.equal(invoke("openwork:browser:bounds", stale), false);
   mainContents.zoomFactor = 0.8;
   await invoke("openwork:browser:selectTab", a.tabId);
-  assert.deepEqual(view.getBounds(), nativeBounds, "reattachment never rescales cached CSS with a new zoom");
+  assert.equal(onScreen(), null, "attachment rejects geometry measured at a previous zoom");
+  assert.deepEqual(view.getBounds(), nativeBounds, "cached native bounds are never rescaled");
+  mainContents.zoomFactor = 1.25;
+  await invoke("openwork:browser:selectTab", a.tabId);
+  assert.equal(onScreen(), null, "returning to the old zoom does not revive invalidated geometry");
+  assert.equal(invoke("openwork:browser:bounds", latest), true);
+  assert.equal(onScreen(), view);
 
   invoke("openwork:browser:hide");
+  mainContents.zoomFactor = 0.8;
   assert.equal(invoke("openwork:browser:show", latest, "B"), false);
   assert.equal(onScreen(), null);
   assert.equal(invoke("openwork:browser:state").visibleSessionId, "A");
   assert.equal(invoke("openwork:browser:show", { ...latest, zoomFactor: 0.8 }, "B"), true);
   assert.notEqual(onScreen(), view);
   assert.equal(invoke("openwork:browser:state").visibleSessionId, "B");
+  panel.destroy();
 });
 
-test("unstamped geometry keeps the legacy CSS contract and malformed snapshots leave placement intact", () => {
-  const { invoke, mainContents, onScreen } = createPanel();
+test("unstamped CSS geometry is scaled and invalid snapshots detach until fresh bounds arrive", async () => {
+  const { invoke, mainContents, onScreen, views, children, panel } = createPanel();
   mainContents.zoomFactor = 1.25;
-  invoke("openwork:browser:createTab", "about:blank");
-  assert.equal(invoke("openwork:browser:show", PANEL_BOUNDS), true);
-  assert.deepEqual(onScreen().getBounds(), { x: 1000, y: 50, width: 500, height: 1125 });
+  const a = invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:createTab", "about:blank", "B");
+  assert.equal(invoke("openwork:browser:show", PANEL_BOUNDS, "A"), true);
+  const foreground = onScreen();
+  const background = views()[1];
+  const backgroundBounds = background.getBounds();
+  assert.deepEqual(foreground.getBounds(), { x: 1000, y: 50, width: 500, height: 1125 });
   const latest = { x: 80, y: 40, width: 240, height: 400 };
-  assert.equal(invoke("openwork:browser:bounds", latest), true);
   const expected = { x: 100, y: 50, width: 300, height: 500 };
-  for (const invalid of [null, { ...latest, x: NaN }, { ...latest, width: 0 },
+  for (const invalid of [undefined, null, {}, { ...latest, x: NaN }, { ...latest, y: Infinity },
+    { ...latest, x: "80" }, { ...latest, width: 0 }, { ...latest, height: -1 },
+    { ...latest, width: 0.01 }, { ...latest, height: 0.01 },
+    { ...latest, x: 1280 }, { ...latest, y: 960 }, { ...latest, x: -240 }, { ...latest, y: -400 },
+    { ...latest, width: Number.MAX_VALUE }, { ...latest, x: Number.MAX_VALUE, width: Number.MAX_VALUE },
     { ...latest, zoomFactor: Infinity }, { ...latest, zoomFactor: 0 }, { ...latest, zoomFactor: null }]) {
-    assert.equal(invoke("openwork:browser:bounds", invalid), false);
+    for (const channel of ["bounds", "show"]) {
+      assert.equal(invoke("openwork:browser:bounds", latest), true);
+      assert.equal(onScreen(), foreground);
+      assert.deepEqual(foreground.getBounds(), expected);
+      assert.equal(invoke(`openwork:browser:${channel}`, invalid), false);
+      assert.deepEqual(children, [], "invalid geometry cannot leave a stale native overlay");
+      await invoke("openwork:browser:selectTab", a.tabId);
+      assert.equal(onScreen(), null, "tab selection cannot reuse rejected geometry");
+      assert.deepEqual(background.getBounds(), backgroundBounds);
+      assert.equal(invoke("openwork:browser:state").backgroundWindowCount, 1);
+    }
+  }
+  assert.equal(invoke("openwork:browser:bounds", latest), true);
+  assert.equal(onScreen(), foreground);
+  assert.equal(views().length, 2);
+  assert.ok(views().every(view => !view.webContents.isDestroyed()));
+  panel.destroy();
+});
+
+test("native geometry clips scaled edges to window content and rechecks cached bounds after resize", async () => {
+  const { invoke, mainWindow, mainContents, onScreen, panel } = createPanel();
+  mainWindow.contentSize = [1000, 700];
+  mainContents.zoomFactor = 1.25;
+  const { tabId } = invoke("openwork:browser:createTab", "about:blank", "A");
+  for (const { bounds, expected } of [
+    { bounds: { x: -8.4, y: -4.4, width: 900, height: 620 }, expected: { x: 0, y: 0, width: 1000, height: 700 } },
+    { bounds: { x: -10, y: 20, width: 30, height: 40 }, expected: { x: 0, y: 25, width: 25, height: 50 } },
+    { bounds: { x: 0, y: 0, width: 800, height: 560 }, expected: { x: 0, y: 0, width: 1000, height: 700 } },
+    { bounds: { x: 760.4, y: 500.4, width: 100, height: 100 }, expected: { x: 951, y: 626, width: 49, height: 74 } },
+  ]) {
+    assert.equal(invoke("openwork:browser:show", { ...bounds, zoomFactor: 1.25 }, "A"), true);
     assert.deepEqual(onScreen().getBounds(), expected);
   }
+  const view = onScreen();
+  mainWindow.contentSize = [970, 650];
+  await invoke("openwork:browser:selectTab", tabId);
+  assert.equal(onScreen(), view);
+  assert.deepEqual(view.getBounds(), { x: 951, y: 626, width: 19, height: 24 });
+  mainWindow.contentSize = [500, 400];
+  await invoke("openwork:browser:selectTab", tabId);
+  assert.equal(onScreen(), null);
+  mainWindow.contentSize = [1000, 700];
+  await invoke("openwork:browser:selectTab", tabId);
+  assert.equal(onScreen(), null, "window growth cannot revive an invalidated rectangle");
+  assert.equal(invoke("openwork:browser:bounds", { x: 0, y: 0, width: 800, height: 560 }), true);
+  assert.equal(onScreen(), view);
+  mainWindow.contentSize = [0, 0];
+  assert.equal(invoke("openwork:browser:bounds", PANEL_BOUNDS), false);
+  assert.equal(onScreen(), null);
+  panel.destroy();
+});
+
+test("hidden panels require fresh show intent even after bounds, selection, or conversation changes", async () => {
+  const { invoke, onScreen, views, panel } = createPanel();
+  const { tabId } = invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const view = onScreen();
+  invoke("openwork:browser:setVisibleSession", "A");
+  assert.equal(onScreen(), view, "an unchanged conversation preserves current geometry");
+  invoke("openwork:browser:hide");
+  await invoke("openwork:browser:selectTab", tabId);
+  assert.equal(onScreen(), null);
+  assert.equal(invoke("openwork:browser:show", null, "A"), false);
+  assert.equal(invoke("openwork:browser:bounds", PANEL_BOUNDS), true);
+  await invoke("openwork:browser:selectTab", tabId);
+  assert.equal(onScreen(), null, "bounds alone do not reopen a hidden panel");
+  invoke("openwork:browser:setVisibleSession", "B");
+  invoke("openwork:browser:setVisibleSession", "A");
+  assert.equal(onScreen(), null);
+  const fresh = { x: 100, y: 50, width: 300, height: 500 };
+  assert.equal(invoke("openwork:browser:show", fresh, "A"), true);
+  assert.equal(onScreen(), view);
+  assert.deepEqual(view.getBounds(), fresh);
+  assert.equal(views().length, 1);
+  assert.equal(view.webContents.isDestroyed(), false);
+  panel.destroy();
+});
+
+test("renderer reload and crash remove native placement without destroying the browser document", async () => {
+  const { invoke, mainContents, onScreen, panel } = createPanel();
+  const { tabId } = invoke("openwork:browser:createTab", "about:blank", "A");
+  await flush();
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const view = onScreen();
+  mainContents.emit("did-start-navigation", {}, "http://localhost/frame", false, false);
+  mainContents.emit("did-start-navigation", {}, "http://localhost/#route", true, true);
+  mainContents.emit("did-start-navigation", {}, "https://example.com/rerouted", false, true);
+  assert.equal(onScreen(), view, "subframe, same-document and canceled navigation retain the container");
+  for (const event of ["did-navigate", "render-process-gone"]) {
+    mainContents.emit(event, {}, "http://localhost/", false, true);
+    assert.equal(onScreen(), null, "the old renderer cannot leave a browser overlay behind");
+    invoke("openwork:browser:bounds", PANEL_BOUNDS);
+    await invoke("openwork:browser:selectTab", tabId);
+    assert.equal(onScreen(), null, "a new mounted container must explicitly show the page");
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+    assert.equal(onScreen(), view);
+    assert.equal(view.webContents.isDestroyed(), false);
+  }
+  panel.destroy();
+});
+
+test("geometry IPC accepts only the main renderer main frame without mutating state for other senders", async () => {
+  const { invoke, emit, mainContents, onScreen, views, panel } = createPanel();
+  const a = invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:createTab", "about:blank", "B");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const view = onScreen();
+  const before = invoke("openwork:browser:state");
+  for (const event of [
+    { sender: views()[1].webContents, senderFrame: views()[1].webContents.mainFrame },
+    { sender: views()[0].webContents, senderFrame: mainContents.mainFrame },
+    { sender: mainContents, senderFrame: {} },
+    { sender: mainContents },
+  ]) {
+    for (const [channel, ...args] of [
+      ["show", { x: 0, y: 0, width: 200, height: 200 }, "B"],
+      ["show", null, "B"], ["hide"], ["setVisibleSession", "B"],
+      ["bounds", { x: 0, y: 0, width: 200, height: 200 }], ["bounds", null],
+    ]) {
+      assert.equal(emit(`openwork:browser:${channel}`, event, ...args), false);
+      assert.equal(onScreen(), view);
+      assert.deepEqual(invoke("openwork:browser:state"), before);
+    }
+  }
+  await invoke("openwork:browser:selectTab", a.tabId);
+  assert.equal(onScreen(), view, "untrusted geometry cannot invalidate the accepted cache");
+  assert.deepEqual(view.getBounds(), PANEL_BOUNDS);
+  invoke("openwork:browser:hide");
+  assert.equal(emit("openwork:browser:show", { sender: mainContents, senderFrame: {} }, PANEL_BOUNDS, "B"), false);
+  assert.equal(onScreen(), null);
+  assert.equal(invoke("openwork:browser:show", PANEL_BOUNDS, "A"), true);
+  panel.destroy();
+});
+
+test("host clipping or invalidation asks preload and the renderer to resend identical fresh bounds", async (t) => {
+  const { invoke, mainWindow, mainContents, onScreen, panel } = createPanel();
+  const { tabId } = invoke("openwork:browser:createTab", "about:blank", "A");
+  const browser = await loadPreload(t);
+  controls.invoke = async (channel, ...args) => invoke(channel, ...args);
+  t.mock.method(mainContents, "send", (channel, payload) => ipcRenderer.emit(channel, {}, payload));
+  let invalidations = 0;
+  window.addEventListener("openwork:browser:bounds-invalidated", () => { invalidations++; });
+  await browser.show(PANEL_BOUNDS, "A");
+  const view = onScreen();
+  for (const width of [1000, 400]) {
+    const before = invalidations;
+    mainWindow.contentSize = [width, 1200];
+    await invoke("openwork:browser:selectTab", tabId);
+    assert.ok(invalidations > before, "host geometry changes invalidate both renderer caches");
+    mainWindow.contentSize = [1600, 1200];
+    await browser.setBounds(PANEL_BOUNDS);
+    assert.equal(onScreen(), view);
+    assert.deepEqual(view.getBounds(), PANEL_BOUNDS, "same-rectangle recovery must reach the host");
+  }
+  panel.destroy();
 });
 
 test("preload deduplicates geometry including zoom, invalidates after applied zoom, and preserves show/hide intent", async (t) => {
@@ -1048,8 +1219,8 @@ test("navigating a background conversation's tab reports its owner instead of ta
   assert.deepEqual(opens.at(-1), { ownerSessionId: "B" }, "later navigation does not override an artifact selection");
 });
 
-test("switching to the background conversation swaps its tab on screen and restores a normal viewport", async () => {
-  const { invoke, onScreen, commands, children, views } = createPanel();
+test("switching conversations detaches before surfacing and waits for fresh show geometry", async (t) => {
+  const { invoke, onScreen, commands, children, views, panel } = createPanel();
   invoke("openwork:browser:show", PANEL_BOUNDS, "A");
   invoke("openwork:browser:createTab", "https://a.example", "A");
   const aView = onScreen();
@@ -1058,13 +1229,19 @@ test("switching to the background conversation swaps its tab on screen and resto
   await flush();
   commands(aView).length = 0;
   commands(bView).length = 0;
+  const loads = views().map(view => [...view.webContents.loads]);
+  const setBackgroundBounds = aView.setBounds.bind(aView);
+  t.mock.method(aView, "setBounds", (bounds) => {
+    assert.deepEqual(children, [], "detach the foreground before background surfacing resizes it");
+    setBackgroundBounds(bounds);
+  });
 
   invoke("openwork:browser:setVisibleSession", "B");
+  assert.deepEqual(children, [], "neither conversation may paint at the previous rectangle");
   await flush();
 
-  assert.equal(onScreen(), bView, "B's tab takes the screen");
-  assert.deepEqual(children, [bView], "the previous foreground view detaches from the window");
-  assert.deepEqual(bView.getBounds(), PANEL_BOUNDS);
+  assert.equal(onScreen(), null);
+  assert.deepEqual(bView.getBounds(), { x: 0, y: 0, width: 1280, height: 800 });
   assert.deepEqual(commands(bView), FOREGROUND_SEQUENCE, "B's emulation is undone before it is shown");
   assert.equal(bView.webContents.debugger.isAttached(), false, "our session is released for the user-driven reset path");
   assert.deepEqual(commands(aView), BACKGROUND_SEQUENCE, "A's tab now keeps painting in the background");
@@ -1072,6 +1249,17 @@ test("switching to the background conversation swaps its tab on screen and resto
   const state = invoke("openwork:browser:state");
   assert.equal(state.visibleSessionId, "B");
   assert.equal(state.activeTabId, state.activeTabIdByOwner.B);
+  await invoke("openwork:browser:selectTab", state.activeTabId);
+  assert.equal(onScreen(), null);
+  const fresh = { x: 400, y: 80, width: 600, height: 700 };
+  assert.equal(invoke("openwork:browser:bounds", fresh), true);
+  assert.equal(onScreen(), null, "a session switch requires fresh show intent, not only bounds");
+  assert.equal(invoke("openwork:browser:show", fresh, "B"), true);
+  assert.deepEqual(children, [bView]);
+  assert.deepEqual(bView.getBounds(), fresh);
+  assert.deepEqual(views().map(view => view.webContents.loads), loads);
+  assert.ok(views().every(view => !view.webContents.isDestroyed()));
+  panel.destroy();
 });
 
 test("closing a conversation's last tab tells only that conversation its panel is empty", async () => {
@@ -1146,6 +1334,7 @@ test("failed navigation rolls back its allocation while another owner's page sur
   const opening = invoke("openwork:browser:openUrl", "http://127.0.0.1:1", "builtin", { sessionId: "B" });
   await flush();
   invoke("openwork:browser:setVisibleSession", "B");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
   approve();
   await assert.rejects(opening, { code: "browser_operation_failed" });
   invoke("openwork:browser:setVisibleSession", "A");
@@ -1166,7 +1355,9 @@ test("tabs created without a conversation stay shared and behave as before", asy
   assert.ok(onScreen(), "a shared tab is on screen");
 
   invoke("openwork:browser:setVisibleSession", "A");
-  assert.ok(onScreen(), "a shared tab stays on screen for every conversation");
+  assert.equal(onScreen(), null, "shared tabs also wait for the current conversation's geometry");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  assert.ok(onScreen(), "a shared tab remains available for every conversation");
   invoke("openwork:browser:closeAllTabs");
   assert.deepEqual(messages("openwork:browser:panel-closed"), [{ ownerSessionId: null }]);
 });
@@ -1761,6 +1952,7 @@ test("automation open waits for its owner's consent and then reuses only that ow
   assert.equal(onScreen(), foreground);
   assert.deepEqual(views()[1].webContents.loads, [], "background approval sends no destination load");
   invoke("openwork:browser:setVisibleSession", "B");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
   approve();
   const opened = await opening;
   assert.deepEqual(opened, {
@@ -1768,6 +1960,7 @@ test("automation open waits for its owner's consent and then reuses only that ow
     tab_id: invoke("openwork:browser:state").activeTabIdByOwner.B, url: "https://b.example/", owner_session_id: "B", visible: true,
   });
   invoke("openwork:browser:setVisibleSession", "A");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
   assert.equal(onScreen(), foreground);
   assert.deepEqual(views()[1].webContents.loads, ["https://b.example/"]);
   assert.equal((await panel.browserTask({ sessionId: "B", operation: "open", args: { url: opened.url } })).tabId, opened.tab_id);
@@ -1958,6 +2151,7 @@ test("human link clicks open without control state but later agent reads require
     assert.deepEqual(views()[0].webContents.destinations, [LINK.url]);
     assert.ok(policies.some(request => request.url === LINK.url && request.external === false));
     invoke("openwork:browser:setVisibleSession", "A");
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
     mockPage(views()[0].webContents);
     let reads = 0;
     const read = views()[0].webContents.executeJavaScriptInIsolatedWorld;
@@ -2013,6 +2207,7 @@ test("automated main-window navigation fallback requires consent and retains its
     assert.deepEqual(views()[0].webContents.destinations, []);
     assert.equal(approve(true, tab.id), false, "another conversation cannot authorize the destination");
     invoke("openwork:browser:setVisibleSession", "A");
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
     approve(allowed, tab.id);
     await flush();
     assert.deepEqual(views()[0].webContents.destinations, allowed ? ["https://linked.example/private"] : []);
@@ -2500,6 +2695,7 @@ test("closing one owned tab preserves consent but closing the last live tab drop
   assert.ok(b.browserApproval);
   assert.equal(approve(true, b.id), false);
   invoke("openwork:browser:setVisibleSession", "B");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
   approve();
   assert.equal((await other).ok, true);
   invoke("openwork:browser:closeTab", sibling.tabId);
@@ -2507,6 +2703,7 @@ test("closing one owned tab preserves consent but closing the last live tab drop
   const reopened = open("A", "https://first.example/");
   await flush();
   invoke("openwork:browser:setVisibleSession", "A");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
   assert.equal(invoke("openwork:browser:state").tabs.at(-1).browserApproval?.title, "Allow browser control for this thread?");
   approve();
   assert.equal((await reopened).ok, true);

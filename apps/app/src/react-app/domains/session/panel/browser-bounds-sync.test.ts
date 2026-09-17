@@ -1,9 +1,81 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { createBrowserBoundsSync, type BrowserBounds } from "./browser-bounds-sync";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { computeBrowserBounds, createBrowserBoundsSync, type BrowserBounds } from "./browser-bounds-sync";
+
+GlobalRegistrator.register({ width: 1200, height: 1000 });
 
 const BOUNDS = { x: 800, y: 40, width: 400, height: 900 };
+
+// Happy DOM has styles and ancestry but no layout engine. Supply rectangles and
+// client boxes explicitly; these tests do not claim real Electron rendering.
+function layout(el: HTMLElement, bounds: BrowserBounds, border = 0) {
+  el.getBoundingClientRect = () => new DOMRect(bounds.x, bounds.y, bounds.width, bounds.height);
+  Object.defineProperties(el, {
+    offsetWidth: { configurable: true, value: bounds.width },
+    offsetHeight: { configurable: true, value: bounds.height },
+    clientLeft: { configurable: true, value: border },
+    clientTop: { configurable: true, value: border },
+    clientWidth: { configurable: true, value: bounds.width - 2 * border },
+    clientHeight: { configurable: true, value: bounds.height - 2 * border },
+  });
+}
+
+function containerFixture() {
+  const shell = document.createElement("div");
+  const content = document.createElement("div");
+  shell.style.overflowX = "hidden";
+  shell.style.overflowY = "hidden";
+  shell.append(content);
+  document.body.append(shell);
+  layout(shell, BOUNDS);
+  layout(content, BOUNDS);
+  return { shell, content };
+}
+
+test("native placement intersects clipping ancestors, borders, and the viewport instead of spilling into chat", () => {
+  const { shell, content } = containerFixture();
+  try {
+    assert.deepEqual(computeBrowserBounds(content), BOUNDS);
+    layout(content, { x: 600, y: -20, width: 900, height: 1200 });
+    assert.deepEqual(computeBrowserBounds(content), BOUNDS, "oversized child stays in its pane");
+    layout(shell, BOUNDS, 2);
+    assert.deepEqual(computeBrowserBounds(content), { x: 802, y: 42, width: 396, height: 896 });
+    shell.style.overflowX = "visible";
+    shell.style.overflowY = "visible";
+    assert.deepEqual(computeBrowserBounds(content), { x: 600, y: 0, width: 600, height: 1000 });
+    shell.style.contain = "paint";
+    assert.deepEqual(computeBrowserBounds(content), { x: 802, y: 42, width: 396, height: 896 });
+  } finally {
+    shell.remove();
+  }
+});
+
+test("a clipped, hidden, or detached container cannot keep the native browser above the app", async () => {
+  const { shell, content } = containerFixture();
+  const f = fixture();
+  try {
+    for (const css of ["visibility: hidden", "display: none", "opacity: 0", "content-visibility: hidden"]) {
+      f.sync.sync(computeBrowserBounds(content), 2, false);
+      await setImmediate();
+      const before = f.hides;
+      shell.style.cssText = css;
+      assert.equal(computeBrowserBounds(content), null, css);
+      f.sync.sync(computeBrowserBounds(content), 2, false);
+      assert.equal(f.hides, before + 1);
+      shell.style.cssText = "overflow-x: hidden; overflow-y: hidden";
+    }
+    layout(content, { ...BOUNDS, x: 1400 });
+    assert.equal(computeBrowserBounds(content), null, "fully clipped child is hidden");
+    layout(content, BOUNDS);
+    shell.remove();
+    assert.equal(computeBrowserBounds(content), null, "detached owner has no native placement");
+  } finally {
+    f.sync.dispose();
+    shell.remove();
+  }
+});
 
 function deferred() {
   let resolve!: (value: boolean) => void;
