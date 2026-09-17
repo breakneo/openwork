@@ -81,13 +81,17 @@ function VirtualGroups<T>(props: ProgressiveMessageListProps<T>) {
   const syncOffset = React.useRef<(() => void) | null>(null)
   const observeOffset = React.useCallback((instance: ThreadVirtualizer, callback: (offset: number, isScrolling: boolean) => void) => {
     const element = instance.scrollElement
+    let active = true
     const sync = () => {
-      if (element && element.scrollTop !== instance.scrollOffset) callback(element.scrollTop, false)
+      if (active && element && element.scrollTop !== instance.scrollOffset) callback(element.scrollTop, false)
     }
     syncOffset.current = sync
     sync()
-    const unsubscribe = observeElementOffset(instance, callback)
+    const unsubscribe = observeElementOffset(instance, (offset, isScrolling) => {
+      if (active) callback(element?.scrollTop ?? offset, isScrolling)
+    })
     return () => {
+      active = false
       unsubscribe?.()
       if (syncOffset.current === sync) syncOffset.current = null
     }
@@ -173,8 +177,6 @@ function VirtualGroups<T>(props: ProgressiveMessageListProps<T>) {
     paddingEnd: trailing > 0 ? trailing + GROUP_GAP : 0,
     initialRect: { width, height: viewport?.scrollRef.current?.clientHeight || 600 },
     initialOffset,
-    anchorTo: "start",
-    followOnAppend: false,
     useFlushSync: false,
   })
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => false

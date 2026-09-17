@@ -7,6 +7,7 @@ import type { MessageListViewport } from "../src/components/chat/progressive-mes
 
 const ownedDom = typeof window === "undefined"
 if (ownedDom) GlobalRegistrator.register({ url: "http://localhost/" })
+const tanstack = await import("@tanstack/react-virtual")
 const { ProgressiveMessageList } = await import("../src/components/chat/progressive-message-list")
 const { useSessionScrollController } = await import("../src/react-app/domains/session/surface/scroll-controller")
 const { useSessionScrollStore, flushSessionScrollState } = await import("../src/react-app/domains/session/surface/scroll-store")
@@ -249,6 +250,28 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
 }
 
 describe("progressive whole-group rendering", () => {
+  test("ignores a queued TanStack scroll reset after the viewport disconnects", async () => {
+    const observe = tanstack.observeElementOffset
+    let notify: (() => void) | undefined
+    let readOffset: (() => number | null) | undefined
+    spyOn(tanstack, "observeElementOffset").mockImplementation((instance, callback) => {
+      notify = () => callback(125, false)
+      readOffset = () => instance.scrollOffset
+      return observe(instance, callback)
+    })
+    const view = fixture(groups())
+    await view.render()
+    await act(async () => view.scroll(40 * 248 + 25))
+    await batch()
+    expect(readOffset?.()).toBe(40 * 248 + 25)
+    await view.unmount()
+    const offset = readOffset?.()
+    await act(async () => notify?.())
+    expect(readOffset?.()).toBe(offset)
+    expect(frames.size).toBe(0)
+    expect(observers.size).toBe(0)
+  })
+
   test.each([0, 100])("a hidden first group does not move the list origin (header height: %s)", async (headerHeight) => {
     const view = fixture(groups(1600), { anchorMessageId: "m0" }, false, false, 200, 1500, undefined, { headerHeight })
     await view.render(undefined, {}, (group) => group.id === "g0" ? null : <div data-message-id={group.messages[0].id}>{group.id}</div>, undefined, "m0")
