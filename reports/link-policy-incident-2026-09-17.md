@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and focused local verification are complete. Exact-ref Daytona verification, inspected real-Electron screenshots, evidence publication, and live pull-request gates remain pending until the signed commit is pushed.
+Product verification passed on signed runtime-changing head `45d6e1ee0a36f31faf4838df0e8385d8fde5faac`. Pull request [#5123](https://github.com/different-ai/openwork/pull/5123) is open; evidence publication and live Warden, CodeQL, and CI gates remain to be inspected without treating pending checks as passed.
 
 ## User-visible issue
 
@@ -43,10 +43,22 @@ The existing identity-generation fence remains authoritative. A policy read that
 | Desktop Electron typecheck | `pnpm --filter @openwork/desktop typecheck:electron` | Passed |
 | Renderer typecheck | `pnpm --filter @openwork/app typecheck` | Passed |
 | Server typecheck and focused policy tests | Focused `@openwork/server` commands | Passed |
-| Exact-ref Daytona product run | Requires a reviewed commit/ref because Daytona checks out a pushed ref | Pending |
-| Four inspected real-Electron screenshots: sign-in, denial, outage, unmanaged external open | Must be captured from the isolated test Electron after the signed ref is available | Pending |
+| Exact-ref Daytona product run | `OPENWORK_EVAL_REF=45d6e1ee0a36f31faf4838df0e8385d8fde5faac`; one trusted-click journey | Passed |
+| Retained-policy sign-out dialog and Cloud Account handoff | Isolated managed Electron; native **Sign in** selected, then `#/settings/cloud-account` asserted | Passed |
+| Genuine organization denial with no bypass | Isolated managed Electron against a restrictive Den policy | Passed |
+| Den outage and bounded fresh Retry | Isolated managed Electron; first dialog had **Retry / Cancel**, second had only **Cancel** | Passed |
+| Affirmatively unmanaged external open | Fresh isolated Electron and OS-default Chromium shown side by side at `https://example.com/` | Passed |
 
-The first Daytona diagnostic was rejected as evidence because the uncommitted product change was not present in its `dev` checkout. It was useful only to repair a wrapped-link hit target in the spec. The corrected spec then passed against the working tree in the isolated local lane.
+The first Daytona diagnostic was rejected as evidence because the uncommitted product change was not present in its `dev` checkout. A later post-commit diagnostic was also rejected because it omitted `OPENWORK_EVAL_REF` and explicitly verified `dev` at `030be3e313aad4d73a6dbfe54a842284359c75fc`. The exact-ref run passed after pinning the signed commit.
+
+## Inspected screenshots
+
+- [Retained-policy sign-in dialog](https://b8tgacyg507ru26g.public.blob.vercel-storage.com/pr-evidence/link-policy-45d6e1ee/link-policy-sign-in-JbD6HhH16KS4pqm13wNM7YGtQmoiUw.png)
+- [Genuine organization-policy denial](https://b8tgacyg507ru26g.public.blob.vercel-storage.com/pr-evidence/link-policy-45d6e1ee/link-policy-denial-clean-spK6gQXOHCFafVc71RAgDsmAEwtDmk.png)
+- [Link-policy service outage with Retry](https://b8tgacyg507ru26g.public.blob.vercel-storage.com/pr-evidence/link-policy-45d6e1ee/link-policy-outage-tPig3JkIt7bL62YVJzc10FSCCsg7I4.png)
+- [Affirmatively unmanaged default-browser handoff](https://b8tgacyg507ru26g.public.blob.vercel-storage.com/pr-evidence/link-policy-45d6e1ee/link-policy-unmanaged-external-UgqizwyMh3Vvgayqi3g7zWf9YrssC7.png)
+
+All four frames were captured from isolated real Electron at the pushed product head, inspected for healthy dimensions, meaningful pixels, clipping, overlap, unrelated overlays, and personal information, then uploaded to public evidence storage. A discarded diagnostic frame that exposed an unconsumed fixture handoff code was deleted and was not published.
 
 ## Safety properties not changed
 
@@ -57,6 +69,6 @@ The first Daytona diagnostic was rejected as evidence because the uncommitted pr
 - No change to explicit link context-menu choices.
 - No use of a shared desktop profile, authentication state, or protocol registration.
 
-## Remaining proof
+## Remaining gates
 
-Create and push the signed commit, run the focused spec on Daytona against that exact ref, exercise and inspect all three managed native-dialog states plus the affirmative-unmanaged external open, publish ambient evidence, and attach the four uploaded screenshots to the pull request. Do not treat pending Warden, CodeQL, or CI checks as passed.
+Publish all useful green and diagnostic-red test evidence to the pull request, rerun the focused Daytona journey on the final report-only head, and inspect live Warden, CodeQL, and CI outcomes. Do not treat a queued or pending check as passed.
