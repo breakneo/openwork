@@ -13,7 +13,7 @@ const test = spec.world(memberRoutingWeb, {
 test("a member creates, edits and reloads a prompt router in Den", async ({ world, user, probe, step, evidence }) => {
   await step("create a router using accessible model choices", async () => {
     await user.see({ role: "heading", text: "Model routing" }, { timeoutMs: 90_000 });
-    await user.see({ text: "No routers yet" }, { timeoutMs: 60_000 });
+    await user.see({ text: "No routers yet. Create a router to match prompt categories to models." }, { timeoutMs: 60_000 });
     await user.notSee({ role: "link", label: "Gateway" });
     await user.screenshot();
     await user.click({ role: "button", label: "Create router" });
@@ -24,11 +24,11 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     await user.click({ role: "option", label: world.modelLabels[0] });
     await user.click({ role: "button", label: "Model 2" });
     await user.click({ role: "option", label: world.modelLabels[1] });
-    await user.see({ text: "Prompt text is sent to Jev to choose a model" });
+    await user.see({ text: "I agree to send the latest user text to Jev to choose a model." });
     expect(await world.savedRouters()).toHaveLength(0);
     await user.click({ role: "switch", label: "Acknowledge prompt sharing with Jev" });
     await user.click({ role: "button", label: "Save router" });
-    await user.see({ text: "Router saved. Not live-verified." }, { timeoutMs: 30_000 });
+    await user.see({ text: "Saved" }, { timeoutMs: 30_000 });
     expect(await world.savedRouters()).toMatchObject([{ name: "Daily work", revision: 1 }]);
     await user.screenshot();
   });
@@ -38,11 +38,11 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     await user.click({ text: "Advanced" });
     await user.type({ label: "Minimum confidence" }, "0.75", { replace: true });
     await user.click({ role: "button", label: "Save router" });
-    await user.see({ text: "Router saved. Not live-verified." }, { timeoutMs: 30_000 });
+    await user.see({ text: "Saved" }, { timeoutMs: 30_000 });
     await user.reload();
     await user.see({ role: "button", label: "Edit Daily work revised" }, { timeoutMs: 60_000 });
     await user.click({ role: "button", label: "Edit Daily work revised" });
-    await user.see({ role: "heading", text: "Edit router" }, { timeoutMs: 30_000 });
+    await user.see({ label: "Name" }, { editable: true, timeoutMs: 30_000 });
     await user.click({ text: "Advanced" });
     const displayedValues = await probe.eval(() => Array.from(document.querySelectorAll<HTMLInputElement>('form[aria-label="Router editor"] input')).map(input => input.value));
     expect(displayedValues).toEqual(["Daily work revised", "Code review and debugging", "Clear business writing", "0.75"]);
@@ -80,5 +80,20 @@ test("a member creates, edits and reloads a prompt router in Den", async ({ worl
     expect(unsupported).toMatchObject({ status: "incomplete", reason: "Verification selection is unsupported or uncertain", modelCalls: 1 });
     await user.screenshot();
     evidence.recordAssertionEvidence("Member browser authoring persists across reload", "Created and revised through browser controls against real Den; reload retained revision 2 and category edits, provider management stayed absent, no live verification claimed.", true);
+  });
+  await step("revoked models remain visible and the owner can disable the router", async () => {
+    await world.revokeModelAccess();
+    await user.reload();
+    await user.see({ text: "No accessible OpenAI-compatible models. Ask your workspace administrator to grant model access." });
+    await user.see({ text: "Model unavailable" });
+    await user.screenshot();
+    await user.click({ role: "button", label: "Edit Daily work revised" });
+    await user.see({ label: "Name" }, { editable: true });
+    await user.click({ role: "switch", label: "Router active" });
+    await user.click({ role: "button", label: "Save router" });
+    await user.see({ text: "Saved" }, { timeoutMs: 30_000 });
+    expect(await world.savedRouters()).toMatchObject([{ status: "disabled", revision: 3 }]);
+    await user.screenshot();
+    evidence.recordAssertionEvidence("Unavailable targets do not prevent disabling", "Revoked grants remain visible as unavailable; the original member disabled the same router through browser controls without substituting a model.", true);
   });
 });

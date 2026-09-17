@@ -36,7 +36,7 @@ export function GatewayRoutingScreen() {
   </section>;
 }
 
-function RoutingWorkspace({ orgId }: { orgId: string }) {
+export function RoutingWorkspace({ orgId }: { orgId: string }) {
   const query = useGatewayRouters(orgId);
   const [editor, setEditor] = useState<{ key: number; router: GatewayRouterSummary | null } | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
@@ -61,12 +61,12 @@ function RoutingWorkspace({ orgId }: { orgId: string }) {
   }
   const { routers, targets } = query.data;
   return <>
-    {query.error ? <div role="alert"><DenNotice tone="error" message="Could not refresh model routing. Showing the last loaded settings." /><DenButton variant="secondary" onClick={() => void query.refetch()}>Retry</DenButton></div> : null}
+    {query.error ? <div role="alert" className="flex flex-col items-start gap-2"><DenNotice tone="error" message="Could not refresh model routing. Showing the last loaded settings." /><p className="text-muted-foreground">Last loaded <time dateTime={new Date(query.dataUpdatedAt).toISOString()}>{new Date(query.dataUpdatedAt).toLocaleString()}</time></p><DenButton variant="secondary" onClick={() => void query.refetch()}>Retry</DenButton></div> : null}
     {error ? <DenNotice tone="error" message={error} /> : null}
     {!targets.length ? <p className="flex items-center gap-2"><LockKeyhole aria-hidden="true" className="size-4" />No accessible OpenAI-compatible models. Ask your workspace administrator to grant model access.</p> : null}
     {editor ? <RouterEditor key={editor.key} orgId={orgId} initial={editor.router} targets={targets}
       onSaved={() => void query.refetch()} onClose={() => { generation.current++; setEditor(null); }} /> : <>
-      <div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">{routers.length ? `${routers.length} saved routers` : "No routers yet"}</span>
+      <div className="flex flex-col gap-3 border-b border-border py-3 sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">{routers.length ? `${routers.length} saved routers` : "No routers yet. Create a router to match prompt categories to models."}</span>
         <DenButton disabled={!targets.length} onClick={() => { const key = ++generation.current; setOpening(null); setEditor({ key, router: null }); }}>Create router</DenButton></div>
       <div className="divide-y divide-border" aria-label="Saved routers">{routers.map(router => <div key={router.id} className="flex min-h-12 items-center gap-4 py-3">
         <span className="min-w-0 flex-1 truncate font-medium">{router.name}</span><span className="text-muted-foreground">{router.status === "active" ? "Active" : "Disabled"}</span>
@@ -105,7 +105,7 @@ export function RouterEditor({ orgId, initial, targets, onSaved, onClose }: {
       const result = await saveRouter(orgId, definition, saved);
       setSaved(result);
       // Only advance server metadata: a response must never overwrite newer typing.
-      setNotice(version === edits.current ? "Router saved. Not live-verified." : "Router saved. You have newer unsaved changes.");
+      setNotice(version === edits.current ? "Saved" : "Saved with newer unsaved changes");
       onSaved();
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not save this router. Try again."); }
     finally { setBusy(false); }
@@ -118,9 +118,8 @@ export function RouterEditor({ orgId, initial, targets, onSaved, onClose }: {
     finally { setBusy(false); }
   }
   return <form className="flex flex-col gap-4" aria-label="Router editor" onSubmit={event => { event.preventDefault(); if (!busy) void save(); }}>
-    <div className="flex items-center justify-between"><h2 className="font-semibold">{saved ? "Edit router" : "Create router"}</h2><DenButton type="button" variant="ghost" disabled={busy} onClick={onClose}>Close editor</DenButton></div>
-    <label className="flex flex-col gap-2">Name<DenInput value={draft.name} onChange={event => change({ ...draft, name: event.target.value })} required maxLength={100} /></label>
-    <div className="flex items-center justify-between gap-3"><span>Active</span><DenSwitch aria-label="Router active" checked={draft.status === "active"} onChange={active => change({ ...draft, status: active ? "active" : "disabled" })} /></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="sr-only">{saved ? "Edit router" : "Create router"}</h2><span className="text-muted-foreground">{saved ? <>Last saved <time dateTime={saved.updatedAt}>{new Date(saved.updatedAt).toLocaleString()}</time></> : "Unsaved router"}</span><DenButton type="button" variant="ghost" disabled={busy} onClick={onClose}>Close editor</DenButton></div>
+    <label className="grid min-h-12 items-center gap-2 border-b border-border py-0.5 sm:grid-cols-[1fr_2fr]">Name<DenInput value={draft.name} onChange={event => change({ ...draft, name: event.target.value })} required maxLength={100} /></label>
     <fieldset className="flex min-w-0 flex-col gap-3"><legend className="mb-3 font-medium">Prompt categories</legend>
       {draft.routes.map((route, index) => {
         const selected = targets.findIndex(target => target.inferenceProviderId === route.inferenceProviderId && target.model === route.model);
@@ -135,9 +134,12 @@ export function RouterEditor({ orgId, initial, targets, onSaved, onClose }: {
       })}
       <div><DenButton type="button" variant="secondary" disabled={draft.routes.length >= 12} onClick={() => change({ ...draft, routes: [...draft.routes, newRouterCategory()] })}>Add category</DenButton></div>
     </fieldset>
-    <div className="flex flex-col gap-2"><label htmlFor="router-fallback">Fallback category</label><DenSelect id="router-fallback" aria-label="Fallback category" value={draft.fallbackRouteId} onChange={event => change({ ...draft, fallbackRouteId: event.target.value })}><option value="" disabled>Choose a fallback</option>{draft.routes.map((route, index) => <option key={route.id} value={route.id}>{route.description || `Category ${index + 1}`}</option>)}</DenSelect></div>
+    <div className="grid min-h-12 items-center gap-2 border-b border-border py-0.5 sm:grid-cols-[1fr_2fr]"><label htmlFor="router-fallback">Fallback category</label><DenSelect id="router-fallback" aria-label="Fallback category" value={draft.fallbackRouteId} onChange={event => change({ ...draft, fallbackRouteId: event.target.value })}><option value="" disabled>Choose a fallback</option>{draft.routes.map((route, index) => <option key={route.id} value={route.id}>{route.description || `Category ${index + 1}`}</option>)}</DenSelect></div>
     <Disclosure title="Advanced"><label className="flex flex-col gap-2">Minimum confidence<DenInput type="number" min="0" max="1" step="0.01" value={confidence} onChange={event => { edits.current++; setNotice(""); setConfidence(event.target.value); }} /></label><p className="text-muted-foreground">Below this confidence, requests use the fallback category.</p></Disclosure>
-    <div className="flex items-center justify-between gap-4"><p id="router-sharing">Prompt text is sent to Jev to choose a model</p><DenSwitch aria-label="Acknowledge prompt sharing with Jev" checked={consent} onChange={setConsent} /></div>
+    <div className="flex flex-col divide-y divide-border">
+      <div className="flex min-h-12 flex-col justify-center gap-2 py-2 sm:flex-row sm:items-center sm:justify-between"><p id="router-sharing">I agree to send the latest user text to Jev to choose a model.</p><DenSwitch aria-label="Acknowledge prompt sharing with Jev" checked={consent} onChange={setConsent} /></div>
+      <div className="flex min-h-12 flex-col justify-center gap-2 py-2 sm:flex-row sm:items-center sm:justify-between"><span>Router active</span><DenSwitch aria-label="Router active" checked={draft.status === "active"} onChange={active => change({ ...draft, status: active ? "active" : "disabled" })} /></div>
+    </div>
     {error ? <div role="alert"><DenNotice tone="error" message={error} /></div> : null}
     {notice ? <p role="status">{notice}</p> : null}
     <div className="flex items-center gap-3"><DenButton type="submit" disabled={busy || (draft.status === "active" && !consent)}>{busy ? "Saving…" : "Save router"}</DenButton>

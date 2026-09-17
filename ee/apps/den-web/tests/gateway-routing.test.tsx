@@ -2,14 +2,39 @@ import { expect, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { GatewayRouterSummary } from "@openwork/types/den/gateway-router";
 import * as requests from "../app/(den)/_lib/den-flow";
 import { ORG_SCOPE_HEADER } from "../app/(den)/_lib/org-scope";
 import { newRouter, routerRequest, saveRouter, validateRouter } from "../app/(den)/dashboard/_components/gateway-router-data";
-import { RouterEditor } from "../app/(den)/dashboard/_components/gateway-routing-screen";
+import { RouterEditor, RoutingWorkspace } from "../app/(den)/dashboard/_components/gateway-routing-screen";
 
 const suffix = "01arz3ndektsv4rrffq69g5fav";
 const targets = [{ inferenceProviderId: `ipr_${suffix}`, model: `gwm_${suffix}_${suffix}_${suffix}`, name: "Test model", providerName: "Test provider" }];
+
+test("empty, blocked and refresh-error states keep the next action visible", async () => {
+  GlobalRegistrator.register();
+  Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const request = spyOn(requests, "requestJson").mockResolvedValue({ response: new Response(null, { status: 500 }), payload: null, text: "" });
+  try {
+    client.setQueryData(["gateway-routers", "org-test"], { routers: [], targets });
+    await act(async () => root.render(<QueryClientProvider client={client}><RoutingWorkspace orgId="org-test" /></QueryClientProvider>));
+    expect(container.textContent).toContain("No routers yet. Create a router to match prompt categories to models.");
+    expect([...container.querySelectorAll("button")].find(button => button.textContent === "Create router")?.disabled).toBe(false);
+    await act(async () => { client.setQueryData(["gateway-routers", "org-test"], { routers: [], targets: [] }); await new Promise(resolve => setTimeout(resolve, 10)); });
+    expect(container.textContent).toContain("Ask your workspace administrator to grant model access.");
+    expect([...container.querySelectorAll("button")].find(button => button.textContent === "Create router")?.disabled).toBe(true);
+    await act(async () => { await client.refetchQueries({ queryKey: ["gateway-routers", "org-test"] }); await new Promise(resolve => setTimeout(resolve, 10)); });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Could not refresh model routing.");
+    expect(container.querySelector("time")?.dateTime).toBeTruthy();
+    expect([...container.querySelectorAll("button")].some(button => button.textContent === "Retry")).toBe(true);
+  } finally {
+    await act(async () => root.unmount()); client.clear(); request.mockRestore(); container.remove(); await GlobalRegistrator.unregister();
+  }
+});
 function fixture(): GatewayRouterSummary {
   const draft = newRouter();
   return { ...draft, name: "Work router", routes: draft.routes.map((route, index) => ({ ...route, description: `Category ${index + 1}`, inferenceProviderId: targets[0].inferenceProviderId, model: targets[0].model })), id: `gwr_${suffix}`, revision: 3, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
@@ -58,7 +83,9 @@ test("editor discloses sharing, preserves unavailable selection and keeps techni
   const request = spyOn(requests, "requestJson");
   try {
     await act(async () => root.render(<RouterEditor orgId="org-test" initial={fixture()} targets={[]} onSaved={() => {}} onClose={() => {}} />));
-    expect(container.textContent).toContain("Prompt text is sent to Jev to choose a model");
+    expect(container.textContent).toContain("I agree to send the latest user text to Jev to choose a model.");
+    expect(container.querySelector("h2")?.className).toBe("sr-only");
+    expect(container.querySelector("time")?.dateTime).toBe(fixture().updatedAt);
     expect(container.textContent).toContain("Saved model unavailable");
     expect(container.querySelectorAll('[data-testid="router-category"]').length).toBe(2);
     expect([...container.querySelectorAll("details")].every(details => !details.open)).toBe(true);
@@ -87,7 +114,8 @@ test("a revoked model remains visible while disabling succeeds and reactivation 
     expect(path).toBe(`/v1/gateway-routers/${router.id}`);
     expect(options?.method).toBe("PUT");
     expect(JSON.parse(String(options?.body))).toMatchObject({ status: "disabled", revision: 3, routes: router.routes });
-    expect(container.textContent).toContain("Router saved. Not live-verified.");
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Saved");
+    expect(container.textContent).toContain("Saved configuration only. No live request has been tested here.");
     expect(container.textContent).toContain("Saved model unavailable");
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Router active"]')?.click());
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Acknowledge prompt sharing with Jev"]')?.click());

@@ -35,6 +35,12 @@ export async function memberRoutingWeb(seed: Seed) {
   return {
     den, web,
     modelLabels: targets.map(target => `${text(target.name)} · ${text(target.providerName)}`),
+    async revokeModelAccess() {
+      for (const grant of rows(record(record(created.body).inferenceProvider).accessGrants)) {
+        const revoked = await api(den.admin, organization, `/v1/inference-providers/${providerId}/access-grants/${text(grant.id)}`, "DELETE");
+        if (revoked.response.status !== 204) throw new Error(`Grant revocation failed: ${revoked.response.status}`);
+      }
+    },
     async savedRouters() {
       const response = await api(author, organization, "/v1/gateway-routers");
       if (!response.response.ok) throw new Error(`Read routers failed: ${response.response.status}`);

@@ -1,12 +1,12 @@
 import type { VerificationDictionary, VerificationEvaluator } from "@openwork/testkit";
 
 // Synthetic fixture only. No provider prompts, identities, or router IDs enter compilation.
-export const routingIntent = "Verify the Edit router heading is visible; the editor name is Daily work revised; category 1 is Code review and debugging; category 2 is Clear business writing; minimum confidence is 0.75; the saved API router revision is 2; the saved API router name is Daily work revised; the saved API categories are Code review and debugging and Clear business writing; the saved API minimum confidence is 0.75; the Gateway administrative link is absent; and the saved-configuration-only notice says no live request has been tested here.";
+export const routingIntent = "Verify the router Name field is editable; the editor name is Daily work revised; category 1 is Code review and debugging; category 2 is Clear business writing; minimum confidence is 0.75; the saved API router revision is 2; the saved API router name is Daily work revised; the saved API categories are Code review and debugging and Clear business writing; the saved API minimum confidence is 0.75; the Gateway administrative link is absent; and the saved-configuration-only notice says no live request has been tested here.";
 export const unsupportedRoutingIntent = "Verify a PDF invoice was exported to disk.";
 export const routingDictionary: VerificationDictionary = {
-  id: "gateway-routing-saved-editor", version: "2",
+  id: "gateway-routing-saved-editor", version: "3",
   checks: [
-    { id: "editor", description: "The Edit router heading is visible", assertion: { kind: "see", target: { role: "heading", text: "Edit router" } } },
+    { id: "editor", description: "The router Name field is editable", assertion: { kind: "see", target: { label: "Name" }, options: { editable: true } } },
     ...[
       ["name", "Name", "Daily work revised"],
       ["category-1", "Prompt category 1", "Code review and debugging"],

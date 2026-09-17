@@ -29,7 +29,7 @@ export async function orgId(session: DenSession, name: string) {
 }
 
 /** Only the provider boundary is fake; actual Gateway resolves aliases and credentials. */
-export async function routerUpstream() {
+export async function routerUpstream(reply: (body: Record<string, unknown>) => string = () => "routed answer") {
   const requests: Array<{ path: string; authorization: string; body: Record<string, unknown> }> = [];
   const http = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -38,12 +38,13 @@ export async function routerUpstream() {
       const body = record(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       requests.push({ path: req.url ?? "", authorization: req.headers.authorization ?? "", body });
       if (req.headers.authorization !== "Bearer fixture-upstream-key") { res.writeHead(401); res.end(); return; }
-      const completion = { id: "chatcmpl-fixture", object: "chat.completion", model: body.model,
-        choices: [{ index: 0, message: { role: "assistant", content: "routed answer" }, finish_reason: "stop" }],
+      const content = reply(body);
+      const completion = { id: "chatcmpl-fixture", created: Math.floor(Date.now() / 1000), object: "chat.completion", model: body.model,
+        choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
         usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } };
       if (body.stream) {
         res.writeHead(200, { "content-type": "text/event-stream" });
-        res.end(`data: ${JSON.stringify({ ...completion, object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "routed answer" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+        res.end(`data: ${JSON.stringify({ ...completion, object: "chat.completion.chunk", choices: [{ index: 0, delta: { content }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
       } else { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(completion)); }
     });
   });
@@ -60,8 +61,14 @@ export async function routerGateway(databaseUrl: string, allowedOrigin: string) 
     import { createInferenceEgressFetch } from '@openwork-ee/utils/inference-egress';
     const app = new Hono();
     const evaluations = [];
+    const dispatches = [];
+    app.use('*', async (c, next) => {
+      const body = c.req.method === 'POST' ? await c.req.raw.clone().json() : null;
+      await next();
+      if (body) dispatches.push({body, status:c.res.status, route:c.res.headers.get('x-openwork-router-route-id'), fallback:c.res.headers.get('x-openwork-router-fallback')});
+    });
     app.get('/ready', c => c.json({ok:true}));
-    app.get('/witness', c => c.json({evaluations}));
+    app.get('/witness', c => c.json({evaluations, dispatches}));
     registerProxyRoutes(app, {fetch: createInferenceEgressFetch(), gateway: {classifyRoute: async ({text, routes}) => {
       evaluations.push({text, routes});
       const choice = text.includes('TypeScript') ? 'code' : text.includes('poem') ? 'writing' : 'code';

@@ -224,6 +224,9 @@ function getDashboardPageTitle(pathname: string, orgSlug: string | null) {
   if (pathname === dashboardRoot) {
     return "Home";
   }
+  if (pathname === `${dashboardRoot}/gateway-routing`) {
+    return "Model routing";
+  }
   if (pathname.startsWith(getAnalyticsRoute(orgSlug))) {
     return "Analytics";
   }
