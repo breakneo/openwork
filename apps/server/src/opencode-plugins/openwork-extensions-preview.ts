@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { ApiError } from "../errors.js";
-import { redactedResponseBodyExcerpt } from "@openwork/enterprise-mcp-client";
 import { uiBridgeRequest } from "./openwork-ui-bridge.js";
 import { createGmailAttachmentFulfillment, type GmailAttachmentDependencies } from "./gmail-attachment-fulfillment.js";
 import { z } from "zod";
@@ -197,7 +196,7 @@ type CreatedOpenWorkSessionResult = {
   sessionId: string;
   title: string;
   titleTruncated: boolean;
-  accepted: true;
+  started: boolean;
   /** The model the engine bound to the session, read from its create response. */
   model: OpenworkSessionModel | null;
   route: string;
@@ -206,8 +205,6 @@ type FailedOpenWorkSessionResult = {
   ok: false;
   title: string;
   titleTruncated: boolean;
-  sessionId?: string;
-  path: string;
   error: string;
 };
 
@@ -261,7 +258,6 @@ function affordanceResult(
       id,
       error: typeof result.error === "string" ? result.error : `${id} failed`,
       ...(Array.isArray(result.issues) ? { issues: result.issues } : {}),
-      ...(id === "session.create" && Array.isArray(result.created) ? { result, effects } : {}),
       code: result.code === "model_unavailable" ? "model_unavailable" : "failed",
     };
   }
@@ -346,10 +342,9 @@ async function uiControlRequest(
   }
 }
 
-async function serverGet(path: string, signal?: AbortSignal): Promise<unknown> {
+async function serverGet(path: string): Promise<unknown> {
   const { url, token } = requireOpenWorkServer();
   const response = await fetch(`${url}${path}`, {
-    signal,
     headers: { Authorization: `Bearer ${token}` },
   });
   const payload = await parseResponse(response);
@@ -667,8 +662,8 @@ function rankSearchResults(matches: SessionSearchResult[], titleMatched: Readonl
   return matches.sort((left, right) => rank(left) - rank(right) || right.updatedAt - left.updatedAt);
 }
 
-async function listOpenWorkWorkspaces(signal?: AbortSignal): Promise<OpenWorkWorkspace[]> {
-  return workspaceListEnvelopeSchema.parse(await serverGet("/workspaces", signal)).items;
+async function listOpenWorkWorkspaces(): Promise<OpenWorkWorkspace[]> {
+  return workspaceListEnvelopeSchema.parse(await serverGet("/workspaces")).items;
 }
 
 function filterWorkspaces(workspaces: OpenWorkWorkspace[], workspaceId?: string): OpenWorkWorkspace[] {
@@ -1082,7 +1077,7 @@ function getStringProperty(value: unknown, key: string): string | null {
 }
 
 function errorMessage(payload: unknown, fallback: string): string {
-  return getStringProperty(payload, "message") ?? (isRecord(payload) ? getStringProperty(payload.data, "message") : null) ?? getStringProperty(payload, "code") ?? fallback;
+  return getStringProperty(payload, "message") ?? getStringProperty(payload, "code") ?? fallback;
 }
 
 function unknownErrorMessage(error: unknown): string {
@@ -1093,8 +1088,8 @@ function normalizeDirPath(path: string): string {
   return path.replace(/\/+$/, "");
 }
 
-async function resolveContextWorkspace(workspaceId: string | undefined, context: OpenCodeContext, signal?: AbortSignal): Promise<OpenWorkWorkspace> {
-  const workspaces = await listOpenWorkWorkspaces(signal);
+async function resolveContextWorkspace(workspaceId: string | undefined, context: OpenCodeContext): Promise<OpenWorkWorkspace> {
+  const workspaces = await listOpenWorkWorkspaces();
   if (!workspaces.length) throw new Error("No OpenWork workspaces are available");
   if (workspaceId) {
     const match = filterWorkspaces(workspaces, workspaceId).at(0);
@@ -1157,13 +1152,7 @@ async function createOpenWorkSessions(rawArgs: unknown, context: OpenCodeContext
   const parsed = sessionCreateArgsSchema.safeParse(rawArgs);
   if (!parsed.success) return sessionArgumentError(parsed.error, rawArgs);
   const args = parsed.data;
-  let workspace: OpenWorkWorkspace;
-  try {
-    workspace = await resolveContextWorkspace(args.workspaceId, context, AbortSignal.timeout(7_000));
-  } catch (error) {
-    const message = redactedResponseBodyExcerpt(unknownErrorMessage(error), 400);
-    return { ok: false, error: message, issues: [{ path: "workspaceId", message }] };
-  }
+  const workspace = await resolveContextWorkspace(args.workspaceId, context);
   let catalog: OpenworkCatalogModel[];
   let models: Array<OpenworkSessionModel | undefined>;
   try {
@@ -1182,33 +1171,29 @@ async function createOpenWorkSessions(rawArgs: unknown, context: OpenCodeContext
     const defaultModel = args.model ? resolveOpenworkModel(args.model, catalog) : undefined;
     models = args.sessions.map((session) => session.model ? resolveOpenworkModel(session.model, catalog) : defaultModel);
   } catch (error) {
-    return { ok: false, error: redactedResponseBodyExcerpt(unknownErrorMessage(error), 400) };
+    return { ok: false, error: unknownErrorMessage(error) };
   }
   let createdOnEngine = false;
   const results = await Promise.all(args.sessions.map(async (session, index): Promise<CreatedOpenWorkSessionResult | FailedOpenWorkSessionResult> => {
     const inputTitle = argumentAtPath(rawArgs, ["sessions", index, "title"]);
     const titleTruncated = typeof inputTitle === "string" && inputTitle.trim().length > 120;
     const model = models[index];
-    let sessionId: string | undefined;
     try {
       const payload = sessionInfoSchema.parse(await postJson(
         `/workspace/${encodeURIComponent(workspace.id)}/opencode/session`,
         { title: session.title, ...(model ? { model: engineSessionCreateModel(model) } : {}) },
-        AbortSignal.timeout(10_000),
       ));
       createdOnEngine = true;
-      sessionId = payload.id;
       await postJson(
         `/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(payload.id)}/prompt_async`,
         { ...(model ? enginePromptModel(model) : {}), parts: [{ type: "text", text: session.prompt }] },
-        AbortSignal.timeout(10_000),
       );
       return {
         ok: true,
         sessionId: payload.id,
         title: session.title,
         titleTruncated,
-        accepted: true,
+        started: true,
         model: labelOpenworkSessionModel(sessionModelOf(payload), catalog),
         route: `/workspace/${encodeURIComponent(workspace.id)}/session/${encodeURIComponent(payload.id)}`,
       };
@@ -1217,9 +1202,7 @@ async function createOpenWorkSessions(rawArgs: unknown, context: OpenCodeContext
         ok: false,
         title: session.title,
         titleTruncated,
-        ...(sessionId ? { sessionId } : {}),
-        path: `sessions[${index}]${sessionId ? ".prompt" : ""}`,
-        error: redactedResponseBodyExcerpt(unknownErrorMessage(error), 400),
+        error: unknownErrorMessage(error),
       };
     }
   }));
@@ -1236,14 +1219,8 @@ async function createOpenWorkSessions(rawArgs: unknown, context: OpenCodeContext
       args: { workspaceId: workspace.id },
     });
   }
-  const issues = failures.map((failure) => ({
-    path: failure.path,
-    message: `${failure.path}: ${failure.error}`,
-    ...(failure.sessionId ? { sessionId: failure.sessionId } : {}),
-  }));
   return {
     ok: failures.length === 0,
-    ...(issues.length ? { error: redactedResponseBodyExcerpt(issues.map((issue) => issue.message).join("; "), 400), issues } : {}),
     workspaceId: workspace.id,
     workspace: workspaceLabel(workspace),
     created,

@@ -161,14 +161,7 @@ describe("OpenWork provider adapters", () => {
       ["model", "object", false],
     ]);
     expect(create?.arguments.find((argument) => argument.name === "model")?.description).toContain("variant");
-    expect(create?.description).toContain("accepted: true");
-    expect(create?.description).toContain("not proof that inference started or succeeded");
-    expect(create?.description).toContain("unavailable model can fail afterward");
-    expect(create?.description).toContain("`issues`");
-    expect(create?.description).toContain("before retrying to avoid duplicates");
     expect(create?.description).toContain("existing renderer host");
-    expect(create?.description).toContain("without a renderer catalog");
-    expect(create?.description).toContain("Sidebar visibility is not guaranteed");
     expect(affordances.find((entry) => entry.id === "models.list")?.description).toContain("including headless callers");
   });
 
