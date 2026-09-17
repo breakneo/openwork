@@ -65,7 +65,8 @@ const createResultSchema = z.object({
     sessionId: z.string(),
     title: z.string(),
     titleTruncated: z.boolean(),
-    started: z.boolean(),
+    accepted: z.literal(true),
+    started: z.never().optional(),
     model: sessionModelSchema.nullable(),
     route: z.string(),
   })),
@@ -135,6 +136,8 @@ async function transformedSystem(plugin: Awaited<ReturnType<typeof OpenWorkExten
 
 function startFakeOpenWorkServer(options: {
   failPromptText?: string;
+  failCreateTitle?: string;
+  rejectModelId?: string;
   failSessionListWorkspaceId?: string;
   activityResponses?: Record<string, unknown>;
   failedActivityPaths?: string[];
@@ -264,6 +267,7 @@ function startFakeOpenWorkServer(options: {
             title: z.string(),
             model: z.object({ id: z.string(), providerID: z.string(), variant: z.string().optional() }).strict().optional(),
           }).strict().parse(record.body);
+          if (body.title === options.failCreateTitle) return Response.json({ message: "Creation rejected" }, { status: 503 });
           createdCount += 1;
           return Response.json({
             id: `ses_created_${createdCount}`,
@@ -363,6 +367,9 @@ function startFakeOpenWorkServer(options: {
         }).strict().parse(record.body);
         if (body.parts[0]?.text === options.failPromptText) {
           return Response.json({ message: "Prompt failed" }, { status: 503 });
+        }
+        if (options.rejectModelId && body.model?.modelID === options.rejectModelId) {
+          return Response.json({ name: "UnknownError", data: { message: `Model unavailable: ${body.model.modelID}` } }, { status: 400 });
         }
         return new Response(null, { status: 204 });
       }
@@ -1408,10 +1415,13 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     const fake = startFakeOpenWorkServer();
     const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
 
-    await expect(plugin.tool.openwork_execute.execute({
+    const output = argumentErrorSchema.parse(JSON.parse(await plugin.tool.openwork_execute.execute({
       id: "session.create",
       args: { workspaceId: "ws_missing", sessions: [{ title: "Nowhere", prompt: "Research nothing." }] },
-    }, { sessionID: "ses_origin" })).rejects.toThrow("No workspace matched ws_missing");
+    }, { sessionID: "ses_origin" })));
+    expect(output).toEqual({ ok: false, error: "No workspace matched ws_missing", issues: [
+      { path: "workspaceId", message: "No workspace matched ws_missing" },
+    ] });
 
     expect(fake.requests.filter((request) => request.method === "POST" && !isHostCatalogQuery(request.body))).toEqual([]);
     expect(fake.uiControlRequests).toEqual([]);
@@ -1552,9 +1562,50 @@ describe("OpenWorkExtensionsPreview session tools", () => {
       code: z.literal("failed"),
     }).parse(JSON.parse(output));
 
-    expect(parsed.error).toBe("session.create failed");
+    expect(parsed.error).toBe("sessions[0].prompt: Prompt failed");
     expect(fake.requests.filter((request) => request.pathname === "/workspace/ws_2/opencode/session" && request.method === "POST")).toHaveLength(1);
     expect(fake.requests.filter((request) => request.pathname.endsWith("/prompt_async") && request.method === "POST")).toHaveLength(1);
+  });
+
+  test("preserves indexed rejection issues and accepted siblings without claiming a model started", async () => {
+    const fake = startFakeOpenWorkServer({ rejectModelId: "unavailable-model", failCreateTitle: "Reject creation", providerCatalogByWorkspace: {
+      ws_2: { connected: ["test-provider"], all: [{ id: "test-provider", name: "Fixture Provider", models: {
+        "unavailable-model": { name: "Stale after preflight" }, "available-model": { name: "Available" },
+      } }] },
+    } });
+    const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
+    const output = z.object({
+      ok: z.literal(false),
+      error: z.string(),
+      issues: z.array(z.object({ path: z.string(), message: z.string(), sessionId: z.string().optional() })),
+      result: createResultSchema.extend({
+        failures: z.array(z.object({ path: z.string(), sessionId: z.string().optional(), error: z.string() })),
+      }),
+    }).parse(JSON.parse(await plugin.tool.openwork_execute.execute({
+      id: "session.create",
+      args: {
+        model: { providerId: "test-provider", modelId: "unavailable-model" },
+        sessions: [
+          { title: "Rejected prompt", prompt: "Do not retry this prompt." },
+          { title: "Reject creation", prompt: "Never submitted." },
+          { title: "Accepted sibling", prompt: "Queued only.", model: { providerId: "test-provider", modelId: "available-model" } },
+        ],
+      },
+    }, {})));
+    expect(output.issues).toEqual([
+      { path: "sessions[0].prompt", message: "sessions[0].prompt: Model unavailable: unavailable-model", sessionId: "ses_created_1" },
+      { path: "sessions[1]", message: "sessions[1]: Creation rejected" },
+    ]);
+    expect(output.error).toBe(output.issues.map((issue) => issue.message).join("; "));
+    expect(output.result.created).toHaveLength(1);
+    expect(output.result.created[0]).toMatchObject({ accepted: true, sessionId: "ses_created_2", model: { providerId: "test-provider", modelId: "available-model", variant: null } });
+    expect(output.result.failures).toEqual([
+      { path: "sessions[0].prompt", sessionId: "ses_created_1", error: "Model unavailable: unavailable-model" },
+      { path: "sessions[1]", error: "Creation rejected" },
+    ]);
+    expect(fake.requests.filter((request) => request.pathname.endsWith("/prompt_async"))).toHaveLength(2);
+    expect(fake.requests.filter((request) => request.pathname.endsWith("/session") && request.method === "POST")).toHaveLength(3);
+    expect(fake.uiControlRequests).toHaveLength(2);
   });
 
   test("creates more than twenty sessions in one tool call", async () => {

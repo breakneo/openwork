@@ -1,0 +1,317 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { expect, vi } from "vitest";
+import { test } from "@openwork/testkit";
+import { openworkAffordanceResultSchema } from "@openwork/types/openwork-affordance";
+import { OpenWorkExtensionsPreview } from "../../apps/server/src/opencode-plugins/openwork-extensions-preview";
+import { buildOpenworkProviderContributions } from "../../apps/server/src/opencode-plugins/openwork-provider-adapters";
+import { close, isRecord, listen, readBody, sendJson } from "../worlds/openwork-server-cli";
+
+function outputOf(output: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(output);
+  if (!isRecord(value)) throw new Error("Expected an affordance response");
+  return value;
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+for (const phase of ["headers", "body"]) {
+  test(`session.create bounds stalled workspace discovery ${phase} without writes`, async ({ evidence }) => {
+    const requests: Array<{ method: string | undefined; path: string | undefined }> = [];
+    const server = createServer((request, response) => {
+      requests.push({ method: request.method, path: request.url });
+      if (phase === "body") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.write('{"items":[');
+      }
+    });
+    try {
+      vi.stubEnv("OPENWORK_SERVER_URL", await listen(server));
+      vi.stubEnv("OPENWORK_SERVER_TOKEN", "discovery-fixture-token");
+      const plugin = await OpenWorkExtensionsPreview();
+      const before = Date.now();
+      const output = outputOf(await plugin.tool.openwork_execute.execute({ id: "session.create", args: {
+        sessions: [{ title: "Discovery stall", prompt: "Must not write" }],
+      } }, {}));
+      const elapsed = Date.now() - before;
+      expect(elapsed).toBeGreaterThanOrEqual(6_500);
+      expect(elapsed).toBeLessThan(10_000);
+      expect(output).toMatchObject({ ok: false, id: "session.create", code: "failed" });
+      expect(openworkAffordanceResultSchema.parse(output)).toEqual(output);
+      expect(output.error).toMatch(/timeout|timed out|aborted/i);
+      expect(output.issues).toEqual([{ path: "workspaceId", message: output.error }]);
+      expect(output).not.toHaveProperty("result");
+      expect(requests).toEqual([{ method: "GET", path: "/workspaces" }]);
+      evidence.recordAssertionEvidence(
+        `Workspace discovery ${phase} has a bounded failure before mutation`,
+        `The real HTTP witness stalled ${phase}; creation returned a structured workspaceId failure in ${elapsed}ms. Exactly one GET reached the server, with no catalog, create, prompt, reload, navigation, or retry.`,
+        elapsed < 10_000 && requests.length === 1 && output.ok === false,
+      );
+    } finally {
+      await close(server);
+      vi.unstubAllEnvs();
+    }
+  });
+}
+
+for (const phase of ["discovery", "create", "prompt"]) {
+  test(`session.create redacts and bounds ${phase} failures while retaining provider reasons`, async ({ evidence }) => {
+    const secrets = ["synthetic-provider-api-key", "synthetic-provider-password", "synthetic-bearer-credential"];
+    const reason = "Provider authorization failed for requested model";
+    const message = `${reason}: ${JSON.stringify({ api_key: secrets[0], password: secrets[1], authorization: `Bearer ${secrets[2]}` })} ${"additional diagnostic detail ".repeat(100)}`;
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (request.url === "/workspaces") return sendJson(response, phase === "discovery" ? 503 : 200,
+        phase === "discovery" ? { message } : { items: [{ id: "ws_redaction", name: "Redaction", path: tmpdir() }] });
+      if (request.url === "/workspace/ws_redaction/opencode/session") return sendJson(response, phase === "create" ? 400 : 200,
+        phase === "create" ? { message } : { id: "ses_redaction", title: "Redaction", directory: tmpdir() });
+      if (request.url?.endsWith("/prompt_async")) return sendJson(response, 400, { data: { message } });
+      return sendJson(response, 200, { ok: false, error: "No UI host" });
+    });
+    try {
+      vi.stubEnv("OPENWORK_SERVER_URL", await listen(server));
+      vi.stubEnv("OPENWORK_SERVER_TOKEN", "redaction-fixture-token");
+      const plugin = await OpenWorkExtensionsPreview();
+      const output = outputOf(await plugin.tool.openwork_execute.execute({ id: "session.create", args: {
+        sessions: [{ title: "Redaction", prompt: "Do not retry" }],
+      } }, {}));
+      expect(output.ok).toBe(false);
+      expect(openworkAffordanceResultSchema.parse(output)).toEqual(output);
+      for (const secret of secrets) expect(JSON.stringify(output)).not.toContain(secret);
+      expect(output.error).toContain(reason);
+      expect(output.error).toContain("[redacted]");
+      expect(String(output.error).length).toBeLessThanOrEqual(400);
+      for (const issue of records(output.issues)) {
+        expect(issue.message).toContain(reason);
+        expect(String(issue.message).length).toBeLessThan(450);
+      }
+      if (phase === "discovery") {
+        expect(output.issues).toMatchObject([{ path: "workspaceId" }]);
+        expect(requests).toEqual(["GET /workspaces"]);
+      } else {
+        if (!isRecord(output.result)) throw new Error("Missing partial failure receipt");
+        expect(output.result.created).toEqual([]);
+        const failure = records(output.result.failures)[0];
+        expect(failure?.error).toContain(reason);
+        expect(String(failure?.error).length).toBeLessThanOrEqual(400);
+        expect(failure?.path).toBe(phase === "prompt" ? "sessions[0].prompt" : "sessions[0]");
+        if (phase === "prompt") expect(failure?.sessionId).toBe("ses_redaction");
+        else expect(failure).not.toHaveProperty("sessionId");
+        expect(requests).toEqual(["GET /workspaces", "POST /workspace/ws_redaction/opencode/session", ...(phase === "prompt" ? [
+          "POST /workspace/ws_redaction/opencode/session/ses_redaction/prompt_async", "POST /experimental/ui-control/request",
+        ] : [])]);
+      }
+      evidence.recordAssertionEvidence(
+        `${phase} failure receipts preserve useful reasons without synthetic credentials`,
+        "Top-level and nested provider messages passed through the shared response redactor before the 400-character cap. Root errors, indexed issues, and partial failures retained the authorization reason and recovery identity without API keys, passwords, or bearer credentials; no retries occurred.",
+        secrets.every((secret) => !JSON.stringify(output).includes(secret)) && String(output.error).length <= 400,
+      );
+    } finally {
+      await close(server);
+      vi.unstubAllEnvs();
+    }
+  });
+}
+
+test("session.create reports asynchronous acceptance, preserves rejected session IDs, and never claims inference started", async ({ evidence }) => {
+  const root = await mkdtemp(join(tmpdir(), "session-create-acceptance-"));
+  const overrides = {
+    HOME: root,
+    XDG_CONFIG_HOME: join(root, "config"),
+    XDG_DATA_HOME: join(root, "data"),
+    XDG_CACHE_HOME: join(root, "cache"),
+    XDG_STATE_HOME: join(root, "state"),
+    OPENCODE_CONFIG_DIR: join(root, "opencode"),
+    OPENWORK_SERVER_CONFIG: join(root, "server.json"),
+    OPENWORK_ENV_STORE: join(root, "env.json"),
+    OPENWORK_DATA_DIR: join(root, "data"),
+    OPENWORK_TOKEN_STORE: join(root, "tokens.json"),
+    OPENWORK_RUNTIME_DB: join(root, "runtime.sqlite"),
+    OPENWORK_UI_CONTROL_DISCOVERY: "",
+    OPENWORK_SERVER_URL: "",
+    OPENWORK_SERVER_TOKEN: "acceptance-test-token",
+  };
+  const keys = new Set([...Object.keys(overrides), ...Object.keys(process.env).filter((key) => key.startsWith("OPENWORK_") || key.startsWith("OPENCODE"))]);
+  const previous = Object.fromEntries([...keys].map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  for (const [key, value] of Object.entries(overrides)) process.env[key] = value;
+  const sessions: Array<{ id: string; title: string; directory: string; time: { created: number; updated: number }; model: { id: string; providerID: string } }> = [];
+  const transcripts = new Map<string, unknown[]>();
+  const prompts: Array<{ sessionId: string; modelId: string }> = [];
+  const engine = createServer((request, response) => {
+    void (async () => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === "/session" && request.method === "POST") {
+        const body: unknown = JSON.parse(await readBody(request));
+        if (!isRecord(body) || typeof body.title !== "string" || !isRecord(body.model) || typeof body.model.id !== "string" || typeof body.model.providerID !== "string") {
+          return sendJson(response, 400, { message: "Invalid create request" });
+        }
+        if (body.title === "Create rejection") return sendJson(response, 503, { message: "Creation rejected" });
+        const session = { id: `ses_acceptance_${sessions.length + 1}`, title: body.title, directory: root, time: { created: 100, updated: 100 }, model: { id: body.model.id, providerID: body.model.providerID } };
+        sessions.push(session);
+        transcripts.set(session.id, []);
+        return sendJson(response, 200, session);
+      }
+      if (url.pathname === "/session") return sendJson(response, 200, sessions);
+      if (url.pathname === "/session/status") return sendJson(response, 200, {});
+      if (url.pathname === "/permission" || url.pathname === "/question" || url.pathname.endsWith("/children")) return sendJson(response, 200, []);
+      const session = sessions.find((entry) => url.pathname === `/session/${entry.id}` || url.pathname.startsWith(`/session/${entry.id}/`));
+      if (session && url.pathname.endsWith("/prompt_async") && request.method === "POST") {
+        const body: unknown = JSON.parse(await readBody(request));
+        if (!isRecord(body) || !isRecord(body.model) || typeof body.model.modelID !== "string") return sendJson(response, 400, { message: "Missing prompt model" });
+        prompts.push({ sessionId: session.id, modelId: body.model.modelID });
+        if (body.model.modelID === "rejected") return sendJson(response, 400, { name: "UnknownError", data: { message: "Model unavailable: rejected" } });
+        if (body.model.modelID === "timeout") return;
+        const user = { info: { id: `msg_${session.id}_user`, role: "user" }, parts: body.parts };
+        transcripts.set(session.id, [user]);
+        if (body.model.modelID === "available") transcripts.set(session.id, [user, { info: { id: `msg_${session.id}_assistant`, role: "assistant" }, parts: [{ type: "text", text: "Fixture reply" }] }]);
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      if (session && url.pathname.endsWith("/message")) return sendJson(response, 200, transcripts.get(session.id));
+      if (session) return sendJson(response, 200, session);
+      return sendJson(response, 404, { message: "Not found" });
+    })().catch((error: unknown) => response.destroy(error instanceof Error ? error : undefined));
+  });
+  let stopServer: (() => Promise<void>) | undefined;
+  const polling = new AbortController();
+  let hostLoop: Promise<void> | undefined;
+  const hostRequests: Array<{ kind: unknown; id: unknown }> = [];
+  try {
+    const engineUrl = await listen(engine);
+    const { startServer } = await import("../../apps/server/src/server");
+    const server = await startServer({
+      host: "127.0.0.1", port: 0, configPath: join(root, "server.json"),
+      token: overrides.OPENWORK_SERVER_TOKEN, hostToken: "acceptance-host-token",
+      approval: { mode: "auto", timeoutMs: 1000 }, corsOrigins: ["*"],
+      workspaces: [{ id: "ws_acceptance", name: "Acceptance", path: root, preset: "starter", workspaceType: "local", baseUrl: engineUrl }],
+      authorizedRoots: [root], readOnly: false, startedAt: Date.now(),
+      tokenSource: "cli", hostTokenSource: "cli", logFormat: "pretty", logRequests: false,
+    });
+    stopServer = async () => { await server.stop(); };
+    process.env.OPENWORK_SERVER_URL = `http://127.0.0.1:${server.port}`;
+    const plugin = await OpenWorkExtensionsPreview({ directory: root });
+    const description = buildOpenworkProviderContributions([]).flatMap((entry) => entry.affordances).find((entry) => entry.id === "session.create")?.description;
+    expect(description).toContain("not proof that inference started or succeeded");
+    const missingHost = outputOf(await plugin.tool.openwork_execute.execute({ id: "session.create", args: {
+      model: { alias: "available" }, sessions: [{ title: "No host", prompt: "Must not write" }],
+    } }, {}));
+    expect(missingHost).toMatchObject({ ok: false });
+    expect(missingHost.error).toContain("existing renderer host");
+    expect(sessions).toEqual([]);
+    expect(prompts).toEqual([]);
+    const headers = { authorization: `Bearer ${overrides.OPENWORK_SERVER_TOKEN}`, "content-type": "application/json" };
+    const poll = async (wait: boolean) => {
+      const response = await fetch(`${process.env.OPENWORK_SERVER_URL}/experimental/ui-control/pending${wait ? "?wait=1" : ""}`, { headers, signal: polling.signal });
+      const payload: unknown = await response.json();
+      if (!isRecord(payload)) throw new Error("Invalid mailbox response");
+      for (const item of records(payload.items)) {
+        if (!isRecord(item.input)) throw new Error("Invalid mailbox input");
+        hostRequests.push({ kind: item.kind, id: item.input.id });
+        const result = item.kind === "query" && item.input.id === "models.list"
+          ? { ok: true, id: "models.list", effects: { data: "read", ui: "none", external: false }, result: {
+            ok: true, workspaceId: "ws_acceptance", models: ["rejected", "unavailable", "available", "timeout"].map((modelId) => ({
+              providerId: "acceptance-provider", modelId, displayName: modelId, providerName: "Fixture", available: true,
+            })),
+          } }
+          : { ok: false, error: "No UI mutation in this witness" };
+        await fetch(`${process.env.OPENWORK_SERVER_URL}/experimental/ui-control/${item.id}/reply`, {
+          method: "POST", headers, body: JSON.stringify({ result }), signal: polling.signal,
+        });
+      }
+    };
+    await poll(false);
+    hostLoop = (async () => {
+      while (!polling.signal.aborted) await poll(true);
+    })().catch((error: unknown) => { if (!polling.signal.aborted) throw error; });
+    const output = outputOf(await plugin.tool.openwork_execute.execute({
+      id: "session.create",
+      args: {
+        model: { providerId: "acceptance-provider", modelId: "rejected" },
+        sessions: [
+          { title: "HTTP rejection", prompt: "Rejected before acceptance" },
+          { title: "Async unavailable model", prompt: "Accepted but no reply", model: { providerId: "acceptance-provider", modelId: "unavailable" } },
+          { title: "Working sibling", prompt: "Reply once", model: { providerId: "acceptance-provider", modelId: "available" } },
+        ],
+      },
+    }, {}));
+    expect(output.ok).toBe(false);
+    expect(openworkAffordanceResultSchema.parse(output)).toEqual(output);
+    expect(output.effects).toEqual({ data: "write", ui: "none", external: false });
+    expect(output.issues).toEqual([{ path: "sessions[0].prompt", message: "sessions[0].prompt: Model unavailable: rejected", sessionId: "ses_acceptance_1" }]);
+    const result = isRecord(output.result) ? output.result : {};
+    const created = records(result.created);
+    expect(created).toHaveLength(2);
+    expect(created.map((entry) => entry.accepted)).toEqual([true, true]);
+    expect(created.every((entry) => !Object.hasOwn(entry, "started"))).toBe(true);
+    expect(records(result.failures)).toMatchObject([{ sessionId: "ses_acceptance_1", path: "sessions[0].prompt" }]);
+    expect(sessions).toHaveLength(3);
+    expect(prompts).toEqual([
+      { sessionId: "ses_acceptance_1", modelId: "rejected" },
+      { sessionId: "ses_acceptance_2", modelId: "unavailable" },
+      { sessionId: "ses_acceptance_3", modelId: "available" },
+    ]);
+    const reads = [];
+    for (const entry of created) {
+      const read = outputOf(await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: entry.sessionId, workspaceId: "ws_acceptance", summary: true } }));
+      expect(read.ok).toBe(true);
+      if (!isRecord(read.result)) throw new Error("Expected session.read result");
+      reads.push(read.result);
+    }
+    expect(reads[0]).toMatchObject({ status: "idle", working: false, lastAssistant: null, model: { providerId: "acceptance-provider", modelId: "unavailable", variant: null } });
+    expect(reads[0]?.firstUser).toMatchObject({ text: "Accepted but no reply" });
+    expect(reads[1]?.lastAssistant).toMatchObject({ text: "Fixture reply" });
+    expect(prompts).toHaveLength(3);
+    evidence.recordAssertionEvidence(
+      "Real OpenWork server preserves acceptance versus execution and partial failure recovery IDs",
+      "The rejecting-engine witness received exactly three creates and three prompts through the real server proxy. HTTP rejection surfaced its indexed issue and created ID; both 204 responses reported accepted without started. session.read found one pinned, idle, user-only session and one sibling reply. No automatic retry occurred.",
+      created.every((entry) => entry.accepted === true && !Object.hasOwn(entry, "started")) && prompts.length === 3,
+    );
+    const beforeTimeout = Date.now();
+    const timed = outputOf(await plugin.tool.openwork_execute.execute({ id: "session.create", args: {
+      model: { alias: "timeout" }, sessions: [
+        { title: "Held request", prompt: "Do not retry" },
+        { title: "Create rejection", prompt: "Must not submit" },
+      ],
+    } }, {}));
+    expect(Date.now() - beforeTimeout).toBeGreaterThanOrEqual(9_500);
+    expect(Date.now() - beforeTimeout).toBeLessThan(15_000);
+    expect(timed.ok).toBe(false);
+    expect(openworkAffordanceResultSchema.parse(timed)).toEqual(timed);
+    if (!isRecord(timed.result)) throw new Error("Missing partial result");
+    expect(timed.result.created).toEqual([]);
+    expect(records(timed.result.failures)).toMatchObject([
+      { sessionId: "ses_acceptance_4", path: "sessions[0].prompt" },
+      { path: "sessions[1]", error: "Creation rejected" },
+    ]);
+    expect(records(timed.result.failures)[0]?.error).toMatch(/timeout|timed out/i);
+    expect(records(timed.result.failures)[1]).not.toHaveProperty("sessionId");
+    expect(prompts).toHaveLength(4);
+    expect(sessions).toHaveLength(4);
+    expect(hostRequests).toEqual([
+      { kind: "query", id: "models.list" }, { kind: "command", id: "workspace.reload_sessions" },
+      { kind: "query", id: "models.list" }, { kind: "command", id: "workspace.reload_sessions" },
+    ]);
+    evidence.recordAssertionEvidence(
+      "Preflight fails closed, stalled HTTP acceptance is bounded, and partial receipts survive the public schema",
+      "Without a renderer catalog there were zero writes. The connected catalog was read without navigation. A held prompt returned within 15 seconds with its known session ID and no acceptance claim; a rejected create had no ID or prompt. No retry, open, focus, or UI mutation occurred; the witness rejected best-effort reloads. Sidebar visibility is not proven.",
+      timed.ok === false && prompts.length === 4 && sessions.length === 4,
+    );
+  } finally {
+    polling.abort();
+    await hostLoop;
+    await stopServer?.();
+    await close(engine);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});

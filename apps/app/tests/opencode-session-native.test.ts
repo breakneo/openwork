@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { focusManager } from "@tanstack/react-query";
+import { PromptAdmissionLedger } from "../../server/src/prompt-admission";
 import type { Message, Part, Session, SessionStatus, Todo } from "@opencode-ai/sdk/v2/client";
 
 import { createClient, createPromptMessageID, hasAcceptedPromptMessage, PromptAdmissionUnknownError, promptAdmissionFailure, readPromptAdmission, unwrap, type FieldsResult } from "../src/app/lib/opencode";
@@ -596,7 +597,7 @@ describe("native OpenCode session operations", () => {
       globalThis.fetch = originalFetch;
     }
   });
-  test("an idle conversation listed without the message is the only absence that counts", async () => {
+  test("missing idle history never proves rejection of an uncertain POST", async () => {
     const originalFetch = globalThis.fetch;
     const messageID = createPromptMessageID();
     let listed: unknown = [];
@@ -618,7 +619,7 @@ describe("native OpenCode session operations", () => {
     });
     try {
       const client = createClient(endpoint.opencodeBaseUrl, session.directory, { token: endpoint.token, mode: "openwork" });
-      expect(await readPromptAdmission(client, session.id, messageID)).toBe("absent");
+      expect(await readPromptAdmission(client, session.id, messageID)).toBe("unknown");
       statuses = { [session.id]: { type: "busy" } };
       expect(await readPromptAdmission(client, session.id, messageID)).toBe("unknown");
       statuses = {};
@@ -628,6 +629,31 @@ describe("native OpenCode session operations", () => {
       expect(await readPromptAdmission(client, session.id, messageID)).toBe("unknown");
       messageStatus = 200;
       expect(await readPromptAdmission(client, session.id, messageID)).toBe("accepted");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+  test.each(["cancelled", "rejected"])("only ledger-authoritative %s admission proves absence", async (state) => {
+    const originalFetch = globalThis.fetch;
+    const messageID = createPromptMessageID();
+    const ledger = new PromptAdmissionLedger();
+    const scope = { credential: "verified-test-credential", workspace: "ws-native", session: session.id };
+    const body = JSON.stringify({ messageID, parts: [] });
+    const prepared: unknown = await ledger.prepare(scope, body).json();
+    if (!prepared || typeof prepared !== "object" || !("ticket" in prepared) || typeof prepared.ticket !== "string") throw new Error("Expected admission ticket");
+    if (state === "cancelled") ledger.inspect(scope, messageID, true);
+    else ledger.rejectQueued(scope, prepared.ticket, body);
+    let nativeReads = 0;
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(new Request(input, init).url).pathname;
+      if (path.endsWith(`/prompt-admission/${messageID}`)) return ledger.inspect(scope, messageID);
+      nativeReads++;
+      return new Response(null, { status: 404 });
+    } });
+    try {
+      const client = createClient(endpoint.opencodeBaseUrl, session.directory, { token: endpoint.token, mode: "openwork" });
+      expect(await readPromptAdmission(client, session.id, messageID)).toBe("absent");
+      expect(nativeReads).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }

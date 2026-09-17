@@ -286,6 +286,14 @@ const openworkAffordanceFailureSchema = z.object({
   error: z.string(),
   code: openworkAffordanceFailureCodeSchema,
   hint: z.string().optional(),
+  issues: z.array(z.object({
+    path: z.string(),
+    message: z.string(),
+    code: openworkAffordanceFailureCodeSchema.optional(),
+    sessionId: z.string().optional(),
+  })).optional(),
+  result: z.unknown().optional(),
+  effects: openworkAffordanceEffectsSchema.optional(),
   revision: z.number().int().nonnegative().optional(),
 })
 

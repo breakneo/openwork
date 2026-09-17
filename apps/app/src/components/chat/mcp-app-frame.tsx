@@ -10,7 +10,7 @@ import { legacyConnectionActionAppResourceUri } from "@openwork/types/connection
 import { isConnectionDiscoveryTool } from "@/components/tools/error-attribution"
 import { createConnectionActionController, hasHostConnectionActions, standardMcpToolResult } from "./mcp-connection-action"
 import { openDesktopUrl } from "@/app/lib/desktop"
-import { mcpAppResolutionRetryDelayMs } from "@/app/lib/mcp-app-resolution"
+import { mcpAppDiscoverySignature, scheduleMcpAppDiscovery } from "@/app/lib/mcp-app-discovery-scheduler"
 import {
   OpenworkServerError,
   type OpenworkMcpAppLaunchReference,
@@ -763,11 +763,12 @@ export function McpAppFrame({ part }: { part: DynamicToolUIPart }) {
 }
 
 function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
-  const { mcpAppOrigin: origin, uiStateOwner, readOnly, getConnectionDecision, onMcpReconnect } = useMessageList()
+  const { mcpAppOrigin: nextOrigin, uiStateOwner, readOnly, getConnectionDecision, onMcpReconnect } = useMessageList()
+  const origin = useMemo(() => nextOrigin, [nextOrigin?.client, nextOrigin?.workspaceId, nextOrigin?.sessionId, nextOrigin?.engine, nextOrigin?.readOnly])
   const openworkServerClient = origin?.client
   const workspaceId = origin?.workspaceId
   const nextResult = preservedResult(part)
-  const nextResultSignature = JSON.stringify(nextResult)
+  const nextResultSignature = mcpAppDiscoverySignature(nextResult)
   const resultCache = useRef<{ signature: string; value: PreservedMcpAppResult | null }>({
     signature: nextResultSignature,
     value: nextResult,
@@ -797,11 +798,12 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
   const [app, setApp] = useState<OpenworkMcpAppResource | null>(null)
   const [error, setError] = useState<McpAppDiagnostic | null>(null)
   const [resolveToken, setResolveToken] = useState(0)
+  const consumedRetryToken = useRef(0)
   // The sandbox view unmounts on every preserved-result change; keep the last
   // measured height here so the rebuilt iframe does not snap back to default.
   const heightRef = useRef(DEFAULT_HEIGHT)
   const nextInputArguments = launch?.arguments ?? (isRecord(part.input) ? part.input : {})
-  const nextInputSignature = JSON.stringify(nextInputArguments)
+  const nextInputSignature = mcpAppDiscoverySignature(nextInputArguments)
   const inputCache = useRef({ signature: nextInputSignature, value: nextInputArguments })
   if (inputCache.current.signature !== nextInputSignature) {
     inputCache.current = { signature: nextInputSignature, value: nextInputArguments }
@@ -819,16 +821,15 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
         void openworkServerClient.releaseMcpApp(workspaceId, launchId).catch(() => undefined)
       }
     }
-    let retryTimer: number | undefined
     setApp(null)
     setError(null)
-    if (!result || !openworkServerClient || !workspaceId) return () => { cancelled = true }
+    if (!result || !openworkServerClient || !workspaceId || !origin) return () => { cancelled = true }
     const startedAt = performance.now()
     const checkpoints = ["resolve-started"]
-    const attempt = (attemptIndex: number) => {
-      if (cancelled) return
-      void openworkServerClient.resolveMcpApp(workspaceId, part.toolName, launch ?? undefined, origin ?? undefined)
-        .then(({ app: resolved }) => {
+    const manual = consumedRetryToken.current !== resolveToken
+    consumedRetryToken.current = resolveToken
+    const cancelDiscovery = scheduleMcpAppDiscovery(origin, part.toolName, launch, manual,
+        (resolved) => {
           launchId = resolved?.launchId
           if (cancelled) { release(); return }
           // A preserved MCP result is neutral transport data. A null resolution
@@ -837,15 +838,10 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
           // result without claiming an unavailable interactive view.
           resolvedFor.current = resolution
           setApp(resolved)
-        })
-        .catch((cause) => {
+        },
+        (cause) => {
           if (cancelled) return
-          checkpoints.push(`resolve-failed-${attemptIndex + 1}+${Math.round(performance.now() - startedAt)}ms`)
-          const retryDelayMs = mcpAppResolutionRetryDelayMs(cause, attemptIndex)
-          if (retryDelayMs !== null) {
-            retryTimer = window.setTimeout(() => attempt(attemptIndex + 1), retryDelayMs)
-            return
-          }
+          checkpoints.push(`resolve-failed+${Math.round(performance.now() - startedAt)}ms`)
           if (launch || isActionableMcpAppResolutionError(cause)) {
             const diagnostic: McpAppDiagnostic = {
               code: "MCP_APP_RESOURCE_RESOLUTION_FAILED",
@@ -860,11 +856,9 @@ function EmbeddedMcpAppFrame({ part }: { part: DynamicToolUIPart }) {
             setError(diagnostic)
           }
         })
-    }
-    attempt(0)
     return () => {
       cancelled = true
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+      cancelDiscovery()
       release()
     }
   }, [launch, openworkServerClient, part.toolName, result, workspaceId, origin, resolution])
