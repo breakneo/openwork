@@ -105,6 +105,7 @@ function fixture() {
   document.body.append(host);
   const root = createRoot(host);
   let historyPages: ReturnType<typeof useOpeningSessionHistory>["pages"] | undefined;
+  const panePages = new Map<string, ReturnType<typeof useOpeningSessionHistory>["pages"]>();
   let openingError: Error | null = null;
   let findRequested = false;
   let ensureFullSnapshot: (() => Promise<OpenworkSessionHistory>) | undefined;
@@ -122,12 +123,13 @@ function fixture() {
     return { owner: cacheOwner, runtimeOwner, sessionId: owner, authToken, snapshotQueryKey: snapshotKey("workspace", owner), transcriptQueryKey: transcriptKey("workspace", owner),
       metadataQueryKey: sessionMetadataKey({ workspaceId: "workspace", baseUrl: "https://history.example/opencode", openworkToken: authToken ?? "" }, owner), readSnapshot, readLatest };
   }
-  function Harness({ options, onMount }: { options: ReturnType<typeof input>; onMount?: (ensure: () => Promise<OpenworkSessionHistory>) => void }) {
+  function Harness({ options, onMount, pane }: { options: ReturnType<typeof input>; onMount?: (ensure: () => Promise<OpenworkSessionHistory>) => void; pane?: string }) {
     const { sessionId: owner, owner: cacheOwner } = options;
     const key = options.snapshotQueryKey;
     const workspaceId = key[1];
     const opening = useOpeningSessionHistory(options);
     historyPages = opening.pages;
+    if (pane) panePages.set(pane, opening.pages);
     openingError = opening.openingError;
     ensureFullSnapshot = opening.ensureFullSnapshot;
     readSendHistory = opening.readSendHistory;
@@ -164,7 +166,7 @@ function fixture() {
   }
   cleanups.push(async () => { await act(async () => root.unmount()); client.clear(); host.remove(); });
   return {
-    reads, latestReads, host, client, input, renderInput,
+    reads, latestReads, host, client, input, renderInput, panePages,
     get openingError() { return openingError; },
     async renderRuntimeOwners(owners: Parameters<typeof useSessionHistoryRuntimeOwners>[0] | null, panes: ReturnType<typeof input>[], strict = false) {
       const tree = <QueryClientProvider client={client}>{owners && <RuntimeOwners owners={owners}>
@@ -174,8 +176,8 @@ function fixture() {
     },
     async renderSplit(left: string, right: string) {
       await act(async () => flushSync(() => root.render(<QueryClientProvider client={client}>
-        <section data-pane="left"><Harness options={input(left)} /></section>
-        <section data-pane="right"><Harness options={input(right)} /></section>
+        <section data-pane="left"><Harness options={input(left)} pane="left" /></section>
+        <section data-pane="right"><Harness options={input(right)} pane="right" /></section>
       </QueryClientProvider>)));
     },
     get pages() {
@@ -229,6 +231,241 @@ async function demand(view: ReturnType<typeof fixture>, direction: "older" | "ne
 function visibleIds(view: ReturnType<typeof fixture>) {
   return [...view.host.querySelectorAll("[data-message-id]")].map((message) => message.getAttribute("data-message-id"));
 }
+
+describe("independent opening regression audit", () => {
+  test("a disjoint opening revalidation retains manual cumulative history until its gap is bridged", async () => {
+    const view = fixture();
+    await view.render();
+    await view.resolve(0, page(["reading"], null, "older"));
+    const older = await demand(view, "older");
+    await view.resolve(1, page(["earlier"], "older", null));
+    await older.settled;
+    const openingKey = openingSessionHistoryOptions(view.input()).queryKey;
+    const scrollKey = sessionScrollKey("a", "a");
+    const anchor = { messageId: "reading", offset: -20 };
+    useSessionScrollStore.getState().setManualScroll(scrollKey, 100, null, anchor);
+    await act(async () => { void view.client.invalidateQueries({ queryKey: openingKey, exact: true }); });
+    await view.resolve(2, page(["newest"], null, "bridge"));
+    expect(visibleIds(view)).toEqual(["earlier", "reading"]);
+    expect(view.pages.hasNewer).toBe(true);
+    expect(view.pages.pageForAnchor("reading")).toBeUndefined();
+    expect(view.pages.pageForAnchor("earlier")?.before).toBe("older");
+    expect(useSessionScrollStore.getState().sessions[scrollKey].anchor).toEqual(anchor);
+    const bridge = await demand(view, "newer");
+    expect(view.reads[3].window).toEqual({ limit: 24, before: "bridge" });
+    await view.resolve(3, page(["reading", "between"], "bridge", "older"));
+    await bridge.settled;
+    expect(visibleIds(view)).toEqual(["earlier", "reading", "between", "newest"]);
+    expect(view.pages.pageForAnchor("reading")?.before).toBe("bridge");
+    expect(view.pages.complete).toBe(true);
+    await act(async () => { void view.client.invalidateQueries({ queryKey: openingKey, exact: true }); });
+    await view.resolve(4, page(["newest", "tail"], null, "bridge"));
+    expect(visibleIds(view)).toEqual(["earlier", "reading", "between", "newest", "tail"]);
+    expect(view.pages.pageForAnchor("reading")?.before).toBe("bridge");
+  });
+
+  test("a reverted opening revalidation hides partial history until complete ordering arrives", async () => {
+    const view = fixture();
+    await view.render();
+    await view.resolve(0, page(["visible", "boundary", "hidden"], null, "older"));
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: openingSessionHistoryOptions(view.input()).queryKey, exact: true });
+    });
+    const reverted = page(["visible", "boundary", "hidden"], null, "older");
+    reverted.session.revert = { messageID: "boundary" };
+    await view.resolve(1, reverted);
+    expect(visibleIds(view)).toEqual([]);
+    await paint();
+    await paint();
+    expect(view.reads[2].window).toBeUndefined();
+    await view.resolve(2, snapshot("a", "Reverted", ["earlier", "visible", "boundary", "hidden"], "boundary"));
+    expect(visibleIds(view)).toEqual(["earlier", "visible"]);
+  });
+
+  test("opening revalidation preserves cumulative pages, live corrections, deletions and saved anchors", async () => {
+    const view = fixture();
+    const event = sessionEvents();
+    useSessionScrollStore.getState().setManualScroll("a", 100, null, { messageId: "old", offset: -20 });
+    useSessionScrollStore.getState().setGeometry("a", { owner: "a", scrollHeight: 1000, viewportWidth: 600,
+      before: 0, after: 300, messageIds: ["old"], page: { before: null, limit: 24, lineage: [null] } });
+    await view.render();
+    await view.resolve(0, { ...historyTool("output-A"), pagination: { limit: 24, nextCursor: "older" } });
+    const older = await demand(view, "older");
+    await view.resolve(1, page(["earlier", "deleted"], "older", null));
+    await older.settled;
+    await event({ type: "message.removed", properties: { sessionID: "a", messageID: "deleted" } });
+    const openingKey = openingSessionHistoryOptions(view.input()).queryKey;
+    const anchor = { messageId: "earlier", offset: -20 };
+    const scrollKey = sessionScrollKey("a", "a");
+    useSessionScrollStore.getState().setManualScroll(scrollKey, 100, null, anchor);
+    const position = view.pages.pageForAnchor("earlier");
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: openingKey, exact: true });
+    });
+    expect(view.reads).toHaveLength(3);
+    await event({ type: "message.part.updated", properties: { part: historyTool("output-B", "corrected").messages[1].parts[1] } });
+    await view.resolve(2, { ...historyTool("output-A"), pagination: { limit: 24, nextCursor: "changed" } });
+    expect(visibleIds(view)).toEqual(["earlier", "old", "active"]);
+    expect(view.host.textContent).toContain("output-B");
+    expect(view.host.textContent).not.toContain("output-A");
+    expect(view.pages.pageForAnchor("earlier")).toEqual(position);
+    expect(useSessionScrollStore.getState().sessions[scrollKey].anchor).toEqual(anchor);
+    expect(view.pages.complete).toBe(true);
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: openingKey, exact: true });
+    });
+    await view.resolve(3, { ...historyTool("output-C", "corrected"), pagination: { limit: 24, nextCursor: "changed" } });
+    expect(view.host.textContent).toContain("output-C");
+    expect(view.host.textContent).not.toContain("output-B");
+    expect(visibleIds(view)).not.toContain("deleted");
+  });
+
+  test("opening adoption fences a pending older read and uses its new cursor on the next demand", async () => {
+    const view = fixture();
+    await view.render();
+    await view.resolve(0, page(["old"], null, "old-cursor"));
+    const pending = await demand(view, "older");
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: openingSessionHistoryOptions(view.input()).queryKey, exact: true });
+    });
+    expect(view.reads).toHaveLength(3);
+    await view.resolve(2, page(["old", "new"], null, "new-cursor"));
+    expect(view.reads[1].signal.aborted).toBe(true);
+    await view.resolve(1, page(["obsolete"], "old-cursor", null));
+    await pending.settled;
+    expect(visibleIds(view)).toEqual(["old", "new"]);
+    expect(view.pages.loading).toBe(false);
+    const current = await demand(view, "older");
+    expect(view.reads[3].window).toEqual({ limit: 24, before: "new-cursor" });
+    await view.resolve(3, page(["earlier"], "new-cursor", null));
+    await current.settled;
+    expect(visibleIds(view)).toEqual(["earlier", "old", "new"]);
+  });
+
+  test("a joining pane preserves live-only rows and deletions through opening revalidation", async () => {
+    const view = fixture();
+    const event = sessionEvents();
+    await view.renderSplit("b", "a");
+    await view.resolve(1, page(["old"], null, "older"));
+    await event({ type: "message.updated", properties: { info: {
+      id: "live", sessionID: "a", role: "assistant", time: { created: 100 },
+    } } });
+    await act(async () => { jest.advanceTimersByTime(2_001); });
+    await view.renderSplit("a", "a");
+    await view.resolve(2, page(["old", "new"], null, "changed"));
+    await event({ type: "message.part.updated", properties: { part: {
+      id: "live-text", sessionID: "a", messageID: "live", type: "text", text: "Still streaming",
+    } } });
+    await event({ type: "message.removed", properties: { sessionID: "a", messageID: "old" } });
+    for (const pane of ["left", "right"]) {
+      expect([...view.host.querySelectorAll(`[data-pane="${pane}"] [data-message-id]`)].map((node) => node.getAttribute("data-message-id")))
+        .toEqual(["new", "live"]);
+      expect(view.host.querySelector(`[data-pane="${pane}"]`)?.textContent).toContain("Still streaming");
+    }
+  });
+
+  test("opening revalidation does not discard older pages loaded by another mounted pane", async () => {
+    const view = fixture();
+    await view.renderSplit("a", "a");
+    await view.resolve(0, page(["old"], null, "older"));
+    const right = view.panePages.get("right");
+    if (!right) throw new Error("Right pane is missing");
+    let pending = Promise.resolve();
+    await act(async () => { pending = right.load("older"); });
+    await view.resolve(1, page(["earlier"], "older", null));
+    await pending;
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: openingSessionHistoryOptions(view.input()).queryKey, exact: true });
+    });
+    await view.resolve(2, page(["old", "new"], null, "changed"));
+    for (const pane of ["left", "right"]) {
+      expect([...view.host.querySelectorAll(`[data-pane="${pane}"] [data-message-id]`)].map((node) => node.getAttribute("data-message-id")))
+        .toEqual(["earlier", "old", "new"]);
+      expect(view.panePages.get(pane)?.pageForAnchor("earlier")?.before).toBe("older");
+    }
+  });
+
+  for (const engine of ["opencode", "opencode2"]) test(`runtime authority admits the resolved remote ${engine} endpoint rather than its sidebar alias`, async () => {
+    const view = fixture();
+    const endpoint = resolveWorkspaceEndpoint({ id: "rem_alias", workspaceType: "remote", baseUrl: "https://worker.example",
+      openworkToken: "remote-token", openworkWorkspaceId: "runtime-x" }, { baseUrl: "http://localhost:7777", token: "local-token" });
+    if (!endpoint) throw new Error("Remote endpoint is missing");
+    const identity = sessionHistoryIdentity({ draftScope: "principal", opencodeBaseUrl: `${endpoint.mountedBaseUrl}/${engine}`,
+      runtimeWorkspaceId: endpoint.workspaceId, sessionId: "a" });
+    const selected = { ...view.input("a", endpoint.token), ...identity, transcriptQueryKey: transcriptKey(endpoint.workspaceId, "a") };
+    await view.renderRuntimeOwners([{ owner: identity.runtimeOwner, authToken: endpoint.token }], [selected]);
+    expect(view.reads).toHaveLength(1);
+    expect(view.reads[0].signal.aborted).toBe(false);
+    expect(identity.snapshotQueryKey).toEqual(snapshotKey("runtime-x", "a"));
+    await view.resolve(0, page(["remote-message"], null, "older"));
+    expect(visibleIds(view)).toEqual(["remote-message"]);
+    expect(view.openingError).toBeNull();
+  });
+
+  test("retry after failed stale-cache revalidation replaces the displayed page and cursor", async () => {
+    const view = fixture();
+    await view.render("a");
+    await view.resolve(0, page(["old"], null, "old-cursor"));
+    await view.render("b");
+    await act(async () => { jest.advanceTimersByTime(2_001); });
+    await view.render("a");
+    expect(view.reads).toHaveLength(3);
+    await act(async () => view.reads[2].reject(new Error("Revalidation failed")));
+    await settle();
+    expect(view.openingError?.message).toBe("Revalidation failed");
+    expect(visibleIds(view)).toEqual(["old"]);
+    await act(async () => view.host.querySelector("button")?.click());
+    expect(view.reads).toHaveLength(4);
+    await view.resolve(3, page(["new"], null, "new-cursor"));
+    expect(view.openingError).toBeNull();
+    expect(visibleIds(view)).toEqual(["new"]);
+    await demand(view, "older");
+    expect(view.reads[4].window).toEqual({ limit: 24, before: "new-cursor" });
+  });
+
+  test("invalidating a completed opening updates the existing observer's displayed page", async () => {
+    const view = fixture();
+    await view.render();
+    await view.resolve(0, page(["old"], null, "old-cursor"));
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: openingSessionHistoryOptions(view.input()).queryKey, exact: true });
+    });
+    expect(view.reads).toHaveLength(2);
+    await view.resolve(1, page(["new"], null, "new-cursor"));
+    expect(view.openingError).toBeNull();
+    expect(visibleIds(view)).toEqual(["new"]);
+  });
+
+  test("snapshot invalidation after completed opening refreshes without leaving a recovery error", async () => {
+    const view = fixture();
+    await view.render();
+    await view.resolve(0, page(["old"], null, "old-cursor"));
+    await act(async () => {
+      void view.client.invalidateQueries({ queryKey: snapshotKey("workspace", "a"), exact: true });
+    });
+    expect(view.reads).toHaveLength(2);
+    await view.resolve(1, page(["old", "new"], null, "new-cursor"));
+    expect(visibleIds(view)).toEqual(["old", "new"]);
+    expect(view.openingError).toBeNull();
+    expect(view.reads).toHaveLength(2);
+  });
+
+  test("a second observer's two-second revalidation keeps the first observer's pagination current", async () => {
+    const view = fixture();
+    await view.renderSplit("b", "a");
+    await view.resolve(1, page(["old"], null, "old-cursor"));
+    await act(async () => { jest.advanceTimersByTime(2_001); });
+    await view.renderSplit("a", "a");
+    expect(view.reads).toHaveLength(3);
+    await view.resolve(2, page(["new"], null, "new-cursor"));
+    expect(view.host.querySelector('[data-pane="left"] [data-message-id]')?.textContent).toBe("new");
+    expect(view.host.querySelector('[data-pane="right"] [data-message-id]')?.textContent).toBe("new");
+    const right = view.panePages.get("right");
+    if (!right) throw new Error("Right pane is missing");
+    await act(async () => { void right.load("older").catch(() => undefined); });
+    expect(view.reads[3].window).toEqual({ limit: 24, before: "new-cursor" });
+  });
+});
 
 describe("bounded opening recovery", () => {
   for (const kind of ["network", "http", "size", "deleted-session"]) test(`${kind} opening errors remain bounded and do not block another thread`, async () => {

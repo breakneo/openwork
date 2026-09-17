@@ -12,9 +12,16 @@ import { getSessionScrollState, useSessionScrollStore, type SessionHistoryPagePo
 type Page = OpenworkSessionHistory & { pagination: NonNullable<OpenworkSessionHistory["pagination"]> };
 type Direction = "older" | "newer" | "refresh" | "latest";
 type Pages = { pages: Page[]; bridge: Page[]; lineage: (string | null)[] };
+type PageHistory = LatestSessionHistory & { pageState?: {
+  value: Pages;
+  opening: Page | null;
+  baseline: Map<string, UIMessage>;
+  removed: Set<string>;
+  expiredPositions: WeakSet<Page>;
+} };
 type PageScope = {
   active: boolean;
-  initialized: boolean;
+  opening: Page | null;
   hydrating: boolean;
   removed: Set<string>;
   expiredPositions: WeakSet<Page>;
@@ -118,6 +125,7 @@ export function useSessionHistoryPages(input: {
   transcriptQueryKey?: readonly unknown[];
   metadataQueryKey?: readonly unknown[];
   initial: OpenworkSessionHistory | null;
+  initialBaseline?: UIMessage[];
   saved: SessionScrollState;
   readSnapshot: (signal: AbortSignal, window?: OpeningHistoryWindow, options?: { desktopTransport: "main" }) => Promise<OpenworkSessionHistory>;
   complete: boolean;
@@ -125,7 +133,7 @@ export function useSessionHistoryPages(input: {
   const client = useQueryClient();
   const scope = useMemo<PageScope>(() => ({
     active: true,
-    initialized: false,
+    opening: null,
     hydrating: false,
     removed: new Set<string>(),
     expiredPositions: new WeakSet<Page>(),
@@ -148,7 +156,7 @@ export function useSessionHistoryPages(input: {
     [input.owner, input.credential, hashKey(input.snapshotQueryKey)]);
   const pageKey = useMemo(() => ["react-session-latest", ...input.snapshotQueryKey, input.owner, input.credential, "page-read"],
     [input.owner, input.credential, hashKey(input.snapshotQueryKey)]);
-  const history = useQuery<LatestSessionHistory>({ queryKey: historyKey, queryFn: skipToken, gcTime: 0, structuralSharing: false });
+  const history = useQuery<PageHistory>({ queryKey: historyKey, queryFn: skipToken, gcTime: 0, structuralSharing: false });
   const metadata = useQuery<Pick<OpenworkSessionHistory["session"], "revert">>({
     queryKey: input.metadataQueryKey ?? ["react-session-metadata", input.owner, input.credential], queryFn: skipToken,
   });
@@ -164,8 +172,7 @@ export function useSessionHistoryPages(input: {
     ? client.getQueryData<UIMessage[]>(input.transcriptQueryKey) ?? EMPTY : EMPTY,
   [client, input.transcriptQueryKey]);
   const keep = useCallback((id: string) => !scope.removed.has(nativeId(id)), [scope]);
-  const publish = useCallback((state: Pages, reset = false, baseline: UIMessage[] = EMPTY, updated: readonly Page[] = state.pages, sourceBefore = scope.baseline) => {
-    if (!scope.active || currentScope.current !== scope) return;
+  const install = useCallback((state: Pages) => {
     scope.state = state;
     const snapshot = mergeSessionHistoryPages(state.pages, keep);
     scope.snapshot = snapshot;
@@ -180,15 +187,23 @@ export function useSessionHistoryPages(input: {
         lineage: index >= 64 ? [null, ...state.lineage.slice(index - 62, index + 1)] : state.lineage.slice(0, index + 1) };
       for (const message of page.messages) if (keep(message.info.id)) scope.positions.set(message.info.id, position);
     }
+    render((value) => value + 1);
+    return snapshot;
+  }, [keep, scope]);
+  const publish = useCallback((state: Pages, reset = false, baseline: UIMessage[] = EMPTY, updated: readonly Page[] = state.pages, sourceBefore = scope.baseline) => {
+    if (!scope.active || currentScope.current !== scope) return;
+    const previousIds = scope.ids;
+    const snapshot = install(state);
     const incoming = snapshotToUIMessages(snapshot);
     const ids = scope.ids;
     const newest = state.pages.at(-1)?.pagination.before === undefined && state.bridge.length === 0;
     scope.hydrating = true;
     try {
-      client.setQueryData<LatestSessionHistory>(historyKey, (current) => {
+      client.setQueryData<PageHistory>(historyKey, (current) => {
         const changes = readSource().filter((message) => sourceBefore.get(message.id) !== message);
         const previous = (reset ? changes : current?.messages ?? changes)
-          .filter((message) => keep(message.id) && (ids.has(nativeId(message.id)) || newest && !scope.baseline.has(message.id)));
+          .filter((message) => keep(message.id) && (ids.has(nativeId(message.id))
+            || newest && !scope.baseline.has(message.id) && !previousIds.has(nativeId(message.id))));
         const existing = new Map(previous.map((message) => [message.id, message]));
         const changed = new Set(updated.flatMap((page) => page.messages.map((message) => message.info.id)));
         const refreshed = incoming.map((message) => changed.has(nativeId(message.id)) ? message : existing.get(message.id) ?? message);
@@ -198,11 +213,12 @@ export function useSessionHistoryPages(input: {
         const messages = reset || !current
           ? [...refreshed.map((message) => values.get(message.id) ?? message), ...reconciled.filter((message) => !orderedIds.has(message.id))]
           : reconciled;
-        return { messages, source: readSource() };
+        return { messages, source: readSource(), pageState: {
+          value: state, opening: scope.opening, baseline: scope.baseline, removed: scope.removed, expiredPositions: scope.expiredPositions,
+        } };
       });
     } finally { scope.hydrating = false; }
-    render((value) => value + 1);
-  }, [client, historyKey, keep, readSource, scope]);
+  }, [client, historyKey, install, keep, readSource, scope]);
   useEffect(() => {
     scope.active = true;
     return () => {
@@ -212,13 +228,49 @@ export function useSessionHistoryPages(input: {
     };
   }, [client, pageKey, scope]);
   useEffect(() => {
-    if (scope.initialized || !isPage(input.initial) || input.complete) return;
-    scope.initialized = true;
-    const before = input.initial.pagination.before ?? null;
-    const saved = input.saved.geometry?.page;
-    const lineage = saved?.before === before ? saved.lineage : [before];
-    publish({ pages: [input.initial], bridge: [], lineage });
-  }, [input.initial, input.complete, input.saved, publish, scope]);
+    const opening = input.initial;
+    if (!isPage(opening) || input.complete) return;
+    const shared = client.getQueryData<PageHistory>(historyKey)?.pageState;
+    if (shared && scope.state !== shared.value) {
+      scope.opening = shared.opening;
+      scope.baseline = shared.baseline;
+      scope.removed = shared.removed;
+      scope.expiredPositions = shared.expiredPositions;
+      install(shared.value);
+    }
+    if (scope.opening === opening) return;
+    scope.opening = opening;
+    const before = opening.pagination.before ?? null;
+    const state = scope.state;
+    if (!state) {
+      const saved = input.saved.geometry?.page;
+      const lineage = saved?.before === before ? saved.lineage : [before];
+      publish({ pages: [opening], bridge: [], lineage }, false, input.initialBaseline);
+      return;
+    }
+    const index = state.pages.findLastIndex((page) => (page.pagination.before ?? null) === before);
+    const bridgeIndex = state.bridge.findIndex((page) => (page.pagination.before ?? null) === before);
+    if (index < 0 && bridgeIndex < 0) return;
+    scope.request?.abort();
+    scope.request = null;
+    scope.failed = null;
+    setStatus({ scope, pending: false, failed: false });
+    if (bridgeIndex >= 0) {
+      publish({ ...state, bridge: state.bridge.map((page, index) => index === bridgeIndex ? opening : page) }, false, input.initialBaseline, []);
+      return;
+    }
+    const previous = state.pages[index];
+    const disjoint = !opening.session.revert && opening.pagination.nextCursor !== previous.pagination.nextCursor
+      && previous.messages.length > 0 && opening.messages.length > 0
+      && !opening.messages.some((message) => previous.messages.some((prior) => prior.info.id === message.info.id));
+    const manual = getSessionScrollState(useSessionScrollStore.getState().sessions, input.sessionId, input.owner).mode === "manual";
+    if (disjoint && index === state.pages.length - 1 && (manual || state.pages.length > 1)) {
+      scope.expiredPositions.add(previous);
+      publish({ ...state, bridge: [opening] }, false, input.initialBaseline, []);
+    } else {
+      publish({ ...state, pages: state.pages.map((page, position) => position === index ? opening : page) }, false, input.initialBaseline, [opening]);
+    }
+  }, [client, historyKey, input.initial, input.initialBaseline, input.complete, input.saved, input.sessionId, input.owner, install, publish, scope]);
   const load = useCallback(async (direction: Direction, options?: { desktopTransport: "main" }, rejectCancelled = false): Promise<void> => {
     if (direction === "latest" && scope.request && scope.active && currentScope.current === scope) {
       scope.request.abort();
@@ -255,11 +307,13 @@ export function useSessionHistoryPages(input: {
       });
       if (rejectCancelled && readSignal?.aborted) throw new CancelledError();
       if (currentScope.current !== scope || !scope.active) return;
+      if (scope.state !== state) throw new CancelledError();
+      const overlap = direction === "newer" && snapshot.messages.some((message) => newest.messages.some((current) => current.info.id === message.info.id));
       if (!isPage(snapshot) || (snapshot.pagination.before ?? null) !== before
         || snapshot.pagination.nextCursor !== null && (snapshot.pagination.nextCursor === before
           || (direction === "older" || direction === "newer")
             && [...state.pages, ...state.bridge].some((page) => page.pagination.before === snapshot.pagination.nextCursor)
-            && (direction === "older" || snapshot.pagination.nextCursor !== newest.pagination.before))) {
+            && (direction === "older" || snapshot.pagination.nextCursor !== newest.pagination.before && !overlap))) {
         throw new Error("Conversation pagination did not advance. Retry loading history.");
       }
       if (direction === "latest") {
@@ -284,7 +338,6 @@ export function useSessionHistoryPages(input: {
         }
       } else {
         const bridge = [snapshot, ...state.bridge];
-        const overlap = snapshot.messages.some((message) => newest.messages.some((current) => current.info.id === message.info.id));
         if (snapshot.pagination.nextCursor === newest.pagination.before || overlap || snapshot.pagination.nextCursor === null) {
           const start = state.lineage.indexOf(bridge.at(-1)?.pagination.before ?? null);
           const lineage = [...state.lineage.slice(0, Math.max(0, start)), ...bridge.toReversed().map((page) => page.pagination.before ?? null),
@@ -330,7 +383,7 @@ export function useSessionHistoryPages(input: {
   const loadRef = useRef(load);
   loadRef.current = load;
   useEffect(() => {
-    let previous = client.getQueryData<LatestSessionHistory>(historyKey);
+    let previous = client.getQueryData<PageHistory>(historyKey);
     const historyHash = hashKey(historyKey);
     const sourceHash = input.transcriptQueryKey ? hashKey(input.transcriptQueryKey) : null;
     const fullHash = hashKey(input.snapshotQueryKey);
@@ -343,7 +396,23 @@ export function useSessionHistoryPages(input: {
       }
       if (event.action.type !== "success") return;
       if (event.query.queryHash === historyHash) {
-        const next = client.getQueryData<LatestSessionHistory>(historyKey);
+        const next = client.getQueryData<PageHistory>(historyKey);
+        if (next?.pageState) {
+          const shared = next.pageState;
+          previous = next;
+          if (scope.state !== shared.value) {
+            scope.request?.abort();
+            scope.request = null;
+            scope.failed = null;
+            scope.opening = shared.opening;
+            scope.baseline = shared.baseline;
+            scope.removed = shared.removed;
+            scope.expiredPositions = shared.expiredPositions;
+            setStatus({ scope, pending: false, failed: false });
+            install(shared.value);
+          }
+          return;
+        }
         const ids = new Set(next?.messages.map((message) => message.id));
         const removed = previous?.messages.filter((message) => !ids.has(message.id)) ?? [];
         previous = next;
@@ -357,15 +426,15 @@ export function useSessionHistoryPages(input: {
         const state = scope.state;
         const newest = state.pages.at(-1)?.pagination.before === undefined && state.bridge.length === 0;
         const ids = scope.ids;
-        client.setQueryData<LatestSessionHistory>(historyKey, (current) => {
+        client.setQueryData<PageHistory>(historyKey, (current) => {
           if (!current) return current;
           const next = applyHistorySourceChanges(current, readSource());
-          return { ...next, messages: next.messages.filter((message) => keep(message.id) && (ids.has(nativeId(message.id))
+          return { ...current, ...next, messages: next.messages.filter((message) => keep(message.id) && (ids.has(nativeId(message.id))
             || newest && !scope.baseline.has(message.id))) };
         });
       }
     });
-  }, [client, historyKey, pageKey, input.complete, input.snapshotQueryKey, input.transcriptQueryKey, keep, publish, readSource, scope]);
+  }, [client, historyKey, pageKey, input.complete, input.snapshotQueryKey, input.transcriptQueryKey, install, keep, publish, readSource, scope]);
   const seedSnapshot = useCallback((seed: () => void) => {
     scope.hydrating = true;
     try {

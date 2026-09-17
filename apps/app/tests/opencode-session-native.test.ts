@@ -416,6 +416,113 @@ describe("native OpenCode session operations", () => {
     expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
 
+  test.each(["opencode", "opencode2"])("%s wrapper cancels failed-attempt siblings without aborting a retry on late completion", async (engine) => {
+    const target = { ...endpoint, opencodeBaseUrl: endpoint.opencodeBaseUrl.replace("opencode", engine) };
+    const caller = new AbortController();
+    const firstMessages = Promise.withResolvers<Response>();
+    const secondMetadata = Promise.withResolvers<Response>();
+    const secondStarted = Promise.withResolvers<void>();
+    const messageRequests: Request[] = [];
+    const metadataRequests: Request[] = [];
+    const delays: number[] = [];
+    const sessionResponse = () => Response.json(engine === "opencode2" ? { data: session } : session);
+    const messagesResponse = () => Response.json(engine === "opencode2"
+      ? { data: [{ id: "msg_1", type: "user", time: { created: 1 }, content: [] }] } : messages);
+    await withSessionFetch((request) => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith(`/session/${session.id}`)) {
+        metadataRequests.push(request);
+        if (metadataRequests.length === 1) return Response.json({ error: "engine_v2_preview_not_running" }, { status: 503 });
+        secondStarted.resolve();
+        return secondMetadata.promise;
+      }
+      expect(path.endsWith("/message")).toBe(true);
+      messageRequests.push(request);
+      return messageRequests.length === 1 ? firstMessages.promise : messagesResponse();
+    }, async () => {
+      const history = composeNativeSessionHistoryWithRetry("owner", () => ({ owner: "owner", endpoint: target, sessionId: session.id }), {
+        signal: caller.signal,
+      }, { waitForSnapshotRetry: async (delay) => {
+        expect(messageRequests).toHaveLength(1);
+        expect(messageRequests[0]!.signal.aborted).toBe(true);
+        expect(caller.signal.aborted).toBe(false);
+        delays.push(delay);
+      } });
+      await secondStarted.promise;
+      firstMessages.resolve(messagesResponse());
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(metadataRequests[1]!.signal.aborted).toBe(false);
+      expect(caller.signal.aborted).toBe(false);
+      secondMetadata.resolve(sessionResponse());
+      expect((await history).messages.map(({ info }) => info.id)).toEqual(["msg_1"]);
+      expect(metadataRequests).toHaveLength(2);
+      expect(messageRequests).toHaveLength(2);
+      expect(delays).toEqual([100]);
+      expect(caller.signal.aborted).toBe(false);
+    });
+  });
+
+  test.each(["opencode", "opencode2"])("%s wrapper classifies permanent, malformed, unknown and transient failures without writes", async (engine) => {
+    const target = { ...endpoint, opencodeBaseUrl: endpoint.opencodeBaseUrl.replace("opencode", engine) };
+    for (const failure of ["missing", "malformed", "unknown", "network", "warmup"]) {
+      for (const saved of [false, true]) {
+        let reads = 0;
+        const delays: number[] = [];
+        await withSessionFetch((request) => {
+          expect(request.method).toBe("GET");
+          const path = new URL(request.url).pathname;
+          if (path.endsWith(`/session/${session.id}`)) {
+            if (failure === "missing") return Response.json({ message: "Session not found" }, { status: 404 });
+            return Response.json(engine === "opencode2" ? { data: session } : session);
+          }
+          expect(path.endsWith(saved ? "/message/msg_1" : "/message")).toBe(true);
+          reads += 1;
+          if (failure === "malformed") return new Response("{", { headers: { "Content-Type": "application/json" } });
+          if (failure === "unknown") throw new Error("Unrecognized native failure");
+          if (failure === "network") throw new TypeError("Failed to fetch");
+          if (failure === "warmup") return Response.json({ error: "engine_v2_preview_not_running" }, { status: 503 });
+          return Response.json(engine === "opencode2"
+            ? { data: saved ? { id: "msg_1", type: "user", content: [] } : [] }
+            : saved ? messages[0] : []);
+        }, async () => {
+          const history = composeNativeSessionHistoryWithRetry("owner", () => ({ owner: "owner", endpoint: target, sessionId: session.id }),
+            saved ? { messageIds: ["msg_1"] } : {}, { waitForSnapshotRetry: async (delay) => { delays.push(delay); } });
+          if (failure === "missing") await expect(history).rejects.toMatchObject({ status: 404, code: "session_not_found" });
+          else if (failure === "warmup") await expect(history).rejects.toMatchObject({ status: 503 });
+          else if (failure === "unknown") await expect(history).rejects.toThrow("Unrecognized native failure");
+          else if (failure === "network") await expect(history).rejects.toThrow("Failed to fetch");
+          else await expect(history).rejects.toBeInstanceOf(Error);
+          const transient = failure === "network" || failure === "warmup";
+          expect(reads).toBe(transient ? 4 : 1);
+          expect(delays).toEqual(transient ? [100, 250, 500] : []);
+        });
+      }
+    }
+  });
+
+  test.each(["opencode", "opencode2"])("%s wrapper preserves a caller's abort reason across all saved-message siblings", async (engine) => {
+    const target = { ...endpoint, opencodeBaseUrl: endpoint.opencodeBaseUrl.replace("opencode", engine) };
+    const caller = new AbortController();
+    const reason = { cancelledBy: "native-history-audit" };
+    const started = Promise.withResolvers<void>();
+    let count = 0;
+    await withSessionFetch((request) => new Promise((_resolve, reject) => {
+      request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+      count += 1;
+      if (count === 3) started.resolve();
+    }), async (requests) => {
+      const history = composeNativeSessionHistoryWithRetry("owner", () => ({ owner: "owner", endpoint: target, sessionId: session.id }), {
+        messageIds: ["msg_1", "msg_2"], signal: caller.signal,
+      }, { waitForSnapshotRetry: async () => { throw new Error("Unexpected retry"); } });
+      await started.promise;
+      caller.abort(reason);
+      await expect(history).rejects.toBe(reason);
+      expect(requests).toHaveLength(3);
+      expect(requests.every((request) => request.signal.aborted && request.signal.reason === reason)).toBe(true);
+    });
+  });
+
   test("history-only reads reject mismatched metadata, messages, and parts", async () => {
     const record = messages[0]!;
     for (const overrides of [

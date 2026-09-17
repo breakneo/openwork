@@ -274,7 +274,10 @@ export function openingSessionHistoryOptions(input: OpeningHistoryInput, saved =
   const readKey = ["react-session-latest", ...input.snapshotQueryKey, input.owner, credential, "opening-read", window];
   return queryOptions({
     queryKey: ["react-session-opening", input.owner, credential, window],
-    queryFn: async ({ signal, client, queryKey }): Promise<{ snapshot: OpenworkSessionHistory | null }> => {
+    queryFn: async ({ signal, client, queryKey }): Promise<{ snapshot: OpenworkSessionHistory | null; baseline: UIMessage[] }> => {
+      const baseline = client.getQueryData<LatestSessionHistory>([
+        "react-session-latest", ...input.snapshotQueryKey, input.owner, credential, "pages",
+      ])?.messages ?? EMPTY_HISTORY;
       if (input.ignoreCached) await Promise.resolve();
       signal.throwIfAborted();
       retainOpeningHistory(client, input, queryKey, readKey, signal);
@@ -308,7 +311,7 @@ export function openingSessionHistoryOptions(input: OpeningHistoryInput, saved =
         || snapshot.pagination.nextCursor !== null && snapshot.pagination.nextCursor === snapshot.pagination.before)) {
         throw new Error("Conversation pagination did not advance.");
       }
-      return { snapshot };
+      return { snapshot, baseline };
     },
     staleTime: (query) => query.state.data?.snapshot && (!cache
       || cache.getQueryData<{ snapshot?: OpenworkSessionHistory }>(readKey)?.snapshot === query.state.data.snapshot) ? 2_000 : 0,
@@ -384,7 +387,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     confirmedFull: null,
     readers: new Set<AbortController>(),
   }), [client, input.owner, input.sessionId, credential]);
-  const pages = useSessionHistoryPages({ ...input, credential, initial: openingSnapshot, saved, complete: hasFullSnapshot });
+  const pages = useSessionHistoryPages({ ...input, credential, initial: openingSnapshot, initialBaseline: query.data?.baseline, saved, complete: hasFullSnapshot });
   const readSource = useCallback(() => input.transcriptQueryKey
     ? client.getQueryData<UIMessage[]>(input.transcriptQueryKey) ?? EMPTY_HISTORY : EMPTY_HISTORY,
   [client, input.transcriptQueryKey]);
