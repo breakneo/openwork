@@ -23,6 +23,8 @@ import {
   type RolloverReason,
 } from "./engine-pool.js";
 import { withEngineDirectoryFence } from "./engine-directory-fence.js";
+import { PromptAdmissionLedger, type PromptAdmissionScope } from "./prompt-admission.js";
+
 import {
   clearEngineInstanceReaperForConfig,
   EngineInstanceReaper,
@@ -173,6 +175,15 @@ let desktopCloudSyncQueue: Promise<void> = Promise.resolve();
 const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, number>>();
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
+const promptAdmissions = new WeakMap<ServerConfig, PromptAdmissionLedger>();
+function promptAdmissionLedger(config: ServerConfig) {
+  let ledger = promptAdmissions.get(config);
+  if (!ledger) {
+    ledger = new PromptAdmissionLedger();
+    promptAdmissions.set(config, ledger);
+  }
+  return ledger;
+}
 const AGENT_DIAGNOSTICS_RATE_LIMIT_CAPACITY = 1_000;
 const AGENT_DIAGNOSTICS_MAX_IN_FLIGHT_PER_SERVER = 16;
 const AGENT_DIAGNOSTICS_MAX_REQUEST_BYTES = 256 * 1024;
@@ -733,6 +744,9 @@ function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
 }
 
 export async function startServer(config: ServerConfig): Promise<ServeResult> {
+  promptAdmissions.get(config)?.close();
+  const admissionLedger = new PromptAdmissionLedger();
+  promptAdmissions.set(config, admissionLedger);
   let taskRecovery: Awaited<ReturnType<typeof createTaskRecovery>> | undefined;
   const approvals = new ApprovalService(config.approval);
   const uiControl = new UiControlMailbox();
@@ -856,20 +870,50 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 
       const proxyWorkspaceOpencodeMount = async (mount: { workspaceId: string; restPath: string }) => {
         authMode = "client";
+        let admissionScope: PromptAdmissionScope | undefined;
         try {
           const actor = await requireClient(request, config, tokens);
+          // Never share a fallback credential namespace. requireClient supplies
+          // the verified bearer hash; a missing hash cannot authorize a ticket.
+          if (!actor.tokenHash) throw new ApiError(401, "unauthorized", "Invalid bearer token");
+          const admissionPath = normalizeOpencodeProxyPath(mount.restPath);
+          const requestedWorkspace = mount.workspaceId.trim();
+          const admissionWorkspace = config.workspaces.find((entry) => entry.id === requestedWorkspace)
+            ?? (requestedWorkspace.startsWith("rem_") ? config.workspaces.find((entry) => entry.id === requestedWorkspace.slice(4)) : undefined);
+          admissionScope = { credential: actor.tokenHash, workspace: admissionWorkspace?.id ?? requestedWorkspace,
+            session: decodeURIComponent(admissionPath.match(/^\/session\/([^/]+)/)?.[1] ?? "") };
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
+          const admissionRoute = admissionPath.match(/^\/session\/[^/]+\/prompt-admission(?:\/([^/]+))?$/);
+          if (admissionRoute) {
+            if (request.method !== "GET") ensureWritable(config);
+            const ledger = promptAdmissionLedger(config);
+            if (request.method === "POST" && !admissionRoute[1]) {
+              return finalize(ledger.prepare(admissionScope, await request.text()));
+            }
+            if ((request.method === "GET" || request.method === "DELETE") && admissionRoute[1]) {
+              return finalize(ledger.inspect(admissionScope, decodeURIComponent(admissionRoute[1]), request.method === "DELETE"));
+            }
+            return finalize(jsonResponse({ message: "Method not allowed" }, 405));
+          }
           await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, mount.restPath, false,
             request.method === "GET" ? request.signal : undefined);
           proxyService = "opencode";
           proxyBaseUrl = workspace.baseUrl?.trim() || undefined;
           const send = () => proxyOpencodeRequest({ config, request, url, workspace, proxyPath: mount.restPath,
+            admissionScope,
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined });
           const response = taskRecovery ? await taskRecovery.forward(workspace, "v1", mount.restPath, request, send) : await send();
           return finalize(response);
         } catch (error) {
+          const ticket = request.headers.get("x-openwork-prompt-ticket");
+          if (admissionScope && ticket && isPromptAsyncProxyRequest(request.method, mount.restPath)
+            && error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) {
+            try {
+              promptAdmissionLedger(config).rejectQueued(admissionScope, ticket, await request.clone().text());
+            } catch { /* A consumed body is already owned by native forwarding. */ }
+          }
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
             captureServerException(error, { method: request.method, route: "/workspace/:id/opencode/*", requestSignal: request.signal });
@@ -1078,6 +1122,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
   } catch (error) {
     await taskRecovery?.stop().catch(() => undefined);
+    admissionLedger.close();
     captureServerException(error, { method: "START", route: "startServer" });
     cloudProviderSync.stop();
     await engineV2Preview.stop().catch(() => undefined);
@@ -1123,6 +1168,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   return {
     ...server,
     stop: async () => {
+      admissionLedger.close();
       let recoveryError: unknown;
       try { await taskRecovery?.stop(); } catch (error) { recoveryError = error; }
       managedDesktopPolicy(config).onChange = undefined;
@@ -1547,6 +1593,7 @@ export async function proxyOpencodeRequest(input: {
   workspace?: WorkspaceInfo;
   proxyPath?: string;
   recoverySignal?: AbortSignal;
+  admissionScope?: PromptAdmissionScope;
 }) {
   const workspace = input.workspace;
   const proxyPath = input.proxyPath ?? input.url.pathname;
@@ -1573,6 +1620,7 @@ export async function proxyOpencodeRequest(input: {
   headers.delete("authorization");
   headers.delete("x-openwork-host-token");
   headers.delete("x-openwork-client-id");
+  headers.delete("x-openwork-prompt-ticket");
   headers.delete("host");
   headers.delete("origin");
 
@@ -1705,8 +1753,16 @@ export async function proxyOpencodeRequest(input: {
     return sanitizeProxyResponse(response);
   };
 
-  if (workspace && workspace.workspaceType !== "remote" && isPromptAsyncProxyRequest(method, proxyPath)) {
-    return withEngineDirectoryFence(input.config, workspace, forward);
+  if (isPromptAsyncProxyRequest(method, proxyPath)) {
+    const schedule = (operation: () => Promise<Response>) => workspace && workspace.workspaceType !== "remote"
+      ? withEngineDirectoryFence(input.config, workspace, operation) : operation();
+    const ticket = input.request.headers.get("x-openwork-prompt-ticket");
+    if (ticket) {
+      if (!input.admissionScope) return jsonResponse({ protocol: "openwork-prompt-admission-v1", state: "unknown" }, 409);
+      return promptAdmissionLedger(input.config).dispatch(input.admissionScope, ticket,
+        body ? new TextDecoder().decode(body) : "", schedule, forward);
+    }
+    return schedule(forward);
   }
   return forward();
 }
@@ -2031,7 +2087,7 @@ function withCors(response: Response, request: Request, config: ServerConfig) {
   headers.set("Access-Control-Allow-Origin", allowOrigin);
   headers.set(
     "Access-Control-Allow-Headers",
-    "Authorization, Content-Type, X-OpenWork-Host-Token, X-OpenWork-Client-Id, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
+    "Authorization, Content-Type, X-OpenWork-Host-Token, X-OpenWork-Client-Id, X-OpenWork-Prompt-Ticket, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
   );
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   const exposed = headers.get("Access-Control-Expose-Headers");
