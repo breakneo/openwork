@@ -22,6 +22,10 @@ export function GatewayUsagePolicyEditor({ orgId, policy, onClose }: { orgId: st
   const id = useId();
   const validation = gatewayUsagePolicyWriteSchema.safeParse(draft);
   const issues = submitted && !validation.success ? validation.error.issues : [];
+  const hasAmountError = issues.some((issue) => issue.path[0] === "limits" && issue.path[2] === "costUsd");
+  const dailyReset = new Date();
+  dailyReset.setUTCHours(5, 0, 0, 0);
+  const localDailyResetTime = dailyReset.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
   const latest = policies.data?.policies.find((item) => item.id === policy?.id);
   const changed = Boolean(policy && (!latest || latest.revision !== revision || latest.archivedAt));
   const canReload = policy && latest && !latest.archivedAt && !policies.isError && !policies.isFetching;
@@ -36,7 +40,6 @@ export function GatewayUsagePolicyEditor({ orgId, policy, onClose }: { orgId: st
       <Dialog.Backdrop className="fixed inset-0 z-50 bg-black/30" />
       <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 flex max-h-[90dvh] w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-5 overflow-y-auto rounded-2xl border border-[var(--ow-line)] bg-[var(--dls-surface)] p-6 shadow-xl">
         <Dialog.Title className="text-lg font-semibold">{policy ? "Edit usage limit policy" : "Create usage limit policy"}</Dialog.Title>
-        <Dialog.Description className="text-sm text-[var(--ow-muted)]">Estimated USD per person. Daily resets at 05:00 UTC; weekly on Monday; monthly on day 1. Editing a policy does not clear consumption.</Dialog.Description>
         <form noValidate className="flex flex-col gap-5" onSubmit={(event) => {
           event.preventDefault();
           setSubmitted(true);
@@ -52,15 +55,16 @@ export function GatewayUsagePolicyEditor({ orgId, policy, onClose }: { orgId: st
             </Field.Root>
             <div className="flex items-center justify-between gap-4"><span>Hard limit</span><DenSwitch aria-label="Hard limit" checked={draft.hardLimit} onChange={(hardLimit) => setDraft({ ...draft, hardLimit })} /></div>
             <p className="text-sm text-[var(--ow-muted)]">Hard limits block further requests after exhaustion. Soft limits only warn. In-flight requests may exceed the allowance; estimates are not an invoice ceiling.</p>
-            <div className="flex items-center justify-between gap-4"><span>Allow request reset</span><DenSwitch aria-label="Allow request reset" checked={draft.allowRequestReset} onChange={(allowRequestReset) => setDraft({ ...draft, allowRequestReset })} /></div>
+            <div className="flex items-center justify-between gap-4"><span>Allow request usage increase</span><DenSwitch aria-label="Allow request usage increase" aria-describedby={`${id}-reset-description`} checked={draft.allowRequestReset} onChange={(allowRequestReset) => setDraft({ ...draft, allowRequestReset })} /></div>
+            <p id={`${id}-reset-description`} className="text-sm text-[var(--ow-muted)]">Allow user to request an increase from within the app once their usage runs out</p>
             <fieldset className="flex min-w-0 flex-col gap-3">
               <legend className="mb-3 text-sm font-semibold">Limits</legend>
               {draft.limits.map((limit, index) => <div key={index} className="flex flex-col gap-2 rounded-lg border border-[var(--ow-line)] p-3">
                 <div className="flex flex-wrap items-end gap-3">
                   <div className="min-w-40 flex-1"><DenCombobox ariaLabel={`Timeframe ${index + 1}`} value={limit.timeframe} options={gatewayUsageTimeframes.map((timeframe) => ({ value: timeframe, label: timeframeLabels[timeframe] }))} onChange={(value) => changeLimit(index, { timeframe: gatewayUsageTimeframeSchema.parse(value) })} /></div>
                   <Field.Root className="flex min-w-40 flex-1 flex-col gap-2" invalid={issues.some((issue) => issue.path[1] === index)}>
-                    <Field.Label htmlFor={`${id}-amount-${index}`} className="text-sm">Estimated USD allowance</Field.Label>
-                    <DenInput id={`${id}-amount-${index}`} aria-label={`USD allowance ${index + 1}`} inputMode="decimal" value={limit.costUsd} maxLength={32} aria-invalid={issues.some((issue) => issue.path[1] === index)} aria-describedby={`${id}-amount-error-${index}`} onChange={(event) => changeLimit(index, { costUsd: event.target.value })} />
+                    <Field.Label htmlFor={`${id}-amount-${index}`} className="text-sm">USD Amount</Field.Label>
+                    <DenInput id={`${id}-amount-${index}`} aria-label={`USD Amount ${index + 1}`} inputMode="decimal" value={limit.costUsd} maxLength={32} aria-invalid={issues.some((issue) => issue.path[1] === index)} aria-describedby={`${id}-amount-error-${index}`} onChange={(event) => changeLimit(index, { costUsd: event.target.value })} />
                   </Field.Root>
                   <DenButton variant="ghost" aria-label={`Remove limit ${index + 1}`} disabled={draft.limits.length === 1} onClick={() => setDraft({ ...draft, limits: draft.limits.filter((_, i) => i !== index) })}>Remove</DenButton>
                 </div>
@@ -71,8 +75,13 @@ export function GatewayUsagePolicyEditor({ orgId, policy, onClose }: { orgId: st
                 const timeframe = gatewayUsageTimeframes.find((value) => !draft.limits.some((limit) => limit.timeframe === value));
                 if (timeframe) setDraft({ ...draft, limits: [...draft.limits, { timeframe, costUsd: "" }] });
               }}>Add limit</DenButton>
+              <div className="flex flex-col gap-1 text-xs text-[var(--ow-muted)]">
+                {draft.limits.some((limit) => limit.timeframe === "month") ? <p>Monthly: Resets on 1st of the month</p> : null}
+                {draft.limits.some((limit) => limit.timeframe === "week") ? <p>Weekly: Resets on Monday</p> : null}
+                {draft.limits.some((limit) => limit.timeframe === "day") ? <p>Daily: Resets at {localDailyResetTime} daily</p> : null}
+              </div>
+              {hasAmountError ? <p className="text-sm text-[var(--ow-danger)]">Enter a nonnegative decimal with at most six decimal places. Zero is allowed: a zero hard allowance blocks immediately and cannot receive a useful 25% extension.</p> : null}
             </fieldset>
-            <p className="text-sm text-[var(--ow-muted)]">Enter a nonnegative decimal with at most six decimal places. Zero is allowed: a zero hard allowance blocks immediately and cannot receive a useful 25% extension.</p>
           </fieldset>
           {mutation.error ? <DenNotice tone="error" message={mutation.error.message} /> : null}
           {policy && changed ? <DenNotice tone="error" message="This policy changed or was archived. Your edits have not been overwritten. Load the latest revision before saving, or close this editor." /> : null}

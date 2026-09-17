@@ -115,9 +115,8 @@ export function InferenceProvidersScreen() {
     >
       {orgId && orgContext && access.isAdmin ? <GatewayUsageResetRequests key={`resets-${orgId}`} orgId={orgId} members={orgContext.members} /> : null}
       {orgId ? <GatewayUsageSection key={orgId} orgId={orgId} /> : null}
-      {orgId && orgContext && access.isAdmin ? <GatewayUsageLimitsSection key={`limits-${orgId}`} orgId={orgId} teams={orgContext.teams} members={orgContext.members} /> : null}
 
-      <section aria-labelledby="gateway-providers-heading">
+      <section aria-labelledby="gateway-providers-heading" className="mb-10">
         <h2 id="gateway-providers-heading" className="mb-4 text-lg font-semibold tracking-tight text-gray-950">Providers</h2>
         <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <DenInput
@@ -164,6 +163,8 @@ export function InferenceProvidersScreen() {
           </section>
         )}
       </section>
+
+      {orgId && orgContext && access.isAdmin ? <GatewayUsageLimitsSection key={`limits-${orgId}`} orgId={orgId} teams={orgContext.teams} members={orgContext.members} /> : null}
     </DashboardPageTemplate>
   );
 }

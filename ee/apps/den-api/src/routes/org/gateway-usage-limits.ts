@@ -280,7 +280,7 @@ export function registerOrgGatewayUsageLimitRoutes<T extends { Variables: OrgRou
   )
   app.get(
     "/v1/gateway/usage-limit-reset-requests/me",
-    route("List own usage reset requests", gatewayUsageResetPageSchema),
+    route("List own usage increase requests", gatewayUsageResetPageSchema),
     orgMemberRoute(),
     available,
     queryValidator(resetListQuery),
@@ -288,7 +288,7 @@ export function registerOrgGatewayUsageLimitRoutes<T extends { Variables: OrgRou
   )
   app.get(
     "/v1/gateway/usage-limit-reset-requests",
-    route("List organization usage reset requests", gatewayUsageResetPageSchema),
+    route("List organization usage increase requests", gatewayUsageResetPageSchema),
     orgMemberRoute(),
     available,
     admin,

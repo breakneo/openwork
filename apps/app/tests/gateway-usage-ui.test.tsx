@@ -3,24 +3,24 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import type { Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { QueryClientProvider, focusManager } from "@tanstack/react-query";
-import { getReactQueryClient } from "../src/react-app/infra/query-client";
 import { writeDenSettings } from "../src/app/lib/den";
 import { gatewayUsageQueryPrefix, gatewayUsageNoticeState, parseGatewayUsageError, type GatewayUsageErrorEvidence } from "../src/react-app/domains/cloud/gateway-usage-state";
 import { gatewayUsageLimitResponse } from "@openwork/types/den/gateway-usage-limits";
 import { approvedUsageStatus, usageStatus } from "./gateway-usage-fixture";
 import { readGatewayUsageScope } from "../src/app/lib/gateway-usage-scope";
-import { disposeGatewayUsageRefresh, refreshGatewayUsageAfterCompletion } from "../src/react-app/domains/cloud/gateway-usage-refresh";
 
 GlobalRegistrator.register();
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import("react-dom/client");
+const { QueryClientProvider, focusManager, isServer } = await import("@tanstack/react-query");
+const { getReactQueryClient } = await import("../src/react-app/infra/query-client");
+const { disposeGatewayUsageRefresh, refreshGatewayUsageAfterCompletion } = await import("../src/react-app/domains/cloud/gateway-usage-refresh");
 let organizationId = "org_test";
 let signedIn = true;
 mock.module("../src/react-app/domains/cloud/den-auth-provider", () => ({
   useDenAuth: () => ({ isSignedIn: signedIn, verifiedIdentity: signedIn ? { organizationId, principalId: "user_test" } : null }),
 }));
-const { GatewayUsageSummary, GatewayUsageNotice, GatewayUsageTrigger, GatewayResetForm } = await import("../src/react-app/domains/cloud/gateway-usage-panel");
+const { GatewayUsageSummary, GatewayUsageNotice, GatewayUsageTrigger, GatewayResetForm, GatewayUsageApprovalNotice } = await import("../src/react-app/domains/cloud/gateway-usage-panel");
 const { useGatewayUsage, useGatewayUsageErrorHandled } = await import("../src/react-app/domains/cloud/use-gateway-usage");
 const { __applySessionSyncEventForTest, __createWorkspaceSessionSyncForTest } = await import("../src/react-app/domains/session/sync/session-sync");
 const originalFetch = globalThis.fetch;
@@ -42,6 +42,7 @@ let modelId = "model-a";
 let providerScope: number | null | undefined;
 let settled = false;
 let ownPanelActive = false;
+let approvalNotices = false;
 
 function latest() {
   if (!current) throw new Error("Missing hook");
@@ -52,6 +53,7 @@ function Probe() {
   const handled = useGatewayUsageErrorHandled({ scopeKey: current.scopeKey, sessionOwner: "session-a", errorKey: "turn", gatewaySelected: current.active, status: current.data, evidence });
   const notice = gatewayUsageNoticeState({ gatewaySelected: current.active, status: current.data });
   return <div>{current.data?.organizationId ?? "no data"}:{current.query.isError ? "error" : current.data?.state ?? "loading"}
+    {approvalNotices ? <><GatewayUsageApprovalNotice /><GatewayUsageTrigger /></> : null}
     {notice && current.data ? <GatewayUsageNotice state={notice} status={current.data} stale={current.query.isError} /> : null}
     {hasError && !handled ? <p>Provider error</p> : null}
   </div>;
@@ -77,6 +79,7 @@ beforeEach(() => {
   providerScope = undefined;
   settled = false;
   ownPanelActive = false;
+  approvalNotices = false;
   reads = 0;
   writes = 0;
   readFailure = false;
@@ -112,23 +115,26 @@ afterEach(async () => {
 test("summary presents day/week/month micro-USD, base/extension, hard/soft, pending and incomplete estimates", () => {
   const first = status.buckets[0];
   const html = renderToStaticMarkup(<GatewayUsageSummary status={{ ...status, coverage: { complete: false, unpricedRequests: 2 }, buckets: [first, { ...first, id: "week", timeframe: "week", hardLimit: false, canRequestReset: false, resetRequestStatus: "pending" }, { ...approvedUsageStatus().buckets[0], id: "month", timeframe: "month" }] }} onRequest={() => {}} />);
-  for (const text of ["Daily", "Weekly", "Monthly", "1.30", "1.00", "1.25", "Base", "Extension", "0.00", "0.25", "Hard limit", "Soft limit", "Incomplete accounting", "Reset request pending", "approved", "05:00 UTC", "GMT"]) expect(html).toContain(text);
-  expect(html).toContain("Request Reset — Daily");
-  expect(html).not.toContain("Request Reset — Weekly");
-  expect(html).not.toContain("Request Reset — Monthly");
+  for (const text of ["Daily", "Weekly", "Monthly", "1.30", "1.00", "1.25", "Base", "Extension", "0.00", "0.25", "Hard limit", "Soft limit", "Incomplete accounting", "Increase request pending", "approved", "Running sessions not reflected in usage above", "GMT"]) expect(html).toContain(text);
+  expect(html).toContain("Request Increase — Daily");
+  expect(html).not.toContain("Request Increase — Weekly");
+  expect(html).not.toContain("Request Increase — Monthly");
   expect(renderToStaticMarkup(<GatewayUsageSummary status={usageStatus({ state: "unlimited", buckets: [] })} onRequest={() => {}} />)).toContain("No usage limit policy assigned");
 });
 
-test("hard/soft notices remain informational and keep accessible usage controls", () => {
-  const hard = renderToStaticMarkup(<GatewayUsageNotice state="blocked" status={status} stale={true} />);
-  expect(hard).toContain("Out of usage");
-  expect(hard).toContain("keep editing");
-  expect(hard).toContain("Could not refresh usage");
-  expect(hard).toContain('aria-label="Usage limits"');
-  expect(hard).not.toContain("disabled=");
-  const soft = renderToStaticMarkup(<GatewayUsageNotice state="over_limit" status={{ ...status, state: "over_limit" }} stale={false} />);
-  expect(soft).toContain("Requests are still allowed");
-  expect(soft).not.toContain("Out of usage");
+test("hard/soft notices retain usage controls and stale truth disables only the increase action", async () => {
+  await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageNotice state="blocked" status={status} stale={true} /></QueryClientProvider>));
+  expect(container.textContent).toContain("Out of usage");
+  expect(container.textContent).toContain("You've consumed the AI usage limits assigned to you.");
+  expect(container.textContent).toContain("Consumed Limit: Standard - Daily");
+  expect(container.textContent).toContain("Could not refresh usage");
+  const increase = [...container.querySelectorAll("button")].find((button) => button.textContent === "Request Increase");
+  expect(increase?.disabled).toBe(true);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="View Usage Limits"]')?.disabled).toBe(false);
+  expect(container.querySelector("time")?.hasAttribute("title")).toBe(false);
+  await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageNotice state="over_limit" status={{ ...status, state: "over_limit" }} stale={false} /></QueryClientProvider>));
+  expect(container.textContent).toContain("Requests are still allowed");
+  expect(container.textContent).not.toContain("Out of usage");
 });
 
 test("reason form rejects blank and submits trimmed input", async () => {
@@ -149,11 +155,12 @@ test("reason form rejects blank and submits trimmed input", async () => {
   expect(reasons).toEqual(["Finish task"]);
 });
 
-test("panel fetches on click and exposes a titled loading/error state", async () => {
+test("trigger observes approval before opening and panel exposes a titled loading/error state", async () => {
   let resolveRead: ((value: Response) => void) | undefined;
   pendingRead = new Promise((resolve) => { resolveRead = resolve; });
   await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageTrigger /></QueryClientProvider>));
-  expect(reads).toBe(0);
+  expect(reads).toBe(1);
+  expect(document.querySelector('[data-slot="popover-title"]')).toBeNull();
   const button = container.querySelector("button");
   if (!button) throw new Error("Missing usage button");
   await act(async () => button.click());
@@ -172,17 +179,137 @@ test("eligible bucket opens a titled reset dialog and pending status removes its
   if (!trigger) throw new Error("Missing usage trigger");
   await act(async () => trigger.click());
   await flush();
-  const request = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("Request Reset — Daily"));
+  const request = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("Request Increase — Daily"));
   if (!request) throw new Error("Missing eligible reset action");
   await act(async () => request.click());
   await flush();
-  expect(document.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("Request Reset");
+  expect(document.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("Request Increase");
   expect(document.querySelector("textarea")?.required).toBe(true);
   status = { ...status, buckets: status.buckets.map((bucket) => ({ ...bucket, canRequestReset: false, resetRequestStatus: "pending" })) };
   await act(async () => { await getReactQueryClient().invalidateQueries({ queryKey: gatewayUsageQueryPrefix }); });
   await flush();
-  expect(document.body.textContent).toContain("Reset request pending");
-  expect(document.body.textContent).not.toContain("Request Reset — Daily");
+  expect(document.body.textContent).toContain("Increase request pending");
+  expect(document.body.textContent).not.toContain("Request Increase — Daily");
+});
+
+test("direct notice opens an increase dialog with a required reason and submits only once", async () => {
+  await act(async () => renderProbe());
+  await flush();
+  const request = [...container.querySelectorAll("button")].find((button) => button.textContent === "Request Increase");
+  if (!request) throw new Error("Missing direct increase action");
+  await act(async () => request.click());
+  await flush();
+  const dialog = document.querySelector('[role="dialog"]');
+  expect(dialog?.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("Request Increase");
+  const textarea = dialog?.querySelector("textarea");
+  const submit = dialog?.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (!textarea || !submit) throw new Error("Missing dialog form");
+  expect(submit.textContent).toBe("Request Increase");
+  expect(submit.disabled).toBe(true);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, " Finish task ");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => submit.click());
+  await flush();
+  expect(writes).toBe(1);
+  expect(submitted).toEqual({ bucketId: "bucket_test", reason: "Finish task" });
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Request Increase")).toBe(false);
+});
+
+test("pending is amber and closed-panel polling discovers approval across non-Gateway session panes", async () => {
+  expect(isServer).toBe(false);
+  enabled = false;
+  approvalNotices = true;
+  paneCount = 2;
+  status = { ...status, state: "within_limit", buckets: status.buckets.map((bucket) => ({ ...bucket, usedMicroUsd: 800_000, remainingMicroUsd: 200_000, resetAt: "2099-01-01T05:00:00.000Z", resetRequestStatus: "pending", canRequestReset: false })) };
+  await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageSummary status={status} onRequest={() => {}} /></QueryClientProvider>));
+  const pending = container.querySelector('[role="status"]');
+  expect(pending?.textContent).toBe("Increase request pending");
+  expect(pending?.classList.contains("bg-amber-3")).toBe(true);
+  expect(pending?.classList.contains("text-amber-11")).toBe(true);
+  await act(async () => renderProbe());
+  await flush();
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).toBeNull();
+  expect(latest().active).toBe(false);
+  const before = reads;
+  status = approvedUsageStatus();
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30_100)); });
+  await flush();
+  expect(reads).toBeGreaterThan(before);
+  const notices = container.querySelectorAll('[data-testid="gateway-usage-approved-notice"]');
+  expect(notices).toHaveLength(2);
+  const gauges = container.querySelectorAll('[aria-label="Usage limits"]');
+  expect(gauges).toHaveLength(2);
+  for (const gauge of gauges) {
+    expect(gauge.getAttribute("title")).toBe("Usage increase approved");
+    expect(gauge.querySelector("svg")?.classList.contains("text-green-11")).toBe(true);
+  }
+  for (const notice of notices) {
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.classList.contains("bg-green-3")).toBe(true);
+    expect(notice.textContent).toContain("Standard - Daily: +$0.25 ($1.25 total)");
+    expect(notice.textContent).toContain("One or more usage limits are still exhausted");
+    expect(notice.querySelector('button svg')?.classList.contains("text-green-11")).toBe(true);
+  }
+  expect(container.querySelector('[data-testid="gateway-usage-notice"]')).toBeNull();
+  expect(document.querySelector('[data-slot="popover-title"]')).toBeNull();
+}, 40_000);
+
+test("approval notice and gauge reject stale, expired, zero-extension, switched-org and signed-out truth", async () => {
+  enabled = false;
+  approvalNotices = true;
+  status = approvedUsageStatus();
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => renderProbe());
+  await flush();
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).not.toBeNull();
+  readFailure = true;
+  await act(async () => { await latest().query.refetch(); });
+  await flush();
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Usage limits"] svg')?.classList.contains("text-green-11")).toBe(false);
+  readFailure = false;
+  const approvedBucket = status.buckets[0];
+  for (const bucket of [{ ...approvedBucket, extensionMicroUsd: 0 }, { ...approvedBucket, resetAt: "2020-01-01T05:00:00.000Z" }, { ...approvedBucket, resetRequestStatus: "denied" } satisfies typeof approvedBucket]) {
+    status = { ...status, buckets: [bucket] };
+    await act(async () => { await latest().query.refetch(); });
+    await flush();
+    expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Usage limits"] svg')?.classList.contains("text-green-11")).toBe(false);
+  }
+  status = approvedUsageStatus();
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => { await latest().query.refetch(); });
+  await flush();
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).not.toBeNull();
+  let resolveRead: ((value: Response) => void) | undefined;
+  pendingRead = new Promise((resolve) => { resolveRead = resolve; });
+  await act(async () => { void latest().query.refetch(); });
+  await act(async () => {
+    organizationId = "org_next";
+    status = usageStatus({ organizationId, state: "unlimited", buckets: [] });
+    changeSettings(organizationId);
+    pendingRead = undefined;
+    renderProbe();
+  });
+  await flush();
+  const oldApproval = approvedUsageStatus();
+  oldApproval.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => resolveRead?.(Response.json(oldApproval)));
+  await flush();
+  expect(latest().data?.organizationId).toBe("org_next");
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Usage limits"] svg')?.classList.contains("text-green-11")).toBe(false);
+  expect(getReactQueryClient().getQueryCache().findAll({ queryKey: gatewayUsageQueryPrefix }).some((query) => query.queryKey.includes("org_test"))).toBe(false);
+  status = { ...oldApproval, organizationId };
+  await act(async () => { await latest().query.refetch(); });
+  await flush();
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).not.toBeNull();
+  await act(async () => { signedIn = false; changeSettings(organizationId, ""); renderProbe(); });
+  expect(container.querySelector('[data-testid="gateway-usage-approved-notice"]')).toBeNull();
 });
 
 test("reset mutation refetches own truth and prevents a pending duplicate", async () => {
@@ -225,7 +352,7 @@ test("approved extension remains exhausted but cannot request another reset", as
   expect(html).toContain("approved");
   expect(html).toContain("1.25");
   expect(html).toContain("0.25");
-  expect(html).not.toContain("Request Reset — Daily");
+  expect(html).not.toContain("Request Increase — Daily");
   await act(async () => renderProbe());
   await flush();
   await act(async () => {

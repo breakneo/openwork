@@ -46,7 +46,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     await admin.click({ role: "button", label: "Create policy" });
     await admin.see({ role: "combobox", label: "Timeframe 1" }, { value: "1 month" });
     await admin.type({ role: "textbox", label: "Policy name" }, policyName);
-    await admin.type({ role: "textbox", label: "USD allowance 1" }, "1.000000");
+    await admin.type({ role: "textbox", label: "USD Amount 1" }, "1.000000");
     await admin.click({ role: "button", label: "Save policy" });
     await admin.see({ role: "button", label: `Assignments for ${policyName}` });
     const saved = (await policies()).find((entry) => entry.name === policyName);
@@ -93,7 +93,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     await member.click({ role: "button", label: "Usage limits" });
     await member.see({ role: "heading", label: "Monthly" });
     await member.see({ text: "$0.00 used / $1.00 total" });
-    await member.notSee({ role: "button", label: "Request Reset — Monthly" });
+    await member.notSee({ role: "button", label: "Request Increase — Monthly" });
   });
   evidence.recordAssertionEvidence("Rendered Den assignment reaches only the intended member's real Desktop", "Monthly $1 hard/reset-enabled policy persisted through Den UI. Own-status identity injection did not change the control member; management requests returned 403; Desktop rendered zero used of $1.", true);
 
@@ -113,7 +113,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     expect(await own(world.control)).toMatchObject({ state: "unlimited", buckets: [] });
     await member.click({ role: "button", label: "Refresh usage" });
     await member.see({ text: "$1.00 used / $1.00 total" });
-    await member.see({ role: "button", label: "Request Reset — Monthly" });
+    await member.see({ role: "button", label: "Request Increase — Monthly" });
     await member.screenshot();
     return status;
   });
@@ -156,19 +156,23 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     await member.screenshot();
     evidence.recordAssertionEvidence("Native composer reaches the real Gateway and own status corroborates the custom notice", JSON.stringify({ engine: world.engine, rejectedBefore: rejectedBefore.length, rejectedAfter: rejectedAfter.length, upstreamRequests: world.upstreamCount(), nativePromptRecorded: true, nativeAssistantErrorRecorded: true, usedMicroUsd: exhausted.buckets[0]?.usedMicroUsd }), true);
     await member.click({ role: "button", label: "Usage limits", nth: 0 });
-    await member.see({ role: "button", label: "Request Reset — Monthly" });
+    await member.see({ role: "button", label: "Request Increase — Monthly" });
   });
 
   const pending = await step("member submits a required reason from Desktop and cannot review the request", async () => {
     const blank = await seed.api(world.member, requestsPath, { method: "POST", body: JSON.stringify({ bucketId: initialBucket.id, reason: "   " }) });
     expect(blank.response.status).toBe(400);
     expect(await requests()).toEqual([]);
-    await member.click({ role: "button", label: "Request Reset — Monthly" });
+    await member.click({ role: "button", label: "Request Increase — Monthly" });
     await member.see({ role: "textbox", label: "Reason (required)" });
     await member.type({ role: "textbox", label: "Reason (required)" }, reason);
-    await member.click({ role: "button", label: "Submit reset request" });
-    await member.see({ text: "Reset request pending" });
-    await member.notSee({ role: "button", label: "Request Reset — Monthly" });
+    const submit = await memberProbe.dom('[role="dialog"] button[type="submit"]');
+    expect(submit.elements).toHaveLength(1);
+    expect(submit.elements[0]?.text).toBe("Request Increase");
+    expect((await memberProbe.dom("button")).elements.filter((element) => element.text === "Request Increase")).toHaveLength(2);
+    await member.click({ role: "button", label: /^Request Increase$/, nth: 1 });
+    await member.see({ text: "Increase request pending" });
+    await member.notSee({ role: "button", label: "Request Increase — Monthly" });
     const rows = await requests();
     expect(rows).toHaveLength(1);
     const request = rows[0];
@@ -195,21 +199,24 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     expect(await requests(world.member, "/me?view=history")).toEqual(history);
     expect(await requests(world.control, "/me?view=history")).toEqual([]);
     expect(history[0]).toMatchObject({ id: pending.id, status: "approved", reviewedBy: world.adminId, reviewedAt: expect.any(String), bucketId: initialBucket.id, usedMicroUsd: 1_000_000, allowanceMicroUsd: 1_250_000, resetAt: initialBucket.resetAt });
-    await admin.see({ text: "Pending queue: 0. 0 queued requests loaded." });
+    await admin.see({ text: "No pending requests" });
+    expect((await probe.on(world.admin).dom('[aria-label="Pending increase request pages"] tbody tr')).elements).toHaveLength(0);
     await admin.notSee({ role: "button", label: "Approve 25% for Usage Member, 1 month" });
-    await admin.click({ role: "button", label: "Show request history" });
-    await admin.see({ role: "button", label: "Refresh history" });
-    await admin.see({ text: "1 history entries loaded." });
+    await admin.click({ text: "Previous requests" });
+    await admin.see({ text: "Reviewer: Usage Admin" });
+    expect((await probe.on(world.admin).dom('#gateway-reset-history tbody tr:nth-child(odd)')).elements).toHaveLength(1);
+    expect((await probe.on(world.admin).dom('#gateway-reset-history tbody tr:nth-child(even)')).elements).toHaveLength(1);
     await admin.notSee({ role: "button", label: "Load more history" });
     await admin.see({ text: "Reviewer: Usage Admin" });
     await admin.screenshot();
     await member.click({ role: "button", label: "Refresh usage" });
     await member.see({ text: "$1.00 used / $1.25 total" });
-    await member.see({ text: "Reset request: approved" });
-    await member.notSee({ text: "Reset request pending" });
-    await member.notSee({ role: "button", label: "Request Reset — Monthly" });
+    await member.see({ text: "Increase request: approved" });
+    await member.notSee({ text: "Increase request pending" });
+    await member.notSee({ role: "button", label: "Request Increase — Monthly" });
     await member.press("Escape");
     await member.notSee({ testId: "gateway-usage-notice" }, { timeoutMs: 60_000 });
+    await member.see({ testId: "gateway-usage-approved-notice" }, { text: /Usage increase approved/ });
     expect(await memberProbe.composer()).toMatchObject({ selectedModelLabel: world.modelName, composerEditable: true, modelUnavailable: false });
     await member.screenshot();
     expect(await own(world.control)).toMatchObject({ state: "unlimited", buckets: [] });

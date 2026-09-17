@@ -88,10 +88,10 @@ export function GatewayMemberUsageDetails({ status, policies, teams }: { status:
       <p className="text-lg font-medium tabular-nums">{formatLimitMoney(bucket.usedMicroUsd)} used / {formatLimitMoney(bucket.allowanceMicroUsd)} allowance</p>
       <p className="text-sm">{bucket.remainingMicroUsd < 0 ? `${formatLimitMoney(-bucket.remainingMicroUsd)} over allowance` : `${formatLimitMoney(bucket.remainingMicroUsd)} remaining`} · Base {formatLimitMoney(bucket.baseAllowanceMicroUsd)} · Extension {formatLimitMoney(bucket.extensionMicroUsd)}</p>
       <p className="text-sm">Next reset: <GatewayLimitTimestamp value={bucket.resetAt} /></p>
-      <p className="text-sm">Reset requests {bucket.allowRequestReset ? "allowed" : "disabled"} · {bucket.resetRequestStatus ? `Request ${bucket.resetRequestStatus}` : bucket.canRequestReset ? "Eligible to request a reset" : "Not currently eligible to request a reset"}</p>
+      <p className="text-sm">Increase requests {bucket.allowRequestReset ? "allowed" : "disabled"} · {bucket.resetRequestStatus ? `Request ${bucket.resetRequestStatus}` : bucket.canRequestReset ? "Eligible to request an increase" : "Not currently eligible to request an increase"}</p>
       <details className="text-sm"><summary className="cursor-pointer font-medium">Effective policy and assignment context</summary>
         <div className="flex flex-col gap-2 pt-3">
-          <p>The highest allowance wins for each timeframe and supplies its hard/reset flags. Ties prefer hard limits, then reset permission, then policy ID.</p>
+          <p>The highest allowance wins for each timeframe and supplies its hard-limit and increase-request settings. Ties prefer hard limits, then increase permission, then policy ID.</p>
           <section aria-label="Server-selected assignment snapshot" className="flex flex-col gap-2">
             <h5 className="font-medium">Server-selected snapshot</h5>
             <p>Policy: {bucket.policyName} ({bucket.policyId}) · {bucket.policyRevision !== undefined ? `revision ${bucket.policyRevision}` : "Revision unavailable in this snapshot"}. Bucket: {bucket.id}.</p>
@@ -141,19 +141,22 @@ export function GatewayUsageLimitsSection({ orgId, teams, members }: { orgId: st
   const latestArchive = active.find((policy) => policy.id === archiving?.id);
   const staleArchive = Boolean(archiving && latestArchive?.revision !== archiving.revision);
   return <section aria-labelledby="gateway-usage-limits-heading" className="flex flex-col gap-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><h2 id="gateway-usage-limits-heading" className="text-lg font-semibold">Usage Limits</h2><div className="flex gap-3"><DenButton variant="secondary" disabled={policies.isFetching} onClick={() => void policies.refetch()}>Refresh policies</DenButton><DenButton onClick={() => setEditor({})}>Create policy</DenButton></div></div>
-    <p className="text-sm text-[var(--ow-muted)]">Estimated USD for organization-provider Gateway traffic. Team policies apply to each person individually, never as a shared pool. Each timeframe applies simultaneously; allowances are not added together.</p>
-    <p className="text-sm text-[var(--ow-muted)]">Calendar resets: daily at 05:00 UTC, Monday at 05:00 UTC weekly, and day 1 at 05:00 UTC monthly.</p>
-    <DenInput type="search" aria-label="Search usage limit policies" placeholder="Search policies" value={query} onChange={(event) => setQuery(event.target.value)} />
+    <div className="flex flex-wrap items-center justify-between gap-3"><h2 id="gateway-usage-limits-heading" className="text-lg font-semibold">Usage Limits</h2><div className="flex gap-3">{active.length > 0 ? <DenButton variant="secondary" disabled={policies.isFetching} onClick={() => void policies.refetch()}>Refresh policies</DenButton> : null}<DenButton onClick={() => setEditor({})}>Create policy</DenButton></div></div>
+    {active.length > 0 ? <>
+      <p className="text-sm text-[var(--ow-muted)]">Estimated USD for organization-provider Gateway traffic. Team policies apply to each person individually, never as a shared pool. Each timeframe applies simultaneously; allowances are not added together.</p>
+      <p className="text-sm text-[var(--ow-muted)]">Calendar resets: daily at 05:00 UTC, Monday at 05:00 UTC weekly, and day 1 at 05:00 UTC monthly.</p>
+      <DenInput type="search" aria-label="Search usage limit policies" placeholder="Search policies" value={query} onChange={(event) => setQuery(event.target.value)} />
+    </> : null}
     <GatewayLimitsQueryFeedback query={policies} label="policies" />
-    {!policies.isError && policies.data ? <DenCard className="overflow-hidden p-0"><DenTable rows={filtered} getRowKey={(row) => row.id} emptyLabel={active.length ? "No policies match this search." : "No usage limit policies yet. Unassigned people have no allowance limit from this feature."} columns={[
+    {!policies.isError && policies.data && active.length === 0 ? <DenCard className="py-10 text-center"><p className="text-sm text-[var(--ow-muted)]">No usage limits configured</p></DenCard> : null}
+    {!policies.isError && policies.data && active.length > 0 ? <DenCard className="overflow-hidden p-0"><DenTable rows={filtered} getRowKey={(row) => row.id} emptyLabel="No policies match this search." columns={[
       { key: "name", header: "Policy", render: (policy) => <div className="flex flex-col gap-1"><span className="font-medium">{policy.name}</span><span className="text-xs text-[var(--ow-muted)]">Revision {policy.revision} · {policy.assignments.length} assignments</span></div> },
       { key: "limits", header: "Estimated allowances", render: (policy) => <ul>{policy.limits.map((limit) => <li key={limit.timeframe}>{timeframeLabels[limit.timeframe]}: {formatLimitMoney(limit.costLimitMicroUsd)}</li>)}</ul> },
-      { key: "flags", header: "Behavior", render: (policy) => <div className="flex flex-wrap gap-2"><DenBadge>{policy.hardLimit ? "Hard" : "Soft"}</DenBadge><DenBadge>{policy.allowRequestReset ? "Reset requests on" : "Reset requests off"}</DenBadge></div> },
+      { key: "flags", header: "Behavior", render: (policy) => <div className="flex flex-wrap gap-2"><DenBadge>{policy.hardLimit ? "Hard" : "Soft"}</DenBadge><DenBadge>{policy.allowRequestReset ? "Increase requests on" : "Increase requests off"}</DenBadge></div> },
       { key: "actions", header: "Actions", render: (policy) => <div className="flex flex-wrap gap-2"><DenButton size="sm" variant="secondary" disabled={policies.isFetching} aria-label={`Edit ${policy.name}`} onClick={() => setEditor({ policy })}>Edit</DenButton><DenButton size="sm" variant="secondary" disabled={policies.isFetching} aria-label={`Assignments for ${policy.name}`} onClick={() => setAssigning(assigning === policy.id ? null : policy.id)}>Assignments</DenButton><DenButton size="sm" variant="ghost" disabled={policies.isFetching} aria-label={`Archive ${policy.name}`} onClick={() => { mutation.reset(); setArchiving(policy); }}>Archive</DenButton></div> },
     ]} /></DenCard> : null}
     {assignmentPolicy && !policies.isError ? <DenCard><PolicyAssignments key={assignmentPolicy.id} orgId={orgId} policy={assignmentPolicy} directory={{ teams, members }} /></DenCard> : null}
-    <MemberInspector orgId={orgId} policies={policies.isError ? [] : active} teams={teams} />
+    {!policies.isError && active.length > 0 ? <MemberInspector orgId={orgId} policies={active} teams={teams} /> : null}
     {editor ? <GatewayUsagePolicyEditor orgId={orgId} policy={editor.policy} onClose={() => setEditor(null)} /> : null}
     <AlertDialog.Root open={Boolean(archiving)} onOpenChange={(open) => { if (!open && !mutation.isPending) setArchiving(null); }}>
       <AlertDialog.Portal><AlertDialog.Backdrop className="fixed inset-0 z-50 bg-black/30" /><AlertDialog.Popup className="fixed left-1/2 top-1/2 z-50 flex w-[min(480px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-2xl border border-[var(--ow-line)] bg-[var(--dls-surface)] p-6 shadow-xl">

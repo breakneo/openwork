@@ -97,7 +97,7 @@ export function useGatewayUsage(requested: boolean, panelOpen = false, refreshKe
     mutationFn: async (input: { bucketId: string; reason: string }) => {
       const organizationId = assertCurrent();
       const bucket = query.data?.buckets.find((item) => item.id === input.bucketId);
-      if (query.isError || !bucket?.canRequestReset || bucket.resetRequestStatus === "pending") throw new Error("Refresh usage limits to check reset eligibility.");
+      if (query.isError || !bucket?.canRequestReset || bucket.resetRequestStatus === "pending") throw new Error("Refresh usage limits to check increase eligibility.");
       const result = await client.requestGatewayUsageReset(organizationId, input);
       assertCurrent();
       return result;

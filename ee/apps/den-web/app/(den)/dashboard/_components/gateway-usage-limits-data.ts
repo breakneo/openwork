@@ -97,6 +97,21 @@ export function useGatewayMemberUsage(orgId: string, memberId: string) {
   });
 }
 
+export function useGatewayResetHistoryAvailable(orgId: string) {
+  return useQuery({
+    ...queryDefaults,
+    queryKey: [...gatewayLimitsKey(orgId), "reset-history-available"],
+    queryFn: async ({ signal }) => {
+      const params = new URLSearchParams({ view: "history", limit: "1" });
+      const page = await requestLimits(orgId, `${resetsPath}?${params}`, gatewayUsageResetPageSchema, { signal });
+      if (page.view !== "history" || page.limit !== 1) {
+        throw new Error("Could not verify previous increase requests. Refresh to try again.");
+      }
+      return page.requests.length > 0;
+    },
+  });
+}
+
 export function useGatewayResetRequests(orgId: string, view: GatewayUsageResetPage["view"]) {
   const client = useQueryClient();
   const queryKey = [...gatewayLimitsKey(orgId), "reset-requests", view];
@@ -110,7 +125,7 @@ export function useGatewayResetRequests(orgId: string, view: GatewayUsageResetPa
       const page = await requestLimits(orgId, `${resetsPath}?${params}`, gatewayUsageResetPageSchema, { signal });
       if (page.view !== view || page.limit !== 50 || page.hasMore !== Boolean(page.nextCursor)
         || (page.hasMore && (!page.requests.length || page.nextCursor === pageParam))) {
-        throw new Error("Gateway reset requests returned inconsistent pagination. Refresh from the first page.");
+        throw new Error("Gateway increase requests returned inconsistent pagination. Refresh from the first page.");
       }
       return page;
     },

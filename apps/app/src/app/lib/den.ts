@@ -3099,7 +3099,7 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
       return status;
     },
     async requestGatewayUsageReset(orgId: string, input: { bucketId: string; reason: string }) {
-      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to request a reset.");
+      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to request an increase.");
       const reason = input.reason.trim();
       if (!reason || reason.length > 2000 || !input.bucketId || input.bucketId.length > 64) {
         throw new Error("Choose a usage bucket and enter a reason (1–2000 characters).");

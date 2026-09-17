@@ -91,7 +91,7 @@ import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpe
 import { createSessionErrorUIMessage } from "@/react-app/domains/session/sync/usechat-adapter";
 import { useLocal } from "@/react-app/kernel/local-provider";
 import { useGatewayUsage, useGatewayUsageErrorHandled } from "../../cloud/use-gateway-usage";
-import { GatewayUsageNotice } from "../../cloud/gateway-usage-panel";
+import { GatewayUsageApprovalNotice, GatewayUsageNotice } from "../../cloud/gateway-usage-panel";
 import { gatewayUsageNoticeState, gatewayUsageRefreshKey, isGatewayUsageModel } from "../../cloud/gateway-usage-state";
 import { resolveAttachmentFileMetadata } from "@/react-app/domains/session/sync/attachment-file-part";
 import { deriveSessionRenderModel } from "@/react-app/domains/session/sync/transition-controller";
@@ -3518,6 +3518,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       </div>
 
       <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2">
+        <GatewayUsageApprovalNotice />
         {gatewayNotice && gatewayUsage.data ? <GatewayUsageNotice key={`${gatewayUsage.scopeKey}:${sessionOwner}`} state={gatewayNotice} status={gatewayUsage.data} stale={gatewayUsage.query.isError} /> : null}
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button

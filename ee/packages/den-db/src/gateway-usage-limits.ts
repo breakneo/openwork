@@ -1017,7 +1017,7 @@ export function createGatewayUsageLimits(db: GatewayUsageDb, clock = () => new D
           .from(R)
           .where(and(eq(R.id, id), eq(R.organizationId, scope.organizationId)))
           .for("update")
-        if (!stored) return fail("reset_not_found", 404, "Reset request not found.")
+        if (!stored) return fail("reset_not_found", 404, "Increase request not found.")
         const row = await refreshRequest(tx, stored, now)
         if (row.status !== "pending") return requestView(tx, row)
         const [bucket] = await tx.select().from(B).where(eq(B.id, row.bucketId)).for("update")

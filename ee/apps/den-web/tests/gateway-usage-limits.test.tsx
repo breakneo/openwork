@@ -38,9 +38,13 @@ function resetPage(view: GatewayUsageResetPage["view"], rows: GatewayUsageResetR
   return { requests: rows, view, limit: 50, pendingCount, hasMore: nextCursor !== null, nextCursor };
 }
 function resetListReply(path: string, rows: GatewayUsageResetRequest[]) {
-  const view = new URLSearchParams(path.split("?")[1]).get("view") === "history" ? "history" : "pending";
+  if (path === policiesPath) return { payload: { policies: [policy()] } };
+  const params = new URLSearchParams(path.split("?")[1]);
+  const view = params.get("view") === "history" ? "history" : "pending";
+  const limit = Number(params.get("limit"));
   const pendingCount = rows.filter((row) => row.status === "pending").length;
-  return { payload: resetPage(view, rows.filter((row) => view === "pending" ? row.status === "pending" : row.status !== "pending"), pendingCount) };
+  const filtered = rows.filter((row) => view === "pending" ? row.status === "pending" : row.status !== "pending");
+  return { payload: { ...resetPage(view, filtered.slice(0, limit), pendingCount, filtered.length > limit ? "next-page" : null), limit } };
 }
 
 type Call = { path: string; init: RequestInit };
@@ -78,6 +82,12 @@ function button(label: string, scope: ParentNode = document.body) {
 }
 async function click(label: string, scope?: ParentNode) {
   await act(async () => button(label, scope).click());
+  await tick();
+}
+async function toggleHistory(scope: ParentNode = document.body) {
+  const summary = [...scope.querySelectorAll("summary")].find((element) => element.textContent === "Previous requests");
+  if (!summary) throw new Error("Missing previous requests disclosure");
+  await act(async () => summary.click());
   await tick();
 }
 async function fill(selector: string, value: string) {
@@ -122,24 +132,33 @@ test("policy form defaults, duplicate frames and precision validate before a rea
     await click("Create policy");
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Create usage limit policy");
     expect(document.querySelector('[aria-label="Hard limit"]')?.getAttribute("aria-checked")).toBe("true");
-    expect(document.querySelector('[aria-label="Allow request reset"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(document.querySelector('[aria-label="Allow request usage increase"]')?.getAttribute("aria-checked")).toBe("true");
     expect(document.querySelector<HTMLInputElement>('[aria-label="Timeframe 1"]')?.value).toBe("1 month");
-    expect(document.querySelector<HTMLInputElement>('[aria-label="USD allowance 1"]')?.value).toBe("");
+    expect(document.querySelector<HTMLInputElement>('[aria-label="USD Amount 1"]')?.value).toBe("");
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain("USD Amount");
+    expect(dialog?.textContent).toContain("Monthly: Resets on 1st of the month");
+    expect(dialog?.textContent).not.toContain("Weekly: Resets on Monday");
+    expect(dialog?.textContent).not.toContain("Daily: Resets at");
+    expect(dialog?.textContent).not.toContain("Enter a nonnegative decimal");
     await fill('[role="dialog"] input[maxlength="120"]', "New policy");
-    await fill('[aria-label="USD allowance 1"]', "0.0000001");
+    await fill('[aria-label="USD Amount 1"]', "0.0000001");
     await click("Save policy");
     expect(document.body.textContent).toContain("maximum six decimal places");
+    expect(dialog?.textContent).toContain("Enter a nonnegative decimal");
     expect(view.calls.some((call) => call.init.method === "POST")).toBe(false);
-    await fill('[aria-label="USD allowance 1"]', "1.000001");
+    await fill('[aria-label="USD Amount 1"]', "1.000001");
+    expect(dialog?.textContent).not.toContain("Enter a nonnegative decimal");
     await click("Add limit");
-    await fill('[aria-label="USD allowance 2"]', "0");
+    expect(dialog?.textContent).toContain("Daily: Resets at");
+    await fill('[aria-label="USD Amount 2"]', "0");
     await choose("Timeframe 2", "1 month");
     await click("Save policy");
     expect(document.body.textContent).toContain("Timeframes must be unique");
     expect(view.calls.some((call) => call.init.method === "POST")).toBe(false);
     await choose("Timeframe 2", "1 day");
     await click("Hard limit");
-    await click("Allow request reset");
+    await click("Allow request usage increase");
     await click("Save policy");
     const save = view.calls.find((call) => call.init.method === "POST");
     expect(save?.path).toBe(policiesPath);
@@ -163,7 +182,7 @@ test("edit retains revision, handles a 409 without overwriting edits, then expli
   });
   try {
     await click("Edit Standard");
-    expect(document.querySelector<HTMLInputElement>('[aria-label="USD allowance 1"]')?.value).toBe("100.000001");
+    expect(document.querySelector<HTMLInputElement>('[aria-label="USD Amount 1"]')?.value).toBe("100.000001");
     await fill('[role="dialog"] input[maxlength="120"]', "Local edit");
     await click("Save policy");
     const write = view.calls.find((call) => call.init.method === "PATCH");
@@ -194,7 +213,7 @@ test("archive confirms the consequence and sends the displayed revision", async 
     expect(view.calls.some((call) => call.init.method === "POST")).toBe(false);
     await click("Archive policy");
     expect(view.calls.find((call) => call.init.method === "POST")).toMatchObject({ path: `${policiesPath}/policy-fixture/archive`, init: { body: '{"revision":7}' } });
-    expect(view.container.textContent).toContain("No usage limit policies yet");
+    expect(view.container.textContent).toContain("No usage limits configured");
   } finally { await view.close(); }
 });
 
@@ -289,10 +308,22 @@ test("reset queue previews ceil(base/4), safely renders reasons, approves once a
     expect(view.container.textContent).toContain("Approve adds $25.000001 → $125.000002 total");
     expect(view.container.textContent).toContain("Approval will still leave this bucket exhausted");
     expect(view.container.querySelector("script")).toBeNull();
+    expect([...view.container.querySelectorAll("th")].map((cell) => cell.textContent)).toEqual(["User", "Reason", "Requested", "Actions"]);
+    const row = view.container.querySelector("tbody tr");
+    expect(row?.textContent).toContain(person.name);
+    expect(row?.textContent).toContain(reset().reason);
+    expect(row?.querySelector("time")?.dateTime).toBe(reset().createdAt);
+    expect(row?.querySelectorAll("button")).toHaveLength(2);
+    expect(row?.textContent).not.toContain("Base:");
+    expect(row?.nextElementSibling?.querySelector("td")?.colSpan).toBe(4);
+    expect(row?.nextElementSibling?.textContent).toContain("Approve adds $25.000001");
+    expect(view.container.textContent).not.toContain(reset().bucketId);
+    expect(view.container.textContent).not.toContain(reset().id);
+    expect(view.container.querySelector("summary")).toBeNull();
     await click("Approve 25% for Example Member, 1 month");
     expect(view.calls.find((call) => call.init.method === "POST")).toMatchObject({ path: `${resetsPath}/reset-fixture/approve`, init: { body: "{}" } });
-    expect(view.container.textContent).toContain("No pending reset requests");
-    await click("Show request history");
+    expect(view.container.textContent).toContain("No pending requests");
+    await toggleHistory();
     expect(view.container.textContent).toContain("approved");
     expect(view.container.textContent).toContain("Reviewer: Example Member");
     expect(view.container.textContent).toContain("Jan 16, 2026");
@@ -310,8 +341,8 @@ test("denial uses its own route; stale decisions are refreshed and never silentl
     expect(view.calls.find((call) => call.init.method === "POST")).toMatchObject({ path: `${resetsPath}/reset-fixture/deny`, init: { body: "{}" } });
     expect(view.container.textContent).toContain("Refresh and review the latest state");
     expect(view.calls.filter((call) => call.init.method === "POST")).toHaveLength(1);
-    expect(view.container.textContent).toContain("No pending reset requests");
-    await click("Show request history");
+    expect(view.container.textContent).toContain("No pending requests");
+    await toggleHistory();
     expect(view.container.textContent).toContain("expired");
   } finally { await view.close(); }
 });
@@ -323,12 +354,12 @@ function MutationHarness() {
 test("mutations invalidate every affected cache within only their organization and pin org headers", async () => {
   const view = await mount(<MutationHarness />, () => ({ payload: reset() }));
   try {
-    for (const kind of ["policies", "assignments", "usage", "members", "reset-requests"]) {
+    for (const kind of ["policies", "assignments", "usage", "members", "reset-requests", "reset-history-available"]) {
       view.client.setQueryData([...gatewayLimitsKey(orgId), kind], { existing: true });
       view.client.setQueryData([...gatewayLimitsKey("other-org"), kind], { existing: true });
     }
     await click("Mutate");
-    for (const kind of ["policies", "assignments", "usage", "members", "reset-requests"]) {
+    for (const kind of ["policies", "assignments", "usage", "members", "reset-requests", "reset-history-available"]) {
       expect(view.client.getQueryState([...gatewayLimitsKey(orgId), kind])?.isInvalidated).toBe(true);
       expect(view.client.getQueryState([...gatewayLimitsKey("other-org"), kind])?.isInvalidated).toBe(false);
     }
@@ -343,11 +374,50 @@ test("pending and failed policy reads do not masquerade as empty policy lists", 
   const view = await mount(section(), (call) => call.path === policiesPath ? new Promise<Reply>((done) => { resolve = done; }) : defaultReply(call));
   try {
     expect(view.container.textContent).toContain("Loading policies");
-    expect(view.container.textContent).not.toContain("No usage limit policies yet");
+    expect(view.container.textContent).not.toContain("No usage limits configured");
     await act(async () => resolve?.({ status: 403, payload: { error: "forbidden", message: "Only owners and admins can manage limits." } }));
     await tick();
     expect(view.container.textContent).toContain("Only owners and admins");
-    expect(view.container.textContent).not.toContain("No usage limit policies yet");
+    expect(view.container.textContent).not.toContain("No usage limits configured");
+  } finally { await view.close(); }
+});
+
+test("no active policies hides the queue and member inspector without fetching private rows", async () => {
+  for (const policies of [[], [{ ...policy(), archivedAt: "2026-01-20T00:00:00.000Z" }]]) {
+    const view = await mount(<>{section()}<GatewayUsageResetRequests orgId={orgId} members={[member]} /></>, ({ path }) => {
+      expect(path).toBe(policiesPath);
+      return { payload: { policies } };
+    });
+    try {
+      expect(view.container.textContent).toContain("No usage limits configured");
+      expect(button("Create policy").disabled).toBe(false);
+      expect(view.container.querySelector('[aria-label="Search usage limit policies"]')).toBeNull();
+      expect(view.container.textContent).not.toContain("Usage Limit Increase Requests");
+      expect(view.container.textContent).not.toContain("Inspect member usage");
+      expect(view.calls.every((call) => call.path === policiesPath)).toBe(true);
+    } finally { await view.close(); }
+  }
+});
+
+test("history availability errors remain retryable without mounting paginated history", async () => {
+  let malformed = true;
+  const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, (call) => {
+    if (call.path === `${resetsPath}?view=history&limit=1`) return malformed
+      ? { payload: resetPage("history", [{ ...reset(), status: "denied" }], 0) }
+      : resetListReply(call.path, [{ ...reset(), status: "denied" }]);
+    return defaultReply(call);
+  });
+  try {
+    expect(view.container.textContent).toContain("Could not check previous requests");
+    expect(view.container.querySelector("summary")).toBeNull();
+    expect(view.calls.some((call) => call.path === `${resetsPath}?view=history&limit=50`)).toBe(false);
+    malformed = false;
+    await click("Refresh requests");
+    expect(view.container.textContent).not.toContain("Could not check previous requests");
+    expect(view.container.querySelector("summary")?.textContent).toBe("Previous requests");
+    expect(view.container.querySelector("details")?.open).toBe(false);
+    await toggleHistory();
+    expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=history&limit=50`);
   } finally { await view.close(); }
 });
 
@@ -364,7 +434,7 @@ test("form keeps one to three limit rows and requires a nonblank policy name", a
   try {
     await click("Create policy");
     expect(button("Remove limit 1").disabled).toBe(true);
-    await fill('[aria-label="USD allowance 1"]', "1");
+    await fill('[aria-label="USD Amount 1"]', "1");
     await click("Save policy");
     expect(document.querySelector('[role="dialog"] input[maxlength="120"]')?.getAttribute("aria-invalid")).toBe("true");
     await click("Add limit");
@@ -386,7 +456,7 @@ test("unknown create outcome keeps the draft and blocks accidental resubmission"
   try {
     await click("Create policy");
     await fill('[role="dialog"] input[maxlength="120"]', "Uncertain creation");
-    await fill('[aria-label="USD allowance 1"]', "25");
+    await fill('[aria-label="USD Amount 1"]', "25");
     await click("Save policy");
     expect(document.body.textContent).toContain("outcome could not be verified");
     expect(button("Save policy").disabled).toBe(true);
@@ -434,20 +504,23 @@ test("reset review locks both controls while pending and reports a successful ex
     await tick();
     expect(view.container.textContent).toContain("No extension was granted by this decision");
     expect(view.container.textContent).not.toContain("Request approved");
-    expect(view.container.textContent).toContain("No pending reset requests");
+    expect(view.container.textContent).toContain("No pending requests");
   } finally { await view.close(); }
 });
 
 test("reset queue handles failed reads and disables zero-base and elapsed-period approvals", async () => {
   let failed = true;
-  const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, () => failed
-    ? { status: 503, payload: { error: "unavailable", message: "Review queue unavailable" } }
-    : { payload: resetPage("pending", [{ ...reset(), baseAllowanceMicroUsd: 0, allowanceMicroUsd: 0, resetAt: "2020-01-01T05:00:00.000Z" }], 1) });
+  const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, (call) => {
+    if (call.path === policiesPath || call.path.includes("view=history")) return defaultReply(call);
+    return failed
+      ? { status: 503, payload: { error: "unavailable", message: "Review queue unavailable" } }
+      : { payload: resetPage("pending", [{ ...reset(), baseAllowanceMicroUsd: 0, allowanceMicroUsd: 0, resetAt: "2020-01-01T05:00:00.000Z" }], 1) };
+  });
   try {
     expect(view.container.textContent).toContain("Review queue unavailable");
-    expect(view.container.textContent).not.toContain("No pending reset requests");
+    expect(view.container.textContent).not.toContain("No pending requests");
     failed = false;
-    await click("Retry reset requests");
+    await click("Retry increase requests");
     expect(button("Approve 25% for Example Member, 1 month").disabled).toBe(true);
     expect(view.container.textContent).toContain("This period ended");
     expect(view.container.textContent).toContain("zero base allowance");
@@ -458,6 +531,7 @@ test("paginates pending and lazy history independently beyond fifty without drop
   const queued = Array.from({ length: 51 }, (_, index): GatewayUsageResetRequest => ({ ...reset(), id: `pending-${index}`, memberName: `Queued person ${index}`, status: index === 49 ? "expired" : "pending" }));
   const history = Array.from({ length: 51 }, (_, index): GatewayUsageResetRequest => ({ ...reset(), id: `history-${index}`, memberName: `Historical person ${index}`, status: "approved" }));
   const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, ({ path }) => {
+    if (path === policiesPath || path === `${resetsPath}?view=history&limit=1`) return resetListReply(path, history);
     const params = new URLSearchParams(path.split("?")[1]);
     const list = params.get("view") === "history" ? "history" : "pending";
     const rows = list === "history" ? history : queued;
@@ -467,38 +541,41 @@ test("paginates pending and lazy history independently beyond fifty without drop
     return { payload: resetPage(list, cursor ? rows.slice(50) : rows.slice(0, 50), 51, cursor ? null : `${list}-cursor`) };
   });
   try {
-    expect(view.calls).toHaveLength(1);
-    expect(view.calls[0].path).toBe(`${resetsPath}?view=pending&limit=50`);
-    expect(view.container.querySelectorAll("tbody tr")).toHaveLength(50);
-    expect(view.container.textContent).toContain("Pending queue: 51. 50 queued requests loaded.");
+    expect(view.calls.map((call) => call.path)).toEqual([policiesPath, `${resetsPath}?view=pending&limit=50`, `${resetsPath}?view=history&limit=1`]);
+    expect(view.container.querySelectorAll("tbody tr:nth-child(odd)")).toHaveLength(50);
+    expect(view.container.textContent).not.toContain("queued requests loaded");
+    expect(view.container.textContent).not.toContain("Pending queue:");
+    expect(view.container.textContent).toContain("Last checked:");
     expect(view.container.textContent).toContain("Expired / ineligible");
     expect(button("Approve 25% for Queued person 49, 1 month").disabled).toBe(true);
     expect(button("Deny request for Queued person 49, 1 month").disabled).toBe(true);
     await click("Load more pending requests");
-    expect(view.container.querySelectorAll("tbody tr")).toHaveLength(51);
+    expect(view.container.querySelectorAll("tbody tr:nth-child(odd)")).toHaveLength(51);
     expect(view.container.textContent).toContain("Queued person 50");
     expect(view.container.textContent).not.toContain("Load more pending requests");
-    expect(view.calls.some((call) => call.path.includes("view=history"))).toBe(false);
-    await click("Show request history");
-    expect(view.container.querySelectorAll('#gateway-reset-history tbody tr')).toHaveLength(50);
+    expect(view.calls.filter((call) => call.path.includes("view=history")).map((call) => call.path)).toEqual([`${resetsPath}?view=history&limit=1`]);
+    await toggleHistory();
+    expect(view.container.querySelectorAll('#gateway-reset-history tbody tr:nth-child(odd)')).toHaveLength(50);
     expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=history&limit=50`);
     await click("Load more history");
-    expect(view.container.querySelectorAll('#gateway-reset-history tbody tr')).toHaveLength(51);
+    expect(view.container.querySelectorAll('#gateway-reset-history tbody tr:nth-child(odd)')).toHaveLength(51);
     expect(view.container.textContent).toContain("Historical person 50");
     expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=history&limit=50&cursor=history-cursor`);
-    await click("Hide request history");
-    await click("Show request history");
+    await toggleHistory();
+    await toggleHistory();
     expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=history&limit=50`);
-    expect(view.container.querySelectorAll('#gateway-reset-history tbody tr')).toHaveLength(50);
-    await click("Refresh requests");
-    expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=pending&limit=50`);
-    expect(view.container.querySelectorAll('[aria-label="Pending reset request pages"] tbody tr')).toHaveLength(50);
+    expect(view.container.querySelectorAll('#gateway-reset-history tbody tr:nth-child(odd)')).toHaveLength(50);
+    const beforeRefresh = view.calls.length;
+    await click("Refresh", view.container.querySelector('[aria-label="Pending increase request pages"]') ?? undefined);
+    expect(view.calls.slice(beforeRefresh).map((call) => call.path)).toEqual([`${resetsPath}?view=pending&limit=50`, `${resetsPath}?view=history&limit=1`]);
+    expect(view.container.querySelectorAll('[aria-label="Pending increase request pages"] tbody tr:nth-child(odd)')).toHaveLength(50);
   } finally { await view.close(); }
 });
 
 test("next-page failure retains loaded rows and offers retry without silently reporting completion", async () => {
   let fail = true;
   const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, ({ path }) => {
+    if (path === policiesPath || path.includes("view=history")) return resetListReply(path, []);
     if (path.includes("cursor=")) return fail ? { status: 503, payload: { error: "unavailable", message: "Next page unavailable" } } : { payload: resetPage("pending", [{ ...reset(), id: "second", memberName: "Second person" }], 2) };
     return { payload: resetPage("pending", [reset()], 2, "next-page") };
   });
@@ -506,11 +583,11 @@ test("next-page failure retains loaded rows and offers retry without silently re
     await click("Load more pending requests");
     expect(view.container.textContent).toContain("Next page unavailable");
     expect(view.container.textContent).toContain("Only previously loaded entries are shown");
-    expect(view.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(view.container.querySelectorAll("tbody tr:nth-child(odd)")).toHaveLength(1);
     expect(button("Approve 25% for Example Member, 1 month").disabled).toBe(true);
     fail = false;
     await click("Retry more pending requests");
-    expect(view.container.querySelectorAll("tbody tr")).toHaveLength(2);
+    expect(view.container.querySelectorAll("tbody tr:nth-child(odd)")).toHaveLength(2);
     expect(view.container.textContent).not.toContain("Next page unavailable");
   } finally { await view.close(); }
 });
@@ -519,6 +596,7 @@ test("org switching clears cursors, cached rows, decisions and history expansion
   const { ORG_SCOPE_HEADER } = await import("../app/(den)/_lib/org-scope");
   const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, ({ path, init }) => {
     const scope = new Headers(init.headers).get(ORG_SCOPE_HEADER);
+    if (path === policiesPath || path === `${resetsPath}?view=history&limit=1`) return resetListReply(path, [{ ...reset(), status: "denied" }]);
     const params = new URLSearchParams(path.split("?")[1]);
     const list = params.get("view") === "history" ? "history" : "pending";
     const cursor = params.get("cursor");
@@ -527,33 +605,34 @@ test("org switching clears cursors, cached rows, decisions and history expansion
   });
   try {
     await click("Load more pending requests");
-    await click("Show request history");
+    await toggleHistory();
     await click("Load more history");
     const before = view.calls.length;
     await view.rerender(<GatewayUsageResetRequests orgId="org-second" members={[]} />);
-    expect(view.calls.slice(before)).toHaveLength(1);
-    expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=pending&limit=50`);
+    expect(view.calls.slice(before).map((call) => call.path)).toEqual([policiesPath, `${resetsPath}?view=pending&limit=50`, `${resetsPath}?view=history&limit=1`]);
+    for (const call of view.calls.slice(before)) expect(new Headers(call.init.headers).get(ORG_SCOPE_HEADER)).toBe("org-second");
     expect(view.container.textContent).toContain("Second organization");
     expect(view.container.textContent).not.toContain("First organization");
     expect(view.container.querySelector('#gateway-reset-history')).toBeNull();
-    expect(button("Show request history").getAttribute("aria-expanded")).toBe("false");
+    expect(view.container.querySelector("details")?.open).toBe(false);
     expect(view.client.getQueryCache().findAll({ queryKey: gatewayLimitsKey(orgId) })).toHaveLength(0);
-    await click("Show request history");
+    await toggleHistory();
     expect(view.calls.at(-1)?.path).toBe(`${resetsPath}?view=history&limit=50`);
   } finally { await view.close(); }
 });
 
 test("a review invalidates both mounted reset views and other usage caches only in its org", async () => {
   let current = reset();
+  const previous = { ...reset(), id: "previous-request", status: "approved" } satisfies GatewayUsageResetRequest;
   const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, (call) => {
     if (call.init.method === "POST") { current = { ...current, status: "denied" }; return { payload: current }; }
-    return resetListReply(call.path, [current]);
+    return resetListReply(call.path, [current, previous]);
   });
   try {
-    const keys = [["policies"], ["usage", person.id], ["assignments", "policy-fixture"], ["reset-requests", "pending"], ["reset-requests", "history"]];
+    const keys = [["usage", person.id], ["assignments", "policy-fixture"], ["policies"], ["reset-requests", "pending"], ["reset-requests", "history"], ["reset-history-available"]];
     for (const key of keys) view.client.setQueryData([...gatewayLimitsKey("other-org"), ...key], { existing: true });
-    for (const key of keys.slice(0, 3)) view.client.setQueryData([...gatewayLimitsKey(orgId), ...key], { existing: true });
-    await click("Show request history");
+    for (const key of keys.slice(0, 2)) view.client.setQueryData([...gatewayLimitsKey(orgId), ...key], { existing: true });
+    await toggleHistory();
     const count = (list: string) => view.calls.filter((call) => call.path === `${resetsPath}?view=${list}&limit=50`).length;
     const pendingReads = count("pending");
     const historyReads = count("history");
@@ -561,8 +640,10 @@ test("a review invalidates both mounted reset views and other usage caches only 
     expect(count("pending")).toBeGreaterThan(pendingReads);
     expect(count("history")).toBeGreaterThan(historyReads);
     expect(view.container.querySelector('#gateway-reset-history')?.textContent).toContain("denied");
-    expect(view.container.textContent).toContain("Pending queue: 0");
-    for (const key of keys.slice(0, 3)) expect(view.client.getQueryState([...gatewayLimitsKey(orgId), ...key])?.isInvalidated).toBe(true);
+    expect(view.container.textContent).toContain("No pending requests");
+    expect(view.calls.filter((call) => call.path === policiesPath)).toHaveLength(2);
+    expect(view.calls.filter((call) => call.path === `${resetsPath}?view=history&limit=1`)).toHaveLength(2);
+    for (const key of keys.slice(0, 2)) expect(view.client.getQueryState([...gatewayLimitsKey(orgId), ...key])?.isInvalidated).toBe(true);
     for (const key of keys) expect(view.client.getQueryState([...gatewayLimitsKey("other-org"), ...key])?.isInvalidated).toBe(false);
   } finally { await view.close(); }
 });
@@ -594,11 +675,11 @@ test("inspector preserves server-selected provenance/revision and reports quaran
 
 test("rejects a paginated response with a different view or missing continuation cursor", async () => {
   for (const malformed of [resetPage("history", [reset()], 1), { ...resetPage("pending", [reset()], 2), hasMore: true }]) {
-    const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, () => ({ payload: malformed }));
+    const view = await mount(<GatewayUsageResetRequests orgId={orgId} members={[]} />, (call) => call.path === policiesPath || call.path.includes("view=history") ? defaultReply(call) : { payload: malformed });
     try {
       expect(view.container.textContent).toContain("inconsistent pagination");
       expect(view.container.querySelector("tbody")).toBeNull();
-      expect(view.calls).toHaveLength(1);
+      expect(view.calls.filter((call) => call.path.includes("view=pending"))).toHaveLength(1);
     } finally { await view.close(); }
   }
 });
