@@ -5,6 +5,7 @@ import { offlineRoutingEvaluator, routingCheckIds, routingDictionary, routingInt
 
 const liveJev = process.env.OPENWORK_EVAL_JEV_ROUTING_VERIFY === "1";
 const test = spec.world(memberRoutingWeb, {
+  resources: { surfaces: ["web"], services: ["den"] },
   timeout: 600_000,
   needs: liveJev ? { env: ["JEV_AI_GATEWAY_API_KEY"] } : {},
 });

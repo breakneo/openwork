@@ -96,7 +96,7 @@
     "./den/gateway-router": {
       "types": "./src/den/gateway-router.ts",
       "development": "./src/den/gateway-router.ts",
-      "default": "./dist/den/gateway-router.js"
+      "default": "./src/den/gateway-router.ts"
     },
     "./den/gateway": {
       "types": "./src/den/gateway.ts",
