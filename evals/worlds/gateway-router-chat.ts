@@ -11,7 +11,8 @@ const exec = promisify(execFile);
 async function engines() {
   const { stdout } = await exec("ps", ["-axo", "pid=,args="], { timeout: 5_000 });
   return stdout.split("\n").flatMap(line => {
-    const match = line.match(/^\s*(\d+)\s+(\S*opencode)\s+serve\b/);
+    // The pinned npm package ships an ELF named opencode.exe on Linux too.
+    const match = line.match(/^\s*(\d+)\s+(\S*opencode(?:\.exe)?)\s+serve\b/);
     return match ? [{ pid: match[1], binary: match[2] }] : [];
   });
 }
