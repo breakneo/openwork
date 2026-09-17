@@ -178,7 +178,7 @@ test("recipe rerun observes actual incoming headers without backfilling historic
   const supplemental = record(JSON.parse(await readFile(new URL("../../reports/mcp-put-by-key-recipe-headers-transcript-2026-09-14.json", import.meta.url), "utf8")));
   expect(supplemental.kind).toBe("released-recipe-observed-headers-rerun");
   expect(supplemental.historicalHeadersBackfilled).toBe(false);
-  expect(supplemental.originalTranscriptSha256).toBe("06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8");
+  expect(supplemental.originalTranscriptSha256).toBe("e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c");
   expect(supplemental.containerImage).toBe(record(transcript.inspection).containerImage);
   const rows = records(supplemental.requests);
   expect(rows).toHaveLength(5);

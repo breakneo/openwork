@@ -68,11 +68,11 @@ test("recorded release receipts identify the pinned image and API-key-only proof
 });
 
 test("recorded release cases 1-2 create then converge to exactly one keyed ID", async ({ evidence }) => {
-  expect(response("case1-create", 201)).toMatchObject({ id: firstId, externalKey: "rs-proof-1", authType: "none" });
+  expect(response("case1-create", 201)).toMatchObject({ id: firstId, externalKey: "demo-proof-1", authType: "none" });
   expect(firstId).toMatch(/^emc_/);
   expect(requestBody("case2-identical")).toEqual(requestBody("case1-create"));
   expect(response("case2-identical", 200).id).toBe(firstId);
-  const matching = listed("case2-list").filter((row) => row.externalKey === "rs-proof-1");
+  const matching = listed("case2-list").filter((row) => row.externalKey === "demo-proof-1");
   expect(matching).toHaveLength(1);
   expect(matching[0]?.id).toBe(firstId);
   evidence.recordAssertionEvidence("Recorded keyed convergence", "201 then identical PUT 200, same ID, exactly one manageable list entry.", true);
@@ -93,7 +93,7 @@ test("recorded release case 3 preserves identity while omitted access widens tea
 test("recorded release cases 4-5 reject duplicate POST and stale ID updates", async ({ evidence }) => {
   const duplicate = response("case4-duplicate-post", 409);
   expect(duplicate.error).toBe("external_key_exists");
-  expect(duplicate.message).toContain("PUT /v1/mcp-connections/by-key/rs-proof-1");
+  expect(duplicate.message).toContain("PUT /v1/mcp-connections/by-key/demo-proof-1");
   const previous = response("case5-get-id", 200);
   expect(requestBody("case5-update-id").expectedUpdatedAt).toBe(previous.updatedAt);
   const updated = response("case5-update-id", 200);
@@ -129,7 +129,7 @@ test("recorded release case 6 retains write-only bearer authentication after sec
   }
   const calls = records(transcript.witnessCalls).filter((row) => row.authenticated === true);
   expect(calls.map((row) => row.nonce)).toEqual(["before-secret-omission", "after-secret-omission"]);
-  expect(calls[0]?.tokenId).toMatch(/^[0-9a-f]{16}$/);
+  expect(calls[0]?.tokenId).toBe("token_fixture_001");
   expect(calls[1]?.tokenId).toBe(calls[0]?.tokenId);
   expect(record(receipt("witness-unauthenticated-control").response).status).toBe(401);
   evidence.recordAssertionEvidence("Recorded secret retention", "Raw responses checked before redaction; two authenticated tools/call results with matching token fingerprints, and an unauthenticated 401 control.", true);
@@ -139,12 +139,12 @@ test("recorded release cases 7-8 recreate a new ID and reject missing API keys",
   expect(response("case7-delete-key", 200)).toMatchObject({ ok: true, deleted: true });
   response("case7-deleted-get", 404);
   const recreated = response("case7-recreate", 201);
-  expect(recreated.externalKey).toBe("rs-proof-1");
+  expect(recreated.externalKey).toBe("demo-proof-1");
   expect(recreated.id).not.toBe(firstId);
   expect(recreated.id).toMatch(/^emc_/);
   response("case8-no-key-put", 401);
   response("case8-no-key-get", 401);
-  expect(listed("case8-list-after-no-key").filter((row) => row.externalKey === "rs-proof-unauthorized")).toHaveLength(0);
+  expect(listed("case8-list-after-no-key").filter((row) => row.externalKey === "demo-proof-unauthorized")).toHaveLength(0);
   expect(listed("cleanup-list")).toHaveLength(0);
   evidence.recordAssertionEvidence("Recorded lifecycle and missing-key boundary", "DELETE 200, GET old ID 404, recreate 201 new ID; missing keys get 401 and do not create a row; cleanup list empty.", true);
 });
@@ -174,8 +174,8 @@ test("original single-org provisioning refusal remains a configuration boundary,
 
 test("supplemental released tenant receipts preserve original evidence and use distinct legitimate owners", async ({ evidence }) => {
   expect(receipts).toHaveLength(51);
-  expect(createHash("sha256").update(originalText).digest("hex")).toBe("06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8");
-  expect(tenantTranscript.originalTranscriptSha256).toBe("06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8");
+  expect(createHash("sha256").update(originalText).digest("hex")).toBe("e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c");
+  expect(tenantTranscript.originalTranscriptSha256).toBe("e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c");
   expect(tenantTranscript.kind).toBe("recorded-release-tenant-blackbox");
   expect(tenantTranscript.project).toBe("mcp-put-proof-release-tenant");
   const inspection = record(tenantTranscript.inspection);
@@ -211,7 +211,7 @@ test("supplemental released tenant receipts preserve original evidence and use d
 
 test("released case 8 denies foreign IDs even with spoofed org headers and keeps same-key resources disjoint", async ({ evidence }) => {
   const source = response("tenant-source-create", 201, tenantReceipts);
-  expect(source).toMatchObject({ name: "Tenant A source", externalKey: "rs-proof-tenant" });
+  expect(source).toMatchObject({ name: "Tenant A source", externalKey: "demo-proof-tenant" });
   const identities = record(tenantTranscript.identities);
   expect(source.id).toBe(identities.sourceId);
   for (const prefix of ["foreign", "spoofed"]) {

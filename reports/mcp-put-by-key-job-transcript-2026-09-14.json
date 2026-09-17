@@ -117,8 +117,8 @@
     }
   ],
   "priorTranscripts": {
-    "mcp-put-by-key-transcript-2026-09-14.json": "06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8",
-    "mcp-put-by-key-tenant-transcript-2026-09-14.json": "786d2040ed1c95eee723e6f81c25d61a4dbdc536f88a4c9718ef7e78837dd196"
+    "mcp-put-by-key-transcript-2026-09-14.json": "e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c",
+    "mcp-put-by-key-tenant-transcript-2026-09-14.json": "0a5884c82758811182df8895b7345b73c46a0fbdf3e1ac4ddd65c552d437506b"
   },
   "comparison": {
     "countsAndIdsIdentical": true,
@@ -128,35 +128,35 @@
         "providers": {
           "count": 1,
           "ids": [
-            "lpr_01m2gc4grsekctcpx9eacr0cm1"
+            "lpr_fixture_001"
           ]
         },
         "teams": {
           "count": 1,
           "ids": [
-            "tem_01m2gc4hbxe3yahc3mnfe616md"
+            "team_fixture_002"
           ]
         },
         "mcpConnections": {
           "count": 2,
           "ids": [
-            "emc_01m2gc4fxwec2s1557ae3dmp39",
-            "emc_01m2gc4hgtehwsbp4v1172bnrj"
+            "emc_fixture_007",
+            "emc_fixture_008"
           ]
         },
         "desktopPolicies": {
           "count": 2,
           "ids": [
-            "dpo_01m2g7d1a6eaa9x4ap4n369ss6",
-            "dpo_01m2gc4hjtesp927jg5jw9bn3x"
+            "dpo_fixture_001",
+            "dpo_fixture_002"
           ]
         },
         "marketplaces": {
           "count": 3,
           "ids": [
-            "mkt_01m2g96168ee68atgd2emc0rrv",
-            "mkt_01m2g9619semfak6z9qsydnrxx",
-            "mkt_01m2gc4hmgeb9bn0kc9160be8c"
+            "mkt_fixture_001",
+            "mkt_fixture_002",
+            "mkt_fixture_003"
           ]
         }
       },
@@ -164,35 +164,35 @@
         "providers": {
           "count": 1,
           "ids": [
-            "lpr_01m2gc4grsekctcpx9eacr0cm1"
+            "lpr_fixture_001"
           ]
         },
         "teams": {
           "count": 1,
           "ids": [
-            "tem_01m2gc4hbxe3yahc3mnfe616md"
+            "team_fixture_002"
           ]
         },
         "mcpConnections": {
           "count": 2,
           "ids": [
-            "emc_01m2gc4fxwec2s1557ae3dmp39",
-            "emc_01m2gc4hgtehwsbp4v1172bnrj"
+            "emc_fixture_007",
+            "emc_fixture_008"
           ]
         },
         "desktopPolicies": {
           "count": 2,
           "ids": [
-            "dpo_01m2g7d1a6eaa9x4ap4n369ss6",
-            "dpo_01m2gc4hjtesp927jg5jw9bn3x"
+            "dpo_fixture_001",
+            "dpo_fixture_002"
           ]
         },
         "marketplaces": {
           "count": 3,
           "ids": [
-            "mkt_01m2g96168ee68atgd2emc0rrv",
-            "mkt_01m2g9619semfak6z9qsydnrxx",
-            "mkt_01m2gc4hmgeb9bn0kc9160be8c"
+            "mkt_fixture_001",
+            "mkt_fixture_002",
+            "mkt_fixture_003"
           ]
         }
       }
@@ -66426,7 +66426,7 @@
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 2666\nDate: Mon, 14 Sep 2026 16:30:25 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -66435,16 +66435,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:40:21.249Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -66454,15 +66454,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -66511,7 +66511,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -66548,7 +66548,7 @@
               "updatedAt": "2026-09-14T15:08:37.064Z"
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -66573,7 +66573,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -66736,9 +66736,9 @@
           ],
           "desktopPolicies": [
             {
-              "id": "dpo_01m2g7d1a6eaa9x4ap4n369ss6",
+              "id": "dpo_fixture_001",
               "externalKey": null,
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "policyName": "Default desktop policy",
               "isDefault": true,
               "isEnabled": true,
@@ -66753,7 +66753,7 @@
                 "allowAlphaUpdates": true,
                 "showWelcomePage": true
               },
-              "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMemberId": "member_release_admin",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "updatedAt": "2026-09-14T15:08:37.063Z",
               "deletedAt": null,
@@ -66785,28 +66785,28 @@
           "items": [
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Built-in OpenWork AI capabilities available in the desktop app after sign-in.",
-              "id": "mkt_01m2g9619semfak6z9qsydnrxx",
+              "id": "mkt_fixture_002",
               "externalKey": null,
               "logoUrl": "/openwork-mark.svg",
               "name": "OpenWork Marketplace",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 4,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
             },
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Starter marketplace for Claude/Anthropic-compatible plugin repos. Example source: https://github.com/anthropics/knowledge-work-plugins.",
-              "id": "mkt_01m2g96168ee68atgd2emc0rrv",
+              "id": "mkt_fixture_001",
               "externalKey": null,
               "logoUrl": "https://cdn.simpleicons.org/anthropic",
               "name": "Anthropic-Compatible Plugins",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 14,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
@@ -66846,7 +66846,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1272\r\nDate: Mon, 14 Sep 2026 16:31:20 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -66889,7 +66889,7 @@
           "requestedScopes": [],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2gc4fxwec2s1557ae3dmp39",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_007",
             "oauthCallback": "http://127.0.0.1/unused-mcp-oauth-callback"
           }
         }
@@ -132290,10 +132290,10 @@
         "headers": "HTTP/1.1 201 Created\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 695\r\nDate: Mon, 14 Sep 2026 16:31:20 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "llmProvider": {
-            "id": "lpr_01m2gc4grsekctcpx9eacr0cm1",
+            "id": "lpr_fixture_001",
             "externalKey": "lane3-provider",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "organizationId": "org_release_primary",
+            "createdByOrgMembershipId": "member_release_admin",
             "source": "custom",
             "providerId": "lane3-provider",
             "name": "Lane3 OpenAI-compatible",
@@ -132328,7 +132328,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/llm-providers/lpr_01m2gc4grsekctcpx9eacr0cm1/connect",
+        "url": "http://localhost:18788/v1/llm-providers/lpr_fixture_001/connect",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -132341,9 +132341,9 @@
         "body": {
           "llmProvider": {
             "externalKey": "lane3-provider",
-            "id": "lpr_01m2gc4grsekctcpx9eacr0cm1",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "id": "lpr_fixture_001",
+            "organizationId": "org_release_primary",
+            "createdByOrgMembershipId": "member_release_admin",
             "source": "custom",
             "providerId": "lane3-provider",
             "name": "Lane3 OpenAI-compatible",
@@ -132467,7 +132467,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 308\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -132529,7 +132529,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 2666\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -132538,16 +132538,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:40:21.249Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -132557,15 +132557,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -132614,7 +132614,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -132639,7 +132639,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -132652,7 +132652,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -132731,7 +132731,7 @@
         "body": {
           "name": "Lane3 team",
           "memberIds": [
-            "om_01m2g7d1a5e05r2ncgsa44pk6r"
+            "member_release_admin"
           ],
           "grantsOrganizationAdmin": false
         }
@@ -132741,14 +132741,14 @@
         "headers": "HTTP/1.1 201 Created\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 323\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "team": {
-            "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+            "id": "team_fixture_002",
             "externalKey": "lane3-team",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "name": "Lane3 team",
             "createdAt": "2026-09-14T16:31:21.469Z",
             "updatedAt": "2026-09-14T16:31:21.469Z",
             "memberIds": [
-              "om_01m2g7d1a5e05r2ncgsa44pk6r"
+              "member_release_admin"
             ],
             "managedByScim": false,
             "grantsOrganizationAdmin": false
@@ -132764,7 +132764,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -132775,7 +132775,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1087\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -132828,7 +132828,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -132851,7 +132851,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1148\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -132921,7 +132921,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2gc4hbxe3yahc3mnfe616md"
+              "team_fixture_002"
             ]
           },
           "oauthClient": {
@@ -132939,7 +132939,7 @@
         "status": 201,
         "headers": "HTTP/1.1 201 Created\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1556\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
+          "id": "emc_fixture_008",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
           "url": "https://job-witness.example.com/oauth/mcp",
@@ -132971,7 +132971,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2gc4hbxe3yahc3mnfe616md"
+              "team_fixture_002"
             ]
           },
           "oauthClientId": "lane3-client",
@@ -132986,7 +132986,7 @@
           ],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2gc4hgtehwsbp4v1172bnrj",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_008",
             "oauthCallback": "http://localhost:18788/v1/mcp-connections/oauth/callback"
           }
         }
@@ -133011,7 +133011,7 @@
           "isEnabled": true,
           "memberIds": [],
           "teamIds": [
-            "tem_01m2gc4hbxe3yahc3mnfe616md"
+            "team_fixture_002"
           ],
           "roles": [],
           "policy": {
@@ -133046,9 +133046,9 @@
         "headers": "HTTP/1.1 201 Created\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 989\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "desktopPolicy": {
-            "id": "dpo_01m2gc4hjtesp927jg5jw9bn3x",
+            "id": "dpo_fixture_002",
             "externalKey": "lane3-policy",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "policyName": "Lane3 explicit policy",
             "isDefault": false,
             "isEnabled": true,
@@ -133078,16 +133078,16 @@
                 "blockBrowserUploads": true
               }
             },
-            "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMemberId": "member_release_admin",
             "createdAt": "2026-09-14T16:31:21.690Z",
             "updatedAt": "2026-09-14T16:31:21.690Z",
             "deletedAt": null,
             "roles": [],
             "assignments": [
               {
-                "id": "dpm_01m2gc4hjwennrqhkk602kbb8k",
+                "id": "dpm_fixture_001",
                 "orgMemberId": null,
-                "teamId": "tem_01m2gc4hbxe3yahc3mnfe616md",
+                "teamId": "team_fixture_002",
                 "role": null,
                 "createdAt": "2026-09-14T16:31:21.690Z"
               }
@@ -133122,14 +133122,14 @@
           "ok": true,
           "item": {
             "createdAt": "2026-09-14T16:31:21.744Z",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMembershipId": "member_release_admin",
             "deletedAt": null,
             "description": "Synthetic post-deploy proof",
-            "id": "mkt_01m2gc4hmgeb9bn0kc9160be8c",
+            "id": "mkt_fixture_003",
             "externalKey": "lane3-marketplace",
             "logoUrl": null,
             "name": "Lane3 marketplace",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "pluginCount": 0,
             "status": "active",
             "updatedAt": "2026-09-14T16:31:21.744Z"
@@ -133159,9 +133159,9 @@
           "llmProviders": [
             {
               "externalKey": "lane3-provider",
-              "id": "lpr_01m2gc4grsekctcpx9eacr0cm1",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "id": "lpr_fixture_001",
+              "organizationId": "org_release_primary",
+              "createdByOrgMembershipId": "member_release_admin",
               "source": "custom",
               "providerId": "lane3-provider",
               "name": "Lane3 OpenAI-compatible",
@@ -133217,11 +133217,11 @@
                 "allMembers": true,
                 "members": [
                   {
-                    "id": "lpa_01m2gc4grwe40bm8xy3kzstab1",
-                    "orgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+                    "id": "lpa_fixture_001",
+                    "orgMembershipId": "member_release_admin",
                     "role": "owner",
                     "user": {
-                      "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                      "id": "usr_release_admin",
                       "name": "Release Administrator",
                       "email": "release-admin@example.com",
                       "image": null
@@ -133233,7 +133233,7 @@
               },
               "accessibleVia": {
                 "orgMembershipIds": [
-                  "om_01m2g7d1a5e05r2ncgsa44pk6r"
+                  "member_release_admin"
                 ],
                 "teamIds": []
               },
@@ -133286,7 +133286,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 3090\r\nDate: Mon, 14 Sep 2026 16:31:21 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -133295,16 +133295,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:40:21.249Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -133314,15 +133314,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -133371,7 +133371,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -133396,7 +133396,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -133409,7 +133409,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -133448,22 +133448,22 @@
           ],
           "teams": [
             {
-              "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+              "id": "team_fixture_002",
               "name": "Lane3 team",
               "createdAt": "2026-09-14T16:31:21.469Z",
               "updatedAt": "2026-09-14T16:31:21.469Z",
               "grantsOrganizationAdmin": false,
               "memberIds": [
-                "om_01m2g7d1a5e05r2ncgsa44pk6r"
+                "member_release_admin"
               ],
               "managedByScim": false
             }
           ],
           "currentMemberTeams": [
             {
-              "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+              "id": "team_fixture_002",
               "name": "Lane3 team",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "createdAt": "2026-09-14T16:31:21.469Z",
               "updatedAt": "2026-09-14T16:31:21.469Z"
             }
@@ -133513,7 +133513,7 @@
         "body": {
           "connections": [
             {
-              "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+              "id": "emc_fixture_007",
               "name": "Lane3 managed existing MCP",
               "externalKey": null,
               "url": "https://job-witness.example.com/public",
@@ -133557,7 +133557,7 @@
               "grantedScopes": []
             },
             {
-              "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
+              "id": "emc_fixture_008",
               "name": "Lane3 OAuth MCP",
               "externalKey": "lane3-oauth",
               "url": "https://job-witness.example.com/oauth/mcp",
@@ -133589,7 +133589,7 @@
                 "orgWide": false,
                 "memberIds": [],
                 "teamIds": [
-                  "tem_01m2gc4hbxe3yahc3mnfe616md"
+                  "team_fixture_002"
                 ]
               },
               "oauthClientId": "lane3-client",
@@ -133711,9 +133711,9 @@
           ],
           "desktopPolicies": [
             {
-              "id": "dpo_01m2g7d1a6eaa9x4ap4n369ss6",
+              "id": "dpo_fixture_001",
               "externalKey": null,
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "policyName": "Default desktop policy",
               "isDefault": true,
               "isEnabled": true,
@@ -133728,7 +133728,7 @@
                 "allowAlphaUpdates": true,
                 "showWelcomePage": true
               },
-              "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMemberId": "member_release_admin",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "updatedAt": "2026-09-14T15:08:37.063Z",
               "deletedAt": null,
@@ -133736,9 +133736,9 @@
               "assignments": []
             },
             {
-              "id": "dpo_01m2gc4hjtesp927jg5jw9bn3x",
+              "id": "dpo_fixture_002",
               "externalKey": "lane3-policy",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "policyName": "Lane3 explicit policy",
               "isDefault": false,
               "isEnabled": true,
@@ -133768,16 +133768,16 @@
                   "blockBrowserUploads": true
                 }
               },
-              "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMemberId": "member_release_admin",
               "createdAt": "2026-09-14T16:31:21.690Z",
               "updatedAt": "2026-09-14T16:31:21.690Z",
               "deletedAt": null,
               "roles": [],
               "assignments": [
                 {
-                  "id": "dpm_01m2gc4hjwennrqhkk602kbb8k",
+                  "id": "dpm_fixture_001",
                   "orgMemberId": null,
-                  "teamId": "tem_01m2gc4hbxe3yahc3mnfe616md",
+                  "teamId": "team_fixture_002",
                   "role": null,
                   "createdAt": "2026-09-14T16:31:21.690Z"
                 }
@@ -133809,42 +133809,42 @@
           "items": [
             {
               "createdAt": "2026-09-14T16:31:21.744Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Synthetic post-deploy proof",
-              "id": "mkt_01m2gc4hmgeb9bn0kc9160be8c",
+              "id": "mkt_fixture_003",
               "externalKey": "lane3-marketplace",
               "logoUrl": null,
               "name": "Lane3 marketplace",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 0,
               "status": "active",
               "updatedAt": "2026-09-14T16:31:21.744Z"
             },
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Built-in OpenWork AI capabilities available in the desktop app after sign-in.",
-              "id": "mkt_01m2g9619semfak6z9qsydnrxx",
+              "id": "mkt_fixture_002",
               "externalKey": null,
               "logoUrl": "/openwork-mark.svg",
               "name": "OpenWork Marketplace",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 4,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
             },
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Starter marketplace for Claude/Anthropic-compatible plugin repos. Example source: https://github.com/anthropics/knowledge-work-plugins.",
-              "id": "mkt_01m2g96168ee68atgd2emc0rrv",
+              "id": "mkt_fixture_001",
               "externalKey": null,
               "logoUrl": "https://cdn.simpleicons.org/anthropic",
               "name": "Anthropic-Compatible Plugins",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 14,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
@@ -199250,9 +199250,9 @@
         "body": {
           "llmProvider": {
             "externalKey": "lane3-provider",
-            "id": "lpr_01m2gc4grsekctcpx9eacr0cm1",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "id": "lpr_fixture_001",
+            "organizationId": "org_release_primary",
+            "createdByOrgMembershipId": "member_release_admin",
             "source": "custom",
             "providerId": "lane3-provider",
             "name": "Lane3 OpenAI-compatible",
@@ -199287,7 +199287,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/llm-providers/lpr_01m2gc4grsekctcpx9eacr0cm1/connect",
+        "url": "http://localhost:18788/v1/llm-providers/lpr_fixture_001/connect",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -199300,9 +199300,9 @@
         "body": {
           "llmProvider": {
             "externalKey": "lane3-provider",
-            "id": "lpr_01m2gc4grsekctcpx9eacr0cm1",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "id": "lpr_fixture_001",
+            "organizationId": "org_release_primary",
+            "createdByOrgMembershipId": "member_release_admin",
             "source": "custom",
             "providerId": "lane3-provider",
             "name": "Lane3 OpenAI-compatible",
@@ -199426,7 +199426,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 308\r\nDate: Mon, 14 Sep 2026 16:31:22 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -199488,7 +199488,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 3090\r\nDate: Mon, 14 Sep 2026 16:31:22 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -199497,16 +199497,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:40:21.249Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -199516,15 +199516,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -199573,7 +199573,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -199598,7 +199598,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -199611,7 +199611,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -199650,22 +199650,22 @@
           ],
           "teams": [
             {
-              "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+              "id": "team_fixture_002",
               "name": "Lane3 team",
               "createdAt": "2026-09-14T16:31:21.469Z",
               "updatedAt": "2026-09-14T16:31:21.469Z",
               "grantsOrganizationAdmin": false,
               "memberIds": [
-                "om_01m2g7d1a5e05r2ncgsa44pk6r"
+                "member_release_admin"
               ],
               "managedByScim": false
             }
           ],
           "currentMemberTeams": [
             {
-              "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+              "id": "team_fixture_002",
               "name": "Lane3 team",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "createdAt": "2026-09-14T16:31:21.469Z",
               "updatedAt": "2026-09-14T16:31:21.469Z"
             }
@@ -199710,7 +199710,7 @@
         "body": {
           "name": "Lane3 team",
           "memberIds": [
-            "om_01m2g7d1a5e05r2ncgsa44pk6r"
+            "member_release_admin"
           ],
           "grantsOrganizationAdmin": false
         }
@@ -199721,15 +199721,15 @@
         "body": {
           "team": {
             "externalKey": "lane3-team",
-            "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+            "id": "team_fixture_002",
             "name": "Lane3 team",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "memberCount": 0,
             "grantsOrganizationAdmin": false,
             "createdAt": "2026-09-14T16:31:21.469Z",
             "updatedAt": "2026-09-14T16:31:22.697Z",
             "memberIds": [
-              "om_01m2g7d1a5e05r2ncgsa44pk6r"
+              "member_release_admin"
             ],
             "managedByScim": false
           }
@@ -199744,7 +199744,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -199755,7 +199755,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1095\r\nDate: Mon, 14 Sep 2026 16:31:22 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -199808,7 +199808,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -199831,7 +199831,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1148\r\nDate: Mon, 14 Sep 2026 16:31:22 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -199901,7 +199901,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2gc4hbxe3yahc3mnfe616md"
+              "team_fixture_002"
             ]
           },
           "oauthClient": {
@@ -199918,7 +199918,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 1410\r\nDate: Mon, 14 Sep 2026 16:31:22 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
-          "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
+          "id": "emc_fixture_008",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
           "url": "https://job-witness.example.com/oauth/mcp",
@@ -199950,7 +199950,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2gc4hbxe3yahc3mnfe616md"
+              "team_fixture_002"
             ]
           },
           "oauthClientId": "lane3-client",
@@ -199988,7 +199988,7 @@
           "isEnabled": true,
           "memberIds": [],
           "teamIds": [
-            "tem_01m2gc4hbxe3yahc3mnfe616md"
+            "team_fixture_002"
           ],
           "roles": [],
           "policy": {
@@ -200023,9 +200023,9 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 989\r\nDate: Mon, 14 Sep 2026 16:31:22 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "desktopPolicy": {
-            "id": "dpo_01m2gc4hjtesp927jg5jw9bn3x",
+            "id": "dpo_fixture_002",
             "externalKey": "lane3-policy",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "policyName": "Lane3 explicit policy",
             "isDefault": false,
             "isEnabled": true,
@@ -200055,16 +200055,16 @@
                 "blockBrowserUploads": true
               }
             },
-            "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMemberId": "member_release_admin",
             "createdAt": "2026-09-14T16:31:21.690Z",
             "updatedAt": "2026-09-14T16:31:22.907Z",
             "deletedAt": null,
             "roles": [],
             "assignments": [
               {
-                "id": "dpm_01m2gc4jrwe7a8zp99ph6kf7va",
+                "id": "dpm_fixture_002",
                 "orgMemberId": null,
-                "teamId": "tem_01m2gc4hbxe3yahc3mnfe616md",
+                "teamId": "team_fixture_002",
                 "role": null,
                 "createdAt": "2026-09-14T16:31:22.907Z"
               }
@@ -200099,14 +200099,14 @@
           "ok": true,
           "item": {
             "createdAt": "2026-09-14T16:31:21.744Z",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMembershipId": "member_release_admin",
             "deletedAt": null,
             "description": "Synthetic post-deploy proof",
-            "id": "mkt_01m2gc4hmgeb9bn0kc9160be8c",
+            "id": "mkt_fixture_003",
             "externalKey": "lane3-marketplace",
             "logoUrl": null,
             "name": "Lane3 marketplace",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "pluginCount": 0,
             "status": "active",
             "updatedAt": "2026-09-14T16:31:22.951Z"
@@ -200136,9 +200136,9 @@
           "llmProviders": [
             {
               "externalKey": "lane3-provider",
-              "id": "lpr_01m2gc4grsekctcpx9eacr0cm1",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "id": "lpr_fixture_001",
+              "organizationId": "org_release_primary",
+              "createdByOrgMembershipId": "member_release_admin",
               "source": "custom",
               "providerId": "lane3-provider",
               "name": "Lane3 OpenAI-compatible",
@@ -200194,11 +200194,11 @@
                 "allMembers": true,
                 "members": [
                   {
-                    "id": "lpa_01m2gc4j5yexxvmybqmajpycb4",
-                    "orgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+                    "id": "lpa_fixture_002",
+                    "orgMembershipId": "member_release_admin",
                     "role": "owner",
                     "user": {
-                      "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                      "id": "usr_release_admin",
                       "name": "Release Administrator",
                       "email": "release-admin@example.com",
                       "image": null
@@ -200210,7 +200210,7 @@
               },
               "accessibleVia": {
                 "orgMembershipIds": [
-                  "om_01m2g7d1a5e05r2ncgsa44pk6r"
+                  "member_release_admin"
                 ],
                 "teamIds": []
               },
@@ -200263,7 +200263,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 3090\r\nDate: Mon, 14 Sep 2026 16:31:23 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -200272,16 +200272,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:40:21.249Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -200291,15 +200291,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -200348,7 +200348,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -200373,7 +200373,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -200386,7 +200386,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -200425,22 +200425,22 @@
           ],
           "teams": [
             {
-              "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+              "id": "team_fixture_002",
               "name": "Lane3 team",
               "createdAt": "2026-09-14T16:31:21.469Z",
               "updatedAt": "2026-09-14T16:31:22.697Z",
               "grantsOrganizationAdmin": false,
               "memberIds": [
-                "om_01m2g7d1a5e05r2ncgsa44pk6r"
+                "member_release_admin"
               ],
               "managedByScim": false
             }
           ],
           "currentMemberTeams": [
             {
-              "id": "tem_01m2gc4hbxe3yahc3mnfe616md",
+              "id": "team_fixture_002",
               "name": "Lane3 team",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "createdAt": "2026-09-14T16:31:21.469Z",
               "updatedAt": "2026-09-14T16:31:22.697Z"
             }
@@ -200490,7 +200490,7 @@
         "body": {
           "connections": [
             {
-              "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+              "id": "emc_fixture_007",
               "name": "Lane3 managed existing MCP",
               "externalKey": null,
               "url": "https://job-witness.example.com/public",
@@ -200534,7 +200534,7 @@
               "grantedScopes": []
             },
             {
-              "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
+              "id": "emc_fixture_008",
               "name": "Lane3 OAuth MCP",
               "externalKey": "lane3-oauth",
               "url": "https://job-witness.example.com/oauth/mcp",
@@ -200566,7 +200566,7 @@
                 "orgWide": false,
                 "memberIds": [],
                 "teamIds": [
-                  "tem_01m2gc4hbxe3yahc3mnfe616md"
+                  "team_fixture_002"
                 ]
               },
               "oauthClientId": "lane3-client",
@@ -200688,9 +200688,9 @@
           ],
           "desktopPolicies": [
             {
-              "id": "dpo_01m2g7d1a6eaa9x4ap4n369ss6",
+              "id": "dpo_fixture_001",
               "externalKey": null,
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "policyName": "Default desktop policy",
               "isDefault": true,
               "isEnabled": true,
@@ -200705,7 +200705,7 @@
                 "allowAlphaUpdates": true,
                 "showWelcomePage": true
               },
-              "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMemberId": "member_release_admin",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "updatedAt": "2026-09-14T15:08:37.063Z",
               "deletedAt": null,
@@ -200713,9 +200713,9 @@
               "assignments": []
             },
             {
-              "id": "dpo_01m2gc4hjtesp927jg5jw9bn3x",
+              "id": "dpo_fixture_002",
               "externalKey": "lane3-policy",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "policyName": "Lane3 explicit policy",
               "isDefault": false,
               "isEnabled": true,
@@ -200745,16 +200745,16 @@
                   "blockBrowserUploads": true
                 }
               },
-              "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMemberId": "member_release_admin",
               "createdAt": "2026-09-14T16:31:21.690Z",
               "updatedAt": "2026-09-14T16:31:22.907Z",
               "deletedAt": null,
               "roles": [],
               "assignments": [
                 {
-                  "id": "dpm_01m2gc4jrwe7a8zp99ph6kf7va",
+                  "id": "dpm_fixture_002",
                   "orgMemberId": null,
-                  "teamId": "tem_01m2gc4hbxe3yahc3mnfe616md",
+                  "teamId": "team_fixture_002",
                   "role": null,
                   "createdAt": "2026-09-14T16:31:22.907Z"
                 }
@@ -200786,42 +200786,42 @@
           "items": [
             {
               "createdAt": "2026-09-14T16:31:21.744Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Synthetic post-deploy proof",
-              "id": "mkt_01m2gc4hmgeb9bn0kc9160be8c",
+              "id": "mkt_fixture_003",
               "externalKey": "lane3-marketplace",
               "logoUrl": null,
               "name": "Lane3 marketplace",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 0,
               "status": "active",
               "updatedAt": "2026-09-14T16:31:22.951Z"
             },
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Built-in OpenWork AI capabilities available in the desktop app after sign-in.",
-              "id": "mkt_01m2g9619semfak6z9qsydnrxx",
+              "id": "mkt_fixture_002",
               "externalKey": null,
               "logoUrl": "/openwork-mark.svg",
               "name": "OpenWork Marketplace",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 4,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
             },
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Starter marketplace for Claude/Anthropic-compatible plugin repos. Example source: https://github.com/anthropics/knowledge-work-plugins.",
-              "id": "mkt_01m2g96168ee68atgd2emc0rrv",
+              "id": "mkt_fixture_001",
               "externalKey": null,
               "logoUrl": "https://cdn.simpleicons.org/anthropic",
               "name": "Anthropic-Compatible Plugins",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 14,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
@@ -200838,7 +200838,7 @@
       "at": "2026-09-14T16:31:39.905592+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -200849,7 +200849,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1095\nDate: Mon, 14 Sep 2026 16:31:40 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -200901,7 +200901,7 @@
       "at": "2026-09-14T16:31:39.975023+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -200936,7 +200936,7 @@
       "at": "2026-09-14T16:31:40.009933+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -200947,7 +200947,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1095\nDate: Mon, 14 Sep 2026 16:31:40 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2gc4fxwec2s1557ae3dmp39",
+          "id": "emc_fixture_007",
           "name": "Lane3 managed existing MCP",
           "externalKey": null,
           "url": "https://job-witness.example.com/public",
@@ -201036,7 +201036,7 @@
       "at": "2026-09-14T16:31:40.191270+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4hgtehwsbp4v1172bnrj",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_008",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -201047,7 +201047,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1357\nDate: Mon, 14 Sep 2026 16:31:40 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
+          "id": "emc_fixture_008",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
           "url": "https://job-witness.example.com/oauth/mcp",
@@ -201079,7 +201079,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2gc4hbxe3yahc3mnfe616md"
+              "team_fixture_002"
             ]
           },
           "oauthClientId": "lane3-client",
@@ -201103,7 +201103,7 @@
       "at": "2026-09-14T16:31:40.227158+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4hgtehwsbp4v1172bnrj/connect/start",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_008/connect/start",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -201167,7 +201167,7 @@
       "at": "2026-09-14T16:31:41.347923+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4hgtehwsbp4v1172bnrj",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_008",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -201178,7 +201178,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1409\nDate: Mon, 14 Sep 2026 16:31:41 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2gc4hgtehwsbp4v1172bnrj",
+          "id": "emc_fixture_008",
           "name": "Lane3 OAuth MCP",
           "externalKey": "lane3-oauth",
           "url": "https://job-witness.example.com/oauth/mcp",
@@ -201210,7 +201210,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2gc4hbxe3yahc3mnfe616md"
+              "team_fixture_002"
             ]
           },
           "oauthClientId": "lane3-client",
@@ -201236,7 +201236,7 @@
       "at": "2026-09-14T16:31:41.401021+00:00",
       "request": {
         "method": "POST",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4hgtehwsbp4v1172bnrj/tools/call",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_008/tools/call",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -201252,7 +201252,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1863\nDate: Mon, 14 Sep 2026 16:31:41 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "referenceId": "req_01m2gc54wpen6bnyx44d9g0xqh",
+          "referenceId": "req_fixture_003",
           "durationMs": 178,
           "result": {
             "content": [
@@ -201378,14 +201378,14 @@
         "body": {
           "item": {
             "createdAt": "2026-09-14T16:31:21.744Z",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMembershipId": "member_release_admin",
             "deletedAt": null,
             "description": "Synthetic post-deploy proof",
-            "id": "mkt_01m2gc4hmgeb9bn0kc9160be8c",
+            "id": "mkt_fixture_003",
             "externalKey": "lane3-marketplace",
             "logoUrl": null,
             "name": "Lane3 marketplace",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "pluginCount": 0,
             "status": "active",
             "updatedAt": "2026-09-14T16:31:22.951Z"
@@ -201443,14 +201443,14 @@
           "ok": true,
           "item": {
             "createdAt": "2026-09-14T16:31:41.850Z",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMembershipId": "member_release_admin",
             "deletedAt": null,
             "description": "Synthetic post-deploy proof",
-            "id": "mkt_01m2gc558tedx9s9wxhj3rwmgj",
+            "id": "mkt_fixture_004",
             "externalKey": "lane3-marketplace",
             "logoUrl": null,
             "name": "Lane3 marketplace",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "pluginCount": 0,
             "status": "active",
             "updatedAt": "2026-09-14T16:31:41.850Z"
@@ -201479,14 +201479,14 @@
         "body": {
           "item": {
             "createdAt": "2026-09-14T16:31:41.850Z",
-            "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+            "createdByOrgMembershipId": "member_release_admin",
             "deletedAt": null,
             "description": "Synthetic post-deploy proof",
-            "id": "mkt_01m2gc558tedx9s9wxhj3rwmgj",
+            "id": "mkt_fixture_004",
             "externalKey": "lane3-marketplace",
             "logoUrl": null,
             "name": "Lane3 marketplace",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "organizationId": "org_release_primary",
             "pluginCount": 0,
             "status": "active",
             "updatedAt": "2026-09-14T16:31:41.850Z"
@@ -201551,7 +201551,7 @@
       "expectedStatus": 200,
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2gc4fxwec2s1557ae3dmp39",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_007",
         "headers": {
           "x-api-key": "[REDACTED]",
           "Content-Type": "application/json"
@@ -201728,7 +201728,7 @@
         "headers": "HTTP/1.1 200 OK\r\naccess-control-allow-credentials: true\r\naccess-control-expose-headers: Content-Length\r\ncontent-type: application/json\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\nvary: Origin\r\nx-content-type-options: nosniff\r\ncontent-length: 2666\r\nDate: Mon, 14 Sep 2026 16:31:42 GMT\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\r\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -201737,16 +201737,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:40:21.249Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -201756,15 +201756,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -201813,7 +201813,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -201838,7 +201838,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -201851,7 +201851,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -202040,9 +202040,9 @@
           ],
           "desktopPolicies": [
             {
-              "id": "dpo_01m2g7d1a6eaa9x4ap4n369ss6",
+              "id": "dpo_fixture_001",
               "externalKey": null,
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "policyName": "Default desktop policy",
               "isDefault": true,
               "isEnabled": true,
@@ -202057,7 +202057,7 @@
                 "allowAlphaUpdates": true,
                 "showWelcomePage": true
               },
-              "createdByOrgMemberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMemberId": "member_release_admin",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "updatedAt": "2026-09-14T15:08:37.063Z",
               "deletedAt": null,
@@ -202090,28 +202090,28 @@
           "items": [
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Built-in OpenWork AI capabilities available in the desktop app after sign-in.",
-              "id": "mkt_01m2g9619semfak6z9qsydnrxx",
+              "id": "mkt_fixture_002",
               "externalKey": null,
               "logoUrl": "/openwork-mark.svg",
               "name": "OpenWork Marketplace",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 4,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"
             },
             {
               "createdAt": "2026-09-14T15:39:44.710Z",
-              "createdByOrgMembershipId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
+              "createdByOrgMembershipId": "member_release_admin",
               "deletedAt": null,
               "description": "Starter marketplace for Claude/Anthropic-compatible plugin repos. Example source: https://github.com/anthropics/knowledge-work-plugins.",
-              "id": "mkt_01m2g96168ee68atgd2emc0rrv",
+              "id": "mkt_fixture_001",
               "externalKey": null,
               "logoUrl": "https://cdn.simpleicons.org/anthropic",
               "name": "Anthropic-Compatible Plugins",
-              "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+              "organizationId": "org_release_primary",
               "pluginCount": 14,
               "status": "active",
               "updatedAt": "2026-09-14T15:39:44.710Z"

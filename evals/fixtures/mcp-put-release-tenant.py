@@ -14,7 +14,7 @@ client = importlib.import_module('mcp-put-release-client')
 ROOT = client.ROOT
 request = client.request
 PROJECT = 'mcp-put-proof-release-tenant'
-ORIGINAL_SHA = '06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8'
+ORIGINAL_SHA = 'e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c'
 ORIGINAL = pathlib.Path('reports/mcp-put-by-key-transcript-2026-09-14.json')
 
 
@@ -68,7 +68,7 @@ def proof():
     original_unchanged()
     state = client.load()
     body = {'name': 'Tenant A source', 'url': os.environ['PROOF_MCP_BASE'] + '/public', 'authType': 'none', 'credentialMode': 'shared', 'exposeDirectly': False, 'access': {'orgWide': True, 'memberIds': [], 'teamIds': []}}
-    keyed = '/v1/mcp-connections/by-key/rs-proof-tenant'
+    keyed = '/v1/mcp-connections/by-key/demo-proof-tenant'
     status, source = request('tenant-source-create', 'PUT', keyed, body, auth='keyA')
     require(status, 201)
     state['sourceId'] = source['id']
@@ -90,14 +90,14 @@ def proof():
     request('tenant-source-owner-cannot-read-B', 'GET', '/v1/mcp-connections/' + own['id'], auth='keyA')
     for auth, prefix in [('none', 'missing-key'), ('invalidKey', 'invalid-key')]:
         request('tenant-' + prefix + '-get', 'GET', item, auth=auth)
-        request('tenant-' + prefix + '-put', 'PUT', '/v1/mcp-connections/by-key/rs-proof-tenant-unauthorized', body, auth=auth)
+        request('tenant-' + prefix + '-put', 'PUT', '/v1/mcp-connections/by-key/demo-proof-tenant-unauthorized', body, auth=auth)
     request('tenant-A-final-list', 'GET', '/v1/mcp-connections?scope=manageable', auth='keyA')
     request('tenant-B-final-list', 'GET', '/v1/mcp-connections?scope=manageable', auth='keyB')
 
 
 def cleanup():
     for tenant in ['A', 'B']:
-        request(f'tenant-cleanup-{tenant}', 'DELETE', '/v1/mcp-connections/by-key/rs-proof-tenant', auth='key' + tenant)
+        request(f'tenant-cleanup-{tenant}', 'DELETE', '/v1/mcp-connections/by-key/demo-proof-tenant', auth='key' + tenant)
         request(f'tenant-cleanup-{tenant}-list', 'GET', '/v1/mcp-connections?scope=manageable', auth='key' + tenant)
     for tenant in ['A', 'B']:
         state = client.load()

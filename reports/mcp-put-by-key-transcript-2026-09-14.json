@@ -66,7 +66,7 @@
       "status": 200,
       "authenticated": true,
       "nonce": "before-secret-omission",
-      "tokenId": "fbbb1d01634b769d"
+      "tokenId": "token_fixture_001"
     },
     {
       "at": "2026-09-14T15:09:50.241719+00:00",
@@ -75,7 +75,7 @@
       "status": 200,
       "authenticated": true,
       "nonce": "after-secret-omission",
-      "tokenId": "fbbb1d01634b769d"
+      "tokenId": "token_fixture_001"
     }
   ],
   "requests": [
@@ -299,7 +299,7 @@
             "image": null,
             "createdAt": "2026-09-14T15:08:37.052Z",
             "updatedAt": "2026-09-14T15:08:37.052Z",
-            "id": "usr_01m2g7d19wexp9jfmj389ewvwz"
+            "id": "usr_release_admin"
           }
         }
       },
@@ -345,7 +345,7 @@
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-allow-origin: http://localhost:13005\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 2645\nDate: Mon, 14 Sep 2026 15:08:37 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
           "organization": {
-            "id": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "org_release_primary",
             "name": "Release Proof",
             "slug": "default",
             "logo": null,
@@ -354,16 +354,16 @@
             "createdAt": "2026-09-14T15:08:37.000Z",
             "updatedAt": "2026-09-14T15:08:37.060Z",
             "owner": {
-              "memberId": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "memberId": "member_release_admin",
+              "userId": "usr_release_admin",
               "name": "Release Administrator",
               "email": "release-admin@example.com",
               "image": null
             }
           },
           "currentMember": {
-            "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-            "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+            "id": "member_release_admin",
+            "userId": "usr_release_admin",
             "role": "owner",
             "directRole": "owner",
             "adminTeams": [],
@@ -373,15 +373,15 @@
           },
           "members": [
             {
-              "id": "om_01m2g7d1a5e05r2ncgsa44pk6r",
-              "userId": "usr_01m2g7d19wexp9jfmj389ewvwz",
+              "id": "member_release_admin",
+              "userId": "usr_release_admin",
               "inviteId": null,
               "role": "owner",
               "createdAt": "2026-09-14T15:08:37.000Z",
               "joinedAt": "2026-09-14T15:08:37.000Z",
               "isOwner": true,
               "user": {
-                "id": "usr_01m2g7d19wexp9jfmj389ewvwz",
+                "id": "usr_release_admin",
                 "email": "release-admin@example.com",
                 "name": "Release Administrator",
                 "image": null
@@ -430,7 +430,7 @@
               "updatedAt": null
             },
             {
-              "id": "orl_01m2g7d1a9e2nbw89ka60hwzgm",
+              "id": "role_fixture_002",
               "role": "admin",
               "permission": {
                 "invitation": [
@@ -455,7 +455,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1aaeer994xqne0w5efy",
+              "id": "role_fixture_003",
               "role": "member",
               "permission": {
                 "ac": [
@@ -468,7 +468,7 @@
               "updatedAt": "2026-09-14T15:08:37.066Z"
             },
             {
-              "id": "orl_01m2g7d1a8eap8f1efrh7tyx84",
+              "id": "role_fixture_001",
               "role": "super-admin",
               "permission": {
                 "organization": [
@@ -543,7 +543,7 @@
           "Content-Type": "application/json",
           "Authorization": "[REDACTED]",
           "Origin": "http://localhost:13005",
-          "x-openwork-org-id": "org_01m2g7d1a4eags33bb31x56fx9"
+          "x-openwork-org-id": "org_release_primary"
         },
         "body": {
           "name": "Release black-box proof"
@@ -554,7 +554,7 @@
         "headers": "HTTP/1.1 201 Created\naccess-control-allow-credentials: true\naccess-control-allow-origin: http://localhost:13005\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 396\nDate: Mon, 14 Sep 2026 15:08:37 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
           "apiKey": {
-            "id": "apk_01m2g7d1dhenxvqjr3e0rp98kj",
+            "id": "apk_fixture_001",
             "name": "Release black-box proof",
             "start": "[REDACTED]",
             "prefix": "den_",
@@ -603,7 +603,7 @@
       "at": "2026-09-14T15:09:24.000148+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-local",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-local",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -718,7 +718,7 @@
       "at": "2026-09-14T15:09:46.500613+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -740,9 +740,9 @@
         "status": 201,
         "headers": "HTTP/1.1 201 Created\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1282\nDate: Mon, 14 Sep 2026 15:09:48 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof public",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -783,7 +783,7 @@
           "requestedScopes": [],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2g7f566efnvzdp35rq95cky",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_001",
             "oauthCallback": "http://127.0.0.1/unused-mcp-oauth-callback"
           }
         }
@@ -796,7 +796,7 @@
       "at": "2026-09-14T15:09:48.769142+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -818,9 +818,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1150\nDate: Mon, 14 Sep 2026 15:09:48 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof public",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -885,9 +885,9 @@
         "body": {
           "connections": [
             {
-              "id": "emc_01m2g7f566efnvzdp35rq95cky",
+              "id": "emc_fixture_001",
               "name": "Release proof public",
-              "externalKey": "rs-proof-1",
+              "externalKey": "demo-proof-1",
               "url": "https://release-witness.example.com/public",
               "authType": "none",
               "credentialMode": "shared",
@@ -939,7 +939,7 @@
       "at": "2026-09-14T15:09:48.853592+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/teams/by-key/rs-proof-team",
+        "url": "http://localhost:18788/v1/teams/by-key/demo-proof-team",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -954,9 +954,9 @@
         "headers": "HTTP/1.1 201 Created\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 303\nDate: Mon, 14 Sep 2026 15:09:48 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
           "team": {
-            "id": "tem_01m2g7f7f9erfrznsbmce7j2pd",
-            "externalKey": "rs-proof-team",
-            "organizationId": "org_01m2g7d1a4eags33bb31x56fx9",
+            "id": "team_fixture_001",
+            "externalKey": "demo-proof-team",
+            "organizationId": "org_release_primary",
             "name": "Release Proof Team",
             "createdAt": "2026-09-14T15:09:48.905Z",
             "updatedAt": "2026-09-14T15:09:48.905Z",
@@ -974,7 +974,7 @@
       "at": "2026-09-14T15:09:48.892014+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -989,7 +989,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2g7f7f9erfrznsbmce7j2pd"
+              "team_fixture_001"
             ]
           }
         }
@@ -998,9 +998,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1188\nDate: Mon, 14 Sep 2026 15:09:48 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof team scoped",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1030,7 +1030,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2g7f7f9erfrznsbmce7j2pd"
+              "team_fixture_001"
             ]
           },
           "oauthClientId": null,
@@ -1054,7 +1054,7 @@
       "at": "2026-09-14T15:09:48.936969+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1065,9 +1065,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1135\nDate: Mon, 14 Sep 2026 15:09:48 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof team scoped",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1097,7 +1097,7 @@
             "orgWide": false,
             "memberIds": [],
             "teamIds": [
-              "tem_01m2g7f7f9erfrznsbmce7j2pd"
+              "team_fixture_001"
             ]
           },
           "oauthClientId": null,
@@ -1119,7 +1119,7 @@
       "at": "2026-09-14T15:09:48.970116+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1136,9 +1136,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1158\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof omitted access",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1190,7 +1190,7 @@
       "at": "2026-09-14T15:09:49.015126+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1201,9 +1201,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1105\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof omitted access",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1269,7 +1269,7 @@
             "memberIds": [],
             "teamIds": []
           },
-          "externalKey": "rs-proof-1"
+          "externalKey": "demo-proof-1"
         }
       },
       "response": {
@@ -1277,7 +1277,7 @@
         "headers": "HTTP/1.1 409 Conflict\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 197\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
           "error": "external_key_exists",
-          "message": "A connection with externalKey \"rs-proof-1\" already exists (emc_01m2g7f566efnvzdp35rq95cky). Use PUT /v1/mcp-connections/by-key/rs-proof-1 to update it."
+          "message": "A connection with externalKey \"demo-proof-1\" already exists (emc_fixture_001). Use PUT /v1/mcp-connections/by-key/demo-proof-1 to update it."
         }
       },
       "curlExit": 0,
@@ -1288,7 +1288,7 @@
       "at": "2026-09-14T15:09:49.086740+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1299,9 +1299,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1105\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof omitted access",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1351,7 +1351,7 @@
       "at": "2026-09-14T15:09:49.124247+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1374,9 +1374,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1153\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof ID rename",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1428,7 +1428,7 @@
       "at": "2026-09-14T15:09:49.164548+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1463,7 +1463,7 @@
       "at": "2026-09-14T15:09:49.201154+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1474,9 +1474,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1100\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f566efnvzdp35rq95cky",
+          "id": "emc_fixture_001",
           "name": "Release proof ID rename",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -1526,7 +1526,7 @@
       "at": "2026-09-14T15:09:49.237315+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-auth",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-auth",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1549,9 +1549,9 @@
         "status": 201,
         "headers": "HTTP/1.1 201 Created\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1265\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
+          "id": "emc_fixture_002",
           "name": "Release proof bearer",
-          "externalKey": "rs-proof-auth",
+          "externalKey": "demo-proof-auth",
           "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
@@ -1592,7 +1592,7 @@
           "requestedScopes": [],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2g7f7v5e6avy9r0byk64epd",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_002",
             "oauthCallback": "http://127.0.0.1/unused-mcp-oauth-callback"
           }
         }
@@ -1605,7 +1605,7 @@
       "at": "2026-09-14T15:09:49.582140+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f7v5e6avy9r0byk64epd",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_002",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1616,9 +1616,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1080\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
+          "id": "emc_fixture_002",
           "name": "Release proof bearer",
-          "externalKey": "rs-proof-auth",
+          "externalKey": "demo-proof-auth",
           "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
@@ -1668,7 +1668,7 @@
       "at": "2026-09-14T15:09:49.626326+00:00",
       "request": {
         "method": "POST",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f7v5e6avy9r0byk64epd/tools/call",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_002/tools/call",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1684,7 +1684,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1856\nDate: Mon, 14 Sep 2026 15:09:49 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "referenceId": "req_01m2g7f86zed7tgdnqm4p6xshr",
+          "referenceId": "req_fixture_001",
           "durationMs": 276,
           "result": {
             "content": [
@@ -1796,7 +1796,7 @@
       "at": "2026-09-14T15:09:49.941017+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-auth",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-auth",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1818,9 +1818,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1142\nDate: Mon, 14 Sep 2026 15:09:50 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
+          "id": "emc_fixture_002",
           "name": "Release proof bearer retained",
-          "externalKey": "rs-proof-auth",
+          "externalKey": "demo-proof-auth",
           "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
@@ -1872,7 +1872,7 @@
       "at": "2026-09-14T15:09:49.991234+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f7v5e6avy9r0byk64epd",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_002",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1883,9 +1883,9 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1089\nDate: Mon, 14 Sep 2026 15:09:50 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
+          "id": "emc_fixture_002",
           "name": "Release proof bearer retained",
-          "externalKey": "rs-proof-auth",
+          "externalKey": "demo-proof-auth",
           "url": "https://release-witness.example.com/bearer",
           "authType": "apikey",
           "credentialMode": "shared",
@@ -1935,7 +1935,7 @@
       "at": "2026-09-14T15:09:50.024357+00:00",
       "request": {
         "method": "POST",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f7v5e6avy9r0byk64epd/tools/call",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_002/tools/call",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -1951,7 +1951,7 @@
         "status": 200,
         "headers": "HTTP/1.1 200 OK\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1852\nDate: Mon, 14 Sep 2026 15:09:50 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "referenceId": "req_01m2g7f8kdeeqse049d3d05ayt",
+          "referenceId": "req_fixture_002",
           "durationMs": 226,
           "result": {
             "content": [
@@ -2063,7 +2063,7 @@
       "at": "2026-09-14T15:09:50.284849+00:00",
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2086,7 +2086,7 @@
       "at": "2026-09-14T15:09:50.337822+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f566efnvzdp35rq95cky",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_001",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2109,7 +2109,7 @@
       "at": "2026-09-14T15:09:50.371788+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2131,9 +2131,9 @@
         "status": 201,
         "headers": "HTTP/1.1 201 Created\naccess-control-allow-credentials: true\naccess-control-expose-headers: Content-Length\ncontent-type: application/json\nstrict-transport-security: max-age=31536000; includeSubDomains\nvary: Origin\nx-content-type-options: nosniff\ncontent-length: 1282\nDate: Mon, 14 Sep 2026 15:09:50 GMT\nConnection: keep-alive\nKeep-Alive: timeout=5\n\n",
         "body": {
-          "id": "emc_01m2g7f8ypedev7g18x76ns91h",
+          "id": "emc_fixture_003",
           "name": "Release proof public",
-          "externalKey": "rs-proof-1",
+          "externalKey": "demo-proof-1",
           "url": "https://release-witness.example.com/public",
           "authType": "none",
           "credentialMode": "shared",
@@ -2174,7 +2174,7 @@
           "requestedScopes": [],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2g7f8ypedev7g18x76ns91h",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_003",
             "oauthCallback": "http://127.0.0.1/unused-mcp-oauth-callback"
           }
         }
@@ -2187,7 +2187,7 @@
       "at": "2026-09-14T15:09:50.662461+00:00",
       "request": {
         "method": "PUT",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-unauthorized",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-unauthorized",
         "headers": {
           "Content-Type": "application/json"
         },
@@ -2219,7 +2219,7 @@
       "at": "2026-09-14T15:09:50.687469+00:00",
       "request": {
         "method": "GET",
-        "url": "http://localhost:18788/v1/mcp-connections/emc_01m2g7f8ypedev7g18x76ns91h",
+        "url": "http://localhost:18788/v1/mcp-connections/emc_fixture_003",
         "headers": {
           "Content-Type": "application/json"
         },
@@ -2253,9 +2253,9 @@
         "body": {
           "connections": [
             {
-              "id": "emc_01m2g7f7v5e6avy9r0byk64epd",
+              "id": "emc_fixture_002",
               "name": "Release proof bearer retained",
-              "externalKey": "rs-proof-auth",
+              "externalKey": "demo-proof-auth",
               "url": "https://release-witness.example.com/bearer",
               "authType": "apikey",
               "credentialMode": "shared",
@@ -2297,9 +2297,9 @@
               "grantedScopes": []
             },
             {
-              "id": "emc_01m2g7f8ypedev7g18x76ns91h",
+              "id": "emc_fixture_003",
               "name": "Release proof public",
-              "externalKey": "rs-proof-1",
+              "externalKey": "demo-proof-1",
               "url": "https://release-witness.example.com/public",
               "authType": "none",
               "credentialMode": "shared",
@@ -2402,7 +2402,7 @@
           "Keep-Alive": "timeout=5"
         },
         "body": {
-          "id": "emc_01m2g7h91eemn8g9kye3bmn0s7",
+          "id": "emc_fixture_004",
           "name": "Release exact recipe",
           "externalKey": "platform-tools",
           "url": "https://release-witness.example.com/public",
@@ -2445,7 +2445,7 @@
           "requestedScopes": [],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2g7h91eemn8g9kye3bmn0s7",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_004",
             "oauthCallback": "http://127.0.0.1/unused-mcp-oauth-callback"
           }
         }
@@ -2460,7 +2460,7 @@
           "curl --proto '=https' --fail-with-body -sS -X PUT -H \"x-api-key: $DEN_API_KEY\" -H 'Content-Type: application/json' --data-binary \"$body\" \"$DEN_API_URL/v1/mcp-connections/by-key/platform-tools\" | jq '{id,externalKey,updatedAt,reconnectionRequired}'"
         ],
         "exit": 0,
-        "stdout": "{\n  \"id\": \"emc_01m2g7h91eemn8g9kye3bmn0s7\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T15:10:56.573Z\",\n  \"reconnectionRequired\": null\n}\n",
+        "stdout": "{\n  \"id\": \"emc_fixture_004\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T15:10:56.573Z\",\n  \"reconnectionRequired\": null\n}\n",
         "stderr": "",
         "CURL_CA_BUNDLE": "private/ca.pem",
         "tlsVerification": true
@@ -2503,7 +2503,7 @@
           "Keep-Alive": "timeout=5"
         },
         "body": {
-          "id": "emc_01m2g7h91eemn8g9kye3bmn0s7",
+          "id": "emc_fixture_004",
           "name": "Release exact recipe",
           "externalKey": "platform-tools",
           "url": "https://release-witness.example.com/public",
@@ -2559,18 +2559,18 @@
           "curl --proto '=https' --fail-with-body -sS -X PUT -H \"x-api-key: $DEN_API_KEY\" -H 'Content-Type: application/json' --data-binary \"$body\" \"$DEN_API_URL/v1/mcp-connections/by-key/platform-tools\" | jq '{id,externalKey,updatedAt,reconnectionRequired}'"
         ],
         "exit": 0,
-        "stdout": "{\n  \"id\": \"emc_01m2g7h91eemn8g9kye3bmn0s7\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T15:10:56.573Z\",\n  \"reconnectionRequired\": false\n}\n",
+        "stdout": "{\n  \"id\": \"emc_fixture_004\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T15:10:56.573Z\",\n  \"reconnectionRequired\": false\n}\n",
         "stderr": "",
         "CURL_CA_BUNDLE": "private/ca.pem",
         "tlsVerification": true
       }
     },
     {
-      "label": "cleanup-rs-proof-1",
+      "label": "cleanup-demo-proof-1",
       "at": "2026-09-14T15:13:12.962736+00:00",
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-1",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-1",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2589,11 +2589,11 @@
       "stderr": ""
     },
     {
-      "label": "cleanup-rs-proof-auth",
+      "label": "cleanup-demo-proof-auth",
       "at": "2026-09-14T15:13:13.028755+00:00",
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-auth",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-auth",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2612,11 +2612,11 @@
       "stderr": ""
     },
     {
-      "label": "cleanup-rs-proof-local",
+      "label": "cleanup-demo-proof-local",
       "at": "2026-09-14T15:13:13.068496+00:00",
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-local",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-local",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2635,11 +2635,11 @@
       "stderr": ""
     },
     {
-      "label": "cleanup-rs-proof-unauthorized",
+      "label": "cleanup-demo-proof-unauthorized",
       "at": "2026-09-14T15:13:13.103374+00:00",
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/mcp-connections/by-key/rs-proof-unauthorized",
+        "url": "http://localhost:18788/v1/mcp-connections/by-key/demo-proof-unauthorized",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"
@@ -2685,7 +2685,7 @@
       "at": "2026-09-14T15:13:13.186446+00:00",
       "request": {
         "method": "DELETE",
-        "url": "http://localhost:18788/v1/teams/by-key/rs-proof-team",
+        "url": "http://localhost:18788/v1/teams/by-key/demo-proof-team",
         "headers": {
           "Content-Type": "application/json",
           "x-api-key": "[REDACTED]"

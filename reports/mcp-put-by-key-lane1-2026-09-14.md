@@ -1,6 +1,6 @@
 # Lane1 — released MCP keyed PUT black-box receipts
 
-Public-copy notice: retired witness hosts in the associated transcripts now use reserved example domains; linked integrity checks use the sanitized copies. Historical byte-identity statements and hashes below refer to the original recording, not the current public bytes. No request outcomes were changed or rerun. See the consolidated report's explicit synthetic allowlist and confidentiality boundary. Prior Git objects and external media have not been erased.
+Public-copy notice: retired witness hosts in the associated transcripts now use reserved example domains; linked integrity checks use the sanitized copies. Historical byte-identity statements and hashes below refer to the original recording, not the current public bytes. Opaque runtime identities are consistently replaced by neutral role/ordinal aliases and fixture keys use the demo prefix. Equality and cross-receipt relationships are preserved. No request outcomes were changed or rerun. See the consolidated report's explicit synthetic allowlist and confidentiality boundary. Prior Git objects and external media have not been erased.
 
 Date: 2026-09-14. **Requested runtime coverage is complete:** cases 1–8 and the exact HTTPS recipe executed with expected results. The original single-org provisioning refusal was a configuration boundary, not a product authentication failure. After explicit scope expansion, an isolated supplemental multi-org stack running the identical pinned release verified the foreign-org case. Formal testkit verification remains **Incomplete/pending the orchestrator's narrow run**; broader static-check failures are noted below. The original 51-receipt transcript remains byte-identical.
 
@@ -20,10 +20,10 @@ All acceptance requests used plain curl with `x-api-key` and jq parsing; no sess
 
 | Case | Actual HTTP statuses | Observed result |
 | --- | --- | --- |
-| 1. New keyed no-auth connection | PUT **201** | `externalKey=rs-proof-1`, nonempty `emc_` ID, connected public witness. |
+| 1. New keyed no-auth connection | PUT **201** | `externalKey=demo-proof-1`, nonempty `emc_` ID, connected public witness. |
 | 2. Exact repeat and list | PUT **200**, GET list **200** | Byte-equivalent JSON request, same ID and timestamp; exactly **one** matching list entry. |
 | 3. Rename/access replacement | Team PUT **201**; scoped PUT/GET **200/200**; omitted-access PUT/GET **200/200** | Connection ID unchanged. First access was `orgWide:false`, empty members, one team. Omitting `access` then returned `orgWide:true`, empty members/teams: **confirmed widening**, not preservation. |
-| 4. POST duplicate key | POST **409** | `external_key_exists`; response names the existing ID and directs caller to `PUT /v1/mcp-connections/by-key/rs-proof-1`. |
+| 4. POST duplicate key | POST **409** | `external_key_exists`; response names the existing ID and directs caller to `PUT /v1/mcp-connections/by-key/demo-proof-1`. |
 | 5. GET + conditional ID update | GET **200**, PUT **200**, stale PUT **409**, verification GET **200** | Correct `expectedUpdatedAt` accepted; stale timestamp rejected with `connection_conflict`. Verification retained the successful rename/timestamp, not the stale payload. |
 | 6. Secret creation/read/omission | Secret PUT **201**, GET **200**, tools/call **200**, omission PUT **200**, GET **200**, tools/call **200** | `authType:apikey` sends an upstream Bearer token. Raw PUT/GET responses were checked **before sanitization**: none contained the secret or an `apiKey` field. Same identity and ID retained after omission. Both real upstream calls returned `authenticated:true` and distinct requested nonces, with the same one-way token fingerprint at the enforcing witness. A no-token direct witness control returned **401**. |
 | 7. Key deletion and recreation | DELETE **200**, old-ID GET **404**, PUT **201** | Deletion returned `{ok:true,deleted:true}`. Recreation returned the same external key with a **new** ID. |
@@ -136,12 +136,12 @@ After the original run, the user explicitly authorized a second isolated stack i
 | User A and B signup | **200 / 200**, distinct user IDs |
 | A and B create organization | **201 / 201**, distinct org IDs; subsequent reads **200 / 200**, each owner |
 | A and B issue API key | **201 / 201**, distinct issued key IDs and private key values |
-| A creates `rs-proof-tenant` | **201**, source resource belongs to A |
+| A creates `demo-proof-tenant` | **201**, source resource belongs to A |
 | B GET / PUT / DELETE A's source ID | **404 / 404 / 404** (`connection_not_found`); PUT used the real source timestamp and valid body, not malformed input |
 | B repeats GET / PUT / DELETE with `x-openwork-org-id: <A org>` | **404 / 404 / 404**; header cannot change key ownership |
 | A reads after each foreign operation group | **200 / 200**, same ID, original name and timestamp; rejected writes/deletes did not mutate or remove it |
 | B list before own resource creation | **200**, empty list |
-| B creates same external key in B | **201**, distinct `emc_` ID, same key `rs-proof-tenant` |
+| B creates same external key in B | **201**, distinct `emc_` ID, same key `demo-proof-tenant` |
 | A list / B list / B list with spoofed A-org header | **200 / 200 / 200**; each exactly one own resource, no overlap; spoofed B request still lists B's resource |
 | A attempts GET of B's new resource | **404** |
 | Missing key GET / PUT | **401 / 401** |

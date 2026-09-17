@@ -9,12 +9,12 @@ request = client.request
 ROOT = client.ROOT
 MCP_BASE = os.environ['PROOF_MCP_BASE']
 public = {'name': 'Release proof public', 'url': MCP_BASE + '/public', 'authType': 'none', 'credentialMode': 'shared', 'exposeDirectly': False, 'access': {'orgWide': True, 'memberIds': [], 'teamIds': []}}
-keyed = '/v1/mcp-connections/by-key/rs-proof-1'
+keyed = '/v1/mcp-connections/by-key/demo-proof-1'
 
 
 def preflight():
     request('setup-foreign-org-attempt', 'POST', '/v1/org', {'name': 'Release Proof Foreign'}, auth='session')
-    request('ssrf-http-witness-rejected', 'PUT', '/v1/mcp-connections/by-key/rs-proof-local', {**public, 'url': 'http://mcp-put-proof-release-witness:8080/public'})
+    request('ssrf-http-witness-rejected', 'PUT', '/v1/mcp-connections/by-key/demo-proof-local', {**public, 'url': 'http://mcp-put-proof-release-witness:8080/public'})
     request('witness-unauthenticated-control', 'POST', '/bearer', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'release_credential_witness', 'arguments': {'nonce': 'unauthenticated-control'}}}, auth='none', base=MCP_BASE)
     request('witness-public-preflight', 'POST', '/public', {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2024-11-05', 'capabilities': {}, 'clientInfo': {'name': 'release-proof', 'version': '1'}}}, auth='none', base=MCP_BASE)
 
@@ -30,7 +30,7 @@ def proof():
     item = '/v1/mcp-connections/' + created['id']
     request('case2-identical', 'PUT', keyed, public)
     request('case2-list', 'GET', '/v1/mcp-connections?scope=manageable')
-    status, team = request('case3-create-team', 'PUT', '/v1/teams/by-key/rs-proof-team', {'name': 'Release Proof Team', 'memberIds': []})
+    status, team = request('case3-create-team', 'PUT', '/v1/teams/by-key/demo-proof-team', {'name': 'Release Proof Team', 'memberIds': []})
     if status == 201:
         team_id = team['team']['id']
         scoped = {**public, 'name': 'Release proof team scoped', 'access': {'orgWide': False, 'memberIds': [], 'teamIds': [team_id]}}
@@ -40,7 +40,7 @@ def proof():
         omitted['name'] = 'Release proof omitted access'
         request('case3-omit-access', 'PUT', keyed, omitted)
         request('case3-read-widened-access', 'GET', item)
-    request('case4-duplicate-post', 'POST', '/v1/mcp-connections', {**public, 'externalKey': 'rs-proof-1'})
+    request('case4-duplicate-post', 'POST', '/v1/mcp-connections', {**public, 'externalKey': 'demo-proof-1'})
     status, row = request('case5-get-id', 'GET', item)
     if status == 200:
         update = client.jq('{expectedUpdatedAt:.updatedAt,name:"Release proof ID rename",url,authType,credentialMode,exposeDirectly,access}', row)
@@ -49,7 +49,7 @@ def proof():
         request('case5-read-after-stale', 'GET', item)
     secret = dict(line.split('=', 1) for line in (ROOT / 'witness.env').read_text().splitlines())['WITNESS_SECRET']
     bearer = {**public, 'name': 'Release proof bearer', 'url': MCP_BASE + '/bearer', 'authType': 'apikey', 'apiKey': secret}
-    status, secured = request('case6-secret-create', 'PUT', '/v1/mcp-connections/by-key/rs-proof-auth', bearer)
+    status, secured = request('case6-secret-create', 'PUT', '/v1/mcp-connections/by-key/demo-proof-auth', bearer)
     if status == 201:
         state['securedId'] = secured['id']
         client.save(state)
@@ -58,7 +58,7 @@ def proof():
         request('case6-call-before', 'POST', secure_item + '/tools/call', {'toolName': 'release_credential_witness', 'arguments': {'nonce': 'before-secret-omission'}})
         omit = {k: v for k, v in bearer.items() if k != 'apiKey'}
         omit['name'] = 'Release proof bearer retained'
-        request('case6-omit-secret', 'PUT', '/v1/mcp-connections/by-key/rs-proof-auth', omit)
+        request('case6-omit-secret', 'PUT', '/v1/mcp-connections/by-key/demo-proof-auth', omit)
         request('case6-secret-read-after', 'GET', secure_item)
         request('case6-call-after', 'POST', secure_item + '/tools/call', {'toolName': 'release_credential_witness', 'arguments': {'nonce': 'after-secret-omission'}})
     request('case7-delete-key', 'DELETE', keyed)
@@ -67,15 +67,15 @@ def proof():
     if status == 201:
         state['recreatedId'] = recreated['id']
         client.save(state)
-    request('case8-no-key-put', 'PUT', '/v1/mcp-connections/by-key/rs-proof-unauthorized', public, auth='none')
+    request('case8-no-key-put', 'PUT', '/v1/mcp-connections/by-key/demo-proof-unauthorized', public, auth='none')
     request('case8-no-key-get', 'GET', '/v1/mcp-connections/' + state.get('recreatedId', created['id']), auth='none')
     request('case8-list-after-no-key', 'GET', '/v1/mcp-connections?scope=manageable')
 
 
 def cleanup():
-    for key in ['rs-proof-1', 'rs-proof-auth', 'rs-proof-local', 'rs-proof-unauthorized', 'platform-tools']:
+    for key in ['demo-proof-1', 'demo-proof-auth', 'demo-proof-local', 'demo-proof-unauthorized', 'platform-tools']:
         request('cleanup-' + key, 'DELETE', '/v1/mcp-connections/by-key/' + key)
-    request('cleanup-team', 'DELETE', '/v1/teams/by-key/rs-proof-team')
+    request('cleanup-team', 'DELETE', '/v1/teams/by-key/demo-proof-team')
     request('cleanup-list', 'GET', '/v1/mcp-connections?scope=manageable')
 
 

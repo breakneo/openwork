@@ -82,7 +82,7 @@ def export():
         raise RuntimeError('Refusing to overwrite a saved recipe supplement')
     original = pathlib.Path('reports/mcp-put-by-key-transcript-2026-09-14.json')
     original_sha = hashlib.sha256(original.read_bytes()).hexdigest()
-    if original_sha != '06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8':
+    if original_sha != 'e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c':
         raise RuntimeError('Original 51-receipt transcript changed')
     receipts = [json.loads(path.read_text()) for path in sorted(ROOT.glob('request-*.json'))]
     image = subprocess.check_output(['docker', 'inspect', 'mcp-put-proof-release-den-1', '--format', '{{.Config.Image}}'], text=True).strip()

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "kind": "released-recipe-observed-headers-rerun",
   "recordedAt": "2026-09-14T16:33:17.482906+00:00",
-  "originalTranscriptSha256": "06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8",
+  "originalTranscriptSha256": "e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c",
   "historicalHeadersBackfilled": false,
   "containerImage": "ghcr.io/different-ai/openwork-den-api@sha256:e254a3842e7ecb6d0c7128b5f17201e92ac4ee566ad82c70c468938a3faa6407",
   "requests": [
@@ -67,7 +67,7 @@
           "Keep-Alive": "timeout=5"
         },
         "body": {
-          "id": "emc_01m2gc81vhee3brn1j6m9qs2s0",
+          "id": "emc_fixture_009",
           "name": "Release exact recipe",
           "externalKey": "platform-tools",
           "url": "https://job-witness.example.com/public",
@@ -110,7 +110,7 @@
           "requestedScopes": [],
           "grantedScopes": [],
           "links": {
-            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_01m2gc81vhee3brn1j6m9qs2s0",
+            "yourConnections": "http://localhost:13005/dashboard/your-connections?connectionId=emc_fixture_009",
             "oauthCallback": "http://127.0.0.1/unused-mcp-oauth-callback"
           }
         }
@@ -133,7 +133,7 @@
         "endedAt": "2026-09-14T16:33:17.059658+00:00",
         "scriptSha256": "e1481d2a832917df94b944eefc94172f5ff852a2251450cff267600829e704f7",
         "exit": 0,
-        "stdout": "{\n  \"id\": \"emc_01m2gc81vhee3brn1j6m9qs2s0\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T16:33:17.089Z\",\n  \"reconnectionRequired\": null\n}\n",
+        "stdout": "{\n  \"id\": \"emc_fixture_009\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T16:33:17.089Z\",\n  \"reconnectionRequired\": null\n}\n",
         "stderr": "",
         "CURL_CA_BUNDLE": "private/ca.pem",
         "tlsVerification": true
@@ -181,7 +181,7 @@
           "Keep-Alive": "timeout=5"
         },
         "body": {
-          "id": "emc_01m2gc81vhee3brn1j6m9qs2s0",
+          "id": "emc_fixture_009",
           "name": "Release exact recipe",
           "externalKey": "platform-tools",
           "url": "https://job-witness.example.com/public",
@@ -245,7 +245,7 @@
         "endedAt": "2026-09-14T16:33:17.229913+00:00",
         "scriptSha256": "e1481d2a832917df94b944eefc94172f5ff852a2251450cff267600829e704f7",
         "exit": 0,
-        "stdout": "{\n  \"id\": \"emc_01m2gc81vhee3brn1j6m9qs2s0\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T16:33:17.089Z\",\n  \"reconnectionRequired\": false\n}\n",
+        "stdout": "{\n  \"id\": \"emc_fixture_009\",\n  \"externalKey\": \"platform-tools\",\n  \"updatedAt\": \"2026-09-14T16:33:17.089Z\",\n  \"reconnectionRequired\": false\n}\n",
         "stderr": "",
         "CURL_CA_BUNDLE": "private/ca.pem",
         "tlsVerification": true

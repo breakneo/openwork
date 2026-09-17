@@ -186,7 +186,7 @@ def export():
         provider = receipt['response']['body']['llmProvider']
         checks.append({'label': label, 'storedCredentialPresent': bool(provider.get('apiKey')), 'storedCredentialMatchesConfigured': provider.get('apiKey') == state['providerSecret']})
     immutable = {}
-    for name, expected in [('mcp-put-by-key-transcript-2026-09-14.json', '06c36eed2d21d27b7f93c33c2f188867efcb4733797e5d99967ffee315248df8'), ('mcp-put-by-key-tenant-transcript-2026-09-14.json', '786d2040ed1c95eee723e6f81c25d61a4dbdc536f88a4c9718ef7e78837dd196')]:
+    for name, expected in [('mcp-put-by-key-transcript-2026-09-14.json', 'e2252c47e46cd222b3755523375d96e2821088d7e835581fe9958111aac1ac9c'), ('mcp-put-by-key-tenant-transcript-2026-09-14.json', '0a5884c82758811182df8895b7345b73c46a0fbdf3e1ac4ddd65c552d437506b')]:
         digest = hashlib.sha256((pathlib.Path('reports') / name).read_bytes()).hexdigest()
         if digest != expected:
             raise RuntimeError('Prior lane transcript changed')
