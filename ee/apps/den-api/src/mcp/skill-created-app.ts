@@ -1,4 +1,5 @@
 import type { CallToolResult, McpServer } from "@modelcontextprotocol/server"
+import { legacyConfirmationAppHtml } from "@openwork/mcp-apps/legacy-confirmation"
 import {
   skillCreatedPayloadSchema,
   type SkillCreatedPayload,
@@ -9,54 +10,7 @@ import { RESOURCE_MIME_TYPE, registerAppResource, registerAppTool } from "./mcp-
 export { skillCreatedPayloadSchema } from "@openwork/types/skill-created-app"
 
 export const SKILL_CREATED_APP_RESOURCE_URI = "ui://openwork/skill-created/v1/view.html"
-export const SKILL_CREATED_APP_HTML = String.raw`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Skill result</title>
-<style>:root{color-scheme:light dark;font-family:var(--font-sans,system-ui,sans-serif);color:var(--color-text-primary,inherit);background:transparent}body{margin:0;padding:16px;font-size:13px;line-height:1.5}p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}</style></head>
-<body><p id="result" role="status">No skill result received.</p><script>
-(function () {
-  'use strict';
-  var initId = 'openwork-skill-created:init';
-  var output = document.getElementById('result');
-  function record(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-  function text(value, max) { return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max; }
-  function url(value) {
-    if (value === null) return true;
-    if (typeof value !== 'string') return false;
-    try { new URL(value); return true; } catch { return false; }
-  }
-  function valid(value) {
-    return record(value) && value.schemaVersion === '1'
-      && (value.mode === undefined || value.mode === 'created' || value.mode === 'updated')
-      && text(value.name, 255) && text(value.pluginId, 160) && text(value.skillId, 160)
-      && text(value.description, 2000) && url(value.libraryUrl);
-  }
-  function post(message) { window.parent.postMessage(message, '*'); }
-  function render(result) {
-    output.textContent = 'No skill result received.';
-    if (!record(result) || result.isError === true) return;
-    var payload = result.structuredContent;
-    if (!valid(payload) && Array.isArray(result.content)) {
-      for (var item of result.content) {
-        if (!record(item) || item.type !== 'text' || typeof item.text !== 'string') continue;
-        try { var candidate = JSON.parse(item.text); if (valid(candidate)) { payload = candidate; break; } } catch {}
-      }
-    }
-    if (!valid(payload)) return;
-    var lines = ['Skill ' + (payload.mode === 'updated' ? 'updated: ' : 'created: ') + payload.name, payload.description, 'Plugin: ' + payload.pluginId, 'Skill: ' + payload.skillId];
-    if (payload.libraryUrl !== null) lines.push('Library: ' + payload.libraryUrl);
-    output.textContent = lines.join('\n');
-  }
-  window.addEventListener('message', function (event) {
-    if (event.source !== window.parent || !record(event.data) || event.data.jsonrpc !== '2.0') return;
-    var message = event.data;
-    if (message.id === initId && record(message.result)) post({ jsonrpc: '2.0', method: 'ui/notifications/initialized' });
-    if (message.method === 'ui/notifications/tool-result') render(message.params);
-    if (message.method === 'ui/notifications/tool-cancelled') render(null);
-    if (message.method === 'ui/resource-teardown' && message.id !== undefined) post({ jsonrpc: '2.0', id: message.id, result: {} });
-  });
-  post({ jsonrpc: '2.0', id: initId, method: 'ui/initialize', params: { appInfo: { name: 'OpenWork legacy skill result', version: '1.0.0' }, appCapabilities: {}, protocolVersion: '2026-01-26' } });
-}());
-</script></body></html>`
+export const SKILL_CREATED_APP_HTML = legacyConfirmationAppHtml
 
 export const CREATE_SKILL_TOOL_NAME = "create_skill"
 export const UPDATE_SKILL_TOOL_NAME = "update_skill"

@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises"
 import { z } from "zod"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { McpServer } from "@modelcontextprotocol/server"
-import { runInNewContext } from "node:vm"
+import { legacyConfirmationAppHtml } from "@openwork/mcp-apps/legacy-confirmation"
 import { PLUGIN_FLOW_APP_HTML, PLUGIN_FLOW_APP_RESOURCE_URI, registerAgentPluginFlowApp } from "../src/mcp/plugin-flow-app.js"
 import type { CapabilityRegistryContext } from "../src/mcp/capability-registry.js"
 import type { McpToolOperation } from "../src/mcp/catalog.js"
@@ -93,33 +93,8 @@ test("legacy formatter is app-only and its exact bound resource resolves before 
   }
 })
 
-test("legacy HTML initializes and renders only validated received results using textContent", () => {
-  const output = { textContent: "No sharing result received." }
-  const sent: unknown[] = []
-  const parent = { postMessage: (message: unknown) => sent.push(message) }
-  let receive: (event: { source: unknown; data: unknown }) => void = () => { throw new Error("Missing message listener") }
-  const script = PLUGIN_FLOW_APP_HTML.split("<script>")[1]?.split("</script>")[0]
-  if (!script) throw new Error("Missing legacy script")
-  runInNewContext(script, {
-    document: { getElementById: () => output },
-    window: { parent, addEventListener: (_name: string, listener: typeof receive) => { receive = listener } },
-  })
-  expect(sent[0]).toMatchObject({ method: "ui/initialize" })
-  receive({ source: parent, data: { jsonrpc: "2.0", id: "openwork-plugin-flow:init", result: {} } })
-  expect(sent[1]).toMatchObject({ method: "ui/notifications/initialized" })
-  const payload = { schemaVersion: "1", mode: "plugin_access_granted", pluginId: "<img src=x onerror=alert(1)>", marketplaceId: null, recipient: { kind: "member", id: "om_fixture", role: "viewer" } }
-  const deliver = (params: unknown) => receive({ source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params } })
-  expect(output.textContent).toBe("No sharing result received.")
-  deliver({ structuredContent: payload })
-  expect(output.textContent).toContain(payload.pluginId)
-  expect(output.textContent).toContain("om_fixture")
-  deliver({ content: [{ type: "text", text: JSON.stringify(payload) }] })
-  expect(output.textContent).toContain("Plugin access granted")
-  for (const params of [{ structuredContent: { ...payload, schemaVersion: "2" } }, { structuredContent: { ...payload, recipient: {} } }, { isError: true, structuredContent: payload }, {}]) {
-    deliver(params)
-    expect(output.textContent).toBe("No sharing result received.")
-  }
-  expect(script).not.toMatch(/innerHTML|fetch\(|tools\/call|window\.open/)
+test("legacy sharing exports the compiled shared confirmation renderer", () => {
+  expect(PLUGIN_FLOW_APP_HTML).toBe(legacyConfirmationAppHtml)
 })
 
 const sharingOperations = [

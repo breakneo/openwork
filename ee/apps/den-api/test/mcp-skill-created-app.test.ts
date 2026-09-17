@@ -1,7 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { McpServer } from "@modelcontextprotocol/server"
 import { expect, test } from "bun:test"
-import { runInNewContext } from "node:vm"
+import { legacyConfirmationAppHtml } from "@openwork/mcp-apps/legacy-confirmation"
 import { registerAgentPluginFlowResource, PLUGIN_FLOW_APP_RESOURCE_URI } from "../src/mcp/plugin-flow-app.js"
 import {
   CREATE_SKILL_TOOL_NAME,
@@ -155,39 +155,13 @@ test("update_skill returns updated-mode structured content and text fallback", a
   expect(requests[0]?.reason).toBe("Add cherry tomatoes")
 })
 
-test("legacy skill resource emits readiness and safely renders current and historical payloads", () => {
-  const output = { textContent: "No skill result received." }
-  const sent: unknown[] = []
-  const parent = { postMessage: (message: unknown) => sent.push(message) }
-  let receive: (event: { source: unknown; data: unknown }) => void = () => { throw new Error("Missing listener") }
-  const script = SKILL_CREATED_APP_HTML.split("<script>")[1]?.split("</script>")[0]
-  if (!script) throw new Error("Missing script")
-  runInNewContext(script, {
-    URL,
-    document: { getElementById: () => output },
-    window: { parent, addEventListener: (_name: string, listener: typeof receive) => { receive = listener } },
+test("historical skill and sharing resources use the same compiled renderer", async () => {
+  await withClient(async client => {
+    for (const uri of [SKILL_CREATED_APP_RESOURCE_URI, PLUGIN_FLOW_APP_RESOURCE_URI]) {
+      const resource = await client.readResource({ uri })
+      expect(resource.contents[0]).toMatchObject({ uri, mimeType: "text/html;profile=mcp-app", text: legacyConfirmationAppHtml })
+    }
   })
-  expect(sent[0]).toMatchObject({ method: "ui/initialize" })
-  receive({ source: parent, data: { jsonrpc: "2.0", id: "openwork-skill-created:init", result: {} } })
-  expect(sent[1]).toMatchObject({ method: "ui/notifications/initialized" })
-  const deliver = (params: unknown) => receive({ source: parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params } })
-  expect(output.textContent).toBe("No skill result received.")
-  receive({ source: {}, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: payload } } })
-  expect(output.textContent).toBe("No skill result received.")
-  deliver({ structuredContent: payload })
-  expect(output.textContent).toContain("Skill created: " + payload.name)
-  deliver({ structuredContent: updatedPayload })
-  expect(output.textContent).toContain("Skill updated: " + payload.name)
-  const historical = { ...payload, description: "<img src=x onerror=alert(1)>" }
-  deliver({ content: [{ type: "text", text: JSON.stringify(historical) }] })
-  expect(output.textContent).toContain(historical.description)
-  for (const invalid of [{ ...payload, mode: "deleted" }, { ...payload, libraryUrl: "invalid" }, { ...payload, name: "" }, { ...payload, schemaVersion: "2" }]) {
-    deliver({ structuredContent: invalid })
-    expect(output.textContent).toBe("No skill result received.")
-  }
-  deliver({ isError: true, structuredContent: payload })
-  expect(output.textContent).toBe("No skill result received.")
-  expect(script).not.toMatch(/innerHTML|fetch\(|tools\/call|window\.open/)
 })
 
 test("keeps creation failures useful to clients without MCP Apps", async () => {

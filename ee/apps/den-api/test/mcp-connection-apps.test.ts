@@ -1,9 +1,26 @@
-import { beforeAll, expect, test } from "bun:test"
+import { afterAll, beforeAll, expect, mock, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { McpServer } from "@modelcontextprotocol/server"
+import { connectionActionAppHtml } from "@openwork/mcp-apps/connection-action"
+import { connectionActionAppResourceUri } from "@openwork/types/connection-action-app"
 
 const API_ORIGIN = "http://127.0.0.1:8790"
+
+mock.module("../src/auth.js", () => ({
+  auth: {},
+  DEN_MCP_OPAQUE_ACCESS_TOKEN_PREFIX: "ow_mcp_at_",
+  DEN_MCP_FIRST_PARTY_CLIENT_ID: "openwork-desktop",
+  DEN_MCP_FIRST_PARTY_RESOURCES: [`${API_ORIGIN}/mcp/agent`],
+  DEN_MCP_GRANT_ID_CLAIM: "https://openworklabs.com/grant_id",
+  DEN_MCP_ORG_ID_CLAIM: "https://openworklabs.com/org_id",
+  DEN_MCP_OAUTH_RESOURCE: `${API_ORIGIN}/mcp/agent`,
+  DEN_MCP_RESOURCE: `${API_ORIGIN}/mcp`,
+  DEN_MCP_RESOURCE_CLAIM: "https://openworklabs.com/resource",
+  DEN_MCP_RESOURCES: [`${API_ORIGIN}/mcp`],
+  DEN_MCP_TOKEN_USE_CLAIM: "https://openworklabs.com/token_use",
+}))
+afterAll(() => mock.restore())
 
 process.env.DATABASE_URL = process.env.DATABASE_URL ?? "mysql://root:password@127.0.0.1:3306/openwork_test"
 process.env.DB_MODE ??= "mysql"
@@ -36,13 +53,13 @@ test("connection requests expose a standard App and deny unauthenticated intents
         resourceUri: "ui://openwork/connection-action/v2/view.html", visibility: ["app"],
       } })
     }
-    const resource = await client.readResource({ uri: "ui://openwork/connection-action/v2/view.html" })
-    expect(resource.contents[0]).toMatchObject({ mimeType: "text/html;profile=mcp-app" })
-    const html = resource.contents[0] && "text" in resource.contents[0] ? resource.contents[0].text : ""
-    expect(html).toContain("ui/initialize")
-    expect(html).toContain("tools/call")
-    expect(html).toContain("Authenticate")
-    expect(html).toContain("Skip")
+    const resource = await client.readResource({ uri: connectionActionAppResourceUri })
+    expect(resource.contents[0]).toMatchObject({
+      uri: connectionActionAppResourceUri,
+      mimeType: "text/html;profile=mcp-app",
+      text: connectionActionAppHtml,
+      _meta: { ui: { csp: { connectDomains: [], resourceDomains: ["https://cdn.simpleicons.org"], frameDomains: [], baseUriDomains: [] } } },
+    })
     for (const action of ["authenticate", "skip"]) {
       const result = await client.callTool({ name: "connection_action_intent", arguments: { connectionId: "emc_fixture", action } })
       expect(result.isError).toBe(true)

@@ -23,6 +23,7 @@ async function files(directory, prefix = "") {
 }
 
 try {
+  execFileSync("pnpm", ["--filter", "@openwork/mcp-apps", "build"], { cwd: repoDir, stdio: "inherit" });
   const input = join(temporary, "openapi.json");
   execFileSync("pnpm", ["--filter", "@openwork-ee/den-api", "exec", "tsx", "--conditions=development",
     "scripts/generate-openapi-snapshot.ts", "--output", input], { cwd: repoDir, stdio: "inherit" });

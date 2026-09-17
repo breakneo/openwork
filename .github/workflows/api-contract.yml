@@ -21,6 +21,7 @@ on:
       - "packages/enterprise-mcp-client/**"
       - "packages/headless-threads/**"
       - "packages/install-config/**"
+      - "packages/mcp-apps/**"
       - "packages/types/**"
   push:
     branches:
@@ -32,6 +33,7 @@ on:
       - "packages/docs/openapi.json"
       - "ee/apps/den-api/**"
       - "ee/packages/**"
+      - "packages/mcp-apps/**"
       - "packages/types/**"
 
 permissions:
