@@ -15,7 +15,7 @@ Keep **A**: one contextual native-app choice, when eligible, alongside the exist
 
 Keep browser entries flat for the smallest diff. If installations with many browsers make the menu unwieldy, consider an `Open in Browser` submenu as a separate usability change. Do not introduce an arbitrary seven-item cap or silently drop installed browser choices.
 
-This review documents the implementation and research boundary. Test outcomes are attributed to the structured receipts cited below. Publication details are added only after the branch and pull request exist.
+This review documents the implementation and research boundary. Test outcomes are attributed to the structured receipts cited below. Publication and final-head evidence are tracked in [pull request #5112](https://github.com/different-ai/openwork/pull/5112).
 
 ## What the current code actually does
 
@@ -154,6 +154,8 @@ Slack and Linear's exact documented forms were re-fetched during this review. Th
 | Cursor / Codex | No verified matching menu screenshots were supplied. | Exact menus are unknown; do not invent parity claims. |
 
 ## Verification, evidence, and limits
+
+Final-head receipts are published in pull request #5112's `test-evidence` sticky comment. The tables below distinguish selected tests, intentionally unselected tests, and baseline failures.
 
 ### Reported executor results
 
