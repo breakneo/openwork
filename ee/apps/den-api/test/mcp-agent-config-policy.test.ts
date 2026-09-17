@@ -128,6 +128,22 @@ describe("agent-configurable org connections policy", () => {
     }))
   })
 
+  test.each(["add skill existing plugin", "add skill to existing plugin", "create skill in existing plugin", "create config object", "postConfigObjects"])(
+    "agent capability search discovers creation in an existing plugin: %s",
+    (query) => {
+      const matches = searchCapabilities(buildMcpCatalog(document), query, 1)
+      const match = matches.find((item) => item.name === "postConfigObjects")
+      expect(match).toMatchObject({
+        name: "postConfigObjects",
+        method: "POST",
+        path: "/v1/config-objects",
+        hasBody: true,
+      })
+      expect(match?.bodySchema).toHaveProperty("properties.pluginIds.type", "array")
+      expect(match?.bodySchema).toHaveProperty("properties.input.properties.rawSourceText.type", "string")
+    },
+  )
+
   test("agent capability search discovers the Cloud skill update workflow", () => {
     const catalog = buildMcpCatalog(document)
     const findMatches = searchCapabilities(catalog, "list skill config objects", 20)
@@ -198,6 +214,13 @@ describe("agent-configurable org connections policy", () => {
     expect(searchCapabilitySourceFilter("admin")).toEqual({
       api: false,
       admin: true,
+      mcp: false,
+      marketplace: false,
+      skills: false,
+    })
+    expect(searchCapabilitySourceFilter("api")).toEqual({
+      api: true,
+      admin: false,
       mcp: false,
       marketplace: false,
       skills: false,
