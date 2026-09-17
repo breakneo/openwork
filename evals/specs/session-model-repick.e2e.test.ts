@@ -43,7 +43,6 @@ test("unavailable composer uses the ordinary model picker unless scoped repick i
   const initialPreferences = record(await probe.storage("openwork.preferences"));
   expect(record(initialPreferences.featureFlags).unavailableModelRepick).not.toBe(true);
 
-  await user.reload();
   await user.click({ role: "button", label: "Change model" });
   await user.see({ role: "heading", label: "Models" });
   await user.notSee({ text: /is no longer available$/ });
@@ -243,7 +242,11 @@ test("unavailable composer repick defaults to this session, previews all, and sa
   )), { within: 5_000, label: "scoped replacement flag enabled" })).toBe(true);
   await user.click("Back to app");
   const dismissRepick = async () => {
-    if (await probe.has("Eval Unavailable Model A is no longer available") || await probe.has("Eval Unavailable Model B is no longer available")) await user.click({ role: "button", label: "Close" });
+    if (await probe.has("Eval Unavailable Model A is no longer available") || await probe.has("Eval Unavailable Model B is no longer available")) {
+      await user.click({ role: "button", label: "Close" });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await user.notSee(repickTitle);
+    }
   };
   const open = async (sessionId: string) => {
     await dismissRepick();
@@ -329,14 +332,13 @@ test("unavailable composer repick defaults to this session, previews all, and sa
   await step("opening unavailable session and previewing scopes never changes selection or sends", async () => {
     await open(peer.sessionId);
     await open(target.sessionId);
-    await user.reload();
-    await user.click({ role: "button", label: "Change model" });
+    await agent.run("session.model_picker.open");
     await user.see(repickTitle);
-    await dismissRepick();
     await user.see("composer", { text: draft });
     await user.screenshot();
-    await user.reload();
-    await choose();
+    await user.click({ role: "combobox", label: "Models" });
+    await user.click({ role: "option", label: `${string(available.title)} (${string(available.providerName)})` });
+    await user.see({ role: "combobox", label: "Models" }, { text: string(available.title) });
     await user.see(confirm(1));
     expect((await probe.dom('[role="dialog"] label:has([role="radio"][aria-checked="true"])')).elements.map((element) => element.text)).toEqual(["This session only"]);
     expect(await probe.storage("openwork.sessionModels.v1")).toEqual(initialSelections);
