@@ -56,12 +56,12 @@ function fakeWorld(failure?: "launch" | "verify" | "source") {
       assert.match(name, /^app-web--test-stage-/);
       assert.equal(workspace, "/workspace");
       assert.equal(receipt.actualSha, ref);
+      assert.equal(options?.env?.OPENWORK_TOKEN, undefined);
       assert.deepEqual(options, {
         browserHostSuffix: ".example.test",
         env: { OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY: "1", OPENWORK_DEV_DEN_PROXY_TARGET: "https://app.openworklabs.com",
           VITE_DISABLE_OPENWORK_MODELS: "0", OPENWORK_WEB_PORT: "5178", VITE_HOST: "0.0.0.0" },
       });
-      assert.equal(options?.env?.OPENWORK_TOKEN, undefined);
       assert.equal(options?.env?.OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY, "1");
       if (failure === "launch") throw new Error("launch failed");
       return { webUrl: "http://127.0.0.1:5178", openworkUrl: "http://127.0.0.1:8778", fixtureRoot: "/tmp/fixture", runtimeDirectory: "/workspace/tmp/runtime", source,

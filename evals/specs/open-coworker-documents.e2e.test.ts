@@ -1,4 +1,4 @@
-import { EVAL_COWORKER_MODEL, clickButton, coworker, evalIn, fill, needs, test, waitFor, waitForText } from "@openwork/testkit";
+import { EVAL_COWORKER_MODEL, browserScript, clickButton, coworker, evalIn, fill, needs, test, waitFor } from "@openwork/testkit";
 import { expect } from "vitest";
 
 const enabled = process.env.OPENWORK_EVAL_E2E_TESTS === "1";
@@ -9,12 +9,6 @@ const title = enabled
 const SLUG = "planner";
 const NAME = "Planner";
 
-function json(value: unknown): string {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) throw new Error("Cannot serialize an undefined browser value.");
-  return serialized.replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -22,7 +16,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 type App = Awaited<ReturnType<typeof coworker>>;
 
 async function invokeCoworker(app: App, command: string, payload: unknown): Promise<unknown> {
-  return evalIn(app, `window.__COWORKER__.invoke(${json(command)}, ${json(payload)})`, { awaitPromise: true, timeoutMs: 120_000 });
+  return evalIn(app, browserScript((command, payload) => window.__COWORKER__.invoke(command, payload), [command, payload]), { awaitPromise: true, timeoutMs: 120_000 });
 }
 
 function resultRecord(response: unknown): Record<string, unknown> {
@@ -40,20 +34,28 @@ function resultList(response: unknown): Record<string, unknown>[] {
 }
 
 async function waitForDiscussionView(app: App, timeoutMs: number): Promise<void> {
-  await waitFor(app, `(() => {
+  await waitFor(app, browserScript((name) => {
     const view = document.querySelector('[data-testid="coworker-discussion-view"]');
-    const named = [...document.querySelectorAll("h1")].some((heading) => heading.textContent?.trim() === ${json(NAME)});
+    const named = [...document.querySelectorAll("h1")].some((heading) => heading.textContent?.trim() === name);
     return Boolean(view) && named;
-  })()`, { timeoutMs, label: `${NAME} discussion view` });
+  }, [NAME]), { timeoutMs, label: `${NAME} discussion view` });
 }
 
 async function reload(app: App): Promise<void> {
-  await evalIn(app, "location.reload(); true");
+  await evalIn(app, () => { location.reload(); return true; });
   await waitForDiscussionView(app, 120_000);
-  await waitFor(app, `Boolean(document.querySelector('textarea[aria-label=${json(`Message ${NAME}`)}]'))`, {
+  await waitFor(app, browserScript((selector) => Boolean(document.querySelector(selector)), [`textarea[aria-label="Message ${NAME}"]`]), {
     timeoutMs: 60_000,
     label: `${NAME} discussion composer`,
   });
+}
+
+async function clickElement(app: App, selector: string): Promise<void> {
+  await evalIn(app, browserScript((selector) => {
+    const element = document.querySelector(selector);
+    if (!(element instanceof HTMLElement)) throw new Error(`Missing clickable element: ${selector}`);
+    element.click();
+  }, [selector]));
 }
 
 /**
@@ -62,39 +64,42 @@ async function reload(app: App): Promise<void> {
  * reply that did arrive; that is still an idle thread for the journey's purposes.
  */
 async function waitForReady(app: App, label: string): Promise<void> {
-  await waitFor(app, `(() => {
+  await waitFor(app, () => {
     const status = document.querySelector('[data-testid="coworker-thread-status"]');
     return status instanceof HTMLElement && status.dataset.state === "idle" && !document.querySelector('[data-testid="coworker-working"]');
-  })()`, { timeoutMs: 300_000, label });
+  }, { timeoutMs: 300_000, label });
 }
 
 /** Send one message and wait for the reply that carries `expected`; returns that bubble's text. */
 async function ask(app: App, prompt: string, expected: string): Promise<string> {
   await fill(app, `textarea[aria-label="Message ${NAME}"]`, prompt);
   await clickButton(app, "Send");
-  await waitFor(app, `(() => [...document.querySelectorAll('[data-message-role="user"]')]
-    .some((candidate) => (candidate.textContent ?? "").includes(${json(prompt.slice(0, 60))})))()`, { timeoutMs: 30_000, label: "visible user message" });
-  const replyExpression = `(() => {
+  await waitFor(app, browserScript((promptStart) => [...document.querySelectorAll('[data-message-role="user"]')]
+    .some((candidate) => (candidate.textContent ?? "").includes(promptStart)), [prompt.slice(0, 60)]), { timeoutMs: 30_000, label: "visible user message" });
+  const replyExpression = browserScript((expected) => {
     const message = [...document.querySelectorAll('[data-message-role="assistant"]')]
-      .find((candidate) => (candidate.textContent ?? "").includes(${json(expected)}));
+      .find((candidate) => (candidate.textContent ?? "").includes(expected));
     return message?.textContent ?? false;
-  })()`;
-  await waitFor(app, replyExpression, { timeoutMs: 300_000, label: `assistant response ${json(expected)}` });
-  await waitForReady(app, `settled after ${json(expected)}`);
+  }, [expected]);
+  await waitFor(app, replyExpression, { timeoutMs: 300_000, label: `assistant response ${JSON.stringify(expected)}` });
+  await waitForReady(app, `settled after ${JSON.stringify(expected)}`);
   // Read the words again once the turn is over, so a reply still streaming at first sight is measured whole.
-  return String(await waitFor(app, replyExpression, { timeoutMs: 30_000, label: `final assistant response ${json(expected)}` }));
+  return String(await waitFor(app, replyExpression, { timeoutMs: 30_000, label: `final assistant response ${JSON.stringify(expected)}` }));
 }
 
 /** Every step label behind the receipts on screen, opening the closed ones first and letting them render. */
 async function receiptSteps(app: App): Promise<string[]> {
-  const steps = await evalIn(app, `(async () => {
-    for (const summary of document.querySelectorAll('[data-testid="coworker-work-summary"][aria-expanded="false"]')) summary.click();
+  const steps = await evalIn(app, async () => {
+    for (const summary of document.querySelectorAll('[data-testid="coworker-work-summary"][aria-expanded="false"]')) {
+      if (!(summary instanceof HTMLElement)) throw new Error("Work summary was not an HTML element.");
+      summary.click();
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
     return {
       summaries: [...document.querySelectorAll('[data-testid="coworker-work-summary"]')].map((node) => node.textContent?.trim() ?? ""),
       steps: [...document.querySelectorAll('[data-testid="coworker-work-step"] span.truncate')].map((node) => node.textContent?.trim() ?? "").filter(Boolean),
     };
-  })()`, { awaitPromise: true, timeoutMs: 20_000 });
+  }, { awaitPromise: true, timeoutMs: 20_000 });
   if (!isRecord(steps) || !Array.isArray(steps.steps) || !Array.isArray(steps.summaries)) throw new Error("The receipt steps were unavailable.");
   // A receipt whose steps did not render still names its one step in the collapsed line.
   return [...new Set([...steps.steps.map(String), ...steps.summaries.map((line) => String(line).replace(/›$/, "").trim())])];
@@ -109,7 +114,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   needs({ optIn: ["OPENWORK_EVAL_E2E_TESTS"], commands: ["opencode"] });
   await using app = await coworker({ name: "documents" });
 
-  await waitFor(app, `(document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker")`, {
+  await waitFor(app, () => (document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker"), {
     timeoutMs: 120_000,
     label: "Open Coworker welcome screen",
   });
@@ -123,7 +128,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   expect(created.workspaceId).toEqual(expect.any(String));
   await invokeCoworker(app, "coworkers.update", { slug: SLUG, patch: { model: EVAL_COWORKER_MODEL, modelVariant: "" } });
   await reload(app);
-  await waitFor(app, `document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Ready"`, {
+  await waitFor(app, () => document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Ready", {
     timeoutMs: 240_000,
     label: "coworker AI ready before the first message",
   });
@@ -132,23 +137,46 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   const agents = resultRecord(await invokeCoworker(app, "coworkers.files.read", { slug: SLUG, path: "AGENTS.md" }));
   expect(String(agents.content)).toContain("## How I talk");
   const config = resultRecord(await invokeCoworker(app, "coworkers.files.read", { slug: SLUG, path: "opencode.json" }));
-  expect(JSON.parse(String(config.content)).instructions).toContain("documents/index.md");
+  const parsedConfig: unknown = JSON.parse(String(config.content));
+  if (!isRecord(parsedConfig) || !Array.isArray(parsedConfig.instructions)
+    || !parsedConfig.instructions.every((instruction: unknown) => typeof instruction === "string")) {
+    throw new Error("Coworker configuration instructions were unavailable.");
+  }
+  expect(parsedConfig.instructions).toContain("documents/index.md");
   // The tools are registered in the workspace and the engine has connected to them before the first message goes out.
-  const toolsRegistered = await waitFor(app, `(async () => {
-    const runtime = (await window.__COWORKER__.invoke("runtime.info")).result;
-    const coworker = (await window.__COWORKER__.invoke("coworkers.get", { slug: ${json(SLUG)} })).result;
+  const toolsRegistered = await waitFor(app, browserScript(async (slug) => {
+    function isRecord(value: unknown): value is Record<string, unknown> {
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+    const runtimeResponse = await window.__COWORKER__.invoke("runtime.info");
+    if (!runtimeResponse.ok) throw new Error(runtimeResponse.error);
+    const runtime = runtimeResponse.result;
+    if (!isRecord(runtime) || typeof runtime.serverUrl !== "string" || typeof runtime.ownerToken !== "string") {
+      throw new Error("Runtime connection details were unavailable.");
+    }
+    const coworkerResponse = await window.__COWORKER__.invoke("coworkers.get", { slug });
+    if (!coworkerResponse.ok) throw new Error(coworkerResponse.error);
+    const coworker = coworkerResponse.result;
+    if (!isRecord(coworker) || typeof coworker.workspaceId !== "string") throw new Error("Coworker workspace was unavailable.");
     const headers = { Authorization: "Bearer " + runtime.ownerToken };
     const base = runtime.serverUrl + "/workspace/" + encodeURIComponent(coworker.workspaceId);
     const registration = await fetch(base + "/mcp", { headers });
-    if (!registration.ok) return false;
-    const payload = await registration.json();
-    const registered = (payload.items ?? []).some((item) => item.name === "coworker");
+    if (!registration.ok) throw new Error("MCP registration failed: " + registration.status);
+    const payload: unknown = await registration.json();
+    if (!isRecord(payload) || !Array.isArray(payload.items)) throw new Error("Unexpected MCP registration list.");
+    const registered = payload.items.map((item: unknown) => {
+      if (!isRecord(item) || typeof item.name !== "string") throw new Error("Unexpected MCP registration entry.");
+      return item.name;
+    }).includes("coworker");
     if (!registered) return false;
     const engine = await fetch(base + "/opencode/mcp", { headers });
-    if (!engine.ok) return false;
-    const status = await engine.json();
-    return status.coworker?.status === "connected" ? "connected" : false;
-  })()`, { timeoutMs: 180_000, label: "document tools registered and connected in the coworker workspace", awaitPromise: true });
+    if (!engine.ok) throw new Error("MCP status failed: " + engine.status);
+    const status: unknown = await engine.json();
+    if (!isRecord(status)) throw new Error("Unexpected MCP status map.");
+    if (status.coworker === undefined) return false;
+    if (!isRecord(status.coworker) || typeof status.coworker.status !== "string") throw new Error("Unexpected coworker MCP status.");
+    return status.coworker.status === "connected" ? "connected" : false;
+  }, [SLUG]), { timeoutMs: 180_000, label: "document tools registered and connected in the coworker workspace", awaitPromise: true });
   expect(toolsRegistered).toBe("connected");
 
   // 1. Ask for a plan: a short reply, "Wrote a document · …" in the action line, and a card with Open.
@@ -162,7 +190,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   const planSteps = await receiptSteps(app);
   expect(planSteps).toEqual(expect.arrayContaining([expect.stringMatching(/^Wrote a document · Launch plan$/)]));
   for (const step of planSteps) expect(step).not.toMatch(/document_create|coworker_/);
-  const card = await waitFor(app, `(() => {
+  const card = await waitFor(app, () => {
     const card = document.querySelector('[data-testid="document-card"][data-document-id="launch-plan"]');
     if (!card) return false;
     return {
@@ -175,7 +203,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
       attachment: Boolean(card.closest('[data-testid="coworker-document-attachments"]')),
       count: document.querySelectorAll('[data-testid="document-card"][data-document-id="launch-plan"]').length,
     };
-  })()`, { timeoutMs: 30_000, label: "document card under the reply" });
+  }, { timeoutMs: 30_000, label: "document card under the reply" });
   expect(card).toMatchObject({ action: "created", title: "Launch plan", summary: "Ship onboarding by the end of Q3.", open: true, insideTextBubble: false, attachment: true, count: 1 });
   if (!isRecord(card) || !Array.isArray(card.highlights)) throw new Error("Card facts were unavailable.");
   expect(card.highlights).toHaveLength(0);
@@ -192,8 +220,8 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   );
 
   // 2. Open shows the rendered document with a table of contents in the Documents view.
-  await evalIn(app, `document.querySelector('[data-testid="document-card"][data-document-id="launch-plan"] [data-testid="document-card-open"]').click(); true`);
-  const opened = await waitFor(app, `(() => {
+  await clickElement(app, '[data-testid="document-card"][data-document-id="launch-plan"] [data-testid="document-card-open"]');
+  const opened = await waitFor(app, () => {
     const panel = document.querySelector('[data-testid="context-panel"]');
     const reader = document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]');
     if (!panel || !reader) return false;
@@ -211,7 +239,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
       headings: [...reader.querySelectorAll('[data-testid="document-body"] h2')].map((node) => node.textContent?.trim() ?? ""),
       title: reader.querySelector('[data-testid="document-title"]')?.textContent?.trim() ?? "",
     };
-  })()`, { timeoutMs: 30_000, label: "Documents view opened on Launch plan" });
+  }, { timeoutMs: 30_000, label: "Documents view opened on Launch plan" });
   // A card's Open lands on Activity › Documents; the composer's summary line already counts the document.
   expect(opened).toMatchObject({ view: "overview", route: "overview/documents", crumbs: ["Activity", "Documents"], collapsed: "false", revision: "1", title: "Launch plan", summaryLine: "1 document" });
   if (!isRecord(opened) || !Array.isArray(opened.toc) || !Array.isArray(opened.headings)) throw new Error("Reader facts were unavailable.");
@@ -227,33 +255,33 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   expect(updateReply.length).toBeLessThan(600);
   const updateSteps = await receiptSteps(app);
   expect(updateSteps).toEqual(expect.arrayContaining([expect.stringMatching(/^Updated Launch plan · Timeline section$/)]));
-  const updatedCard = await waitFor(app, `(() => {
+  const updatedCard = await waitFor(app, () => {
     const cards = [...document.querySelectorAll('[data-testid="document-card"][data-document-id="launch-plan"][data-action="updated"]')];
     const card = cards.at(-1);
     return card ? (card.querySelector('[data-testid="document-card-subline"]')?.textContent?.trim() ?? "") : false;
-  })()`, { timeoutMs: 30_000, label: "updated card subline" });
+  }, { timeoutMs: 30_000, label: "updated card subline" });
   expect(updatedCard).toBe("Updated · Timeline section");
-  await waitFor(app, `document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')?.getAttribute("data-revision") === "2"`, {
+  await waitFor(app, () => document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')?.getAttribute("data-revision") === "2", {
     timeoutMs: 30_000,
     label: "reader at revision 2",
   });
-  expect(await evalIn(app, `document.querySelector('[data-testid="document-body"]')?.textContent ?? ""`)).toContain("Week two: build.");
-  await evalIn(app, `document.querySelector('[data-testid="document-history"]').click(); true`);
-  const history = await waitFor(app, `(() => {
+  expect(await evalIn(app, () => document.querySelector('[data-testid="document-body"]')?.textContent ?? "")).toContain("Week two: build.");
+  await clickElement(app, '[data-testid="document-history"]');
+  const history = await waitFor(app, () => {
     const revisions = [...document.querySelectorAll('[data-testid="document-revision"]')].map((node) => node.getAttribute("data-revision"));
     const summary = document.querySelector('[data-testid="document-diff-summary"]')?.textContent?.trim() ?? "";
     const added = [...document.querySelectorAll('[data-testid="document-diff"] pre[data-kind="added"]')].map((node) => node.textContent ?? "");
     const removed = [...document.querySelectorAll('[data-testid="document-diff"] pre[data-kind="removed"]')].map((node) => node.textContent ?? "");
     return revisions.length > 0 && summary ? { revisions, summary, added, removed } : false;
-  })()`, { timeoutMs: 30_000, label: "history with a diff" });
+  }, { timeoutMs: 30_000, label: "history with a diff" });
   expect(history).toMatchObject({ revisions: ["1"] });
   if (!isRecord(history) || !Array.isArray(history.added) || !Array.isArray(history.removed)) throw new Error("History facts were unavailable.");
   expect(String(history.summary)).toMatch(/^Revision 1 → current \(revision 2\): \+\d+ −\d+ lines$/);
   expect(history.added.join("\n")).toContain("Week two: build.");
   expect(history.removed.length).toBeGreaterThan(0);
   const revisionOneBody = String(resultList(await invokeCoworker(app, "documents.revisions", { slug: SLUG, id: "launch-plan" }))[0]?.body ?? "");
-  await evalIn(app, `document.querySelector('[data-testid="document-restore"]').click(); true`);
-  await waitFor(app, `document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')?.getAttribute("data-revision") === "3"`, {
+  await clickElement(app, '[data-testid="document-restore"]');
+  await waitFor(app, () => document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')?.getAttribute("data-revision") === "3", {
     timeoutMs: 30_000,
     label: "restore produced revision 3",
   });
@@ -278,25 +306,25 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   const grouped = await documentsOnDisk(app);
   expect(grouped.find((document) => document.id === "old-vendor-notes")).toMatchObject({ status: "aside" });
   expect(grouped.find((document) => document.id === "launch-plan")).toMatchObject({ status: "active" });
-  await evalIn(app, `document.querySelector('[data-testid="document-back"]').click(); true`);
-  const groups = await waitFor(app, `(() => {
+  await clickElement(app, '[data-testid="document-back"]');
+  const groups = await waitFor(app, () => {
     const active = [...document.querySelectorAll('[data-testid="documents-active"] [data-testid="document-row"]')].map((node) => node.getAttribute("data-document-id"));
     const aside = document.querySelector('[data-testid="documents-aside"]');
     if (!aside || active.length === 0) return false;
     return { active, asideOpen: aside instanceof HTMLDetailsElement ? aside.open : null, asideLabel: aside.querySelector("summary")?.textContent?.trim() ?? "" };
-  })()`, { timeoutMs: 30_000, label: "Active and Put aside groups" });
+  }, { timeoutMs: 30_000, label: "Active and Put aside groups" });
   expect(groups).toMatchObject({ active: ["launch-plan"], asideOpen: false });
   expect(String(isRecord(groups) ? groups.asideLabel : "")).toContain("Put aside · 1");
-  await evalIn(app, `document.querySelector('[data-testid="documents-aside"] summary').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="documents-aside-list"] [data-document-id="old-vendor-notes"]'))`, { timeoutMs: 10_000, label: "put-aside row" });
+  await clickElement(app, '[data-testid="documents-aside"] summary');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="documents-aside-list"] [data-document-id="old-vendor-notes"]')), { timeoutMs: 10_000, label: "put-aside row" });
 
   // 5. The person edits and saves; the coworker acknowledges the edit next turn.
-  await evalIn(app, `document.querySelector('[data-testid="documents-active"] [data-document-id="launch-plan"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]'))`, { timeoutMs: 10_000, label: "reader again" });
+  await clickElement(app, '[data-testid="documents-active"] [data-document-id="launch-plan"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')), { timeoutMs: 10_000, label: "reader again" });
   await clickButton(app, "Edit");
   await fill(app, 'textarea[aria-label="Document Markdown"]', "## Timeline\n\nEdited by hand: launch moves to October.\n\n## Owners\n\nAna and Ben.\n\n## Risks\n\nNone open.\n");
-  await evalIn(app, `document.querySelector('[data-testid="document-save"]').click(); true`);
-  await waitFor(app, `document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')?.getAttribute("data-revision") === "4"`, { timeoutMs: 30_000, label: "saved as revision 4" });
+  await clickElement(app, '[data-testid="document-save"]');
+  await waitFor(app, () => document.querySelector('[data-testid="document-reader"][data-document-id="launch-plan"]')?.getAttribute("data-revision") === "4", { timeoutMs: 30_000, label: "saved as revision 4" });
   const edited = resultRecord(await invokeCoworker(app, "documents.read", { slug: SLUG, id: "launch-plan" }));
   expect(edited).toMatchObject({ updatedBy: "person", revision: 4 });
   const indexAfterEdit = resultRecord(await invokeCoworker(app, "coworkers.files.read", { slug: SLUG, path: "documents/index.md" }));
@@ -318,14 +346,14 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   await reload(app);
   const afterReload = await documentsOnDisk(app);
   expect(afterReload.map((document) => [document.id, document.status, document.revision])).toEqual(expect.arrayContaining([["launch-plan", "active", 4], ["old-vendor-notes", "aside", 1]]));
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="document-card"][data-document-id="launch-plan"]'))`, { timeoutMs: 60_000, label: "cards survive reload" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="document-card"][data-document-id="launch-plan"]')), { timeoutMs: 60_000, label: "cards survive reload" });
   // The summary line's documents part opens Activity › Documents from the folded panel.
-  await waitFor(app, `document.querySelector('[data-testid="summary-part-documents"]')?.textContent?.trim() === "1 document"`, { timeoutMs: 30_000, label: "summary line: 1 document" });
-  await evalIn(app, `document.querySelector('[data-testid="summary-part-documents"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="documents-active"] [data-document-id="launch-plan"]'))`, { timeoutMs: 30_000, label: "Documents level after reload" });
-  expect(await evalIn(app, `document.querySelector('[data-testid="panel-content"]')?.getAttribute("data-route")`)).toBe("overview/documents");
+  await waitFor(app, () => document.querySelector('[data-testid="summary-part-documents"]')?.textContent?.trim() === "1 document", { timeoutMs: 30_000, label: "summary line: 1 document" });
+  await clickElement(app, '[data-testid="summary-part-documents"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="documents-active"] [data-document-id="launch-plan"]')), { timeoutMs: 30_000, label: "Documents level after reload" });
+  expect(await evalIn(app, () => document.querySelector('[data-testid="panel-content"]')?.getAttribute("data-route"))).toBe("overview/documents");
   // The list is flat rows, not a card inside the panel.
-  expect(await evalIn(app, `document.querySelectorAll('[data-testid="documents-active"].rounded-2xl, [data-testid="documents-panel"] .rounded-2xl').length`)).toBe(0);
+  expect(await evalIn(app, () => document.querySelectorAll('[data-testid="documents-active"].rounded-2xl, [data-testid="documents-panel"] .rounded-2xl').length)).toBe(0);
 
   // 7. A long reply without a document folds to its first paragraph; nothing is lost; the coworker is reminded.
   const foldedBubble = await ask(
@@ -334,38 +362,68 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
     "LONG REPLY START",
   );
   // The bubble shows only the lead; the whole reply is measured from the thread itself.
-  const fullReply = await evalIn(app, `(async () => {
-    const runtime = (await window.__COWORKER__.invoke("runtime.info")).result;
-    const coworker = (await window.__COWORKER__.invoke("coworkers.get", { slug: ${json(SLUG)} })).result;
+  const fullReply = await evalIn(app, browserScript(async (slug) => {
+    function isRecord(value: unknown): value is Record<string, unknown> {
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+    const runtimeResponse = await window.__COWORKER__.invoke("runtime.info");
+    if (!runtimeResponse.ok) throw new Error(runtimeResponse.error);
+    const runtime = runtimeResponse.result;
+    if (!isRecord(runtime) || typeof runtime.serverUrl !== "string" || typeof runtime.ownerToken !== "string") {
+      throw new Error("Runtime connection details were unavailable.");
+    }
+    const coworkerResponse = await window.__COWORKER__.invoke("coworkers.get", { slug });
+    if (!coworkerResponse.ok) throw new Error(coworkerResponse.error);
+    const coworker = coworkerResponse.result;
+    if (!isRecord(coworker) || typeof coworker.workspaceId !== "string" || typeof coworker.conversationThreadId !== "string") {
+      throw new Error("Coworker discussion identifiers were unavailable.");
+    }
     const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(coworker.workspaceId) + "/opencode/session/" + encodeURIComponent(coworker.conversationThreadId) + "/message", {
       headers: { Authorization: "Bearer " + runtime.ownerToken },
     });
-    const messages = await response.json();
-    const reply = [...messages].reverse().find((message) => message.info.role === "assistant" && message.parts.some((part) => part.type === "text" && String(part.text ?? "").includes("LONG REPLY START")));
-    return reply ? reply.parts.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\\n") : "";
-  })()`, { awaitPromise: true, timeoutMs: 30_000 });
+    if (!response.ok) throw new Error("message list failed: " + response.status);
+    const payload: unknown = await response.json();
+    if (!Array.isArray(payload)) throw new Error("Unexpected native message list.");
+    const messages = payload.map((message: unknown) => {
+      if (!isRecord(message) || !isRecord(message.info) || typeof message.info.role !== "string" || !Array.isArray(message.parts)) {
+        throw new Error("Unexpected native message entry.");
+      }
+      const parts = message.parts.map((part: unknown) => {
+        if (!isRecord(part) || (part.type !== undefined && typeof part.type !== "string")
+          || (part.text !== undefined && typeof part.text !== "string")) throw new Error("Unexpected native message part.");
+        return { type: part.type, text: part.text ?? "" };
+      });
+      return { role: message.info.role, parts };
+    });
+    const reply = messages.reverse().find((message) => message.role === "assistant" && message.parts.some((part) => part.type === "text" && part.text.includes("LONG REPLY START")));
+    return reply ? reply.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n") : "";
+  }, [SLUG]), { awaitPromise: true, timeoutMs: 30_000 });
   const longReply = String(fullReply);
   expect(longReply.length, `a ${longReply.length}-character reply is not long enough to fold`).toBeGreaterThan(1200);
   expect(String(foldedBubble).length).toBeLessThan(longReply.length);
-  const fold = await waitFor(app, `(() => {
+  const fold = await waitFor(app, () => {
     const fold = document.querySelector('[data-testid="reply-fold"]');
     if (!fold) return false;
     const toggle = fold.querySelector('[data-testid="reply-fold-toggle"]');
     return { toggle: toggle?.textContent?.trim() ?? "", visibleChars: (fold.querySelector('[data-testid="reply-fold-lead"]')?.textContent ?? "").length };
-  })()`, { timeoutMs: 30_000, label: "folded long reply" });
+  }, { timeoutMs: 30_000, label: "folded long reply" });
   expect(fold).toMatchObject({ toggle: "Show the rest" });
   if (!isRecord(fold)) throw new Error("Fold facts were unavailable.");
   expect(Number(fold.visibleChars)).toBeLessThan(longReply.length);
-  await evalIn(app, `document.querySelector('[data-testid="reply-fold-toggle"]').click(); true`);
-  const unfolded = await waitFor(app, `(() => {
+  await clickElement(app, '[data-testid="reply-fold-toggle"]');
+  const unfolded = await waitFor(app, () => {
     const fold = document.querySelector('[data-testid="reply-fold"][data-open="true"]');
     return fold ? (fold.textContent ?? "").length : false;
-  })()`, { timeoutMs: 10_000, label: "unfolded reply" });
+  }, { timeoutMs: 10_000, label: "unfolded reply" });
   expect(Number(unfolded)).toBeGreaterThan(1200);
-  const style = await waitFor(app, `(async () => {
-    const response = await window.__COWORKER__.invoke("coworkers.files.read", { slug: ${json(SLUG)}, path: "memory/style.jsonl" });
-    return response.ok && String(response.result.content).includes("long-reply") ? response.result.content : false;
-  })()`, { timeoutMs: 30_000, label: "style log records the long reply", awaitPromise: true });
+  const style = await waitFor(app, browserScript(async (slug) => {
+    const response = await window.__COWORKER__.invoke("coworkers.files.read", { slug, path: "memory/style.jsonl" });
+    if (!response.ok) throw new Error(response.error);
+    const result = response.result;
+    if (typeof result !== "object" || result === null || Array.isArray(result)
+      || !("content" in result) || typeof result.content !== "string") throw new Error("Style log content was unavailable.");
+    return result.content.includes("long-reply") ? result.content : false;
+  }, [SLUG]), { timeoutMs: 30_000, label: "style log records the long reply", awaitPromise: true });
   expect(String(style)).toContain("\"kind\":\"long-reply\"");
   const indexWithReminder = resultRecord(await invokeCoworker(app, "coworkers.files.read", { slug: SLUG, path: "documents/index.md" }));
   expect(String(indexWithReminder.content)).toContain("## Reminder");

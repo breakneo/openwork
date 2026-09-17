@@ -140,6 +140,7 @@ test('mixed-world specs: a prerequisite one case declares is never promoted to t
 test('registered case metadata names exact files, supported execution axes, and defaults', async () => {
   const entries = await catalog();
   assert.deepEqual(registeredCases.map(({ spec, id, engines }) => ({ spec, id, engines })), [
+    { spec: 'open-coworker-local-first.e2e.test.ts', id: 'COWORKER-SHARED', engines: ['v2'] },
     {
       spec: 'composer-model-picker-no-subscribe-promo.e2e.test.ts',
       id: 'MODEL-01',

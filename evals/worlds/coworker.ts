@@ -10,8 +10,8 @@ import type { GeneratedArtifactViewBuildInput } from "../../ee/apps/den-api/src/
 import { addInitScript, browserScript, clickAt, evaluate, evaluateOnSurface, pressKey, typeText, waitForLocated, type Surface, type Target } from "@openwork/cdp";
 import { coworker, localHost } from "@openwork/hosts";
 import { SkipError, type Place, type Seed } from "@openwork/env";
-import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { createConnection } from "node:net";
@@ -20,7 +20,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { nativeSource, verifyPackagedNativeRuntime } from "../../apps/coworker/electron/packaged-native-runtime.mjs";
 
 export { pressKey } from "@openwork/cdp";
 
@@ -122,6 +124,285 @@ async function nativeConversationModel() {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },
   };
+}
+
+const sharedExec = promisify(execFile);
+const sharedDigest = (value: string) => createHash("sha256").update(value).digest("hex");
+const sharedSlugs = ["alpha", "beta", "gamma"];
+
+function sharedString(value: unknown): string {
+  if (typeof value !== "string" || !value) throw new Error("Missing shared-fixture identity.");
+  return value;
+}
+
+async function sharedUntil<T>(read: () => Promise<T>, ready: (value: T) => boolean, label: string, timeoutMs = 60_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const value = await read();
+    if (ready(value)) return value;
+    await new Promise((done) => setTimeout(done, 200));
+  } while (Date.now() < deadline);
+  throw new Error(`Shared fixture timed out: ${label}.`);
+}
+
+async function sharedFileFingerprint(file: string) {
+  const info = await lstat(file).catch((error: unknown) => {
+    if (isNativeRecord(error) && error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!info) return { kind: "deleted" };
+  const mode = info.mode & 0o777;
+  if (info.isSymbolicLink()) return { kind: "symlink", mode, sha256: sharedDigest(await readlink(file)) };
+  if (info.isDirectory()) return { kind: "directory", mode };
+  if (!info.isFile()) throw new Error("A proof input is not a regular file or symlink.");
+  const hash = createHash("sha256");
+  for await (const bytes of createReadStream(file)) hash.update(bytes);
+  return { kind: "file", mode, bytes: info.size, sha256: hash.digest("hex") };
+}
+
+async function sharedTreeFingerprint(root: string) {
+  const files: Record<string, Awaited<ReturnType<typeof sharedFileFingerprint>>> = {};
+  const walk = async (directory: string) => {
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = join(directory, entry.name);
+      files[relative(root, file)] = await sharedFileFingerprint(file);
+      if (entry.isDirectory()) await walk(file);
+    }
+  };
+  await walk(root);
+  return { sha256: sharedDigest(JSON.stringify(files)), files };
+}
+
+async function sharedSourceFingerprint(root: string) {
+  const git = async (...args: string[]) => (await sharedExec("git", args, { cwd: root, encoding: "utf8", timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })).stdout;
+  const [head, names, untracked, productDiff, harnessDiff] = await Promise.all([
+    git("rev-parse", "HEAD"), git("ls-files", "--cached", "--others", "--exclude-standard", "-z"), git("ls-files", "--others", "--exclude-standard", "-z"),
+    git("diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", ".", ":(exclude)evals", ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*"),
+    git("diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD", "--", "evals", ":(glob)**/*.test.*", ":(glob)**/*.spec.*"),
+  ]);
+  const product: Record<string, Awaited<ReturnType<typeof sharedFileFingerprint>>> = {}, harness: typeof product = {};
+  for (const name of [...new Set(names.split("\0").filter(Boolean))].sort()) {
+    const target = name.startsWith("evals/") || /\.(?:test|spec)\.[^/]+$/.test(name) ? harness : product;
+    target[name] = await sharedFileFingerprint(join(root, name));
+  }
+  const describe = (files: typeof product, diff: string) => ({ sha256: sharedDigest(JSON.stringify(files)), diffSha256: sharedDigest(diff),
+    untracked: untracked.split("\0").filter((name) => Object.hasOwn(files, name)).sort(), files });
+  return { head: head.trim(), product: describe(product, productDiff), harness: describe(harness, harnessDiff) };
+}
+
+async function sharedProcessTable() {
+  const { stdout } = await sharedExec("ps", ["-axo", "pid=,ppid=,pgid=,lstart="], { encoding: "utf8", timeout: 5_000 });
+  return stdout.trim().split("\n").map((line) => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if (!match) throw new Error("Process identity observation is unavailable.");
+    return { pid: Number(match[1]), parent: Number(match[2]), group: Number(match[3]), started: match[4] };
+  });
+}
+
+async function sharedOwnedProcesses(roots: number[]) {
+  const table = await sharedProcessTable(), owned = new Set(roots);
+  for (let previous = -1; previous !== owned.size;) {
+    previous = owned.size;
+    for (const row of table) if (owned.has(row.parent)) owned.add(row.pid);
+  }
+  return table.filter((row) => owned.has(row.pid));
+}
+
+async function sharedListeners(args: string[]) {
+  const { stdout } = await sharedExec("lsof", ["-nP", ...args, "-sTCP:LISTEN", "-Fpn"], { encoding: "utf8", timeout: 5_000 }).catch((error: unknown) => {
+    if (isNativeRecord(error) && error.code === 1 && error.stdout === "" && error.stderr === "") return { stdout: "" };
+    throw new Error("Owned TCP listener observation is unavailable.");
+  });
+  let pid = 0;
+  const listeners: Array<{ pid: number; port: number }> = [];
+  for (const line of stdout.split("\n")) {
+    if (/^p\d+$/.test(line)) pid = Number(line.slice(1));
+    if (line.startsWith("n")) {
+      const port = Number(/:(\d+)$/.exec(line)?.[1]);
+      if (!pid || !Number.isInteger(port) || port < 1) throw new Error("Invalid owned listener identity.");
+      listeners.push({ pid, port });
+    }
+  }
+  return listeners;
+}
+
+async function sharedCoworkerServices() {
+  const nonce = randomUUID(), key = `fixture-model-${randomUUID()}`, token = `fixture-member-${randomUUID()}`;
+  const providerId = "ipr_shared_fixture", orgId = "org_shared_fixture";
+  const part = (value: number) => String(value).padStart(26, "0");
+  const modelIds = [3, 4].map((id) => `gwm_${part(1)}_${part(2)}_${part(id)}`);
+  const prompt = (name: string) => `CASE:${name}:${nonce}`;
+  const reply = (name: string) => `${name === "gamma-worker" ? "## Done\n" : ""}Shared fixture completed ${name} ${nonce}.`;
+  const canary = (slug: string) => `PRIVATE_${slug}_${nonce}`;
+  const requests: Array<{ case: string; model: string; authenticated: boolean; userCases: string[]; toolResults: string[]; finished: boolean }> = [];
+  const reads: Array<{ path: string; authenticated: boolean; scoped: boolean; status: number }> = [], faults: string[] = [];
+  let origin = "", closed = false;
+  const active = new Set<ServerResponse>();
+  const provider = () => ({
+    id: providerId, providerId: "openai", name: "Shared fixture", credentialMode: "org", credentialStatus: "ready", source: "openwork_gateway", status: "active", authUrl: null, authorizationRequests: [],
+    updatedAt: "2026-09-17T00:00:00.000Z", modelIds: ["gpt-5.6-luna", "gpt-5.5"],
+    providerConfig: { npm: "@ai-sdk/openai-compatible", env: ["IPR_SHARED_FIXTURE_API_KEY"], options: { baseURL: `${origin}/v1` } },
+    models: modelIds.map((id, index) => ({ id, name: `Shared model ${index ? "B" : "A"}`, upstreamModelId: index ? "gpt-5.5" : "gpt-5.6-luna",
+      modelGroupId: `gmg_${part(1)}`, modelGroupName: "Shared fixture", credentialSetId: `gcs_${part(2)}`, credentialSetName: "Synthetic key",
+      config: { id, tool_call: true, status: "active", modalities: { input: ["text"], output: ["text"] }, limit: { context: 128_000, output: 8_192 }, cost: { input: 1, output: 2 } } })),
+  });
+  const json = (response: ServerResponse, status: number, value: unknown) => {
+    response.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-allow-headers": "authorization, content-type, x-openwork-org-id, x-openwork-legacy-org-id" });
+    response.end(JSON.stringify(value));
+  };
+  const text = (message: Record<string, unknown>) => typeof message.content === "string" ? message.content : nativeRows(message.content ?? []).map((part) => typeof part.text === "string" ? part.text : "").join("\n");
+  const server = createServer((request, response) => {
+    active.add(response); response.once("close", () => active.delete(response));
+    void (async () => {
+      const route = new URL(request.url ?? "/", "http://127.0.0.1").pathname.replace(/^\/api\/den(?=\/|$)/, "");
+      if (request.method === "OPTIONS") { json(response, 204, null); return; }
+      if (request.method === "GET" && ["/models", "/models/api.json", "/api.json"].includes(route)) { json(response, 200, {}); return; }
+      if (route === "/api/tags") { json(response, 200, { models: [] }); return; }
+      if (route === "/v1/models") { json(response, 200, { data: modelIds.map((id) => ({ id, object: "model" })) }); return; }
+      if (request.method === "POST" && route === "/v1/chat/completions") {
+        let raw = "";
+        for await (const chunk of request) { raw += String(chunk); if (raw.length > 2_097_152) throw new Error("request_bound"); }
+        const body = nativeRecord(JSON.parse(raw)), messages = nativeRows(body.messages);
+        const user = messages.filter((message) => message.role === "user");
+        const last = text(user.at(-1) ?? {});
+        const name = [...last.matchAll(new RegExp(`CASE:([a-z-]+):${nonce}`, "g"))].at(-1)?.[1] ?? "";
+        const allowed = ["legacy-seed", "legacy-follow", "alpha-first", "beta-first", "gamma-first", "alpha-follow", "gamma-worker", "gamma-review"];
+        if (!allowed.includes(name) || body.stream !== true || !modelIds.includes(String(body.model)) || request.headers.authorization !== `Bearer ${key}` || requests.length >= 24) throw new Error("dispatch_boundary");
+        const toolResults = messages.filter((message) => message.role === "tool" && typeof message.tool_call_id === "string").map((message) => String(message.tool_call_id));
+        const call = { case: name, model: String(body.model), authenticated: true,
+          userCases: user.flatMap((message) => [...text(message).matchAll(new RegExp(`CASE:([a-z-]+):${nonce}`, "g"))].map((match) => match[1])), toolResults, finished: false };
+        requests.push(call);
+        const tools: Array<[string, Record<string, unknown>]> = [];
+        if (name.endsWith("-first")) {
+          const slug = name.split("-")[0];
+          tools.push(["read", { path: "soul.md" }], ["read", { path: "policy.txt" }], ["coworker_document_create", { title: "Shared proof", summary: canary(slug), body: `## Result\n${canary(slug)}` }]);
+          if (slug === "gamma") tools.push(["coworker_worker_spawn", { name: "Shared route worker", goal: prompt("gamma-worker"), lifespan: { kind: "turns", turns: 1 },
+            continuation: { objective: prompt("gamma-review"), resumeInstructions: "Report the finding without creating another Worker." } }]);
+        }
+        if (["gamma-worker", "legacy-follow"].includes(name)) tools.push(["read", { path: "soul.md" }]);
+        const attempt = requests.filter((item) => item.case === name).length;
+        if (attempt > (tools.length ? 2 : 1)) throw new Error("duplicate_dispatch");
+        if (attempt === 2 && tools.some((_, index) => !toolResults.includes(`call_shared_${name}_${index}`))) throw new Error("missing_tool_result");
+        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        const chunk = (delta: Record<string, unknown>, finish: string | null = null) => response.write(`data: ${JSON.stringify({ id: `chatcmpl-${nonce}-${requests.length}`, object: "chat.completion.chunk", created: 1, model: body.model,
+          choices: [{ index: 0, delta, finish_reason: finish }], ...(finish ? { usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 } } : {}) })}\n\n`);
+        if (tools.length && attempt === 1) {
+          chunk({ role: "assistant", tool_calls: tools.map(([name, args], index) => ({ index, id: `call_shared_${call.case}_${index}`, type: "function", function: { name, arguments: JSON.stringify(args) } })) });
+          chunk({}, "tool_calls");
+        } else { chunk({ role: "assistant", content: reply(name) }); chunk({}, "stop"); }
+        call.finished = true;
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      const authenticated = request.headers.authorization === `Bearer ${token}`;
+      const scoped = (request.headers["x-openwork-org-id"] ?? request.headers["x-openwork-legacy-org-id"]) === orgId;
+      const status = !authenticated ? 401 : !scoped && route !== "/v1/me/orgs" ? 403 : 200;
+      reads.push({ path: route, authenticated, scoped, status });
+      if (status !== 200) { json(response, status, { error: "fixture_auth_required" }); return; }
+      if (route === "/v1/me/orgs") { json(response, 200, { orgs: [{ id: orgId, name: "Fixture organization" }], activeOrgId: orgId }); return; }
+      if (route === "/v1/me") { json(response, 200, { user: { id: "member_shared_fixture", email: "member@example.test" } }); return; }
+      if (route === "/v1/me/desktop-config") { json(response, 200, {}); return; }
+      if (route === "/v1/me/coworkers") { json(response, 200, { enabled: false, items: [], nextCursor: null }); return; }
+      if (route === "/v1/llm-providers") { json(response, 200, { llmProviders: [] }); return; }
+      if (route === "/v1/inference-providers") { json(response, 200, { inferenceProviders: [provider()] }); return; }
+      if (route === `/v1/inference-providers/${providerId}/connect`) { json(response, 200, { inferenceProvider: { ...provider(), apiKey: key, apiKeys: { IPR_SHARED_FIXTURE_API_KEY: key } } }); return; }
+      if (route === "/v1/automations") { json(response, 200, { items: [], nextCursor: null }); return; }
+      json(response, route === "/v1/mcp/token" ? 403 : 404, { error: "fixture_service_unavailable" });
+    })().catch(() => { faults.push("Fixture request violated its bounded protocol."); if (!response.headersSent) json(response, 400, { error: "fixture_protocol" }); else response.destroy(); });
+  });
+  server.requestTimeout = 15_000;
+  await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Shared fixture failed to bind loopback.");
+  origin = `http://127.0.0.1:${address.port}`;
+  return { url: origin, port: address.port, providerId, modelIds, prompt, reply, canary, secrets: [key, token],
+    session: { baseUrl: origin, token, orgId, orgName: "Fixture organization", userName: "Fixture member", userEmail: "member@example.test" },
+    nativeProvider: { id: providerId, name: "Shared fixture", package: "@opencode/ai/providers/openai-compatible", baseUrl: `${origin}/v1`, apiKey: key,
+      models: modelIds.map((id) => ({ id, name: id, config: { tool_call: true } })) },
+    requests: () => requests.map((call) => ({ ...call, userCases: [...call.userCases], toolResults: [...call.toolResults] })),
+    denReads: () => reads.map((read) => ({ ...read })), faults: () => [...faults],
+    async close() {
+      if (!closed) {
+        for (const response of active) response.destroy();
+        server.closeAllConnections();
+        await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
+        closed = true;
+      }
+      return { closed, listening: server.listening, pendingResponses: active.size };
+    },
+  };
+}
+
+export async function sourceSharedCoworker(seed: Seed, { place }: { place: Place }) {
+  if (place.kind !== "local" || process.platform !== "darwin") throw new SkipError("source native Coworker smoke requires local macOS");
+  const manifest = process.env.OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST;
+  const binary = process.env.OPENWORK_EVAL_ELECTRON_BINARY;
+  if (!manifest || !binary) throw new SkipError("source native smoke requires an explicit build manifest and source Electron executable");
+  if (!isAbsolute(manifest) || !isAbsolute(binary) || !(await realpath(binary)).includes("/node_modules/")) throw new Error("Source smoke refuses an installed app or implicit profile.");
+  const stack = new AsyncDisposableStack();
+  try {
+    const profileDir = await mkdtemp(join(await realpath(tmpdir()), "coworker-source-app-"));
+    stack.defer(() => rm(profileDir, { recursive: true, force: true }));
+    const model = stack.use(await nativeConversationModel());
+    const appRoot = new URL("../../apps/coworker/", import.meta.url).pathname;
+    const { createServer: createViteServer } = await import(new URL("../../apps/coworker/node_modules/vite/dist/node/index.js", import.meta.url).href);
+    const vite = await createViteServer({ root: appRoot, configFile: join(appRoot, "vite.config.ts"), envDir: false,
+      cacheDir: join(profileDir, "vite-cache"), server: { host: "127.0.0.1", port: 0, strictPort: false } });
+    stack.defer(() => vite.close());
+    await vite.listen();
+    const address = vite.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("The source renderer did not bind loopback.");
+    const cleared = Object.fromEntries(Object.keys(process.env).filter((key) => !/^(PATH|USER|LOGNAME|SHELL|LANG|LC_\w+|TZ|TERM|TMPDIR|TMP|TEMP|DISPLAY|OPENWORK_ELECTRON_REMOTE_DEBUG_PORT)$/.test(key)).map((key) => [key, ""]));
+    const home = join(profileDir, "coworkers");
+    const app = stack.use(await coworker({ name: "source-shared", host: stack.use(localHost()), profileDir, env: {
+      ...cleared, HOME: join(profileDir, "home"), XDG_CONFIG_HOME: join(profileDir, "config"), XDG_DATA_HOME: join(profileDir, "data"),
+      XDG_CACHE_HOME: join(profileDir, "cache"), XDG_STATE_HOME: join(profileDir, "state"),
+      OPENWORK_EVAL_ELECTRON_ENTRY: join(appRoot, "electron/main.mjs"), COWORKER_START_URL: `http://127.0.0.1:${address.port}`,
+      COWORKER_USER_DATA_DIR: join(profileDir, "electron-userdata"), COWORKER_HOME_DIR: home, COWORKER_SERVER_CONFIG: join(profileDir, "server.json"),
+      OPENWORK_RUNTIME_DB: join(profileDir, "runtime.sqlite"), OPENWORK_ENV_STORE: join(profileDir, "env.json"),
+      OPENWORK_SERVER_STATE_PATH: join(profileDir, "server-state.json"), OPENWORK_SERVER_TOKEN_STORE_PATH: join(profileDir, "server-tokens.json"),
+      OPENWORK_SERVER_LOG_FILE: join(profileDir, "server.log"), OPENWORK_DATA_DIR: join(profileDir, "openwork-data"),
+      OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST: manifest,
+      OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST_SHA256: process.env.OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST_SHA256 ?? "",
+      OPENWORK_DEV_MODE: "1", OPENWORK_ELECTRON_DISABLE_PROTOCOL_REGISTRATION: "1", OPENWORK_ELECTRON_USE_MOCK_KEYCHAIN: "1",
+      COWORKER_DEN_BASE_URL: model.url, OPENCODE_MODELS_URL: model.url + "/models", OPENCODE_CONFIG_DIR: join(profileDir, "opencode-config"),
+      CODEX_HOME: join(profileDir, "codex"), CLAUDE_CONFIG_DIR: join(profileDir, "claude"), OLLAMA_HOST: "127.0.0.1:9", LMSTUDIO_HOST: "127.0.0.1:9",
+    }, timeoutMs: 120_000 }));
+    const invoke = async (command: string, payload: unknown = {}) => {
+      const response = nativeRecord(await seed.evalIn(app, browserScript((command, payload) => {
+        const bridge: unknown = Reflect.get(window, "__COWORKER__");
+        if (!bridge || typeof bridge !== "object" || !("invoke" in bridge) || typeof bridge.invoke !== "function") throw new Error("Coworker bridge is unavailable.");
+        return bridge.invoke(command, payload);
+      }, [command, payload]), { timeoutMs: 120_000 }));
+      if (response.ok !== true) throw new Error(`Source app setup failed: ${command}: ${String(response.error)}`);
+      return response.result;
+    };
+    const runtime = nativeRecord(await invoke("runtime.info"));
+    if (runtime.engineManaged !== true || runtime.apiContract !== "native-2") throw new Error("The app did not start its source native profile.");
+    const provider = nativeRecord(await invoke("localProviders.custom.add", { name: "Scope fixture", address: model.url + "/v1", key: "fixture-only", models: ["reply"] }));
+    if (typeof provider.providerId !== "string") throw new Error("The app did not register the fixture provider.");
+    for (const name of ["Alpha", "Beta", "Gamma"]) {
+      const owner = nativeRecord(await invoke("coworkers.create", { name, role: "Synthetic teammate", mission: "Answer fixture requests", avatarColor: "blue", avatarGlasses: "round", personality: "neutral" }));
+      await invoke("coworkers.update", { slug: owner.slug, patch: { model: provider.providerId + "/reply", modelChosenBy: "person", modelMode: "fixed" } });
+    }
+    const configBytes = await readFile(join(home, ".runtime", "opencode.json"), "utf8");
+    await invoke("den.providers.sync");
+    if (await readFile(join(home, ".runtime", "opencode.json"), "utf8") !== configBytes) throw new Error("Provider refresh rewrote the team configuration.");
+    return { app, model, home,
+      ui: () => evaluateOnSurface(app, () => ({ text: document.body.innerText })),
+      configBytes: () => readFile(join(home, ".runtime", "opencode.json"), "utf8"),
+      diagnostics: async () => {
+        const state = nativeRecord(JSON.parse(await readFile(join(home, ".collaboration/state.json"), "utf8")));
+        const executions = Object.values(nativeRecord(state.executions)).map((entry) => {
+          const record = nativeRecord(entry);
+          return { state: record.state, error: record.error, nativeAdmission: record.nativeAdmission, admissionFailure: record.admissionFailure };
+        });
+        const log = (await readFile(join(profileDir, "electron.log"), "utf8")).split("\n").filter((line) => !/^(GET|OPTIONS) .* (200|204) /.test(line)).slice(-60).join("\n");
+        return JSON.stringify({ executions, log });
+      },
+      async [Symbol.asyncDispose]() { await stack[Symbol.asyncDispose](); },
+    };
+  } catch (error) { await stack[Symbol.asyncDispose](); throw error; }
 }
 
 export async function nativePackagedDiscussion(seed: Seed, { place }: { place: Place }) {
@@ -427,9 +708,8 @@ export async function isolatedOnboardingCoworker(_seed: Seed, { place }: { place
     } }));
     const invoke = async (command: string, payload: unknown = {}) => {
       const response = nativeRecord(await evaluateOnSurface(app, browserScript((command, payload) => {
-        const host: Window & { __COWORKER__?: CoworkerTestBridge } = window;
-        if (!host.__COWORKER__) throw new Error("The native Coworker bridge is missing.");
-        return host.__COWORKER__.invoke(command, payload);
+        if (!window.__COWORKER__) throw new Error("The native Coworker bridge is missing.");
+        return window.__COWORKER__.invoke(command, payload);
       }, [command, payload]), { timeoutMs: 30_000 }));
       if (response.ok !== true) throw new Error(`Native read failed: ${command}`);
       return response.result;

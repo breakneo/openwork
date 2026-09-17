@@ -4,6 +4,12 @@ import type { OpenworkContextSnapshot } from "@openwork/types/openwork-context";
 /** Test-facing browser protocols. State is installed by the corresponding world before use. */
 declare global {
   interface Window {
+    __COWORKER__: {
+      invoke(command: string, payload?: unknown): Promise<
+        | { ok: true; result: unknown; error?: never }
+        | { ok: false; error: string; maintenanceRetryable?: boolean; result?: never }
+      >;
+    };
     __openworkControl: {
       listActions(): { id: string; disabled: boolean; args?: unknown; [key: string]: unknown }[];
       execute(action: string, args?: unknown): Promise<{ ok: boolean; error?: string; result?: unknown; value?: unknown }>;

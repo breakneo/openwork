@@ -10,10 +10,10 @@ import { listControlSessions } from "../../apps/app/src/react-app/domains/sessio
 // parent "waiting" (orange, needs you) instead of "thinking" (spinner).
 
 const workspaceId = "ws_rollup";
-const parent = { id: "ses_parent", title: "Slop audit (Astra high)", time: { updated: 300 } };
-const child = { id: "ses_child", title: "Audit four open PRs", parentID: parent.id, time: { updated: 310 } };
-const grandchild = { id: "ses_grandchild", title: "Read den-web", parentID: child.id, time: { updated: 320 } };
-const unrelated = { id: "ses_other", title: "Unrelated root", time: { updated: 200 } };
+const parent = { id: "ses_parent", title: "Slop audit (Astra high)", time: { archived: undefined, updated: 300 } };
+const child = { id: "ses_child", title: "Audit four open PRs", parentID: parent.id, time: { archived: undefined, updated: 310 } };
+const grandchild = { id: "ses_grandchild", title: "Read den-web", parentID: child.id, time: { archived: undefined, updated: 320 } };
+const unrelated = { id: "ses_other", title: "Unrelated root", time: { archived: undefined, updated: 200 } };
 const sessions = [parent, child, grandchild, unrelated];
 
 function reset() {

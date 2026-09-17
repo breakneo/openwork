@@ -1,4 +1,4 @@
-import { EVAL_COWORKER_MODEL, clickButton, coworker, evalIn, fill, needs, test, waitFor, waitForText } from "@openwork/testkit";
+import { EVAL_COWORKER_MODEL, browserScript, clickButton, coworker, evalIn, fill, needs, test, waitFor, waitForText } from "@openwork/testkit";
 import { expect } from "vitest";
 
 /**
@@ -18,18 +18,12 @@ const CHAT_REPLY = "CHAT ONE READY";
 const OUTCOME = "Reply with exactly ASSIGNMENT ONE DONE. Do not use tools.";
 const ASSIGNMENT_REPLY = "ASSIGNMENT ONE DONE";
 
-function json(value: unknown): string {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) throw new Error("Cannot serialize an undefined browser value.");
-  return serialized.replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function invokeCoworker(app: Awaited<ReturnType<typeof coworker>>, command: string, payload: unknown): Promise<unknown> {
-  return evalIn(app, `window.__COWORKER__.invoke(${json(command)}, ${json(payload)})`, { awaitPromise: true, timeoutMs: 120_000 });
+  return evalIn(app, browserScript((command, payload) => window.__COWORKER__.invoke(command, payload), [command, payload]), { awaitPromise: true, timeoutMs: 120_000 });
 }
 
 function resultRecord(response: unknown): Record<string, unknown> {
@@ -41,45 +35,83 @@ function resultRecord(response: unknown): Record<string, unknown> {
 
 /** Native session list and one session's visible user/assistant texts, read through the embedded server's engine proxy. */
 async function readEngineSessions(app: Awaited<ReturnType<typeof coworker>>, workspaceId: string): Promise<Array<{ id: string; title: string }>> {
-  const value = await evalIn(app, `(async () => {
-    const runtime = (await window.__COWORKER__.invoke("runtime.info")).result;
-    const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(${json(workspaceId)}) + "/opencode/session", {
+  return evalIn(app, browserScript(async (workspaceId) => {
+    function isRecord(value: unknown): value is Record<string, unknown> {
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+    const runtimeResponse = await window.__COWORKER__.invoke("runtime.info");
+    if (!runtimeResponse.ok) throw new Error(runtimeResponse.error);
+    const runtime = runtimeResponse.result;
+    if (!isRecord(runtime) || typeof runtime.serverUrl !== "string" || typeof runtime.ownerToken !== "string") {
+      throw new Error("Runtime connection details were unavailable.");
+    }
+    const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/session", {
       headers: { Authorization: "Bearer " + runtime.ownerToken },
     });
     if (!response.ok) throw new Error("session list failed: " + response.status);
-    const sessions = await response.json();
-    return sessions.filter((session) => !session.parentID).map((session) => ({ id: session.id, title: session.title ?? "" }));
-  })()`, { awaitPromise: true, timeoutMs: 60_000 });
-  if (!Array.isArray(value) || !value.every((entry) => isRecord(entry) && typeof entry.id === "string" && typeof entry.title === "string")) {
-    throw new Error(`Unexpected native session list: ${JSON.stringify(value)}`);
-  }
-  return value.map((entry) => ({ id: String(entry.id), title: String(entry.title) }));
+    const sessions: unknown = await response.json();
+    if (!Array.isArray(sessions)) throw new Error("Unexpected native session list.");
+    return sessions.map((session: unknown) => {
+      if (!isRecord(session) || typeof session.id !== "string"
+        || (session.title != null && typeof session.title !== "string")
+        || (session.parentID !== undefined && typeof session.parentID !== "string")) {
+        throw new Error("Unexpected native session entry.");
+      }
+      return { id: session.id, title: session.title ?? "", parentID: session.parentID };
+    }).filter((session) => !session.parentID).map((session) => ({ id: session.id, title: session.title }));
+  }, [workspaceId]), { awaitPromise: true, timeoutMs: 60_000 });
 }
 
 async function readSessionTexts(app: Awaited<ReturnType<typeof coworker>>, workspaceId: string, sessionId: string): Promise<Array<{ role: string; text: string }>> {
-  const value = await evalIn(app, `(async () => {
-    const runtime = (await window.__COWORKER__.invoke("runtime.info")).result;
-    const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(${json(workspaceId)}) + "/opencode/session/" + encodeURIComponent(${json(sessionId)}) + "/message", {
+  return evalIn(app, browserScript(async (workspaceId, sessionId) => {
+    function isRecord(value: unknown): value is Record<string, unknown> {
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    }
+    const runtimeResponse = await window.__COWORKER__.invoke("runtime.info");
+    if (!runtimeResponse.ok) throw new Error(runtimeResponse.error);
+    const runtime = runtimeResponse.result;
+    if (!isRecord(runtime) || typeof runtime.serverUrl !== "string" || typeof runtime.ownerToken !== "string") {
+      throw new Error("Runtime connection details were unavailable.");
+    }
+    const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/session/" + encodeURIComponent(sessionId) + "/message", {
       headers: { Authorization: "Bearer " + runtime.ownerToken },
     });
     if (!response.ok) throw new Error("message list failed: " + response.status);
-    const messages = await response.json();
-    return messages.map((message) => ({
-      role: message.info.role,
-      text: message.parts.filter((part) => part.type === "text" && !part.synthetic).map((part) => part.text ?? "").join(""),
-    }));
-  })()`, { awaitPromise: true, timeoutMs: 60_000 });
-  if (!Array.isArray(value) || !value.every((entry) => isRecord(entry) && typeof entry.role === "string" && typeof entry.text === "string")) {
-    throw new Error(`Unexpected native message list: ${JSON.stringify(value)}`);
-  }
-  return value.map((entry) => ({ role: String(entry.role), text: String(entry.text) }));
+    const messages: unknown = await response.json();
+    if (!Array.isArray(messages)) throw new Error("Unexpected native message list.");
+    return messages.map((message: unknown) => {
+      if (!isRecord(message) || !isRecord(message.info) || typeof message.info.role !== "string" || !Array.isArray(message.parts)) {
+        throw new Error("Unexpected native message entry.");
+      }
+      const parts = message.parts.map((part: unknown) => {
+        if (!isRecord(part) || (part.type !== undefined && typeof part.type !== "string")
+          || (part.text !== undefined && typeof part.text !== "string")
+          || (part.synthetic !== undefined && typeof part.synthetic !== "boolean")) {
+          throw new Error("Unexpected native message part.");
+        }
+        return { type: part.type, text: part.text ?? "", synthetic: part.synthetic };
+      });
+      return {
+        role: message.info.role,
+        text: parts.filter((part) => part.type === "text" && !part.synthetic).map((part) => part.text).join(""),
+      };
+    });
+  }, [workspaceId, sessionId]), { awaitPromise: true, timeoutMs: 60_000 });
+}
+
+async function clickElement(app: Awaited<ReturnType<typeof coworker>>, selector: string): Promise<void> {
+  await evalIn(app, browserScript((selector) => {
+    const element = document.querySelector(selector);
+    if (!(element instanceof HTMLElement)) throw new Error(`Missing clickable element: ${selector}`);
+    element.click();
+  }, [selector]));
 }
 
 async function waitForAssistantText(app: Awaited<ReturnType<typeof coworker>>, expected: string): Promise<void> {
-  await waitFor(app, `[...document.querySelectorAll('[data-message-role="assistant"]')]
-    .some((message) => (message.textContent ?? "").includes(${json(expected)}))`, {
+  await waitFor(app, browserScript((expected) => [...document.querySelectorAll('[data-message-role="assistant"]')]
+    .some((message) => (message.textContent ?? "").includes(expected)), [expected]), {
     timeoutMs: 300_000,
-    label: `assistant response ${json(expected)}`,
+    label: `assistant response ${JSON.stringify(expected)}`,
   });
 }
 
@@ -87,7 +119,7 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
   needs({ optIn: ["OPENWORK_EVAL_E2E_TESTS"], commands: ["opencode"] });
   await using app = await coworker({ name: "assignments" });
 
-  await waitFor(app, `(document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker")`, {
+  await waitFor(app, () => (document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker"), {
     timeoutMs: 120_000,
     label: "Open Coworker welcome screen",
   });
@@ -101,18 +133,18 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
   const workspaceId = String(created.workspaceId);
   expect(workspaceId).not.toBe("");
   await invokeCoworker(app, "coworkers.update", { slug: "editor", patch: { model: EVAL_COWORKER_MODEL, modelVariant: "" } });
-  await evalIn(app, "location.reload(); true");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-discussion-view"]')) && [...document.querySelectorAll("h1")].some((heading) => heading.textContent?.trim() === "Editor")`, {
+  await evalIn(app, () => { location.reload(); return true; });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-discussion-view"]')) && [...document.querySelectorAll("h1")].some((heading) => heading.textContent?.trim() === "Editor"), {
     timeoutMs: 120_000,
     label: "Editor discussion view",
   });
 
   // A person waits for the coworker to read Ready before asking anything of it; so does the journey.
-  await waitFor(app, `(() => {
+  await waitFor(app, () => {
     const status = document.querySelector('[data-testid="coworker-top-status"]');
     if (!(status instanceof HTMLElement)) return false;
     return status.textContent?.trim() === "Ready";
-  })()`, { timeoutMs: 240_000, label: "coworker AI ready" });
+  }, { timeoutMs: 240_000, label: "coworker AI ready" });
 
   // --- Chat first. Nothing here is an assignment.
   await fill(app, 'textarea[aria-label="Message Editor"]', CHAT_PROMPT);
@@ -120,7 +152,10 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
   await waitForAssistantText(app, CHAT_REPLY);
   // The reply text can land before the turn closes; wait for the discussion to settle so the
   // composer's assignment control is enabled again.
-  await waitFor(app, `document.querySelector('[data-testid="coworker-thread-status"]')?.dataset.state === "idle"`, {
+  await waitFor(app, () => {
+    const status = document.querySelector('[data-testid="coworker-thread-status"]');
+    return status instanceof HTMLElement && status.dataset.state === "idle";
+  }, {
     timeoutMs: 120_000,
     label: "discussion turn settled",
   });
@@ -128,7 +163,7 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
   const discussionId = String(editor.conversationThreadId);
   expect(discussionId).toMatch(/^ses_/);
   // Nothing counts as an assignment yet: the composer's summary line has no assignments part.
-  const assignmentsBefore = await evalIn(app, `[...document.querySelectorAll('[data-testid^="summary-part-"]')].map((part) => part.textContent?.trim())`);
+  const assignmentsBefore = await evalIn(app, () => [...document.querySelectorAll('[data-testid^="summary-part-"]')].map((part) => part.textContent?.trim()));
   expect(assignmentsBefore).toEqual([]);
   const sessionsBefore = await readEngineSessions(app, workspaceId);
   expect(sessionsBefore.map((session) => session.id)).toEqual([discussionId]);
@@ -152,10 +187,10 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
   // The conversation column is the surface under test: the one header now carries the
   // assignment's title and badge. The rail and Activity view may truthfully name the
   // discussion while its session is still busy.
-  await waitFor(app, `(() => {
+  await waitFor(app, () => {
     const badge = [...document.querySelectorAll('[data-testid="conversation-header"] span, main span')].some((span) => (span.textContent ?? "").trim() === "Assignment");
     return badge && !document.querySelector('[data-testid="coworker-discussion-view"]');
-  })()`, {
+  }, {
     timeoutMs: 30_000,
     label: "assignment thread view with its badge replaces the discussion view",
   });
@@ -163,7 +198,7 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
 
   // What the person sees is the brief, not the scaffolding the model needs: the outcome up front,
   // the carried discussion behind one small disclosure, no headings or instructions in view.
-  const briefView = await evalIn(app, `(() => {
+  const briefView = await evalIn(app, () => {
     const brief = document.querySelector('[data-message-role="user"][data-assignment-brief="true"]');
     if (!(brief instanceof HTMLElement)) return null;
     const context = brief.querySelector('[data-testid="coworker-assignment-context"]');
@@ -174,7 +209,7 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
       contextOpen: context?.querySelector("button")?.getAttribute("aria-expanded") === "true",
       plainUserBubbles: document.querySelectorAll('[data-message-role="user"]:not([data-assignment-brief])').length,
     };
-  })()`);
+  });
   expect(briefView).toMatchObject({ outcome: OUTCOME, contextSummary: "From your discussion · 2 messages", contextOpen: false, plainUserBubbles: 0 });
   if (!isRecord(briefView) || typeof briefView.visibleText !== "string") throw new Error("Assignment brief facts were unavailable.");
   expect(briefView.visibleText.toLowerCase()).toContain("assignment for editor");
@@ -215,59 +250,65 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence }) => {
 
   // --- Back to the discussion: the summary line counts one, Activity › Assignments names it, the chat is unchanged.
   await clickButton(app, "Back");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-discussion-view"]'))`, { timeoutMs: 60_000, label: "back in the discussion view" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-discussion-view"]')), { timeoutMs: 60_000, label: "back in the discussion view" });
   // The discussion is titled after its first message; that title belongs to the thread row, not the
   // assignment list. Wait for the row itself: the sidebar can show the same words before the
   // transcript has loaded back into the view.
-  await waitFor(app, `(document.querySelector('[data-testid="coworker-discussion-switcher"]')?.textContent ?? "").includes(${JSON.stringify(CHAT_PROMPT)})`, {
+  await waitFor(app, browserScript((prompt) => (document.querySelector('[data-testid="coworker-discussion-switcher"]')?.textContent ?? "").includes(prompt), [CHAT_PROMPT]), {
     timeoutMs: 60_000,
     label: "discussion row titled after its first message",
   });
-  await waitFor(app, `[...document.querySelectorAll('[data-message-role="assistant"]')].some((message) => (message.textContent ?? "").includes(${JSON.stringify(CHAT_REPLY)}))`, {
+  await waitFor(app, browserScript((reply) => [...document.querySelectorAll('[data-message-role="assistant"]')].some((message) => (message.textContent ?? "").includes(reply)), [CHAT_REPLY]), {
     timeoutMs: 30_000,
     label: "chat reply back in the discussion view",
   });
   // The quiet line under the composer counts the one assignment; it is the way into Activity › Assignments.
-  await waitFor(app, `document.querySelector('[data-testid="summary-part-assignments"]')?.textContent?.trim() === "1 assignment"`, {
+  await waitFor(app, () => document.querySelector('[data-testid="summary-part-assignments"]')?.textContent?.trim() === "1 assignment", {
     timeoutMs: 30_000,
     label: "summary line: 1 assignment",
   });
-  const composerLine = await evalIn(app, `(() => {
+  const composerLine = await evalIn(app, () => {
     const composer = document.querySelector('[data-testid="coworker-composer"]');
     return {
       line: composer?.querySelector('[data-testid="coworker-summary-line"]')?.textContent?.trim() ?? "",
       brandLine: (composer?.textContent ?? "").includes("Powered by"),
       headerAssignmentsControl: [...document.querySelectorAll('[data-testid="conversation-header"] button')].some((button) => (button.textContent ?? "").startsWith("Assignments")),
     };
-  })()`);
+  });
   expect(composerLine).toEqual({ line: "1 assignment", brandLine: false, headerAssignmentsControl: false });
-  await evalIn(app, `document.querySelector('[data-testid="summary-part-assignments"]').click(); true`);
-  const panelAssignments = await waitFor(app, `(() => {
+  await clickElement(app, '[data-testid="summary-part-assignments"]');
+  const panelAssignments = await waitFor(app, browserScript((prompt) => {
     const section = document.querySelector('[data-testid="coworker-assignments"]');
     const rows = [...document.querySelectorAll('[data-testid="assignment-row"]')];
     if (!(section instanceof HTMLElement) || rows.length === 0) return false;
     return {
       route: document.querySelector('[data-testid="panel-content"]')?.getAttribute("data-route") ?? "",
       crumbs: [...document.querySelectorAll('[data-testid="panel-crumb"]')].map((crumb) => crumb.textContent?.trim()),
-      rows: rows.map((row) => row.innerText.replace(/\\s+/g, " ").trim()),
+      rows: rows.map((row) => {
+        if (!(row instanceof HTMLElement)) throw new Error("Assignment row was not an HTML element.");
+        return row.innerText.replace(/\s+/g, " ").trim();
+      }),
       scheduledEmpty: Boolean(section.querySelector('[data-testid="responsibilities-empty"]')),
       cards: section.querySelectorAll(".rounded-2xl").length,
-      mentionsDiscussion: (section.innerText ?? "").includes(${JSON.stringify(CHAT_PROMPT)}),
+      mentionsDiscussion: (section.innerText ?? "").includes(prompt),
     };
-  })()`, { timeoutMs: 30_000, label: "the assignment in Activity › Assignments" });
+  }, [CHAT_PROMPT]), { timeoutMs: 30_000, label: "the assignment in Activity › Assignments" });
   expect(panelAssignments).toMatchObject({ route: "overview/assignments", crumbs: ["Activity", "Assignments"], scheduledEmpty: true, cards: 0, mentionsDiscussion: false });
   if (!isRecord(panelAssignments) || !Array.isArray(panelAssignments.rows)) throw new Error("Panel assignment rows were unavailable.");
   expect(panelAssignments.rows).toHaveLength(1);
   expect(String(panelAssignments.rows[0])).toContain(expectedTitle);
   expect(String(panelAssignments.rows[0])).toMatch(/(Done .+ ago|Working on it)/);
   // The Activity root's row says the same number.
-  await evalIn(app, `document.querySelector('[data-testid="panel-back"]').click(); true`);
-  await waitFor(app, `(document.querySelector('[data-testid="activity-row-assignments"]')?.textContent ?? "").includes("1 assignment")`, { timeoutMs: 30_000, label: "Activity row: 1 assignment" });
-  await evalIn(app, `document.querySelector('[data-testid="activity-row-assignments"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="assignment-row"]'))`, { timeoutMs: 30_000, label: "the Assignments level again" });
-  await evalIn(app, `document.querySelector('[data-testid="assignment-row"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-assignment-view"]'))`, { timeoutMs: 30_000, label: "the assignment opened from the panel" });
-  await evalIn(app, `document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true`);
+  await clickElement(app, '[data-testid="panel-back"]');
+  await waitFor(app, () => (document.querySelector('[data-testid="activity-row-assignments"]')?.textContent ?? "").includes("1 assignment"), { timeoutMs: 30_000, label: "Activity row: 1 assignment" });
+  await clickElement(app, '[data-testid="activity-row-assignments"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="assignment-row"]')), { timeoutMs: 30_000, label: "the Assignments level again" });
+  await clickElement(app, '[data-testid="assignment-row"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-assignment-view"]')), { timeoutMs: 30_000, label: "the assignment opened from the panel" });
+  await evalIn(app, () => {
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    return true;
+  });
 
   evidence.recordAssertionEvidence(
     "The standing discussion stays out of the assignment count and list, and the panel lists the assignment once",

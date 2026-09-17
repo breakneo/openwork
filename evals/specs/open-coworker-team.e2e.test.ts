@@ -830,10 +830,10 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   const waitingConsult = await waitForReceipt(app, origin, "consultation", "waiting");
   expect(waitingConsult).toMatchObject({ conversationId: origin, threadId: origin, dependencies: [{ kind: "consultation", state: "running" }] });
   try {
-    await waitFor(app, `document.querySelector('[data-testid="collaboration-receipt"][data-work-id=${json(waitingConsult.id)}]')?.dataset.state === "waiting" && !document.querySelector('[data-testid="coworker-working"]')`, { label: "quiet waiting receipt, not endless typing" });
+    await waitFor(app, browserScript((selector) => document.querySelector<HTMLElement>(selector)?.dataset.state === "waiting" && !document.querySelector('[data-testid="coworker-working"]'), [`[data-testid="collaboration-receipt"][data-work-id=${json(waitingConsult.id)}]`]), { label: "quiet waiting receipt, not endless typing" });
   } catch (error) {
     const receipts = resultList(await invokeCoworker(app, "collaboration.receipts", { slug: "nova", threadId: origin }));
-    const phase = await evalIn(app, `({ working: document.querySelector('[data-testid="coworker-working"]')?.outerHTML, receipts: document.querySelector('[data-testid="collaboration-receipts"]')?.textContent })`);
+    const phase = await evalIn(app, () => ({ working: document.querySelector('[data-testid="coworker-working"]')?.outerHTML, receipts: document.querySelector('[data-testid="collaboration-receipts"]')?.textContent }));
     throw new Error(`${String(error)}\nCollaboration receipts: ${JSON.stringify(receipts)}\nView: ${JSON.stringify(phase)}\nFixture errors: ${JSON.stringify(scripted.errors)}`);
   }
 
@@ -858,26 +858,31 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   expect(waitingConsult).toMatchObject({ dependencies: [{ groupId: pair.id }] });
   await openGroup(app, pair.id);
   await waitForText(app, CONSULT_QUESTION);
-  expect(await evalIn(app, `document.body.innerText.includes(${json(PRIVATE_CANARY)})`)).toBe(false);
+  expect(await evalIn(app, browserScript((canary) => document.body.innerText.includes(canary), [PRIVATE_CANARY]))).toBe(false);
   expect(resultList(await invokeCoworker(app, "groups.readTimeline", { id: pair.id }))).toMatchObject([{ kind: "coworker", slug: "nova", status: "consultation", text: expect.stringContaining(CONSULT_QUESTION) }]);
 
   await openCoworker(app, "nova", "Nova", false);
-  await evalIn(app, `document.querySelector('[data-testid="coworker-discussion-switcher"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-discussion-menu"] [data-testid="coworker-new-discussion"]'))`, { label: "new discussion in the open switcher" });
-  await evalIn(app, `document.querySelector('[data-testid="coworker-discussion-menu"] [data-testid="coworker-new-discussion"]').click(); true`);
+  await click(app, '[data-testid="coworker-discussion-switcher"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-discussion-menu"] [data-testid="coworker-new-discussion"]')), { label: "new discussion in the open switcher" });
+  await click(app, '[data-testid="coworker-discussion-menu"] [data-testid="coworker-new-discussion"]');
   try {
-    await waitFor(app, `(async () => {
+    await waitFor(app, browserScript(async (origin) => {
       const member = (await window.__COWORKER__.invoke("coworkers.get", { slug: "nova" })).result;
-      return member.conversationThreadId !== ${json(origin)} && Boolean(document.querySelector('textarea[aria-label="Message Nova"]')) && document.querySelectorAll('[data-message-role]').length === 0;
-    })()`, { awaitPromise: true, label: "the new empty private discussion, not the origin" });
+      if (typeof member !== "object" || member === null || !("conversationThreadId" in member) || typeof member.conversationThreadId !== "string") throw new Error("Private discussion unavailable");
+      return member.conversationThreadId !== origin && Boolean(document.querySelector('textarea[aria-label="Message Nova"]')) && document.querySelectorAll('[data-message-role]').length === 0;
+    }, [origin]), { awaitPromise: true, label: "the new empty private discussion, not the origin" });
   } catch (error) {
-    const state = await evalIn(app, `(async () => ({ selected: (await window.__COWORKER__.invoke("coworkers.get", { slug: "nova" })).result.conversationThreadId, body: document.body.innerText.slice(-5000), menus: document.querySelectorAll('[data-testid="coworker-discussion-menu"]').length }))()`, { awaitPromise: true });
+    const state = await evalIn(app, async () => {
+      const member = (await window.__COWORKER__.invoke("coworkers.get", { slug: "nova" })).result;
+      if (typeof member !== "object" || member === null || !("conversationThreadId" in member)) throw new Error("Private discussion unavailable");
+      return { selected: member.conversationThreadId, body: document.body.innerText.slice(-5000), menus: document.querySelectorAll('[data-testid="coworker-discussion-menu"]').length };
+    }, { awaitPromise: true });
     throw new Error(`${String(error)}\nDiscussion switch state: ${JSON.stringify(state)}`);
   }
   await fill(app, 'textarea[aria-label="Message Nova"]', OTHER_DISCUSSION_PROMPT);
   await clickButton(app, "Send");
   await waitForText(app, OTHER_DISCUSSION_REPLY);
-  await waitFor(app, `document.querySelector('[data-testid="coworker-thread-status"]')?.dataset.state === "idle"`, { label: "separate discussion settled" });
+  await waitFor(app, () => document.querySelector<HTMLElement>('[data-testid="coworker-thread-status"]')?.dataset.state === "idle", { label: "separate discussion settled" });
   const otherPrivate = String(resultRecord(await invokeCoworker(app, "coworkers.get", { slug: "nova" })).conversationThreadId);
   expect(otherPrivate).toMatch(/^ses_/);
   expect(otherPrivate).not.toBe(origin);
@@ -889,14 +894,14 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   await fill(app, 'textarea[aria-label="Message Editor"]', PRIVATE_EDITOR_PROMPT);
   await clickButton(app, "Send");
   await waitForText(app, PRIVATE_EDITOR_REPLY);
-  await waitFor(app, `document.querySelector('[data-testid="coworker-thread-status"]')?.dataset.state === "idle" && !document.querySelector('[data-testid="coworker-working"]')`, { label: "Editor's private reply clears while its group consultation still runs" });
+  await waitFor(app, () => document.querySelector<HTMLElement>('[data-testid="coworker-thread-status"]')?.dataset.state === "idle" && !document.querySelector('[data-testid="coworker-working"]'), { label: "Editor's private reply clears while its group consultation still runs" });
   expect(scripted.held.has("consultation")).toBe(true);
   const editorBefore = await readThreadMessages(app, "editor", editorPrivate);
   scripted.release("consultation");
   const completedConsult = await waitForReceipt(app, origin, "consultation", "succeeded");
   expect(completedConsult).toMatchObject({ id: waitingConsult.id, conversationId: origin, dependencies: [{ state: "succeeded", groupId: pair.id }] });
   expect(scripted.prompts.filter((prompt) => prompt.startsWith(FOLLOW_UP) && prompt.includes(CONSULT_OBJECTIVE))).toEqual([expect.stringContaining(CONSULT_ANSWER)]);
-  expect(await evalIn(app, `Boolean(document.querySelector('textarea[aria-label="Message Editor"]')) && !document.querySelector('[data-testid="group-chat"]')`)).toBe(true);
+  expect(await evalIn(app, () => Boolean(document.querySelector('textarea[aria-label="Message Editor"]')) && !document.querySelector('[data-testid="group-chat"]'))).toBe(true);
   expect(resultRecord(await invokeCoworker(app, "coworkers.get", { slug: "editor" })).conversationThreadId).toBe(editorPrivate);
   expect(await readThreadMessages(app, "editor", editorPrivate)).toEqual(editorBefore);
   expect(resultRecord(await invokeCoworker(app, "coworkers.get", { slug: "nova" })).conversationThreadId).toBe(otherPrivate);
@@ -908,18 +913,18 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   if (!answer || typeof answer.threadId !== "string") throw new Error("The group answer has no native thread.");
   expect(answer.threadId).not.toBe(editorPrivate);
   expect(await invokeCoworker(app, "collaboration.excludedThreads", { slug: "editor" })).toMatchObject({ ok: true, result: expect.arrayContaining([answer.threadId]) });
-  await evalIn(app, `document.querySelector('[data-testid="coworker-discussion-switcher"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-discussion-menu"]'))`, { label: "private discussion choices" });
-  expect(await evalIn(app, `[...document.querySelectorAll('[data-testid="coworker-discussion-menu"] [data-thread-id]')].map((item) => item.dataset.threadId)`)).toEqual([editorPrivate]);
-  await evalIn(app, `document.querySelector('[data-testid="coworker-discussion-switcher"]').click(); true`);
+  await click(app, '[data-testid="coworker-discussion-switcher"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-discussion-menu"]')), { label: "private discussion choices" });
+  expect(await evalIn(app, () => [...document.querySelectorAll<HTMLElement>('[data-testid="coworker-discussion-menu"] [data-thread-id]')].map((item) => item.dataset.threadId))).toEqual([editorPrivate]);
+  await click(app, '[data-testid="coworker-discussion-switcher"]');
   await openGroup(app, pair.id);
-  await waitFor(app, `[...document.querySelectorAll('[data-message-role="assistant"][data-speaker="editor"]')].filter((node) => node.textContent.includes(${json(CONSULT_ANSWER)})).length === 1`, { label: "one signed Editor answer in the group" });
-  expect(await evalIn(app, `document.body.innerText.includes(${json(CONSULT_SYNTHESIS)}) || document.body.innerText.includes(${json(PRIVATE_CANARY)})`)).toBe(false);
+  await waitFor(app, browserScript((answer) => [...document.querySelectorAll('[data-message-role="assistant"][data-speaker="editor"]')].filter((node) => (node.textContent ?? "").includes(answer)).length === 1, [CONSULT_ANSWER]), { label: "one signed Editor answer in the group" });
+  expect(await evalIn(app, browserScript((synthesis, canary) => document.body.innerText.includes(synthesis) || document.body.innerText.includes(canary), [CONSULT_SYNTHESIS, PRIVATE_CANARY]))).toBe(false);
   expect(resultList(await invokeCoworker(app, "groups.readTimeline", { id: unrelatedGroupId }))).toEqual([]);
   await openCoworker(app, "nova", "Nova");
   await openDiscussion(app, origin);
   expect(resultRecord(await invokeCoworker(app, "coworkers.get", { slug: "nova" })).conversationThreadId).toBe(origin);
-  await waitFor(app, `[...document.querySelectorAll('[data-message-role="assistant"]')].filter((node) => node.textContent.includes(${json(CONSULT_SYNTHESIS)})).length === 1`, { label: "one synthesis in Nova's original private conversation" });
+  await waitFor(app, browserScript((synthesis) => [...document.querySelectorAll('[data-message-role="assistant"]')].filter((node) => (node.textContent ?? "").includes(synthesis)).length === 1, [CONSULT_SYNTHESIS]), { label: "one synthesis in Nova's original private conversation" });
   const afterConsult = await readThreadMessages(app, "nova", origin);
   expect(afterConsult.filter((message) => message.role === "assistant" && message.text === CONSULT_SYNTHESIS)).toEqual([expect.objectContaining({ completed: true, parentId: completedConsult.messageId })]);
   evidence.recordAssertionEvidence("A private consultation shares only its explicit brief, publishes one group answer and returns one synthesis to the origin", "A user send invoked the installed consultation tool with a completed native tool receipt. Editor's entire inference request omitted the private canary. The pair group contained one question and one signed answer; its native answer thread was excluded from private discussions. Nova received one automatic synthesis in the originating thread while the selected Editor private conversation and unrelated group stayed unchanged.", true);
@@ -928,25 +933,30 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   await openGroup(app, pair.id);
   const groupSelector = `[data-testid="group-chat"][data-group-id=${json(pair.id)}]`;
   const documentsSelector = `${groupSelector} [data-testid="group-documents"]`;
-  await evalIn(app, `document.querySelector(${json(`${groupSelector} [data-testid="group-shared-documents"]`)}).click(); true`);
-  await waitFor(app, `Boolean(document.querySelector(${json(documentsSelector)}))`, { label: "shared documents beside the group conversation" });
-  await evalIn(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-new"]`)}).click(); true`);
+  await click(app, `${groupSelector} [data-testid="group-shared-documents"]`);
+  await waitFor(app, browserScript((selector) => Boolean(document.querySelector(selector)), [documentsSelector]), { label: "shared documents beside the group conversation" });
+  await click(app, `${documentsSelector} [data-testid="group-document-new"]`);
   await fill(app, `${documentsSelector} input[aria-label="Shared document title"]`, SHARED_DOCUMENT_TITLE);
   await fill(app, `${documentsSelector} textarea[aria-label="Shared document body"]`, "A public launch plan for the group.");
-  await evalIn(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-save"]`)}).click(); true`);
-  const sharedId = await waitFor(app, `(() => {
-    const reader = document.querySelector(${json(`${documentsSelector} [data-testid="group-document-reader"]`)});
+  await click(app, `${documentsSelector} [data-testid="group-document-save"]`);
+  const sharedId = await waitFor(app, browserScript((selector) => {
+    const reader = document.querySelector<HTMLElement>(selector);
     return reader?.dataset.revision === "1" ? reader.dataset.documentId : false;
-  })()`, { label: "person-created shared document revision one" });
+  }, [`${documentsSelector} [data-testid="group-document-reader"]`]), { label: "person-created shared document revision one" });
   if (typeof sharedId !== "string" || !sharedId) throw new Error("The saved shared document has no id.");
   expect(resultRecord(await invokeCoworker(app, "groups.documents.read", { id: pair.id, documentId: sharedId }))).toMatchObject({ groupId: pair.id, author: "You", authorSlug: "", revision: 1 });
-  await evalIn(app, `[...document.querySelectorAll(${json(`${documentsSelector} button`)})].find((button) => button.textContent.trim() === "Edit").click(); true`);
+  await evalIn(app, browserScript((selector) => {
+    const button = [...document.querySelectorAll<HTMLButtonElement>(selector)].find((button) => button.textContent?.trim() === "Edit");
+    if (!button) throw new Error("Shared document Edit button unavailable");
+    button.click();
+    return true;
+  }, [`${documentsSelector} button`]));
   const personDraft = "My unsaved addition: confirm the launch date.";
   await fill(app, `${documentsSelector} textarea[aria-label="Shared document body"]`, personDraft);
   const sharedPrompt = `${SHARED_DOCUMENT_UPDATE} Shared document identity: ${pair.id}/${sharedId}.`;
   await fill(app, `${groupSelector} [data-testid="group-composer"]`, sharedPrompt);
-  await evalIn(app, `document.querySelector(${json(`${groupSelector} [data-testid="group-send"]`)}).click(); true`);
-  await waitFor(app, `[...document.querySelectorAll(${json(`${groupSelector} [data-message-role="assistant"]`)})].some((message) => message.textContent.includes(${json(SHARED_DOCUMENT_REPLY)}))`, { timeoutMs: 180_000, label: "native group document update finishes beside the preserved draft" });
+  await click(app, `${groupSelector} [data-testid="group-send"]`);
+  await waitFor(app, browserScript((selector, reply) => [...document.querySelectorAll(selector)].some((message) => (message.textContent ?? "").includes(reply)), [`${groupSelector} [data-message-role="assistant"]`, SHARED_DOCUMENT_REPLY]), { timeoutMs: 180_000, label: "native group document update finishes beside the preserved draft" });
   const sharedGroup = resultRecord(await invokeCoworker(app, "groups.get", { id: pair.id }));
   const sharedThread = isRecord(sharedGroup.participantThreadIds) ? sharedGroup.participantThreadIds.editor : null;
   if (typeof sharedThread !== "string") throw new Error("The shared document update has no native group thread.");
@@ -954,29 +964,42 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   expect(sharedTools, "One completed native shared-document write").toMatchObject([{ name: "coworker_group_document_save", status: "completed" }]);
   expect(resultRecord(await invokeCoworker(app, "groups.documents.read", { id: pair.id, documentId: sharedId })), `Native shared-document receipts: ${JSON.stringify(sharedTools)}`).toMatchObject({ author: "Editor", authorSlug: "editor", revision: 2, body: `${SHARED_DOCUMENT_BODY}\n` });
   expect(scripted.facts.find((facts) => facts.prompt.includes(SHARED_DOCUMENT_UPDATE))?.toolNames).toContain("coworker_group_document_save");
-  expect(await evalIn(app, `document.querySelector(${json(`${documentsSelector} textarea[aria-label="Shared document body"]`)}).value`)).toBe(personDraft);
-  await evalIn(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-save"]`)}).click(); true`);
-  await waitFor(app, `document.querySelector(${json(documentsSelector)}).textContent.includes("This document changed")`, { label: "stale revision is rejected without replacing the person's draft" });
-  expect(await evalIn(app, `document.querySelector(${json(`${documentsSelector} textarea[aria-label="Shared document body"]`)}).value`)).toBe(personDraft);
+  expect(await evalIn(app, browserScript((selector) => {
+    const textarea = document.querySelector(selector);
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Shared document draft unavailable");
+    return textarea.value;
+  }, [`${documentsSelector} textarea[aria-label="Shared document body"]`]))).toBe(personDraft);
+  await click(app, `${documentsSelector} [data-testid="group-document-save"]`);
+  await waitFor(app, browserScript((selector) => (document.querySelector(selector)?.textContent ?? "").includes("This document changed"), [documentsSelector]), { label: "stale revision is rejected without replacing the person's draft" });
+  expect(await evalIn(app, browserScript((selector) => {
+    const textarea = document.querySelector(selector);
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Shared document draft unavailable");
+    return textarea.value;
+  }, [`${documentsSelector} textarea[aria-label="Shared document body"]`]))).toBe(personDraft);
   expect(resultRecord(await invokeCoworker(app, "groups.documents.read", { id: pair.id, documentId: sharedId })).revision).toBe(2);
-  await evalIn(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-compare"]`)}).click(); true`);
-  await waitFor(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-conflict-preview"]`)})?.textContent.includes("Latest: revision 2 by Editor")`, { label: "latest native revision is available to reconcile" });
+  await click(app, `${documentsSelector} [data-testid="group-document-compare"]`);
+  await waitFor(app, browserScript((selector) => (document.querySelector(selector)?.textContent ?? "").includes("Latest: revision 2 by Editor"), [`${documentsSelector} [data-testid="group-document-conflict-preview"]`]), { label: "latest native revision is available to reconcile" });
   const reconciledBody = `${SHARED_DOCUMENT_BODY}\n\n${personDraft}`;
   await fill(app, `${documentsSelector} textarea[aria-label="Shared document body"]`, reconciledBody);
-  await evalIn(app, `[...document.querySelectorAll(${json(`${documentsSelector} button`)})].find((button) => button.textContent.includes("I've reconciled my draft")).click(); true`);
-  await evalIn(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-save"]`)}).click(); true`);
-  await waitFor(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-reader"]`)})?.dataset.revision === "3"`, { label: "reconciled shared document saved as revision three" });
+  await evalIn(app, browserScript((selector) => {
+    const button = [...document.querySelectorAll<HTMLButtonElement>(selector)].find((button) => (button.textContent ?? "").includes("I've reconciled my draft"));
+    if (!button) throw new Error("Shared document reconciliation button unavailable");
+    button.click();
+    return true;
+  }, [`${documentsSelector} button`]));
+  await click(app, `${documentsSelector} [data-testid="group-document-save"]`);
+  await waitFor(app, browserScript((selector) => document.querySelector<HTMLElement>(selector)?.dataset.revision === "3", [`${documentsSelector} [data-testid="group-document-reader"]`]), { label: "reconciled shared document saved as revision three" });
   expect(resultRecord(await invokeCoworker(app, "groups.documents.read", { id: pair.id, documentId: sharedId }))).toMatchObject({ author: "You", revision: 3, body: `${reconciledBody}\n` });
-  await evalIn(app, `document.querySelector(${json(`${documentsSelector} [data-testid="group-document-history"]`)}).click(); true`);
-  await waitFor(app, `(() => {
-    const history = document.querySelector(${json(`${documentsSelector} [data-testid="group-document-history-view"]`)});
-    return history?.textContent.includes("Revision 2") && history.textContent.includes("Revision 1");
-  })()`, { label: "both authors' earlier revisions are retained" });
+  await click(app, `${documentsSelector} [data-testid="group-document-history"]`);
+  await waitFor(app, browserScript((selector) => {
+    const text = document.querySelector(selector)?.textContent ?? "";
+    return text.includes("Revision 2") && text.includes("Revision 1");
+  }, [`${documentsSelector} [data-testid="group-document-history-view"]`]), { label: "both authors' earlier revisions are retained" });
   expect(resultList(await invokeCoworker(app, "groups.documents.revisions", { id: pair.id, documentId: sharedId })).map((revision) => [revision.revision, revision.author])).toEqual([[2, "Editor"], [1, "You"]]);
   const sharedDocumentTimeline = resultList(await invokeCoworker(app, "groups.readTimeline", { id: pair.id }));
   expect(sharedDocumentTimeline.filter((event) => event.documentId === sharedId).map((event) => event.revision)).toEqual([1, 2, 3]);
   expect(resultList(await invokeCoworker(app, "groups.documents.list", { id: unrelatedGroupId }))).toEqual([]);
-  expect(await evalIn(app, `document.querySelector(${json(`${groupSelector} [data-testid="group-conversation"]`)}).textContent.includes(${json(CONSULT_ANSWER)})`)).toBe(true);
+  expect(await evalIn(app, browserScript((selector, answer) => (document.querySelector(selector)?.textContent ?? "").includes(answer), [`${groupSelector} [data-testid="group-conversation"]`, CONSULT_ANSWER]))).toBe(true);
   await screenshot(app);
   evidence.recordAssertionEvidence("Shared group documents retain the conversation, trusted authors and conflict drafts", "The person created a shared plan in the beside-conversation panel. While its edit draft stayed open, Editor updated the same document through the installed native group tool. Saving the stale draft was rejected without losing it; comparing and reconciling produced revision three by You. History retained revisions by both authors, the group timeline retained document ids and revisions, and another group had no shared documents.", true);
   await openCoworker(app, "nova", "Nova");
@@ -994,7 +1017,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   expect(worker.threadId).toMatch(/^ses_/);
   expect(worker.threadId).not.toBe(origin);
   expect(resultRecord(await invokeCoworker(app, "turns.state", { slug: "nova", threadId: origin }))).toMatchObject({ pending: null, next: [] });
-  await waitFor(app, `document.querySelector('[data-testid="collaboration-receipt"][data-work-id=${json(waitingWorker.id)}]')?.dataset.state === "waiting" && !document.querySelector('[data-testid="coworker-working"]')`, { label: "Worker wait released the private turn" });
+  await waitFor(app, browserScript((selector) => document.querySelector<HTMLElement>(selector)?.dataset.state === "waiting" && !document.querySelector('[data-testid="coworker-working"]'), [`[data-testid="collaboration-receipt"][data-work-id=${json(waitingWorker.id)}]`]), { label: "Worker wait released the private turn" });
   const workerTurn = scripted.facts.filter((facts) => facts.prompt.startsWith(`You are a Worker named "${WORKER_NAME}"`));
   expect(workerTurn).toHaveLength(1);
   expect(workerTurn[0]?.prompt).toContain('section titled "Done"');
@@ -1025,7 +1048,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   const completedWorker = await waitForReceipt(app, origin, "worker", "succeeded");
   expect(completedWorker.id).toBe(waitingWorker.id);
   expect(scripted.prompts.filter((prompt) => prompt.startsWith(FOLLOW_UP) && prompt.includes(WORKER_OBJECTIVE))).toEqual([expect.stringContaining(WORKER_FINDING)]);
-  expect(await evalIn(app, `Boolean(document.querySelector('textarea[aria-label="Message Editor"]'))`)).toBe(true);
+  expect(await evalIn(app, () => Boolean(document.querySelector('textarea[aria-label="Message Editor"]')))).toBe(true);
   expect(await readThreadMessages(app, "editor", editorPrivate)).toEqual(editorBefore);
   expect(resultRecord(await invokeCoworker(app, "coworkers.get", { slug: "nova" })).conversationThreadId).toBe(otherPrivate);
   expect(await readThreadMessages(app, "nova", otherPrivate)).toEqual(otherMessages);
@@ -1052,9 +1075,9 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   await expect.poll(async () => resultRecord(await invokeCoworker(app, "workers.get", { slug: "nova", id: cancelWorker?.id })).status, { timeout: 30_000 }).toBe("cancelled");
   scripted.release("cancelled-worker", true);
   const settledMessages = await readThreadMessages(app, "nova", origin);
-  await evalIn(app, "location.reload(); true");
+  await evalIn(app, () => { location.reload(); return true; });
   await openCoworker(app, "nova", "Nova");
-  await waitFor(app, `document.querySelector('[data-testid="collaboration-receipt"][data-work-id=${json(stopped.id)}]')?.dataset.state === "cancelled"`, { label: "stopped follow-up survives reload" });
+  await waitFor(app, browserScript((selector) => document.querySelector<HTMLElement>(selector)?.dataset.state === "cancelled", [`[data-testid="collaboration-receipt"][data-work-id=${json(stopped.id)}]`]), { label: "stopped follow-up survives reload" });
   expect(await readThreadMessages(app, "nova", origin)).toEqual(settledMessages);
   await app.stop();
   await using restarted = await coworker({ ...launchOptions, name: "team-restarted" });
@@ -1062,7 +1085,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   await waitForReceipt(restarted, origin, "consultation", "succeeded");
   await waitForReceipt(restarted, origin, "worker", "succeeded");
   await waitForReceipt(restarted, origin, "worker", "cancelled", [String(waitingWorker.id)]);
-  await waitFor(restarted, `document.querySelector('[data-testid="collaboration-receipt"][data-work-id=${json(stopped.id)}]')?.dataset.state === "cancelled"`, { label: "stopped follow-up survives full restart" });
+  await waitFor(restarted, browserScript((selector) => document.querySelector<HTMLElement>(selector)?.dataset.state === "cancelled", [`[data-testid="collaboration-receipt"][data-work-id=${json(stopped.id)}]`]), { label: "stopped follow-up survives full restart" });
   // Observe several scheduler polls, not merely an immediate zero-count check.
   for (let observation = 0; observation < 5; observation += 1) {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -1072,8 +1095,8 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
     expect(scripted.prompts.filter((prompt) => prompt.startsWith(FOLLOW_UP) && prompt.includes(CONSULT_OBJECTIVE))).toHaveLength(1);
     expect(scripted.prompts.filter((prompt) => prompt.startsWith(FOLLOW_UP) && prompt.includes(WORKER_OBJECTIVE))).toHaveLength(1);
   }
-  expect(await evalIn(restarted, `[...document.querySelectorAll('[data-message-role="assistant"]')].filter((node) => node.textContent.includes(${json(WORKER_SYNTHESIS)})).length`)).toBe(1);
-  expect(await evalIn(restarted, `document.body.innerText.includes(${json(CANCEL_SYNTHESIS)}) || document.body.innerText.includes(${json(CANCEL_FINDING)})`)).toBe(false);
+  expect(await evalIn(restarted, browserScript((synthesis) => [...document.querySelectorAll('[data-message-role="assistant"]')].filter((node) => (node.textContent ?? "").includes(synthesis)).length, [WORKER_SYNTHESIS]))).toBe(1);
+  expect(await evalIn(restarted, browserScript((synthesis, finding) => document.body.innerText.includes(synthesis) || document.body.innerText.includes(finding), [CANCEL_SYNTHESIS, CANCEL_FINDING]))).toBe(false);
   expect(resultList(await invokeCoworker(restarted, "workers.list", { slug: "nova" }))).toHaveLength(2);
   expect(resultRecord(await invokeCoworker(restarted, "workers.get", { slug: "nova", id: cancelWorker?.id })).status).toBe("cancelled");
   expect(await readThreadMessages(restarted, "nova", otherPrivate)).toEqual(otherMessages);
@@ -1094,28 +1117,28 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
     await invokeCoworker(restarted, "coworkers.files.write", { slug: String(member.slug), path: "opencode.json", content: JSON.stringify({ ...config, permission: { ...(isRecord(config.permission) ? config.permission : {}), bash: member.slug === "editor" ? "ask" : "allow", question: "allow" } }) });
     expect((await fetch(`${base}/engine/reload`, { method: "POST", headers, body: JSON.stringify({ force: true }) })).status).toBe(200);
   }
-  await evalIn(restarted, "location.reload(); true");
+  await evalIn(restarted, () => { location.reload(); return true; });
   await openCoworker(restarted, "nova", "Nova");
   await openDiscussion(restarted, origin);
   await fill(restarted, 'textarea[aria-label="Message Nova"]', CANARY_PROMPT);
   await clickButton(restarted, "Send");
-  await waitFor(restarted, `document.querySelector('[data-testid="coworker-turn-failed"] [data-choice="continue"]')?.textContent.includes("Continue")`, { timeoutMs: 120_000, label: "tool-bearing failure offers Continue" });
+  await waitFor(restarted, () => (document.querySelector('[data-testid="coworker-turn-failed"] [data-choice="continue"]')?.textContent ?? "").includes("Continue"), { timeoutMs: 120_000, label: "tool-bearing failure offers Continue" });
   const failedHistory = await readThreadMessages(restarted, "nova", origin);
   const failedUser = failedHistory.find((message) => message.role === "user" && message.text === CANARY_PROMPT);
   expect(failedUser).toBeDefined();
   expect(resultText(await invokeCoworker(restarted, "coworkers.files.read", { slug: "nova", path: "continuation-canary.md" }))).toBe("counted\n");
   const failedTools = failedHistory.filter((message) => message.parentId === failedUser?.id).flatMap((message) => Array.isArray(message.tools) ? message.tools : []);
   expect(failedTools).toEqual([expect.objectContaining({ name: "bash", status: "completed" })]);
-  await evalIn(restarted, `document.querySelector('[data-testid="coworker-turn-failed"] [data-choice="continue"]').click(); true`);
+  await click(restarted, '[data-testid="coworker-turn-failed"] [data-choice="continue"]');
   await waitForText(restarted, CANARY_CONTINUED, { timeoutMs: 120_000 });
-  await waitFor(restarted, `!document.querySelector('[data-testid="coworker-working"]')`, { label: "continuation settled" });
+  await waitFor(restarted, () => !document.querySelector('[data-testid="coworker-working"]'), { label: "continuation settled" });
   const continuedHistory = await readThreadMessages(restarted, "nova", origin);
   expect(continuedHistory.slice(0, failedHistory.length)).toEqual(failedHistory);
   const continuedUser = continuedHistory.filter((message) => message.role === "user" && String(message.text).startsWith("Continue the earlier private request."));
   expect(continuedUser).toHaveLength(1);
   expect(continuedUser[0]?.id).not.toBe(failedUser?.id);
   expect(continuedHistory.filter((message) => message.text === CANARY_CONTINUED)).toEqual([expect.objectContaining({ parentId: continuedUser[0]?.id, completed: true })]);
-  await evalIn(restarted, "location.reload(); true");
+  await evalIn(restarted, () => { location.reload(); return true; });
   await openCoworker(restarted, "nova", "Nova");
   expect(resultText(await invokeCoworker(restarted, "coworkers.files.read", { slug: "nova", path: "continuation-canary.md" }))).toBe("counted\n");
   expect(await readThreadMessages(restarted, "nova", origin)).toEqual(continuedHistory);
@@ -1127,38 +1150,50 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   await openCoworker(restarted, "editor", "Editor");
   await fill(restarted, 'textarea[aria-label="Message Editor"]', PRIVATE_QUESTION);
   await clickButton(restarted, "Send");
-  const privateQuestionState = await waitFor(restarted, `document.querySelector('[data-testid="question-card"]')?.textContent.includes("PRIVATE-QUESTION-CANARY") ? "pending" : [...document.querySelectorAll('[data-message-role="assistant"]')].some((node) => node.textContent.includes("The private question was answered.")) ? "answered" : false`, { timeoutMs: 120_000, label: "private native question pending" });
-  const questionConfig = privateQuestionState === "pending" ? null : await evalIn(restarted, `(async () => {
+  const privateQuestionState = await waitFor(restarted, () => (document.querySelector('[data-testid="question-card"]')?.textContent ?? "").includes("PRIVATE-QUESTION-CANARY") ? "pending" : [...document.querySelectorAll('[data-message-role="assistant"]')].some((node) => (node.textContent ?? "").includes("The private question was answered.")) ? "answered" : false, { timeoutMs: 120_000, label: "private native question pending" });
+  const questionConfig = privateQuestionState === "pending" ? null : await evalIn(restarted, async () => {
+    const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
     const runtime = (await window.__COWORKER__.invoke("runtime.info")).result;
-    const member = (await window.__COWORKER__.invoke("coworkers.get", {slug:"editor"})).result;
+    const member = (await window.__COWORKER__.invoke("coworkers.get", { slug: "editor" })).result;
+    if (!record(runtime) || typeof runtime.serverUrl !== "string" || typeof runtime.ownerToken !== "string" || !record(member) || typeof member.workspaceId !== "string") throw new Error("Runtime workspace unavailable");
     const base = runtime.serverUrl + "/workspace/" + encodeURIComponent(member.workspaceId) + "/opencode";
-    const headers = {Authorization: "Bearer " + runtime.ownerToken};
-    const [config, agents, ids] = await Promise.all(["/config", "/agent", "/experimental/tool/ids"].map(route => fetch(base + route, {headers}).then(response => response.json()).catch(() => null)));
-    return {defaultAgent: config?.default_agent, questionPermission: config?.permission?.question, questionTool: config?.tools?.question, agents: Array.isArray(agents) ? agents.map(agent => ({name:agent.name, questionRules:agent.permission?.filter(rule=>rule.permission==="question")})) : null, questionRegistered: Array.isArray(ids) ? ids.includes("question") : null};
-  })()`, {awaitPromise:true});
+    const headers = { Authorization: "Bearer " + runtime.ownerToken };
+    const [config, agents, ids] = await Promise.all(["/config", "/agent", "/experimental/tool/ids"].map(async (route): Promise<unknown> => fetch(base + route, { headers }).then(response => response.json()).catch(() => null)));
+    if (config !== null && !record(config)) throw new Error("Native config unavailable");
+    return {
+      defaultAgent: config?.default_agent,
+      questionPermission: record(config?.permission) ? config.permission.question : undefined,
+      questionTool: record(config?.tools) ? config.tools.question : undefined,
+      agents: Array.isArray(agents) ? agents.map((agent: unknown) => {
+        if (!record(agent)) throw new Error("Native agent unavailable");
+        return { name: agent.name, questionRules: Array.isArray(agent.permission) ? agent.permission.filter((rule: unknown) => record(rule) && rule.permission === "question") : undefined };
+      }) : null,
+      questionRegistered: Array.isArray(ids) ? ids.includes("question") : null,
+    };
+  }, { awaitPromise: true });
   expect(privateQuestionState, JSON.stringify({ results: scripted.seenToolResults.slice(-3), config: questionConfig, tools: scripted.facts.find((fact) => fact.prompt === PRIVATE_QUESTION)?.toolNames })).toBe("pending");
   const privateWaiting = await readThreadMessages(restarted, "editor", editorPrivate);
   await openGroup(restarted, pair.id);
   await fill(restarted, '[data-testid="group-composer"]', APPROVAL_PROMPT);
   await clickButton(restarted, "Send");
-  await waitFor(restarted, `Boolean(document.querySelector('[data-testid="group-waiting-person"][data-speaker="editor"] [data-testid="permission-card"]')) && !document.querySelector('[data-testid="group-working"]')`, { timeoutMs: 120_000, label: "quiet inline group permission" });
-  await waitFor(restarted, `document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Waiting for you" && document.querySelector('[data-testid="group-rail-row"][data-group-id=${json(pair.id)}] [data-testid="group-rail-line"]')?.textContent?.trim() === "Editor waiting for you" && !document.querySelector('[data-testid="group-chat"] header .coworker-avatar-group__member[data-active="true"]')`, { timeoutMs: 10_000, label: "human approval takes precedence over active group faces and reply wording" });
+  await waitFor(restarted, () => Boolean(document.querySelector('[data-testid="group-waiting-person"][data-speaker="editor"] [data-testid="permission-card"]')) && !document.querySelector('[data-testid="group-working"]'), { timeoutMs: 120_000, label: "quiet inline group permission" });
+  await waitFor(restarted, browserScript((selector) => document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Waiting for you" && document.querySelector(selector)?.textContent?.trim() === "Editor waiting for you" && !document.querySelector('[data-testid="group-chat"] header .coworker-avatar-group__member[data-active="true"]'), [`[data-testid="group-rail-row"][data-group-id=${json(pair.id)}] [data-testid="group-rail-line"]`]), { timeoutMs: 10_000, label: "human approval takes precedence over active group faces and reply wording" });
   const approvalStatus = resultRecord(await invokeCoworker(restarted, "groups.status", { id: pair.id }));
   const approval = Array.isArray(approvalStatus.interactions) ? approvalStatus.interactions.find(isRecord) : null;
   if (!isRecord(approval) || !isRecord(approval.pending) || !Array.isArray(approval.pending.permissions) || !isRecord(approval.pending.permissions[0])) throw new Error("Missing bound group approval.");
   const approvalBinding = { groupId: pair.id, executionId: approval.executionId, slug: approval.slug, threadId: approval.threadId, workspaceId: approval.workspaceId, requestId: approval.pending.permissions[0].id, kind: "permission", reply: "once" };
   expect(approval.threadId).not.toBe(editorPrivate);
   expect(await invokeCoworker(restarted, "coworkers.files.read", { slug: "editor", path: "approval-canary.md" })).toMatchObject({ ok: false });
-  expect(await evalIn(restarted, `document.body.innerText.includes("PRIVATE-QUESTION-CANARY")`)).toBe(false);
+  expect(await evalIn(restarted, () => document.body.innerText.includes("PRIVATE-QUESTION-CANARY"))).toBe(false);
   await fill(restarted, '[data-testid="group-composer"]', "Keep this draft while I decide");
-  await expect.poll(() => evalIn(restarted, `document.activeElement?.getAttribute("data-testid")`)).toBe("group-composer");
+  await expect.poll(() => evalIn(restarted, () => document.activeElement?.getAttribute("data-testid"))).toBe("group-composer");
   await openGroup(restarted, unrelatedGroupId);
-  expect(await evalIn(restarted, `document.querySelectorAll('[data-testid="permission-card"], [data-testid="question-card"]').length`)).toBe(0);
+  expect(await evalIn(restarted, () => document.querySelectorAll('[data-testid="permission-card"], [data-testid="question-card"]').length)).toBe(0);
   expect(await invokeCoworker(restarted, "groups.interactions.reply", { ...approvalBinding, groupId: unrelatedGroupId })).toMatchObject({ ok: false });
   expect(await invokeCoworker(restarted, "groups.interactions.reply", { ...approvalBinding, threadId: editorPrivate })).toMatchObject({ ok: false });
   expect(await readThreadMessages(restarted, "editor", editorPrivate)).toEqual(privateWaiting);
   await openGroup(restarted, pair.id);
-  await waitFor(restarted, `Boolean(document.querySelector('[data-testid="group-waiting-person"][data-speaker="editor"] [data-testid="permission-card"]'))`, { label: "restored group approval before the activity fault" });
+  await waitFor(restarted, () => Boolean(document.querySelector('[data-testid="group-waiting-person"][data-speaker="editor"] [data-testid="permission-card"]')), { label: "restored group approval before the activity fault" });
   // Deny timeline reads without blocking group status. Hold the provider's final
   // reply so delivery never needs that timeline during the fault.
   const approvalTimeline = path.join(String(runtime.coworkersDir), ".groups", String(pair.id), "timeline.jsonl");
@@ -1167,11 +1202,22 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
     await chmod(approvalTimeline, 0o200);
     expect(await invokeCoworker(restarted, "groups.activity", { id: pair.id })).toMatchObject({ ok: false, error: expect.stringContaining("EACCES") });
     await waitForText(restarted, "Live activity could not be refreshed.", { timeoutMs: 10_000 });
-    await waitFor(restarted, `document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Waiting for you"`, { timeoutMs: 10_000, label: "unanswered approval retains waiting-first presentation during the activity fault" });
-    await waitFor(restarted, `(() => { const button = [...document.querySelectorAll('[data-testid="group-waiting-person"][data-speaker="editor"] [data-testid="permission-card"] button')].find((button) => button.textContent.includes("Allow once")); if (!(button instanceof HTMLButtonElement) || button.disabled) return false; button.click(); return true; })()`, { label: "approve the restored group permission card once" });
+    await waitFor(restarted, () => document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Waiting for you", { timeoutMs: 10_000, label: "unanswered approval retains waiting-first presentation during the activity fault" });
+    await waitFor(restarted, () => {
+      const button = [...document.querySelectorAll('[data-testid="group-waiting-person"][data-speaker="editor"] [data-testid="permission-card"] button')].find((button) => (button.textContent ?? "").includes("Allow once"));
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      button.click();
+      return true;
+    }, { label: "approve the restored group permission card once" });
     await expect.poll(() => scripted.held.has("approval"), { timeout: 30_000 }).toBe(true);
-    await waitFor(restarted, `window.__COWORKER__.invoke("groups.status", { id: ${json(pair.id)} }).then((response) => response.ok && response.result.interactions.length === 0)`, { awaitPromise: true, timeoutMs: 10_000, label: "native approval cleared while activity is unavailable" });
-    await waitFor(restarted, `!document.querySelector('[data-testid="group-waiting-person"]') && document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Activity unavailable" && document.querySelector('[data-testid="group-rail-row"][data-group-id=${json(pair.id)}] [data-testid="group-rail-line"]')?.textContent?.trim() === "Activity unavailable" && !document.querySelector('[data-testid="group-chat"] header .coworker-avatar-group__member[data-active="true"]')`, { timeoutMs: 10_000, label: "answered wait disappears despite the ancillary activity failure" });
+    await waitFor(restarted, browserScript(async (id) => {
+      const response = await window.__COWORKER__.invoke("groups.status", { id });
+      if (!response.ok) return false;
+      const status = response.result;
+      if (typeof status !== "object" || status === null || !("interactions" in status) || !Array.isArray(status.interactions)) throw new Error("Group interactions unavailable");
+      return status.interactions.length === 0;
+    }, [pair.id]), { awaitPromise: true, timeoutMs: 10_000, label: "native approval cleared while activity is unavailable" });
+    await waitFor(restarted, browserScript((selector) => !document.querySelector('[data-testid="group-waiting-person"]') && document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Activity unavailable" && document.querySelector(selector)?.textContent?.trim() === "Activity unavailable" && !document.querySelector('[data-testid="group-chat"] header .coworker-avatar-group__member[data-active="true"]'), [`[data-testid="group-rail-row"][data-group-id=${json(pair.id)}] [data-testid="group-rail-line"]`]), { timeoutMs: 10_000, label: "answered wait disappears despite the ancillary activity failure" });
     expect(await invokeCoworker(restarted, "groups.activity", { id: pair.id })).toMatchObject({ ok: false, error: expect.stringContaining("EACCES") });
     expect(await readThreadMessages(restarted, "editor", editorPrivate)).toEqual(privateWaiting);
   } finally {
@@ -1180,7 +1226,7 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   scripted.release("approval");
   evidence.recordAssertionEvidence("Answered group waits clear even when activity cannot refresh", "A real timeline read-permission fault left the pending approval visible. After Allow once, native status cleared the interaction and the header and rail reported Activity unavailable with no waiting card or active face, while timeline reads still failed and the private question was unchanged. Timeline permissions were restored before releasing the held final reply.", true);
   await waitForText(restarted, APPROVAL_REPLY, { timeoutMs: 120_000 });
-  await waitFor(restarted, `!document.querySelector('[data-testid="group-waiting-person"]') && document.querySelector('[data-testid="group-chat"]')?.dataset.live === "false"`, { label: "same group approval execution finished" });
+  await waitFor(restarted, () => !document.querySelector('[data-testid="group-waiting-person"]') && document.querySelector<HTMLElement>('[data-testid="group-chat"]')?.dataset.live === "false", { label: "same group approval execution finished" });
   expect(resultText(await invokeCoworker(restarted, "coworkers.files.read", { slug: "editor", path: "approval-canary.md" }))).toBe("approved\n");
   const approvalMessages = await readThreadMessages(restarted, "editor", String(approval.threadId));
   expect(approvalMessages.filter((message) => message.role === "user")).toHaveLength(1);
@@ -1189,13 +1235,18 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   for (const { prompt, cancel } of [{ prompt: GROUP_QUESTION, cancel: false }, { prompt: GROUP_CANCEL_QUESTION, cancel: true }]) {
     await fill(restarted, '[data-testid="group-composer"]', prompt);
     await clickButton(restarted, "Send");
-    await waitFor(restarted, `Boolean(document.querySelector('[data-testid="group-waiting-person"] [data-testid="question-card"]')) && !document.querySelector('[data-testid="group-working"]')`, { timeoutMs: 120_000, label: "native question inside the group" });
+    await waitFor(restarted, () => Boolean(document.querySelector('[data-testid="group-waiting-person"] [data-testid="question-card"]')) && !document.querySelector('[data-testid="group-working"]'), { timeoutMs: 120_000, label: "native question inside the group" });
     const status = resultRecord(await invokeCoworker(restarted, "groups.status", { id: pair.id }));
     const wait = Array.isArray(status.interactions) ? status.interactions.find(isRecord) : null;
     if (!isRecord(wait) || !isRecord(wait.pending) || !Array.isArray(wait.pending.questions) || !isRecord(wait.pending.questions[0])) throw new Error("Missing bound group question.");
-    if (cancel) await evalIn(restarted, `document.querySelector('[data-testid="group-waiting-person"] > button').click(); true`);
-    else await evalIn(restarted, `[...document.querySelectorAll('[data-testid="group-waiting-person"] [data-testid="question-card"] button')].find((button) => button.textContent.includes("North")).click(); true`);
-    await waitFor(restarted, `!document.querySelector('[data-testid="group-waiting-person"]') && document.querySelector('[data-testid="group-chat"]')?.dataset.live === "false"`, { timeoutMs: 120_000, label: cancel ? "group question cancellation settled" : "native question answer settled" });
+    if (cancel) await click(restarted, '[data-testid="group-waiting-person"] > button');
+    else await evalIn(restarted, () => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="group-waiting-person"] [data-testid="question-card"] button')].find((button) => (button.textContent ?? "").includes("North"));
+      if (!button) throw new Error("Group question North option unavailable");
+      button.click();
+      return true;
+    });
+    await waitFor(restarted, () => !document.querySelector('[data-testid="group-waiting-person"]') && document.querySelector<HTMLElement>('[data-testid="group-chat"]')?.dataset.live === "false", { timeoutMs: 120_000, label: cancel ? "group question cancellation settled" : "native question answer settled" });
     if (!cancel) await waitForText(restarted, "The group chose North.");
     expect(await invokeCoworker(restarted, "groups.interactions.reply", { groupId: pair.id, executionId: wait.executionId, workspaceId: wait.workspaceId, slug: wait.slug, threadId: wait.threadId, kind: "question", requestId: wait.pending.questions[0].id, answers: [["North"]] })).toMatchObject({ ok: false });
   }
@@ -1205,8 +1256,8 @@ test.skipIf(!enabled)(title, { timeout: 1_200_000 }, async ({ evidence }) => {
   expect(groupMessages.filter((message) => message.role === "assistant").flatMap((message) => Array.isArray(message.tools) ? message.tools : [])).toEqual(expect.arrayContaining([expect.objectContaining({ name: "question", status: "completed", output: expect.stringContaining("North") })]));
   expect(await readThreadMessages(restarted, "editor", editorPrivate)).toEqual(privateWaiting);
   await openCoworker(restarted, "editor", "Editor", false);
-  await waitFor(restarted, `document.querySelector('[data-testid="question-card"]')?.textContent.includes("PRIVATE-QUESTION-CANARY")`, { label: "private question remains unanswered" });
-  expect(await evalIn(restarted, `document.body.innerText.includes("Group direction")`)).toBe(false);
+  await waitFor(restarted, () => (document.querySelector('[data-testid="question-card"]')?.textContent ?? "").includes("PRIVATE-QUESTION-CANARY"), { label: "private question remains unanswered" });
+  expect(await evalIn(restarted, () => document.body.innerText.includes("Group direction"))).toBe(false);
   expect(await invokeCoworker(restarted, "turns.cancel", { slug: "editor", threadId: editorPrivate })).toMatchObject({ ok: true });
   evidence.recordAssertionEvidence("Group permission and question replies stay bound to their native execution and do not expose or answer a private question", "The group showed Editor's native cards with a static waiting receipt and no writing indicator. Wrong-group and wrong-session replies were rejected, Allow once wrote one line without another native user message, North answered the next native question, and cancelling the last question rejected a late answer. The simultaneous private question remained unchanged and visible only in Editor's private discussion.", true);
 });

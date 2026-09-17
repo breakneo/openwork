@@ -1,4 +1,4 @@
-import { EVAL_COWORKER_MODEL, clickButton, coworker, evalIn, fill, needs, test, waitFor } from "@openwork/testkit";
+import { EVAL_COWORKER_MODEL, browserScript, clickButton, coworker, evalIn, fill, needs, test, waitFor } from "@openwork/testkit";
 import { expect } from "vitest";
 
 /**
@@ -37,7 +37,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function invokeCoworker(app: App, command: string, payload?: unknown): Promise<unknown> {
-  return evalIn(app, `window.__COWORKER__.invoke(${json(command)}, ${json(payload ?? null)})`, { awaitPromise: true, timeoutMs: 120_000 });
+  return evalIn(app, browserScript((command, payload) => window.__COWORKER__.invoke(command, payload), [command, payload ?? null]), { awaitPromise: true, timeoutMs: 120_000 });
 }
 
 function resultRecord(response: unknown): Record<string, unknown> {
@@ -81,18 +81,28 @@ async function readGroup(app: App, groupId: string): Promise<{ name: string; arc
 
 /** The visible user and assistant texts of one native thread, read through the embedded server's engine proxy. */
 async function readThreadTexts(app: App, workspaceId: string, threadId: string): Promise<Array<{ role: string; text: string }>> {
-  const value = await evalIn(app, `(async () => {
+  const value = await evalIn(app, browserScript(async (workspaceId, threadId) => {
+    const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
     const runtime = (await window.__COWORKER__.invoke("runtime.info")).result;
-    const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(${json(workspaceId)}) + "/opencode/session/" + encodeURIComponent(${json(threadId)}) + "/message", {
+    if (!record(runtime) || typeof runtime.serverUrl !== "string" || typeof runtime.ownerToken !== "string") throw new Error("Runtime unavailable");
+    const response = await fetch(runtime.serverUrl + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/session/" + encodeURIComponent(threadId) + "/message", {
       headers: { Authorization: "Bearer " + runtime.ownerToken },
     });
     if (!response.ok) throw new Error("message list failed: " + response.status);
-    const messages = await response.json();
-    return messages.map((message) => ({
-      role: message.info.role,
-      text: message.parts.filter((part) => part.type === "text" && !part.synthetic).map((part) => part.text ?? "").join(""),
-    }));
-  })()`, { awaitPromise: true, timeoutMs: 60_000 });
+    const messages: unknown = await response.json();
+    if (!Array.isArray(messages)) throw new Error("Native message list unavailable");
+    return messages.map((message: unknown) => {
+      if (!record(message) || !record(message.info) || typeof message.info.role !== "string" || !Array.isArray(message.parts)) throw new Error("Native message unavailable");
+      const text = message.parts.map((part: unknown) => {
+        if (!record(part)) throw new Error("Native message part unavailable");
+        if (part.type !== "text" || part.synthetic) return "";
+        if (part.text == null) return "";
+        if (typeof part.text !== "string") throw new Error("Native message text unavailable");
+        return part.text;
+      }).join("");
+      return { role: message.info.role, text };
+    });
+  }, [workspaceId, threadId]), { awaitPromise: true, timeoutMs: 60_000 });
   if (!Array.isArray(value) || !value.every((entry) => isRecord(entry) && typeof entry.role === "string" && typeof entry.text === "string")) {
     throw new Error(`Unexpected native message list: ${JSON.stringify(value)}`);
   }
@@ -101,19 +111,19 @@ async function readThreadTexts(app: App, workspaceId: string, threadId: string):
 
 /** Every visible line of the group as the person sees it, in order. */
 async function readTimeline(app: App): Promise<Array<{ kind: string; speaker: string; text: string; status: string }>> {
-  const value = await evalIn(app, `[...document.querySelectorAll('[data-testid="group-chat"] [data-message-role], [data-testid="group-chat"] [data-testid="group-status"], [data-testid="group-chat"] [data-testid="group-action-line"]')]
+  const value = await evalIn(app, () => [...document.querySelectorAll('[data-testid="group-chat"] [data-message-role], [data-testid="group-chat"] [data-testid="group-status"], [data-testid="group-chat"] [data-testid="group-action-line"]')]
     .map((node) => ({
       kind: node.getAttribute("data-message-role") ?? node.getAttribute("data-testid") ?? "",
       speaker: node.getAttribute("data-speaker") ?? "",
       text: (node.textContent ?? "").trim(),
       status: node.getAttribute("data-status") ?? "",
-    }))`);
+    })));
   if (!Array.isArray(value) || !value.every(isRecord)) throw new Error("The group timeline was unavailable.");
   return value.map((entry) => ({ kind: String(entry.kind), speaker: String(entry.speaker), text: String(entry.text), status: String(entry.status) }));
 }
 
 async function waitForGroupIdle(app: App, timeoutMs = 300_000): Promise<void> {
-  await waitFor(app, `document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "false"`, { timeoutMs, label: "group turn settled" });
+  await waitFor(app, () => document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "false", { timeoutMs, label: "group turn settled" });
 }
 
 /** The turn at `index` once the group is idle; a turn that did not succeed fails loudly with each speaker's recorded reason. */
@@ -130,28 +140,37 @@ async function settledTurn(app: App, groupId: string, index: number, expectedSta
 
 async function sendGroupMessage(app: App, text: string): Promise<void> {
   await fill(app, '[data-testid="group-composer"]', text);
-  await evalIn(app, `document.querySelector('[data-testid="group-send"]').click(); true`);
-  await waitFor(app, `[...document.querySelectorAll('[data-testid="group-chat"] [data-message-role="user"]')].some((node) => (node.textContent ?? "").includes(${json(text.slice(0, 40))}))`, {
+  await click(app, '[data-testid="group-send"]');
+  await waitFor(app, browserScript((text) => [...document.querySelectorAll('[data-testid="group-chat"] [data-message-role="user"]')].some((node) => (node.textContent ?? "").includes(text)), [text.slice(0, 40)]), {
     timeoutMs: 60_000,
     label: `visible group message ${json(text.slice(0, 40))}`,
   });
 }
 
+async function click(app: App, selector: string): Promise<void> {
+  await evalIn(app, browserScript((selector) => {
+    const element = document.querySelector(selector);
+    if (!(element instanceof HTMLElement)) throw new Error(`Missing control: ${selector}`);
+    element.click();
+    return true;
+  }, [selector]));
+}
+
 async function openGroupFromRail(app: App, groupId: string): Promise<void> {
-  await waitFor(app, `(() => {
-    const row = document.querySelector('[data-testid="group-rail-row"][data-group-id=${json(groupId)}]');
+  await waitFor(app, browserScript((selector) => {
+    const row = document.querySelector(selector);
     if (!(row instanceof HTMLElement)) return false;
     row.click();
     return true;
-  })()`, { timeoutMs: 60_000, label: "group row in the rail" });
-  await waitFor(app, `document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-group-id") === ${json(groupId)}`, { timeoutMs: 30_000, label: "group view" });
+  }, [`[data-testid="group-rail-row"][data-group-id=${json(groupId)}]`]), { timeoutMs: 60_000, label: "group row in the rail" });
+  await waitFor(app, browserScript((groupId) => document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-group-id") === groupId, [groupId]), { timeoutMs: 30_000, label: "group view" });
 }
 
 test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   needs({ optIn: ["OPENWORK_EVAL_E2E_TESTS"], commands: ["opencode"] });
   await using app = await coworker({ name: "group-conversation" });
 
-  await waitFor(app, `(document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker")`, {
+  await waitFor(app, () => (document.body?.innerText ?? "").toLowerCase().includes("welcome to open coworker"), {
     timeoutMs: 120_000,
     label: "Open Coworker welcome screen",
   });
@@ -163,21 +182,21 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   for (const slug of ["scout", "editor"]) {
     await invokeCoworker(app, "coworkers.update", { slug, patch: { model: EVAL_COWORKER_MODEL, modelVariant: "" } });
   }
-  await evalIn(app, "location.reload(); true");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-rail"]')) && document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Ready"`, {
+  await evalIn(app, () => { location.reload(); return true; });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-rail"]')) && document.querySelector('[data-testid="coworker-top-status"]')?.textContent?.trim() === "Ready", {
     timeoutMs: 240_000,
     label: "coworkers ready",
   });
   const names: Record<string, string> = { scout: "Scout", editor: "Editor" };
 
   // --- A group of two from the rail, named from the roles.
-  await evalIn(app, `document.querySelector('[data-testid="new-group-chat"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="new-group-sheet"]'))`, { timeoutMs: 30_000, label: "new group sheet" });
-  const preselected = await evalIn(app, `[...document.querySelectorAll('[data-testid="new-group-member"][aria-checked="true"]')].map((node) => node.getAttribute("data-slug"))`);
+  await click(app, '[data-testid="new-group-chat"]');
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="new-group-sheet"]')), { timeoutMs: 30_000, label: "new group sheet" });
+  const preselected = await evalIn(app, () => [...document.querySelectorAll('[data-testid="new-group-member"][aria-checked="true"]')].map((node) => node.getAttribute("data-slug")));
   expect(preselected).toEqual(["editor", "scout"]);
   await clickButton(app, "Create group chat");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="group-chat"]')) && Boolean(document.querySelector('[data-testid="group-chat-empty"]'))`, { timeoutMs: 30_000, label: "empty group view" });
-  const groupId = String(await evalIn(app, `document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-group-id") ?? ""`));
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="group-chat"]')) && Boolean(document.querySelector('[data-testid="group-chat-empty"]')), { timeoutMs: 30_000, label: "empty group view" });
+  const groupId = String(await evalIn(app, () => document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-group-id") ?? ""));
   expect(groupId).toMatch(/^grp_/);
   // --- @everyone: both answer in the recorded speaking order.
   await sendGroupMessage(app, ROLL_CALL);
@@ -256,10 +275,10 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   // --- One coworker's model is unavailable: the other still answers, the failure names the fix, and Retry
   // (after the fix) asks only that coworker — with the reply that already landed in its prompt.
   await invokeCoworker(app, "coworkers.update", { slug: "editor", patch: { model: "missing-provider/missing-model", modelVariant: "" } });
-  await evalIn(app, "location.reload(); true");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-rail"]'))`, { timeoutMs: 120_000, label: "app after the model change" });
+  await evalIn(app, () => { location.reload(); return true; });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-rail"]')), { timeoutMs: 120_000, label: "app after the model change" });
   await openGroupFromRail(app, groupId);
-  await waitFor(app, `[...document.querySelectorAll('[data-testid="group-chat"] [data-message-role="assistant"]')].length >= 5`, { timeoutMs: 60_000, label: "timeline back after reload" });
+  await waitFor(app, () => [...document.querySelectorAll('[data-testid="group-chat"] [data-message-role="assistant"]')].length >= 5, { timeoutMs: 60_000, label: "timeline back after reload" });
   await sendGroupMessage(app, MODEL_CHECK);
   const failedTurn = await settledTurn(app, groupId, 3, "partial");
   const failedSpeaker = failedTurn.speakers.find((speaker) => speaker.slug === "editor");
@@ -267,7 +286,7 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   expect(failedSpeaker?.status, JSON.stringify(failedTurn.speakers)).toBe("failed");
   expect(fineSpeaker?.status, JSON.stringify(failedTurn.speakers)).toBe("succeeded");
   expect(failedSpeaker?.error).toContain("missing-provider/missing-model");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="group-speaker-retry"][data-speaker="editor"]'))`, { timeoutMs: 30_000, label: "Retry on Editor's failure line" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="group-speaker-retry"][data-speaker="editor"]')), { timeoutMs: 30_000, label: "Retry on Editor's failure line" });
   timeline = await readTimeline(app);
   const failureLine = timeline.find((line) => line.kind === "group-status" && line.status === "failed" && line.speaker === "editor");
   expect(failureLine?.text).toContain("Editor's AI model is not available.");
@@ -275,15 +294,15 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   expect(failureLine?.text).toContain("Choose AI model");
   expect(failureLine?.text).not.toMatch(/engine|APIError|stack/i);
   expect(timeline.filter((line) => line.kind === "assistant").at(-1)?.speaker).toBe("scout");
-  expect(await evalIn(app, `Boolean(document.querySelector('[data-testid="group-turn-continue"]'))`)).toBe(false);
+  expect(await evalIn(app, () => Boolean(document.querySelector('[data-testid="group-turn-continue"]')))).toBe(false);
 
   await invokeCoworker(app, "coworkers.update", { slug: "editor", patch: { model: EVAL_COWORKER_MODEL, modelVariant: "" } });
-  await evalIn(app, "location.reload(); true");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-rail"]'))`, { timeoutMs: 120_000, label: "app after the model fix" });
+  await evalIn(app, () => { location.reload(); return true; });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-rail"]')), { timeoutMs: 120_000, label: "app after the model fix" });
   await openGroupFromRail(app, groupId);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="group-speaker-retry"][data-speaker="editor"]'))`, { timeoutMs: 60_000, label: "Retry for Editor" });
-  await evalIn(app, `document.querySelector('[data-testid="group-speaker-retry"][data-speaker="editor"]').click(); true`);
-  await waitFor(app, `document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "true"`, { timeoutMs: 30_000, label: "Retry started" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="group-speaker-retry"][data-speaker="editor"]')), { timeoutMs: 60_000, label: "Retry for Editor" });
+  await click(app, '[data-testid="group-speaker-retry"][data-speaker="editor"]');
+  await waitFor(app, () => document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "true", { timeoutMs: 30_000, label: "Retry started" });
   const retriedTurn = await settledTurn(app, groupId, 3);
   expect(retriedTurn.speakers.map((speaker) => speaker.status)).toEqual(retriedTurn.speakers.map(() => "succeeded"));
   group = await readGroup(app, groupId);
@@ -307,7 +326,7 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
 
   // --- Stop all while the first coworker is still counting: the rest are marked stopped, and Continue is offered.
   await sendGroupMessage(app, SLOW_STOP);
-  await waitFor(app, `document.querySelector('[data-testid="group-working"]')?.getAttribute("data-phase") === "running"`, { timeoutMs: 120_000, label: "a coworker replying" });
+  await waitFor(app, () => document.querySelector('[data-testid="group-working"]')?.getAttribute("data-phase") === "running", { timeoutMs: 120_000, label: "a coworker replying" });
   await clickButton(app, "Stop all");
   const stoppedTurn = await settledTurn(app, groupId, 4, "");
   expect(["stopped", "partial"], `stopped turn: ${JSON.stringify(stoppedTurn.speakers)}`).toContain(stoppedTurn.status);
@@ -317,7 +336,7 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   timeline = await readTimeline(app);
   const stopLines = timeline.filter((line) => line.kind === "group-status" && line.status === "stopped");
   expect(stopLines.map((line) => line.text)).toEqual([`Stopped before ${stoppedSpeakers.map((speaker) => names[speaker.slug]).join(" and ")} replied.`]);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="group-turn-continue"]'))`, { timeoutMs: 30_000, label: "Continue offered" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="group-turn-continue"]')), { timeoutMs: 30_000, label: "Continue offered" });
   const stoppedBubblesBefore = timeline.filter((line) => line.kind === "assistant").length;
 
   evidence.recordAssertionEvidence(
@@ -327,8 +346,8 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   );
 
   // --- Continue finishes the stopped turn with the same message; nobody who replied is asked again.
-  await evalIn(app, `document.querySelector('[data-testid="group-turn-continue"]').click(); true`);
-  await waitFor(app, `document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "true"`, { timeoutMs: 30_000, label: "Continue started" });
+  await click(app, '[data-testid="group-turn-continue"]');
+  await waitFor(app, () => document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "true", { timeoutMs: 30_000, label: "Continue started" });
   const continuedTurn = await settledTurn(app, groupId, 4);
   expect(continuedTurn.speakers.map((speaker) => speaker.status)).toEqual(continuedTurn.speakers.map(() => "succeeded"));
   timeline = await readTimeline(app);
@@ -337,7 +356,7 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   const continuedReplies = continuedBubbles.slice(-stoppedSpeakers.length);
   expect(continuedReplies.map((line) => line.speaker).sort()).toEqual(stoppedSpeakers.map((speaker) => speaker.slug).sort());
   for (const line of continuedReplies) expect(line.text).toMatch(/\d/);
-  expect(await evalIn(app, `Boolean(document.querySelector('[data-testid="group-turn-continue"]'))`)).toBe(false);
+  expect(await evalIn(app, () => Boolean(document.querySelector('[data-testid="group-turn-continue"]')))).toBe(false);
 
   evidence.recordAssertionEvidence(
     "Continue lets the stopped coworkers reply to the same message and only them",
@@ -347,12 +366,12 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
 
   // --- A reload mid-turn: the timeline is kept, the cut-off turn is settled with one quiet line, and Continue finishes it.
   await sendGroupMessage(app, SLOW_RELOAD);
-  await waitFor(app, `document.querySelector('[data-testid="group-working"]')?.getAttribute("data-phase") === "running"`, { timeoutMs: 120_000, label: "a coworker replying before reload" });
+  await waitFor(app, () => document.querySelector('[data-testid="group-working"]')?.getAttribute("data-phase") === "running", { timeoutMs: 120_000, label: "a coworker replying before reload" });
   const bubblesBeforeReload = (await readTimeline(app)).filter((line) => line.kind === "assistant").length;
-  await evalIn(app, "location.reload(); true");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="coworker-rail"]'))`, { timeoutMs: 120_000, label: "app after reload" });
+  await evalIn(app, () => { location.reload(); return true; });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="coworker-rail"]')), { timeoutMs: 120_000, label: "app after reload" });
   await openGroupFromRail(app, groupId);
-  await waitFor(app, `[...document.querySelectorAll('[data-testid="group-status"]')].some((node) => (node.textContent ?? "").includes("Stopped when the app closed"))`, { timeoutMs: 60_000, label: "interrupted turn settled" });
+  await waitFor(app, () => [...document.querySelectorAll('[data-testid="group-status"]')].some((node) => (node.textContent ?? "").includes("Stopped when the app closed")), { timeoutMs: 60_000, label: "interrupted turn settled" });
   group = await readGroup(app, groupId);
   const interruptedTurn = group.turns[5];
   if (!interruptedTurn) throw new Error("The interrupted turn was not recorded.");
@@ -365,9 +384,9 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   expect(timeline.some((line) => line.text.includes("ROLL CALL"))).toBe(true);
   const interruptedLine = timeline.find((line) => line.status === "interrupted");
   expect(interruptedLine?.text).toMatch(/^Stopped when the app closed before (Scout|Editor|Scout and Editor|Editor and Scout) replied\./);
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="group-turn-continue"]'))`, { timeoutMs: 30_000, label: "Continue after reload" });
-  await evalIn(app, `document.querySelector('[data-testid="group-turn-continue"]').click(); true`);
-  await waitFor(app, `document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "true"`, { timeoutMs: 30_000, label: "Continue after reload started" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="group-turn-continue"]')), { timeoutMs: 30_000, label: "Continue after reload" });
+  await click(app, '[data-testid="group-turn-continue"]');
+  await waitFor(app, () => document.querySelector('[data-testid="group-chat"]')?.getAttribute("data-live") === "true", { timeoutMs: 30_000, label: "Continue after reload started" });
   await settledTurn(app, groupId, 5);
   timeline = await readTimeline(app);
   const recoveredReplies = timeline.filter((line) => line.kind === "assistant").slice(-interruptedSpeakers.length);
@@ -381,23 +400,28 @@ test.skipIf(!enabled)(title, { timeout: 1_500_000 }, async ({ evidence }) => {
   );
 
   // --- Rename and archive from the header's overflow.
-  await evalIn(app, `document.querySelector('[aria-label="Group chat options"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[role="menu"][aria-label="Group chat options"]'))`, { timeoutMs: 10_000, label: "group options menu" });
+  await click(app, '[aria-label="Group chat options"]');
+  await waitFor(app, () => Boolean(document.querySelector('[role="menu"][aria-label="Group chat options"]')), { timeoutMs: 10_000, label: "group options menu" });
   await clickButton(app, "Rename");
-  await waitFor(app, `Boolean(document.querySelector('[data-testid="group-name-input"]'))`, { timeoutMs: 10_000, label: "rename field" });
+  await waitFor(app, () => Boolean(document.querySelector('[data-testid="group-name-input"]')), { timeoutMs: 10_000, label: "rename field" });
   await fill(app, '[data-testid="group-name-input"]', "Launch desk");
-  await evalIn(app, `document.querySelector('[data-testid="group-name-input"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); true`);
-  await waitFor(app, `document.querySelector('[data-testid="group-name"]')?.textContent?.trim() === "Launch desk"`, { timeoutMs: 30_000, label: "renamed group" });
+  await evalIn(app, () => {
+    const input = document.querySelector('[data-testid="group-name-input"]');
+    if (!(input instanceof HTMLInputElement)) throw new Error("Group name input unavailable");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    return true;
+  });
+  await waitFor(app, () => document.querySelector('[data-testid="group-name"]')?.textContent?.trim() === "Launch desk", { timeoutMs: 30_000, label: "renamed group" });
   expect((await readGroup(app, groupId)).name).toBe("Launch desk");
-  await evalIn(app, `document.querySelector('[aria-label="Group chat options"]').click(); true`);
-  await waitFor(app, `Boolean(document.querySelector('[role="menu"][aria-label="Group chat options"]'))`, { timeoutMs: 10_000, label: "group options menu again" });
+  await click(app, '[aria-label="Group chat options"]');
+  await waitFor(app, () => Boolean(document.querySelector('[role="menu"][aria-label="Group chat options"]')), { timeoutMs: 10_000, label: "group options menu again" });
   await clickButton(app, "Archive");
-  await waitFor(app, `!document.querySelector('[data-testid="group-chat"]') && !document.querySelector('[data-testid="group-rail-row"][data-group-id=${json(groupId)}]')`, { timeoutMs: 30_000, label: "group archived" });
+  await waitFor(app, browserScript((selector) => !document.querySelector('[data-testid="group-chat"]') && !document.querySelector(selector), [`[data-testid="group-rail-row"][data-group-id=${json(groupId)}]`]), { timeoutMs: 30_000, label: "group archived" });
   const archived = await readGroup(app, groupId);
   expect(archived.archivedAt).toEqual(expect.any(Number));
   expect(archived.turns.length).toBe(6);
   const storedTimeline = await invokeCoworker(app, "groups.readTimeline", { id: groupId });
-  expect(Array.isArray(isRecord(storedTimeline) ? storedTimeline.result : null) ? (storedTimeline as { result: unknown[] }).result.length : 0).toBeGreaterThan(10);
+  expect(isRecord(storedTimeline) && Array.isArray(storedTimeline.result) ? storedTimeline.result.length : 0).toBeGreaterThan(10);
 
   evidence.recordAssertionEvidence(
     "Rename and archive keep the group's history readable",

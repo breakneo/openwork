@@ -4,7 +4,7 @@ import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { browserScript, clickButton, coworker, evalIn, eventually, fill, needs, resolveHost, screenshot, spec, test, waitFor, waitForText, type Probe, type User } from "@openwork/testkit";
 import { expect, onTestFinished } from "vitest";
-import { clickCoworkerControl, isolatedFreshStartCoworker, isolatedOnboardingCoworker, pressKey } from "../worlds/coworker.ts";
+import { clickCoworkerControl, isolatedFreshStartCoworker, isolatedOnboardingCoworker, sourceSharedCoworker, pressKey } from "../worlds/coworker.ts";
 
 type OnboardingWorld = Awaited<ReturnType<typeof isolatedOnboardingCoworker>>;
 
@@ -1259,6 +1259,35 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
     "The created assignment stored a 120-minute interval, 09:00-18:00 window, weekdays, and maximum of four runs per day, with a next due time.",
     true,
   );
+});
+
+const sourceShared = spec.world(sourceSharedCoworker, {
+  resources: { surfaces: ["desktop"], services: ["mock"], nativeReason: "Verify source Coworker main-process startup, verified native profile, team creation and native conversation through the actual Electron bridge." },
+  needs: { env: ["OPENWORK_EVAL_ELECTRON_BINARY", "OPENWORK_COWORKER_NATIVE_SOURCE_MANIFEST"], optIn: ["OPENWORK_EVAL_COWORKER_LOOPBACK_ONLY"] },
+  timeout: 240_000,
+});
+
+sourceShared("COWORKER-SHARED source workspace starts and completes a follow-up after setup refresh", async ({ world, user, probe }) => {
+  await user.reload();
+  await user.see({ testId: "coworker-rail" }, { timeoutMs: 120_000 });
+  await user.click({ role: "button", label: "Alpha" });
+  const before = await world.configBytes();
+  for (const [index, text] of ["Source startup request", "Source follow-up request"].entries()) {
+    await user.type({ role: "textbox", label: "Message Alpha" }, text);
+    await user.press("Enter");
+    const observed = await probe.eventually(async () => ({ calls: world.model.requests(), ui: await world.ui() }), { within: 90_000, label: "the UI sends exactly one native request", until: ({ calls }) => calls.length === index + 1 }).catch(async (error: unknown) => {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\n${await world.diagnostics()}`);
+    });
+    const call = observed.calls[index];
+    if (!call) throw new Error("The native request was not observed.");
+    expect(call.userTexts).toContain(text);
+    if (index > 0) expect(call.userTexts).toContain("Source startup request");
+    for (const _chunk of call.chunks) world.model.release(call.id);
+    world.model.finish(call.id);
+    await probe.eventually(world.ui, { within: 30_000, label: "the native reply is visible in the app", until: (ui) => ui.text.includes(call.chunks.at(-1) ?? "missing") });
+  }
+  expect(world.model.errors()).toEqual([]);
+  expect(await world.configBytes()).toBe(before);
 });
 
 const onboarding = spec.world(isolatedOnboardingCoworker, {

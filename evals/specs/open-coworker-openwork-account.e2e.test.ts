@@ -1153,9 +1153,10 @@ test.skipIf(!enabled)(title, { timeout: 900_000 }, async ({ evidence, skip }) =>
     voiceCompletion.finish = undefined;
     await fill(app, 'textarea[aria-label="Message Scout"]', `Another voice reply check, ${stopPlayback ? "stop" : "finish"} playback.`);
     await clickCoworkerControl(app, { role: "button", label: /^Send$/ });
-    await eventually(() => Boolean(voiceCompletion.finish), { within: 60_000, label: "new model stream awaits completion" });
+    const finish = await eventually(() => voiceCompletion.finish, { within: 60_000, label: "new model stream awaits completion" });
     expect(speeches).toHaveLength(requestsBefore);
-    voiceCompletion.finish?.();
+    if (!finish) throw new Error("The model witness has no pending final reply");
+    finish();
     await waitFor(app, browserScript((sentence) => document.querySelector('[data-testid="voice-panel"]')?.getAttribute("data-phase") === "speaking" && document.querySelector('[data-testid="voice-caption"]')?.textContent?.includes(sentence), [VOICE_SENTENCES[0]]), { timeoutMs: 30_000, label: "first sentence decoded and captioned" });
     await eventually(async () => (await capture.read()).playback[firstSource]?.progress ?? 0, { within: 5_000, until: (seconds) => seconds > 0.2, label: "real AudioContext clock advances during playback" });
     const playing = (await capture.read()).playback[firstSource];
