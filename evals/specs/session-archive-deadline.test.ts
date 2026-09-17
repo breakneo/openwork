@@ -5,7 +5,7 @@ import { needs, test } from "@openwork/testkit";
 
 const appDirectory = fileURLToPath(new URL("../../apps/app/", import.meta.url));
 
-test("archive deadlines settle stalled reads and uncertain writes, preserve caller cancellation, and retain pin and working-session contracts", { timeout: 120_000 }, async ({ evidence }) => {
+test("archive deadlines settle stalled reads and uncertain writes, preserve caller cancellation, and retain pin and working-session contracts", async ({ evidence }) => {
   needs({ commands: ["bun"], placement: "local" });
   const files = [
     "tests/session-archive-agent-contract.test.tsx",
@@ -20,9 +20,8 @@ test("archive deadlines settle stalled reads and uncertain writes, preserve call
     env: { ...process.env, NO_COLOR: "1" },
   });
   const output = result.stdout + result.stderr;
-  // Keep the original coverage floor while allowing upstream regression cases.
-  const passedCount = Number(output.match(/\b(\d+) pass\b/)?.[1]);
-  const passed = result.error === undefined && result.status === 0 && passedCount >= 117
+  // Upstream added seven transport cases: three history GETs, one override, two IPC cancellations, and one POST guard.
+  const passed = result.error === undefined && result.status === 0 && /\b117 pass/.test(output)
     && /\b0 fail/.test(output) && !/\b[1-9]\d* (skip|todo|filtered out)/.test(output);
   evidence.recordAssertionEvidence(
     "Bounded preflight never sends a late PATCH; uncertain PATCH is not reported as cancellation; holds and busy state recover; caller signals and pin state survive",
@@ -32,4 +31,4 @@ test("archive deadlines settle stalled reads and uncertain writes, preserve call
   expect(result.error).toBeUndefined();
   expect(result.status, output).toBe(0);
   expect(passed, output).toBe(true);
-});
+}, 120_000);

@@ -1837,14 +1837,8 @@ describe("cloud provider sync gateway", () => {
     denProviders = [];
     expect(await runSync(base, "provider-removed")).toEqual({ status: "applied" });
     expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config)).lpr_test).toBeUndefined();
-    // This witness has no readable session inventory. Retain removal work for
-    // retry even after cleanup releases provider and credential ownership.
     expect(await readOpenworkWorkspaceConfig(config, "__cloud_provider_ownership__"))
-      .toEqual({ providerIds: [], envHashes: {}, pendingModelRemovals: {
-        ws_1: [["model-a", "Model A"], ["model-z", "Model Z"], ["model-b", "Model B"]].map(([modelId, displayName]) => ({
-          providerId: "lpr_test", providerName: "Test provider", modelId, displayName, variant: null,
-        })),
-      } });
+      .toEqual({ providerIds: [], envHashes: {} });
     const removedStatusResponse = await fetch(`${base}/cloud-provider-sync/status`, { headers: clientHeaders() });
     expect((await responseRecord(removedStatusResponse, "removed status")).providers).toEqual([]);
 
@@ -1858,8 +1852,6 @@ describe("cloud provider sync gateway", () => {
     )).toBeUndefined();
     const clearedStatusResponse = await fetch(`${base}/cloud-provider-sync/status`, { headers: clientHeaders() });
     expect(await responseRecord(clearedStatusResponse, "cleared status")).toEqual({
-      affectedSessions: [],
-      modelRemovalPending: false,
       hasSession: false,
       lastRun: null,
       providers: [],

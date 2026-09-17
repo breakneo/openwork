@@ -137,7 +137,7 @@ import { getModelBehaviorSummary, nextModelBehaviorValue, previousModelBehaviorV
 import { computeModelAvailability, createUnavailableConfirmationGate, type ModelAvailability } from "@/react-app/domains/session/surface/model-availability";
 import { useSessionFindStore } from "@/react-app/domains/session/surface/find-store";
 import { useModelPicker } from "@/react-app/domains/session/modals/use-model-picker";
-import { effectiveSessionModelSelection, sessionCommandModelFields, sessionModelSelectionFromEngine, getSessionModelSelection, useSessionModelStore } from "@/react-app/domains/session/surface/session-model-store";
+import { getSessionModelSelection, useSessionModelStore } from "@/react-app/domains/session/surface/session-model-store";
 import { getSessionAgentSelection, useSessionAgentSelection, useSessionAgentStore } from "@/react-app/domains/session/surface/session-mode-memory";
 import { useWorkbenchStore } from "@/react-app/domains/session/chat/workbench-store";
 import { resolveWorkbenchPaneEndpoint } from "@/react-app/domains/session/chat/pane-runtime";
@@ -199,8 +199,6 @@ import {
   testRemoteWorkspaceConnection,
 } from "@/react-app/domains/workspace/remote-workspace-diagnostics";
 import { useShareWorkspaceState } from "@/react-app/domains/workspace/share-workspace-state";
-import type { OpenworkSessionModel } from "@openwork/types/openwork-affordance";
-import { UnavailableModelRepick } from "@/react-app/domains/session/modals/unavailable-model-repick";
 import { ModelPickerModal, MODEL_PICKER_UNAVAILABLE_SUBTITLE } from "@/react-app/domains/session/modals/model-picker-modal";
 import { CommandPalette, type PaletteItem, type SessionGroupOption } from "./command-palette";
 import { buildCommandPaletteSessions } from "./command-palette-sessions";
@@ -1112,7 +1110,7 @@ export function SessionRoute() {
   // the picker edits the global default (e.g. opened from the new-providers
   // toast). Composer "All models" carries the session id on the open event.
   const [modelPickerSessionId, setModelPickerSessionId] = useState<string | null>(null);
-  const modelPickerLocalSelection = useSessionModelStore((state) =>
+  const modelPickerSelection = useSessionModelStore((state) =>
     modelPickerSessionId ? state.bySessionId[modelPickerSessionId] ?? null : null,
   );
   useEffect(() => {
@@ -1207,16 +1205,9 @@ export function SessionRoute() {
   const selectedSessionModelSelection = useSessionModelStore((state) =>
     (selectedSessionId ? state.bySessionId[selectedSessionId] ?? null : null),
   );
-  const engineModelSelection = useCallback((sessionId: string) => sessionModelSelectionFromEngine(
-    Object.values(sessionsByWorkspaceId).flat().find((session) => session.id === sessionId),
-  ), [sessionsByWorkspaceId]);
-  const activeEngineSelection = selectedSessionId ? engineModelSelection(selectedSessionId) : null;
-  const fallbackModelSelection = local.prefs.defaultModel ? { model: local.prefs.defaultModel, variant: local.prefs.modelVariant ?? null } : null;
-  const modelPickerSelection = effectiveSessionModelSelection(modelPickerLocalSelection, modelPickerSessionId ? engineModelSelection(modelPickerSessionId) : null, fallbackModelSelection);
-  const activeComposerSelection = effectiveSessionModelSelection(selectedSessionModelSelection, activeEngineSelection, fallbackModelSelection);
-  const activeComposerModel = activeComposerSelection?.model ?? null;
+  const activeComposerModel = selectedSessionModelSelection?.model ?? local.prefs.defaultModel ?? null;
   const activeComposerAvailability = resolveModelAvailability(activeComposerModel);
-  const activeComposerTargetsSession = Boolean((selectedSessionModelSelection || activeEngineSelection) && selectedSessionId);
+  const activeComposerTargetsSession = Boolean(selectedSessionModelSelection && selectedSessionId);
   const selectedModelUnavailableKey = activeComposerAvailability.status === "unavailable" && activeComposerModel
     ? `${activeComposerTargetsSession ? selectedSessionId : "default"}:${activeComposerModel.providerID}:${activeComposerModel.modelID}`
     : null;
@@ -1454,7 +1445,6 @@ export function SessionRoute() {
     // local server with the local `rem_*` id.
     return {
       workspaceRoot: selectedWorkspaceRoot,
-      engineModelSelection,
       draftScope: sessionDraftScope,
       developerMode,
       modelLabel,
@@ -1515,9 +1505,8 @@ export function SessionRoute() {
         // Per-conversation model memory: a session that picked its own model
         // sends with it (and its variant) instead of the global default.
         const sessionModelSelection = getSessionModelSelection(targetSessionId);
-        const engineSelection = engineModelSelection(targetSessionId);
-        const sendModel = sessionModelSelection?.model ?? engineSelection?.model ?? local.prefs.defaultModel;
-        const sendVariant = sessionModelSelection ? sessionModelSelection.variant : engineSelection ? engineSelection.variant : modelVariantValue;
+        const sendModel = sessionModelSelection?.model ?? local.prefs.defaultModel;
+        const sendVariant = sessionModelSelection ? sessionModelSelection.variant : modelVariantValue;
         const sendAgent = agent === undefined ? getSessionAgentSelection(targetSessionId, newTaskAgent) : agent;
         // Send-time validation targets the exact provider/model identity this
         // conversation displays and will submit — not the global default.
@@ -1600,7 +1589,6 @@ export function SessionRoute() {
                     messageID: draft.messageId,
                     command: draft.command.name,
                     arguments: draft.command.arguments,
-                    ...sessionCommandModelFields(sendModel, sendVariant),
                   });
                   if (result.error) {
                     throw new Error(serializeSDKError(result.error));
@@ -1624,7 +1612,7 @@ export function SessionRoute() {
                   parts,
                   model: sendModel ?? undefined,
                   agent: sendAgent ?? undefined,
-                  variant: sendVariant ?? "default",
+                  ...(sendVariant ? { variant: sendVariant } : {}),
                   system,
                 });
                 if (result.error) {
@@ -1633,7 +1621,7 @@ export function SessionRoute() {
                 }
                 // Remember what this conversation used last so returning to it
                 // (or splitting it beside another session) keeps its own model.
-                if (sendModel && getQueuedSendGeneration(targetSessionId) === generation && getSessionModelSelection(targetSessionId) === sessionModelSelection) {
+                if (sendModel && getQueuedSendGeneration(targetSessionId) === generation) {
                   useSessionModelStore.getState().setModel(targetSessionId, sendModel, sendVariant ?? null);
                 }
               },
@@ -1754,7 +1742,6 @@ export function SessionRoute() {
         : undefined,
     };
   }, [
-    engineModelSelection,
     client,
     modelPicker.compactOpen,
     handleOpenExtensions,
@@ -1893,9 +1880,8 @@ export function SessionRoute() {
           return { outcome: "cancelled", reason: "context_changed" };
         }
         const sessionModelSelection = getSessionModelSelection(targetSessionId);
-        const engineSelection = engineModelSelection(targetSessionId);
-        const sendModel = sessionModelSelection?.model ?? engineSelection?.model ?? local.prefs.defaultModel;
-        const sendVariant = sessionModelSelection ? sessionModelSelection.variant : engineSelection ? engineSelection.variant : modelVariantValue;
+        const sendModel = sessionModelSelection?.model ?? local.prefs.defaultModel;
+        const sendVariant = sessionModelSelection ? sessionModelSelection.variant : modelVariantValue;
         const sendAgent = agent === undefined ? getSessionAgentSelection(targetSessionId, newTaskAgent) : agent;
         return submitWithCloudMcpReadiness({
           skipGate: true,
@@ -1958,7 +1944,6 @@ export function SessionRoute() {
                     messageID: draft.messageId,
                     command: draft.command.name,
                     arguments: draft.command.arguments,
-                    ...sessionCommandModelFields(sendModel, sendVariant),
                   });
                   if (result.error) throw new Error(serializeSDKError(result.error));
                   return;
@@ -1979,14 +1964,14 @@ export function SessionRoute() {
                   parts,
                   model: sendModel ?? undefined,
                   agent: sendAgent ?? undefined,
-                  variant: sendVariant ?? "default",
+                  ...(sendVariant ? { variant: sendVariant } : {}),
                   system,
                 });
                 if (result.error) {
                   if (isPromptAdmissionUnknown(result.error)) throw result.error;
                   throw new Error(serializeSDKError(result.error));
                 }
-                if (sendModel && getQueuedSendGeneration(targetSessionId) === generation && getSessionModelSelection(targetSessionId) === sessionModelSelection) {
+                if (sendModel && getQueuedSendGeneration(targetSessionId) === generation) {
                   useSessionModelStore.getState().setModel(targetSessionId, sendModel, sendVariant ?? null);
                 }
               },
@@ -2658,7 +2643,7 @@ export function SessionRoute() {
     await archiveSession(sessionId, archived);
   };
 
-  const { modelActions, availableWorkspaceModels } = useSessionControlActions({
+  useSessionControlActions({
     workspaces,
     sessionsByWorkspaceId,
     selectedWorkspaceId,
@@ -2676,19 +2661,6 @@ export function SessionRoute() {
     refreshRouteState,
     archiveSession,
   });
-
-  const [repickTarget, setRepickTarget] = useState<{ sessionId: string; workspaceId: string; from: OpenworkSessionModel } | null>(null);
-  useEffect(() => {
-    if (!modelPicker.open || !modelPickerSessionId || repickTarget) return;
-    const selection = modelPickerSelection ?? engineModelSelection(modelPickerSessionId);
-    if (!selection || resolveModelAvailability(selection.model).status !== "unavailable") return;
-    const workspace = workspaces.find((entry) => sessionsByWorkspaceId[entry.id]?.some((session) => session.id === modelPickerSessionId));
-    if (!workspace) return;
-    setRepickTarget({ sessionId: modelPickerSessionId, workspaceId: workspace.id, from: {
-      providerId: selection.model.providerID, modelId: selection.model.modelID, variant: selection.variant,
-      displayName: providerCatalog[selection.model.providerID]?.[selection.model.modelID]?.name || resolveModelDisplayName(selection.model.modelID),
-    } });
-  }, [modelPicker.open, modelPickerSessionId, modelPickerSelection, engineModelSelection, repickTarget, resolveModelAvailability, workspaces, sessionsByWorkspaceId, providerCatalog]);
 
   const seedUnavailableModelControlAction = useMemo<OpenworkControlAction | null>(() => {
     if (!import.meta.env.DEV) return null;
@@ -2910,7 +2882,9 @@ export function SessionRoute() {
     [sessionsByWorkspaceId, selectedWorkspaceId, workspaces],
   );
 
-  const paletteSessionModelSelection = activeComposerSelection;
+  const paletteSessionModelSelection = selectedSessionId
+    ? getSessionModelSelection(selectedSessionId)
+    : null;
   const paletteSelectedModel = paletteSessionModelSelection?.model
     ?? local.prefs.defaultModel
     ?? undefined;
@@ -2939,7 +2913,6 @@ export function SessionRoute() {
       const sessionStore = useSessionModelStore.getState();
       sessionStore.setModel(targetSessionId, next, explicitBehavior ? behavior.value : undefined);
       if (explicitBehavior) sessionStore.setVariant(targetSessionId, behavior.value);
-      return;
     }
     local.setPrefs((previous) => ({
       ...previous,
@@ -3993,26 +3966,8 @@ export function SessionRoute() {
       fetchMessages={sessionSearchFetcher}
       onOpenSession={(workspaceId, sessionId) => navigateToWorkspaceSession(workspaceId, sessionId)}
     />
-    {repickTarget && <UnavailableModelRepick
-      key={`${repickTarget.workspaceId}:${repickTarget.sessionId}`}
-      {...repickTarget}
-      workspaceDefault={local.prefs.defaultModel ? { providerId: local.prefs.defaultModel.providerID, modelId: local.prefs.defaultModel.modelID, variant: null } : null}
-      loadModels={async () => {
-        const workspace = workspaces.find((entry) => entry.id === repickTarget.workspaceId);
-        if (!workspace) throw new Error("Workspace unavailable");
-        return availableWorkspaceModels(workspace);
-      }}
-      loadRemovedModels={async () => {
-        const endpoint = endpointForWorkspace(workspaces.find((entry) => entry.id === repickTarget.workspaceId));
-        if (!endpoint) return [];
-        const status = await endpoint.client.getCloudProviderSyncStatus();
-        return (status.affectedSessions ?? []).filter((impact) => impact.workspaceId === endpoint.workspaceId).flatMap((impact) => impact.removedModels);
-      }}
-      modelActions={modelActions}
-      onClose={() => { setRepickTarget(null); setModelPickerSessionId(null); modelPicker.setOpen(false); }}
-    />}
     <ModelPickerModal
-      open={modelPicker.open && !repickTarget}
+      open={modelPicker.open}
       options={modelPicker.options}
       organizationModelsEmpty={organizationModelsEmpty}
       organizationModelsSettingsUrl={organizationModelsSettingsUrl}
@@ -4052,7 +4007,6 @@ export function SessionRoute() {
           store.setModel(modelPickerSessionId, model, value);
           // Same-model selection preserves settings; explicit effort edits do not.
           store.setVariant(modelPickerSessionId, value);
-          return;
         }
         local.setPrefs((previous) => ({ ...previous, modelVariant: value }));
       }}

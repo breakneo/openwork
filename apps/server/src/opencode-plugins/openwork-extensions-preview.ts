@@ -9,7 +9,6 @@ import { sessionActivityFrom, type SessionActivity } from "./session-activity.js
 import { visualizationSchema } from "@openwork/types/visualization";
 import {
   openworkSessionModelSchema,
-  openworkSessionModelPreflightResultSchema,
   openworkAffordanceResultSchema,
   openworkModelsListResultSchema,
   openworkEngineProviderCatalogSchema,
@@ -262,7 +261,7 @@ function affordanceResult(
       error: typeof result.error === "string" ? result.error : `${id} failed`,
       ...(Array.isArray(result.issues) ? { issues: result.issues } : {}),
       ...(id === "session.create" && Array.isArray(result.created) ? { result, effects } : {}),
-      code: result.code === "model_unavailable" ? "model_unavailable" : "failed",
+      code: "failed",
     };
   }
   return { ok: true, id, result, effects };
@@ -981,7 +980,7 @@ function createSendMessageId(): string {
 }
 
 type SendToOpenWorkSessionResult =
-  | { ok: false; error: string; code?: "model_unavailable"; issues?: Array<{ path: string; code?: "model_unavailable"; message: string }> }
+  | { ok: false; error: string }
   | {
     ok: true;
     accepted: true;
@@ -1009,25 +1008,10 @@ async function sendToOpenWorkSession(rawArgs: unknown, context: OpenCodeContext)
   const located = await locateOpenWorkSession(args.sessionId, args.workspaceId);
   if ("error" in located) return { ok: false, error: located.error };
   const { workspace, session } = located;
-  let model: OpenworkSessionModel | null;
-  try {
-    const envelope = openworkAffordanceResultSchema.parse(await uiControlRequest("query", {
-      id: "session.model_preflight",
-      args: { workspaceId: workspace.id, sessionId: session.id, model: sessionModelOf(session) },
-    }));
-    if (!envelope.ok || envelope.id !== "session.model_preflight") throw new Error("Invalid model preflight");
-    const preflight = openworkSessionModelPreflightResultSchema.parse(envelope.result);
-    if (preflight.workspaceId !== workspace.id || preflight.sessionId !== session.id) throw new Error("Model preflight identity mismatch");
-    model = preflight.model;
-    if (!model && sessionModelOf(session)) throw new Error("Explicit binding cannot use an implicit default");
-  } catch {
-    const message = "Model unavailable or catalog host unavailable. Use models.list and session.set_model, then send again. No prompt was written.";
-    return { ok: false, code: "model_unavailable", error: message, issues: [{ path: "model", code: "model_unavailable", message }] };
-  }
   const messageId = createSendMessageId();
   await postJson(
     `/workspace/${encodeURIComponent(workspace.id)}/opencode/session/${encodeURIComponent(session.id)}/prompt_async`,
-    { messageID: messageId, ...(model ? { ...enginePromptModel(model), variant: model.variant ?? "default" } : {}), parts: [{ type: "text", text: args.text }] },
+    { messageID: messageId, parts: [{ type: "text", text: args.text }] },
   );
   const result: SendToOpenWorkSessionResult = {
     ok: true,

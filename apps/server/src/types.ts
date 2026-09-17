@@ -146,7 +146,6 @@ export interface Capabilities {
 export type ReloadReason = "plugins" | "skills" | "mcp" | "config" | "agents" | "commands";
 
 export type ReloadTrigger = {
-  modelRemoval?: import("./cloud-provider-sync.js").CloudModelRemovalImpact;
   type: "skill" | "plugin" | "config" | "mcp" | "agent" | "command";
   name?: string;
   action?: "added" | "removed" | "updated";
