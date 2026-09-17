@@ -96,7 +96,7 @@ export function restrictCodemodeToolTree(input: {
   const missing: CodemodeManifestEntry[] = []
   for (const required of input.requiredCapabilities) {
     const resolved = available.get(required.scriptPath)
-    if (!resolved || !manifest.has(`${required.scriptPath}\n${required.capabilityName}`)) {
+    if (!resolved || resolved.definition.unavailableReason !== undefined || !manifest.has(`${required.scriptPath}\n${required.capabilityName}`)) {
       missing.push(required)
       continue
     }

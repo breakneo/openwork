@@ -78,7 +78,8 @@ export async function executeWorkflowAuthoringTest(request: unknown, context: {
   const built = await context.buildTools()
   const tools = codemodeAuthoringToolTree(built, mode === "live")
   const startedAt = new Date()
-  const result = await runCodemodeScript({ code, scriptInput, readOnlyInput: mode === "live", tools, timeoutMs: 170_000 })
+  const result = await runCodemodeScript({ code, scriptInput, readOnlyInput: mode === "live",
+    failOnToolAvailabilityError: mode === "live", tools, timeoutMs: 170_000 })
   const finishedAt = new Date()
   if (!result.ok) {
     const receiptId = await record({ ...receipt, status: "failed", errorKind: result.error.kind,

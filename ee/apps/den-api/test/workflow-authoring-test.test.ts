@@ -117,7 +117,7 @@ test("rejects invalid time zones, adhoc time zones and top-level forged runtime"
   }
 })
 
-test("live rejects mutation, external hinted and undeclared paths even inside try/catch", async () => {
+test("live rejects ineligible dependencies even when script recovery returns fallback data", async () => {
   for (const path of ["tools.den.write", "tools.external.hinted", "tools.den.legacy", "tools.den.hidden", "tools.den['write']"]) {
     const direct = fixture()
     const denied = await execute({ mode: "live", code: `return await ${path}({})` }, direct.context)
@@ -129,11 +129,21 @@ test("live rejects mutation, external hinted and undeclared paths even inside tr
     if (path !== "tools.den.hidden") expect(JSON.stringify(denied.content)).toContain("live_capability_ineligible")
     const caught = fixture()
     const result = await execute({ mode: "live", code: `try { await ${path}({}) } catch (error) { return 2 } return 3` }, caught.context)
-    expect(result.isError).not.toBe(true)
-    expect(record(result.structuredContent).value).toBe(2)
+    expect(result.isError).toBe(true)
+    expect(caught.receipts[0]).toMatchObject({ status: "failed", errorKind: path === "tools.den.hidden" ? "UnknownTool" : "ToolUnavailable" })
+    expect(caught.retainSource).not.toHaveBeenCalled()
     expect(caught.calls).toEqual([])
     expect(caught.receipts[0]?.toolCalls).toEqual([])
   }
+})
+
+test("allSettled cannot create a successful live receipt from an unavailable dependency", async () => {
+  const f = fixture()
+  const result = await execute({ mode: "live", code: "return await Promise.allSettled([tools.external.hinted({})])" }, f.context)
+  expect(result.isError).toBe(true)
+  expect(f.receipts[0]).toMatchObject({ status: "failed", errorKind: "ToolUnavailable", toolCalls: [] })
+  expect(f.retainSource).not.toHaveBeenCalled()
+  expect(f.calls).toEqual([])
 })
 
 test("interpreter discovery explains live eligibility without exposing undeclared live paths", async () => {
@@ -174,6 +184,16 @@ test("live executes read tools and adhoc preserves write access", async () => {
     expect(record(result.structuredContent).value).toEqual({ count: 2 })
     expect(f.calls).toEqual([name])
   }
+})
+
+test("adhoc authoring can recover an unknown dependency with an authorized write", async () => {
+  const f = fixture()
+  const result = await execute({ mode: "adhoc", code: "try { await tools.den.missing({}) } catch (error) { return await tools.den.write({}) }" }, f.context)
+  expect(result.isError).not.toBe(true)
+  expect(record(result.structuredContent).value).toEqual({ count: 2 })
+  expect(f.calls).toEqual(["write"])
+  expect(f.receipts[0]).toMatchObject({ status: "succeeded", toolCalls: [{ name: "den.write" }] })
+  expect(f.retainSource).toHaveBeenCalledTimes(1)
 })
 
 test("live supports the same confined date operations as saved runs", async () => {

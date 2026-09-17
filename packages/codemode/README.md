@@ -146,6 +146,8 @@ interface Failure {
 
 `toolCalls` contains the names of calls admitted by the runtime in call order. It is retained on failure so hosts can audit partial execution without exposing inputs or host failures. `truncated` is present when the value or logs were cut to fit `maxOutputBytes` (see Execution Limits).
 
+Hosts may set `failOnToolAvailabilityError: true` for live read-only execution. Calling an unknown tool (`UnknownTool`) or a host-disabled tool (`ToolUnavailable`) then makes the run fail even if the program catches the error, returns from `finally`, or uses `Promise.allSettled`, so fallback data cannot masquerade as a successfully tested live Workflow. The option defaults to false: ad-hoc and ordinary saved workflows retain error recovery, including authorized fallback calls. Rejected calls are never admitted or dispatched in either mode. Ordinary tool execution errors remain recoverable.
+
 ### Tool-call hooks
 
 `onToolCallStart` receives `{ index, name, input }` after input decoding and before tool execution. The input is decoded host-side data and may include values produced by schema transformations; applications should avoid logging sensitive tool arguments indiscriminately.
