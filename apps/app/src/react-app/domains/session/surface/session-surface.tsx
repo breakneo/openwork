@@ -1325,7 +1325,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     queryKey: snapshotQueryKey,
     queryFn: ({ signal }) => openingHistory.readFullSnapshot(signal),
     enabled: openingHistory.backgroundReady || findOwned,
-    staleTime: 500,
+    staleTime: openingHistory.fullCurrent ? Infinity : 500,
     networkMode: useDesktopLoopbackSnapshotRetry ? "always" : undefined,
     retry: useDesktopLoopbackSnapshotRetry
       ? false

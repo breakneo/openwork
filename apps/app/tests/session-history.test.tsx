@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import { notifyManager, onlineManager, QueryClientProvider, skipToken, useQuery } from "@tanstack/react-query";
 import type { UIMessage } from "ai";
 import type { OpenworkSessionHistory } from "../src/app/lib/openwork-server";
-import { openingHistoryWindow, openingSessionHistoryOptions, prefetchOpeningSessionHistory, sessionHistoryIdentity, SessionHistoryBoundary, SessionHistoryStatus, useOpeningSessionHistory, useSessionPrefetchIntent, type OpeningHistoryWindow } from "../src/react-app/domains/session/surface/session-history";
+import { latestConfirmsFullHistory, openingHistoryWindow, openingSessionHistoryOptions, prefetchOpeningSessionHistory, sessionHistoryIdentity, SessionHistoryBoundary, SessionHistoryStatus, useOpeningSessionHistory, useSessionPrefetchIntent, type OpeningHistoryWindow } from "../src/react-app/domains/session/surface/session-history";
 import { resolveWorkspaceEndpoint } from "../src/app/lib/workspace-endpoint";
 import { flushSessionScrollState, readPersistedSessionScrollState, sessionScrollKey, useSessionScrollStore } from "../src/react-app/domains/session/surface/scroll-store";
 import { getReactQueryClient } from "../src/react-app/infra/query-client";
@@ -128,7 +128,7 @@ function fixture() {
     runWithFullSnapshot = opening.runWithFullSnapshot;
     // The hero's one-step auto-send fires from a mount effect, before any read settled.
     useEffect(() => { onMount?.(opening.ensureFullSnapshot); }, [onMount, opening.ensureFullSnapshot]);
-    const full = useQuery({ queryKey: key, queryFn: ({ signal }) => opening.readFullSnapshot(signal), enabled: opening.backgroundReady || findRequested, staleTime: 500, retry: false });
+    const full = useQuery({ queryKey: key, queryFn: ({ signal }) => opening.readFullSnapshot(signal), enabled: opening.backgroundReady || findRequested, staleTime: opening.fullCurrent ? Infinity : 500, retry: false });
     const current = full.data ?? opening.snapshot;
     useEffect(() => {
       if (current) opening.seedSnapshot(current, () => seedSessionState(workspaceId, current, { preview: !opening.complete }));
@@ -1266,6 +1266,61 @@ describe("opening a thread", () => {
     await view.resolveLatest(0, snapshot("a", "Fresh", ["tail"]));
     expect(view.host.textContent).toContain("tail");
     expect(view.reads.map((read) => read.window)).toEqual([undefined]);
+  });
+
+  test("a warm return whose newest window matches the cached tail keeps complete history without an uncapped re-read", async () => {
+    const view = fixture();
+    const ids = ["first", "second", ...fullWindow];
+    const cached = snapshot("a", "Cached history", ids);
+    const key = snapshotKey("workspace", "a");
+    view.client.setQueryData(key, cached, { updatedAt: Date.now() - 60_000 });
+    await view.render();
+    expect(view.latestReads).toHaveLength(1);
+    expect(view.reads).toHaveLength(0);
+    await view.resolveLatest(0, { session: cached.session, messages: cached.messages.slice(-24) });
+    await paint();
+    await settle();
+    expect(view.reads).toHaveLength(0);
+    expect(view.client.getQueryData(key)).toBe(cached);
+    expect(visibleIds(view)).toEqual(ids);
+    expect(view.host.querySelector("[data-thread-loading]")).toBeNull();
+    expect(view.host.querySelector("[data-thread-history-status]")).toBeNull();
+    // Every fresh newest read re-judges the cache; a reconnect issues one.
+    await act(async () => { onlineManager.setOnline(false); onlineManager.setOnline(true); });
+    await settle();
+    expect(view.latestReads).toHaveLength(2);
+    const uncappedReads = () => view.reads.filter((read) => read.owner === "a" && read.window === undefined);
+    expect(uncappedReads()).toHaveLength(0);
+    const changed = snapshot("a", "Cached history", ids);
+    // Same length as "w23": content changes count even when size does not.
+    changed.messages.at(-1)!.parts[0] = { ...changed.messages.at(-1)!.parts[0], type: "text", text: "w2x" };
+    await view.resolveLatest(1, { session: changed.session, messages: changed.messages.slice(-24) });
+    await paint();
+    await settle();
+    expect(uncappedReads()).toHaveLength(1);
+  });
+
+  test("latestConfirmsFullHistory accepts only an identical tail and compares inline images by size", () => {
+    const ids = ["older", ...fullWindow];
+    const full = snapshot("a", "Images", ids);
+    const image = (bytes: number) => ({ id: "image", sessionID: "a", messageID: "w23", type: "file" as const, mime: "image/png", url: `data:image/png;base64,${"A".repeat(bytes)}` });
+    full.messages.at(-1)!.parts.push(image(4_000));
+    const latest = (mutate: (copy: OpenworkSessionHistory) => void = () => {}) => {
+      const copy = structuredClone(full);
+      mutate(copy);
+      return { session: copy.session, messages: copy.messages.slice(-24) };
+    };
+    expect(latestConfirmsFullHistory(full, latest())).toBe(true);
+    expect(latestConfirmsFullHistory(full, latest((copy) => { copy.messages.at(-1)!.parts[1] = image(4_001); }))).toBe(false);
+    expect(latestConfirmsFullHistory(full, latest((copy) => { copy.messages.at(-1)!.parts.pop(); }))).toBe(false);
+    expect(latestConfirmsFullHistory(full, latest((copy) => { copy.session.time.updated = 2; }))).toBe(false);
+    expect(latestConfirmsFullHistory(full, latest((copy) => { copy.session.revert = { messageID: "w20" }; }))).toBe(false);
+    expect(latestConfirmsFullHistory(full, latest((copy) => { copy.messages.at(-1)!.info.id = "replacement"; }))).toBe(false);
+    expect(latestConfirmsFullHistory(full, { session: full.session, messages: full.messages.slice(-24, -1) })).toBe(false);
+    const short = snapshot("a", "Short", ["only"]);
+    expect(latestConfirmsFullHistory(short, { session: short.session, messages: short.messages })).toBe(true);
+    expect(latestConfirmsFullHistory(snapshot("a", "Grown", ["only", "more"]), { session: short.session, messages: short.messages })).toBe(false);
+    expect(latestConfirmsFullHistory({ ...full, pagination: { nextCursor: "older", limit: 24 } }, latest())).toBe(false);
   });
 
   test("a selected warm return shows a persisted tail before a held full read without replacing complete history", async () => {

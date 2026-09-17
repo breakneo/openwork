@@ -55,6 +55,43 @@ type OpeningHistoryInput = {
 
 const hydratingTranscripts = new WeakSet<object>();
 const EMPTY_HISTORY: UIMessage[] = [];
+/** The newest-window size a warm return reads; a shorter window is the whole conversation. */
+export const LATEST_HISTORY_WINDOW = 24;
+
+type HistoryRecord = OpenworkSessionHistory["messages"][number];
+
+function recordSignature(record: HistoryRecord): string {
+  // Compare everything except inline file bytes: an image data URL can be
+  // megabytes, and a replaced image also changes its part ID, length, or time.
+  return JSON.stringify([record.info, record.parts.map((part) =>
+    "url" in part && typeof part.url === "string" ? { ...part, url: part.url.length } : part)]);
+}
+
+/**
+ * A newest window that equals the tail of a complete cached history proves the
+ * cache is still current. Returning to such a conversation keeps the cache
+ * instead of re-reading every message (and every inline image) again. Any
+ * doubt — a different session revision, revert, count, ID, or part lifecycle —
+ * falls back to the uncapped read.
+ */
+export function latestConfirmsFullHistory(
+  full: OpenworkSessionHistory,
+  latest: Pick<OpenworkSessionHistory, "session" | "messages">,
+): boolean {
+  if (full.session.id !== latest.session.id || full.messages.length < latest.messages.length) return false;
+  if (full.pagination && (full.pagination.before !== undefined || full.pagination.nextCursor !== null)) return false;
+  if ((full.session.revert?.messageID ?? null) !== (latest.session.revert?.messageID ?? null)) return false;
+  if (full.session.time.updated !== latest.session.time.updated
+    || Boolean(full.session.time.archived) !== Boolean(latest.session.time.archived)) return false;
+  if (latest.messages.length < LATEST_HISTORY_WINDOW && full.messages.length !== latest.messages.length) return false;
+  const tail = full.messages.slice(full.messages.length - latest.messages.length);
+  const latestById = new Map(latest.messages.map((record) => [record.info.id, record]));
+  if (latestById.size !== tail.length) return false;
+  return tail.every((record) => {
+    const match = latestById.get(record.info.id);
+    return match !== undefined && recordSignature(match) === recordSignature(record);
+  });
+}
 
 async function readLatestHistory<T>(read: (signal: AbortSignal) => Promise<T>, signal: AbortSignal) {
   signal.throwIfAborted();
@@ -174,10 +211,13 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   const entry = useMemo<{
     warm: boolean;
     fullRead: { baseline: UIMessage[]; updateCount: number } | null;
+    /** The latest newest read matched the cached complete history's tail. */
+    fullConfirmed: boolean;
     readers: Set<AbortController>;
   }>(() => ({
     warm: !input.ignoreCached && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.id === input.sessionId,
     fullRead: null,
+    fullConfirmed: false,
     readers: new Set<AbortController>(),
   }), [client, input.owner, input.sessionId, credential]);
   const pages = useSessionHistoryPages({ ...input, credential, initial: openingSnapshot, saved, complete: hasFullSnapshot });
@@ -193,6 +233,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       const initial = client.getQueryData<LatestSessionHistory>(latestKey) ?? {
         messages: mergeHistoryWindow(projectHistoryRead(full), readSource()), source: readSource(),
       };
+      entry.fullConfirmed = false;
       const history = await readLatestHistory(input.readLatest, signal);
       signal.throwIfAborted();
       if (history.session.id !== input.sessionId || history.messages.some(({ info, parts }) =>
@@ -200,6 +241,9 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
           part.sessionID !== input.sessionId || part.messageID !== info.id))) {
         throw new Error("Conversation history belongs to another session.");
       }
+      // Judge the cache as it stands now: live events may have changed it during the read.
+      const cachedNow = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
+      entry.fullConfirmed = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history);
       const current = applyHistorySourceChanges(client.getQueryData<LatestSessionHistory>(latestKey) ?? initial, readSource());
       if (history.session.revert?.messageID || client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.revert?.messageID) return current;
       return {
@@ -405,6 +449,9 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     backgroundReady: paginated && !needsRevertHistory ? false : hasFullSnapshot
       ? !entry.warm || !input.readLatest || !latestQuery.isFetching
       : backgroundOwner === entry,
+    // Cached complete history whose tail the newest read just matched needs no
+    // uncapped re-read; terminal-edge invalidation still refreshes it later.
+    fullCurrent: hasFullSnapshot && entry.warm && latestQuery.isSuccess && entry.fullConfirmed,
     pages,
     complete: hasFullSnapshot || pages.complete,
     paginated,

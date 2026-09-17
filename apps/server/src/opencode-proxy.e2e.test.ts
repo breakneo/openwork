@@ -364,12 +364,48 @@ describe("workspace OpenCode proxy", () => {
     }
     const foreign = await request("ses_foreign", cursor);
     expect(foreign.status).toBe(404);
-    expect(engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign/message")).toBe(false);
+    // The proof runs beside the read; only the proof decides what the caller receives.
+    expect(await foreign.text()).not.toContain("msg_foreign");
     expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1")).toHaveLength(2);
     const pages = engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/message");
     expect(pages).toHaveLength(2);
     expect(new URLSearchParams(pages[1]?.search).get("before")).toBe(cursor);
     expect(pages.every(({ method }) => method === "GET")).toBe(true);
+  });
+
+  test.serial("v1 session reads dispatch beside the ownership proof and withhold a foreign body until it fails", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const release = deferred();
+    const engine = startMockOpencode({
+      foreignSessionDirectory: "/workspace/foreign",
+      onRead: async (request) => {
+        if (new URL(request.url).pathname === "/session/ses_foreign") await release.promise;
+      },
+    });
+    const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+    const request = (path: string) => fetch(
+      `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode${path}`,
+      { headers: auth(openwork.token), signal: AbortSignal.timeout(2_000) },
+    );
+    const foreign = request("/session/ses_foreign/message");
+    try {
+      // The requested read reaches the engine while its proof is still pending.
+      expect(await waitUntil(() => engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign/message"), 100)).toBe(true);
+      expect(engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign")).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Nothing is released before the proof settles, even though the engine already answered.
+      expect(await Promise.race([foreign.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 20))])).toBe("pending");
+    } finally {
+      release.resolve();
+    }
+    const response = await foreign;
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("msg_foreign");
+    // An owned read still answers from a single pass over the engine.
+    const owned = await request("/session/ses_1/todo");
+    expect(owned.status).toBe(200);
+    expect(await owned.json()).toEqual([{ content: "Validate session reads", status: "completed", priority: "high" }]);
+    expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/todo")).toHaveLength(1);
   });
 
   for (const version of ["v1", "v2"]) {
@@ -401,7 +437,8 @@ describe("workspace OpenCode proxy", () => {
           caller.abort();
           expect(await result).toMatchObject({ name: "AbortError" });
           expect(await waitUntil(() => observed?.aborted === true, 100)).toBe(true);
-          if (phase === "ownership") expect(fixture.engine.requests.some((entry) => entry.pathname === historyPath)).toBe(false);
+          // v1 dispatches the history read beside its ownership proof; v2 still proves first.
+          if (phase === "ownership" && version === "v2") expect(fixture.engine.requests.some((entry) => entry.pathname === historyPath)).toBe(false);
           expect(fixture.engine.requests.every((entry) => entry.method === "GET")).toBe(true);
         } finally {
           caller.abort();
