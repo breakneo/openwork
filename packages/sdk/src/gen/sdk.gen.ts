@@ -9423,9 +9423,9 @@ export class DenClient extends HeyApiClient {
   }
 
   /**
-   * Create config object
+   * Create a skill, agent, or other config object; optionally add it to an existing plugin
    *
-   * Creates a new private config object and initial immutable version.
+   * Creates a config object and initial immutable version. Pass pluginIds to add the new component to existing plugins without creating a duplicate plugin; omit pluginIds for a private standalone object. Skills require complete SKILL.md in input.rawSourceText.
    */
   public postV1ConfigObjects<ThrowOnError extends boolean = false>(
     parameters: {
