@@ -99,6 +99,11 @@ test.each([
   { name: "Starting stale steers preserve unsent drafts without blocking eligible steers or queued items", startingRegression: "stale" },
   { name: "Starting blocked steer retries explicitly with an empty composer", startingRegression: "retry" },
   { name: "Starting blocked steer retries explicitly after automatic gate clearing", startingRegression: "retry-cleared" },
+  { name: "Starting queued Send now chain follows click order without duplicate admissions", startingRegression: "chain" },
+  { name: "Starting queued Send now chain waits for unknown admission", startingRegression: "chain-unknown" },
+  { name: "Starting queued Send now chain is invalidated by Stop", startingRegression: "chain-stop" },
+  { name: "Starting queued Send now chain retains blocked-row explicit retry", startingRegression: "chain-blocked" },
+  { name: "Starting queued Send now chain retains failed-row explicit retry", startingRegression: "chain-failed" },
 ])("$name", async ({ queueRegression, modeRegression, orderingRegression, startingRegression }) => {
   const sessionId = `session-focus-continuity${startingRegression ? `-${startingRegression}` : orderingRegression ? `-${orderingRegression}` : ""}`;
   window.localStorage.clear();
@@ -409,6 +414,99 @@ test.each([
             element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: steer, bubbles: true, cancelable: true }));
           });
         };
+        if (startingRegression.startsWith("chain")) {
+          for (const text of ["Queued A", "Queued B", "Queued C", "Ordinary D"]) {
+            await act(async () => useComposerStateStore.getState().setDraft(sessionId, text));
+            await enter();
+          }
+          const original = useComposerStateStore.getState().queuedDrafts[sessionId];
+          const [a, b, c, d] = original ?? [];
+          if (!a || !b || !c || !d) throw new Error("Expected four queued rows");
+          const clickRow = (id: string) => {
+            const button = container.querySelector<HTMLButtonElement>(`[data-queued-item-id="${id}"] button[aria-label="Send now"], [data-queued-item-id="${id}"] button[aria-label="Sending..."]`);
+            expect(button).not.toBeNull();
+            expect(button?.disabled).toBe(false);
+            button?.click();
+            button?.click();
+          };
+          await act(async () => { clickRow(c.id); clickRow(a.id); });
+          expect(sentDrafts).toHaveLength(1);
+          const requested = useComposerStateStore.getState().queuedDrafts[sessionId];
+          expect(requested?.filter((item) => item.steer)).toHaveLength(2);
+          for (const item of requested ?? []) expect(item.draft).toBe(original?.find((row) => row.id === item.id)?.draft);
+          expect(container.querySelector(`[data-queued-item-id="${c.id}"] [role="status"]`)?.textContent).toBe("Send requested");
+          expect(container.querySelector(`[data-queued-item-id="${d.id}"] [role="status"]`)).toBeNull();
+          await act(async () => {
+            useComposerStateStore.getState().setDraft(sessionId, "Newer chain draft");
+            useComposerStateStore.getState().reorderQueuedDrafts(sessionId, [d.id, b.id, a.id, c.id]);
+            root.render(null);
+          });
+          await act(async () => renderSurface());
+          expect(sentDrafts).toHaveLength(1);
+          if (startingRegression === "chain-stop") {
+            await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.click());
+            expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toBeUndefined();
+            await act(async () => { initial.resolve({ outcome: "accepted" }); interruption.resolve(); });
+            expect(sentDrafts).toHaveLength(1);
+            expect(editor().textContent).toBe("Newer chain draft");
+            return;
+          }
+          submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+          if (startingRegression === "chain-unknown") {
+            const { PromptAdmissionUnknownError } = await import("../src/app/lib/opencode");
+            await act(async () => initial.reject(new PromptAdmissionUnknownError({ messageID: initialId })));
+            await act(async () => clickRow(b.id));
+            expect(sentDrafts).toHaveLength(1);
+            expect(getQueuedDrainState(sessionId).phase.kind).toBe("admission_unknown");
+            acceptedMessageId = initialId;
+            await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Check acceptance")?.click());
+          } else {
+            await act(async () => initial.resolve({ outcome: "accepted" }));
+          }
+          await waitFor(() => sentDrafts.length === 2, "the first requested row C");
+          expect(sentDrafts[1]?.messageId).toBe(c.draft.messageId);
+          await act(async () => { clickRow(c.id); clickRow(a.id); clickRow(b.id); });
+          expect(sentDrafts).toHaveLength(2);
+          expect(container.querySelector(`[data-queued-item-id="${c.id}"] [role="status"]`)?.textContent).toBe("Sending...");
+          if (startingRegression === "chain-blocked" || startingRegression === "chain-failed") {
+            const current = submission;
+            submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+            await act(async () => {
+              if (startingRegression === "chain-failed") current.reject(new Error("Queued send failed"));
+              else {
+                const issue = { code: "tools_unavailable", stage: "engine_delivery", message: "Tools unavailable", retryable: true, recommendedAction: "Retry connected tools." } satisfies NonNullable<CloudMcpSubmissionGateState["issue"]>;
+                cloudSubmissionState = { ...IDLE_CLOUD_MCP_SUBMISSION_GATE_STATE, status: "failed", issue };
+                renderSurface();
+                current.resolve({ outcome: "blocked", issue });
+              }
+            });
+            expect(getQueuedDrainState(sessionId).phase.kind).toBe("halted");
+            expect(sentDrafts).toHaveLength(2);
+            await act(async () => clickRow(c.id));
+            await waitFor(() => sentDrafts.length === 3, "the explicit retry of row C");
+            expect(sentDrafts[2]?.messageId).toBe(c.draft.messageId);
+          }
+          for (const next of [a, b]) {
+            const count = sentDrafts.length;
+            const current = submission;
+            submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+            await act(async () => current.resolve({ outcome: "accepted" }));
+            await waitFor(() => sentDrafts.length === count + 1, `the next requested row ${next.draft.text}`);
+            expect(sentDrafts.at(-1)?.messageId).toBe(next.draft.messageId);
+            expect(getQueuedDrainState(sessionId).phase).toMatchObject({ kind: "sending", itemId: next.id });
+            await act(async () => clickRow(next.id));
+            expect(sentDrafts).toHaveLength(count + 1);
+          }
+          const count = sentDrafts.length;
+          await act(async () => submission.resolve({ outcome: "accepted" }));
+          expect(sentDrafts).toHaveLength(count);
+          expect(useComposerStateStore.getState().queuedDrafts[sessionId]).toEqual([d]);
+          expect(editor().textContent).toBe("Newer chain draft");
+          expect(sentDrafts.map((item) => item.text)).toEqual(startingRegression === "chain-blocked" || startingRegression === "chain-failed"
+            ? ["Initial admission", "Queued C", "Queued C", "Queued A", "Queued B"]
+            : ["Initial admission", "Queued C", "Queued A", "Queued B"]);
+          return;
+        }
         await act(async () => useComposerStateStore.getState().setDraft(sessionId, "After the run"));
         await enter();
         expect(sentDrafts).toHaveLength(1);
@@ -1562,12 +1660,12 @@ test.each([
     };
     const expectQueuedSending = () => {
       const button = container.querySelector<HTMLButtonElement>('button[aria-label="Sending..."]');
-      expect(button?.disabled).toBe(true);
+      expect(button?.disabled).toBe(false);
       expect(button?.querySelector("svg.lucide-loader-circle")).not.toBeNull();
       expect(button?.closest('[aria-busy="true"]')?.querySelector('[role="status"]')?.textContent).toBe("Sending...");
       expect(container.textContent?.split("Promote this queued message")).toHaveLength(2);
       expect(useComposerStateStore.getState().queuedDrafts[sessionId]?.map((item) => item.id)).toContain(selectedQueueId);
-      expect(container.querySelector<HTMLButtonElement>('button[aria-label="Send now"]')?.disabled).toBe(true);
+      expect(container.querySelector<HTMLButtonElement>('button[aria-label="Send now"]')?.disabled).toBe(false);
       expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Composer continuation beside queue");
     };
     submission = Promise.withResolvers<CloudMcpSubmissionResult>();
