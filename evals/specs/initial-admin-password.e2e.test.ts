@@ -1,5 +1,6 @@
 import { expect } from "vitest";
-import { test, server, needs, screenshot, validate } from "@openwork/testkit";
+import { test, server, needs, screenshot } from "@openwork/testkit";
+import { validate } from "@openwork/test-evidence";
 import { chrome } from "@openwork/hosts";
 import { fill, clickText, waitFor, evalIn } from "@openwork/behaviors";
 import { addInitScript, navigate } from "@openwork/cdp";
