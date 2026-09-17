@@ -2,7 +2,7 @@
 
 ## Status
 
-Product verification passed on signed runtime-changing head `45d6e1ee0a36f31faf4838df0e8385d8fde5faac`. Pull request [#5123](https://github.com/different-ai/openwork/pull/5123) is open; evidence publication and live Warden, CodeQL, and CI gates remain to be inspected without treating pending checks as passed.
+Product verification passed on signed runtime-changing head `45d6e1ee0a36f31faf4838df0e8385d8fde5faac`. Pull request [#5123](https://github.com/different-ai/openwork/pull/5123) is open with exact-head test evidence and inspected screenshots published. At the final audit, every reported automated check had completed without failure; GitHub exposed no Warden check, review, comment, or finding to inspect, so Warden is recorded as not reported rather than passed. The pull request remains unmerged and `REVIEW_REQUIRED` pending human approval.
 
 ## User-visible issue
 
@@ -44,12 +44,13 @@ The existing identity-generation fence remains authoritative. A policy read that
 | Renderer typecheck | `pnpm --filter @openwork/app typecheck` | Passed |
 | Server typecheck and focused policy tests | Focused `@openwork/server` commands | Passed |
 | Exact-ref Daytona product run | `OPENWORK_EVAL_REF=45d6e1ee0a36f31faf4838df0e8385d8fde5faac`; one trusted-click journey | Passed |
-| Retained-policy sign-out dialog and Cloud Account handoff | Isolated managed Electron; native **Sign in** selected, then `#/settings/cloud-account` asserted | Passed |
+| Exact-ref Daytona final-head run | Published `test-evidence` PR comment; its SHA and sandbox ref both identify the final report-only head | Passed |
+| Retained-policy sign-out dialog and Cloud Account handoff | Isolated managed Electron; native **Sign in** selected, then `#/workspace/<workspace-id>/settings/cloud-account` asserted | Passed |
 | Genuine organization denial with no bypass | Isolated managed Electron against a restrictive Den policy | Passed |
 | Den outage and bounded fresh Retry | Isolated managed Electron; first dialog had **Retry / Cancel**, second had only **Cancel** | Passed |
 | Affirmatively unmanaged external open | Fresh isolated Electron and OS-default Chromium shown side by side at `https://example.com/` | Passed |
 
-The first Daytona diagnostic was rejected as evidence because the uncommitted product change was not present in its `dev` checkout. A later post-commit diagnostic was also rejected because it omitted `OPENWORK_EVAL_REF` and explicitly verified `dev` at `030be3e313aad4d73a6dbfe54a842284359c75fc`. The exact-ref run passed after pinning the signed commit.
+The first Daytona diagnostic was rejected as evidence because the uncommitted product change was not present in its `dev` checkout. A later post-commit diagnostic was also rejected because it omitted `OPENWORK_EVAL_REF` and explicitly verified `dev` at `030be3e313aad4d73a6dbfe54a842284359c75fc`. That diagnostic red was published with its cause stated; the sticky evidence was then updated with the passing exact-head run after pinning the signed commit.
 
 ## Inspected screenshots
 
@@ -69,6 +70,16 @@ All four frames were captured from isolated real Electron at the pushed product 
 - No change to explicit link context-menu choices.
 - No use of a shared desktop profile, authentication state, or protocol registration.
 
-## Remaining gates
+## Final gate audit
 
-Publish all useful green and diagnostic-red test evidence to the pull request, rerun the focused Daytona journey on the final report-only head, and inspect live Warden, CodeQL, and CI outcomes. Do not treat a queued or pending check as passed.
+| Gate | Final observed result |
+|---|---|
+| Exact-head test evidence | Passed and published on the pull request; the evidence SHA matched its Daytona sandbox ref |
+| Build and core checks | Passed, including `openwork-tests-build`, `openwork-tests-core`, `openwork-tests-required`, and `workflow-authoring`; unrelated jobs classified out by the workflow were skipped |
+| CodeQL | Passed for actions, JavaScript/TypeScript, and Python; the aggregate CodeQL check passed |
+| Repository guards | `i18n-audit`, `guard-legacy-eval-flows`, validation, and change classification passed |
+| Vercel Agent Review | Passed |
+| Warden | Not reported: no Warden check, pull-request review, comment, or finding was attached to the final head; absence is not represented as approval |
+| Human review | Pending: GitHub reports `REVIEW_REQUIRED`, so the pull request remains unmerged |
+
+No queued, in-progress, or failed automated check remained at the final audit. The only observed merge blocker was the required human review.
