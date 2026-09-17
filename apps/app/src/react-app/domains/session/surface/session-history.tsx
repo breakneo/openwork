@@ -211,8 +211,11 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   const entry = useMemo<{
     warm: boolean;
     fullRead: { baseline: UIMessage[]; updateCount: number } | null;
-    /** The exact cached complete history whose tail the latest newest read matched. */
-    confirmedFull: OpenworkSessionHistory | null;
+    /**
+     * The exact cached complete history whose tail the latest newest read
+     * matched. Weak so a replaced snapshot is not kept alive by this record.
+     */
+    confirmedFull: WeakRef<OpenworkSessionHistory> | null;
     readers: Set<AbortController>;
   }>(() => ({
     warm: !input.ignoreCached && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.id === input.sessionId,
@@ -243,7 +246,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       }
       // Judge the cache as it stands now: live events may have changed it during the read.
       const cachedNow = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
-      entry.confirmedFull = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history) ? cachedNow : null;
+      entry.confirmedFull = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history) ? new WeakRef(cachedNow) : null;
       const current = applyHistorySourceChanges(client.getQueryData<LatestSessionHistory>(latestKey) ?? initial, readSource());
       if (history.session.revert?.messageID || client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.revert?.messageID) return current;
       return {
@@ -453,7 +456,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     // uncapped re-read. Only that exact object is current: a later refresh or
     // terminal-edge invalidation replaces it and returns to the default policy.
     fullCurrent: hasFullSnapshot && entry.warm && latestQuery.isSuccess && entry.confirmedFull !== null
-      && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey) === entry.confirmedFull,
+      && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey) === entry.confirmedFull.deref(),
     pages,
     complete: hasFullSnapshot || pages.complete,
     paginated,
