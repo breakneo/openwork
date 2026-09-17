@@ -602,8 +602,22 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   }, [entry, query.isSuccess, query.isFetching, hasFullSnapshot, paginated, needsRevertHistory]);
   const snapshot = hasFullSnapshot ? null : pages.snapshot ?? openingSnapshot;
   const limit = openingHistoryWindow(saved).limit;
-  const openingError = !hasFullSnapshot && !query.isFetching
-    ? query.error ?? (!snapshot ? new Error("Conversation history loading was interrupted.") : null) : null;
+  const recovery = useMemo(() => ({ attempted: false }), [client, hashKey(options.queryKey)]);
+  const transitionError = query.error instanceof CancelledError || query.error?.name === "AbortError";
+  const openingError = !hasFullSnapshot && query.fetchStatus === "idle"
+    ? (transitionError ? null : query.error) ?? (!snapshot && recovery.attempted
+      ? new Error("Conversation history loading was interrupted.") : null) : null;
+  useEffect(() => {
+    if (hasFullSnapshot || snapshot || recovery.attempted || query.fetchStatus !== "idle"
+      || query.isError && !transitionError) return;
+    const authorities = openingRuntimeOwners.get(client);
+    if (input.runtimeOwner && authorities !== undefined && ![...authorities.values()].some((allowed) =>
+      allowed.some((authority) => authority.owner === input.runtimeOwner && authority.authToken === (input.authToken ?? null)))) return;
+    const current = client.getQueryCache().find({ queryKey: options.queryKey, exact: true });
+    if (!current?.isActive() || current.state.fetchStatus !== "idle") return;
+    recovery.attempted = true;
+    void query.refetch();
+  });
   const retryOpening = useCallback(async () => {
     if (activeOwner.current !== entry) throw new CancelledError();
     return query.refetch({ throwOnError: true });
