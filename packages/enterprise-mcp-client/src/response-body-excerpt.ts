@@ -1,6 +1,7 @@
 const SENSITIVE_RESPONSE_KEY = /token|secret|password|assertion|code|key|authorization/i
 const QUOTED_PAIR = /((["'])([\w.-]+)\2\s*:\s*)("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^,\s"'{}\[\]]+)/g
 const TEXT_PAIR = /\b([\w.-]+)(\s*[=:]\s*)("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^&,;\s"'<>(){}\[\]]+|\[redacted(?::[a-z-]+)?\])/g
+const CONTAINER_PAIR = /(?<![\w.-])(?:"([\w.-]+)"|'([\w.-]+)'|([\w.-]+))\s*[:=]\s*([\[{])/g
 const REDACTION_MARKER = /^["']?\[redacted(?::[a-z-]+)?\]["']?$/
 const JWT_CREDENTIAL = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g
 const SLACK_CREDENTIAL = /\bxox[a-z]-[A-Za-z0-9-]+|\bxoxe(?:-\d)?-[A-Za-z0-9-]+/gi
@@ -34,7 +35,7 @@ function normalizeCredentialKey(key: string): string {
   return normalized.join("").toLowerCase()
 }
 
-const CREDENTIAL_SEGMENTS = new Set(["token", "grant", "secret", "password", "passwd", "authorization", "cookie", "assertion"])
+const CREDENTIAL_SEGMENTS = new Set(["auth", "authentication", "authorization", "oauth", "oauth2", "credential", "credentials", "creds", "token", "tokens", "grant", "grants", "secret", "secrets", "password", "passwords", "passwd", "pwd", "passphrase", "passphrases", "cookie", "cookies", "assertion", "assertions", "bearer", "jwt"])
 const CREDENTIAL_PAIRS = new Set(["api_key", "access_key", "private_key", "signing_key", "encryption_key", "authorization_code", "auth_code", "code_verifier", "pkce_verifier", "saml_response"])
 const CREDENTIAL_METADATA_SUFFIXES = new Set(["count", "length", "type", "method", "status"])
 
@@ -52,8 +53,46 @@ function credentialKey(key: string, policy: CredentialPolicy): boolean {
   return isSensitiveCredentialKey(key) || (policy === "conservative" && SENSITIVE_RESPONSE_KEY.test(key))
 }
 
+function credentialContainerEnd(text: string, start: number): number {
+  const closing: string[] = []
+  let quote: string | null = null
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index]
+    if (quote !== null) {
+      if (character === "\\") index += 1
+      else if (character === quote) quote = null
+      continue
+    }
+    if (character === '"' || character === "'") quote = character
+    else if (character === "{") closing.push("}")
+    else if (character === "[") closing.push("]")
+    else if (character === "}" || character === "]") {
+      if (closing.pop() !== character) return text.length
+      if (closing.length === 0) return index + 1
+    }
+  }
+  return text.length
+}
+
+function redactCredentialContainers(text: string, policy: CredentialPolicy): string {
+  const chunks: string[] = []
+  let cursor = 0
+  for (const match of text.matchAll(CONTAINER_PAIR)) {
+    if (match.index < cursor) continue
+    const key = match[1] ?? match[2] ?? match[3]
+    if (!credentialKey(key, policy)) continue
+    const start = match.index + match[0].length - 1
+    const prefix = text.slice(start, start + 128)
+    const markerEnd = prefix.indexOf("]")
+    if (markerEnd >= 0 && REDACTION_MARKER.test(prefix.slice(0, markerEnd + 1))) continue
+    chunks.push(text.slice(cursor, start), '"[redacted]"')
+    cursor = credentialContainerEnd(text, start)
+  }
+  return chunks.length ? chunks.join("") + text.slice(cursor) : text
+}
+
 function redactCredentialText(text: string, policy: CredentialPolicy): string {
-  const redacted = text
+  const redacted = redactCredentialContainers(text, policy)
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>()]+/gi, (url) => {
       const start = url.indexOf("//") + 2
       const end = url.slice(start).search(/[/?#]/)

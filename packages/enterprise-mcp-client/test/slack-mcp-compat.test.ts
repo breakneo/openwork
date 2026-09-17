@@ -225,9 +225,10 @@ describe("Slack-style MCP compatibility", () => {
     const moduleUrl = new URL("../src/response-body-excerpt.ts", import.meta.url).href
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
       import assert from "node:assert/strict";
-      import { isSensitiveCredentialKey } from ${JSON.stringify(moduleUrl)};
+      import { isSensitiveCredentialKey, redactSensitiveText } from ${JSON.stringify(moduleUrl)};
       const repeated = "A".repeat(200000);
       assert.equal(isSensitiveCredentialKey(repeated), false);
+      assert.equal(redactSensitiveText(repeated), repeated);
       assert.equal(isSensitiveCredentialKey(repeated + "SecretAccessKey"), true);
       assert.equal(isSensitiveCredentialKey(repeated + "SecretAccessKeyValue"), true);
       assert.equal(isSensitiveCredentialKey("A_".repeat(100000) + "code_verifier_value"), true);
@@ -239,8 +240,26 @@ describe("Slack-style MCP compatibility", () => {
     assert.equal(result.status, 0, result.stderr)
   })
 
+  it("omits whole auth and credential containers in raw JSON without inspecting their leaf names", () => {
+    for (const key of ["auth", "credential", "credentials", "authentication"]) {
+      for (const value of [{ opaque: 'opaque7 } ] "quoted"', nested: ["opaque7"] }, ["opaque7", { text: "opaque7" }], {}, []]) {
+        const source = `log {"${key}":${JSON.stringify(value)},"result":"useful"}`
+        for (const redact of [redactSensitiveText, redactedSensitiveResponseString]) {
+          const clean = redact(source)
+          assert.equal(clean, `log {"${key}":"[redacted]","result":"useful"}`)
+          assert.equal(redact(clean), clean)
+        }
+      }
+      for (const source of [`${key}={opaque:'opaque7'`, `${key}=[{"opaque":"opaque7"}} trailing`]) {
+        assert.equal(redactSensitiveText(source), `${key}="[redacted]"`)
+      }
+    }
+    const metadata = 'log {"authentication_method":{"public":"useful"},"credential_count":2}'
+    assert.equal(redactSensitiveText(metadata), metadata)
+  })
+
   it("shares credential handling across selective and conservative policies", () => {
-    for (const key of ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "APIKey", "foo2Token", "code_verifier", "codeVerifier", "PKCECodeVerifier", "pkce.verifier", "client_assertion", "OAuthClientAssertion", "assertion", "jwt_assertion", "saml_assertion", "SAMLResponse", "access_token_value", "client_secret_value", "SecretAccessKeyValue", "code_verifier_value", "custom_token_payload", "signing_key_material", "oauth_assertion_blob", "service_password_backup", "access_token_countdown", "access_token_count_value"]) {
+    for (const key of ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "APIKey", "foo2Token", "code_verifier", "codeVerifier", "PKCECodeVerifier", "pkce.verifier", "client_assertion", "OAuthClientAssertion", "assertion", "jwt_assertion", "saml_assertion", "SAMLResponse", "access_token_value", "client_secret_value", "SecretAccessKeyValue", "code_verifier_value", "custom_token_payload", "signing_key_material", "oauth_assertion_blob", "service_password_backup", "access_token_countdown", "access_token_count_value", "auth", "authentication", "authorization", "oauth", "oauth2", "credential", "credentials", "creds", "token", "tokens", "grant", "grants", "secret", "secrets", "password", "passwords", "passwd", "pwd", "passphrase", "passphrases", "cookie", "cookies", "assertion", "assertions", "bearer", "jwt"]) {
       assert.equal(isSensitiveCredentialKey(key), true)
       for (const redact of [redactSensitiveText, redactedSensitiveResponseString]) {
         const value = "opaque-short-fixture"
@@ -248,7 +267,7 @@ describe("Slack-style MCP compatibility", () => {
         assert.equal(redact(JSON.stringify({ [key]: value })), JSON.stringify({ [key]: "[redacted]" }))
       }
     }
-    for (const key of ["monkey", "statusCode", "exitCode", "tokenCount", "client_assertion_type", "clientAssertionType", "code_challenge", "code_challenge_method", "codeVerifierLength", "assertionCount", "SAMLResponseStatus", "ClientID", "access_token_value_count", "client_secret_value_type", "code_verifier_value_length", "signing_key_method", "primary_key_value", "tokenizer_value", "statusCodeValue", "exit_code_value"]) {
+    for (const key of ["monkey", "statusCode", "exitCode", "tokenCount", "client_assertion_type", "clientAssertionType", "code_challenge", "code_challenge_method", "codeVerifierLength", "assertionCount", "SAMLResponseStatus", "ClientID", "access_token_value_count", "client_secret_value_type", "code_verifier_value_length", "signing_key_method", "primary_key_value", "tokenizer_value", "statusCodeValue", "exit_code_value", "auth_type", "authentication_method", "credential_count", "credentials_length", "credentials_status", "creds_type", "passphrase_length", "jwt_method", "authorName", "username", "session", "account_id", "content_hash"]) {
       assert.equal(isSensitiveCredentialKey(key), false)
       assert.equal(redactSensitiveText(`${key}=useful`), `${key}=useful`)
     }
