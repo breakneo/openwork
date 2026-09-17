@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import type { ToolPart } from "@opencode-ai/sdk/v2";
+import { redactSensitiveText, isSensitiveCredentialKey, redactedResponseBodyExcerpt } from "@openwork/enterprise-mcp-client";
 import { OPENWORK_SESSION_DETAIL_LIMITS, openworkSessionActivityResultSchema, openworkSessionPartPageSchema, openworkSessionToolProjectionSchema, openworkCatalogModels, openworkEngineProviderCatalogSchema, openworkSessionActivityInventorySchema, openworkSessionModelPreflightArgsSchema, resolveOpenworkModel } from "@openwork/types/openwork-affordance";
 
 import { OpenWorkExtensionsPreview } from "./openwork-extensions-preview.js";
@@ -901,6 +902,44 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     const output = await plugin.tool.openwork_query.execute({ id: "session.activity", args: { sessionId: "ses_alpha", since: "invalid" } });
     expect(argumentErrorSchema.parse(JSON.parse(output)).issues.map((issue) => issue.path)).toEqual(["since"]);
     expect(fake.requests).toHaveLength(0);
+  });
+
+  test.each(["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "aws.secret.access.key"])("credential key %s is redacted in nested tool objects and JSON strings before search", async (key) => {
+    const secret = "opaque-fixture-credential-7p9";
+    const benign = { monkey: "useful", statusCode: 422, exitCode: 1, tokenCount: 3 };
+    const payload = { credentials: { [key]: secret }, encoded: JSON.stringify({ nested: [{ [key]: secret }] }), ...benign };
+    const expected = { credentials: { [key]: "[redacted]" }, encoded: JSON.stringify({ nested: [{ [key]: "[redacted]" }] }), ...benign };
+    startFakeOpenWorkServer({ messages: [{ info: { id: "msg_credentials", role: "assistant" }, parts: [
+      completedTool("call_credentials", payload, JSON.stringify(payload)),
+      { ...completedTool("call_error", payload, ""), state: { status: "error", input: payload, error: JSON.stringify(payload), time: { start: 310, end: 311 } } },
+    ] }] });
+    const plugin = await OpenWorkExtensionsPreview();
+    const raw = await plugin.tool.openwork_query.execute({ id: "session.read", args: { sessionId: "ses_alpha", parts: ["tool"] } });
+    const read = affordanceResultSchema("session.read", detailReadResultSchema).parse(JSON.parse(raw)).result;
+    const tools = read.messages.flatMap((message) => message.tools ?? []);
+    expect(tools[0].input).toBe(JSON.stringify(expected));
+    expect(tools[0].output).toBe(JSON.stringify(JSON.stringify(expected)));
+    expect(tools[1].error).toBe(JSON.stringify(JSON.stringify(expected)));
+    expect(raw).not.toContain(secret);
+    const search = async (query: string) => affordanceResultSchema("session.search", searchResultSchema).parse(JSON.parse(await plugin.tool.openwork_query.execute({ id: "session.search", args: { query, in: ["tool"] } }))).result;
+    expect((await search(secret)).results).toEqual([]);
+    expect((await search("useful")).results).toHaveLength(1);
+  });
+
+  test("shared selective redaction preserves controls without weakening legacy error excerpts", () => {
+    for (const source of ["password=short", "passwd=short", 'password="short secret"', "Authorization: Basic c2hvcnQ=", "Bearer short"]) {
+      const clean = redactSensitiveText(source);
+      expect(clean).not.toContain("short");
+      expect(clean).not.toContain("c2hvcnQ");
+      expect(redactSensitiveText(clean)).toBe(clean);
+    }
+    for (const key of ["monkey", "statusCode", "exitCode", "tokenCount"]) expect(isSensitiveCredentialKey(key)).toBe(false);
+    for (const key of ["password", "api_key", "accessToken", "authorization-code"]) expect(isSensitiveCredentialKey(key)).toBe(true);
+    const control = "0123456789abcdef".repeat(4);
+    expect(redactSensitiveText(control)).toBe(control);
+    expect(redactedResponseBodyExcerpt(control)).toBe("[redacted]");
+    expect(redactSensitiveText('token="[redacted:openai-api-key] residual-private"')).not.toContain("residual-private");
+    expect(redactSensitiveText("token=[redacted:openai-api-key]")).toBe("token=[redacted:openai-api-key]");
   });
 
   test("activity omits arbitrary prompts and groups untrusted IDs while tool opt-in retains safe details", async () => {

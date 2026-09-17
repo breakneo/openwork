@@ -1,5 +1,6 @@
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,8 +56,31 @@ test("session tool descriptors advertise accepted enums, text defaults, caps and
   expect(activity?.arguments.map((argument) => argument.name).sort()).toEqual(Object.keys(sessionActivityArgsSchema.shape).sort());
   expect(activity).toMatchObject({ kind: "query", effects: { data: "read", ui: "none", external: false }, executor: { kind: "openwork" } });
   for (const value of ["300", "byAffordanceId", "ok: false", "callId", "scope.complete", "fixed labels"]) expect(activity?.description).toContain(value);
+  for (const value of [OPENWORK_SESSION_DETAIL_LIMITS.activityMessages, OPENWORK_SESSION_DETAIL_LIMITS.activityParts, OPENWORK_SESSION_DETAIL_LIMITS.activityErrors, OPENWORK_SESSION_DETAIL_LIMITS.outcomeChars, OPENWORK_SESSION_DETAIL_LIMITS.responseBytes]) expect(activity?.description).toContain(String(value));
+  for (const value of ["partPage", "nextOffset", "nextBefore", "including start/summary"]) expect(parts).toContain(value);
   evidence.recordAssertionEvidence("Tool opt-in and activity contracts are discoverable", "Descriptors match accepted enum values and text defaults, advertise redaction and field caps, reject unsupported scopes and invalid timestamps, and declare activity read-only.", true);
 });
+
+for (const { name, command, args } of [
+  { name: "prompt isolation, shared redaction, 1301-part continuation, native before pagination and bounded incomplete scans", command: "bun", args: ["--conditions=development", "test", "apps/server/src/opencode-plugins/openwork-extensions-preview.test.ts"] },
+  { name: "shared result bounds, cursor schema identity and descriptor drift", command: "bun", args: ["--conditions=development", "test", "apps/server/src/opencode-plugins/openwork-provider-adapters.test.ts"] },
+  { name: "existing shared credential redaction compatibility", command: "pnpm", args: ["--filter", "@openwork/enterprise-mcp-client", "exec", "tsx", "--test", "test/slack-mcp-compat.test.ts"] },
+]) {
+  test(`session detail regressions prove ${name}`, async ({ evidence }) => {
+    needs({ commands: [command], placement: "local" });
+    const result = spawnSync(command, args, {
+      cwd: fileURLToPath(new URL("../../", import.meta.url)),
+      encoding: "utf8", timeout: 30_000, env: { ...process.env, NO_COLOR: "1" },
+    });
+    const output = result.stdout + result.stderr;
+    expect(result.error).toBeUndefined();
+    expect(result.status, output).toBe(0);
+    expect(output).toMatch(/(?:[1-9]\d* pass|\bpass [1-9]\d*)/);
+    expect(output).toMatch(/(?:\b0 fail|\bfail 0)/);
+    expect(output).not.toMatch(/(?:\b[1-9]\d* (?:skip|todo)|\b(?:skipped|todo) [1-9]\d*)/);
+    evidence.recordAssertionEvidence(name, `${command} ${args.join(" ")}\nExit: ${result.status}\n${output}`, true);
+  });
+}
 
 test("HTTP transcript fixture preserves the prior reply and counts three session.create calls with one too_big outcome", async ({ evidence }) => {
   const original = { url: process.env.OPENWORK_SERVER_URL, token: process.env.OPENWORK_SERVER_TOKEN };
@@ -67,7 +91,7 @@ test("HTTP transcript fixture preserves the prior reply and counts three session
     type: "tool", tool: "openwork_execute", callID: `call_${index}`,
     state: {
       status: "completed", input: { id: "session.create", sessions: [{ title: `Fixture ${index}`, prompt: index === 1 ? needle : "Synthetic task" }] },
-      output: JSON.stringify(index === 3 ? { ok: true, result: { ok: false, error: failure } } : { ok: true }),
+      output: JSON.stringify(index === 3 ? { ok: true, result: { ok: false, code: "too_big", error: failure } } : { ok: true }),
       time: { start: 300 + index * 10, end: 301 + index * 10 },
     },
   }));
@@ -97,6 +121,7 @@ test("HTTP transcript fixture preserves the prior reply and counts three session
       const limit = url.searchParams.get("limit");
       return json(200, limit === null ? messages : messages.slice(-Number(limit)));
     }
+    if (url.pathname === `${base}/provider`) return json(200, { connected: [], all: [] });
     if (url.pathname === `${base}/session/status`) return json(200, {});
     if ([`${base}/session/ses_fixture/children`, `${base}/permission`, `${base}/question`].includes(url.pathname)) return json(200, []);
     unexpected.push(url.pathname);
@@ -125,7 +150,8 @@ test("HTTP transcript fixture preserves the prior reply and counts three session
     }
     evidence.recordAssertionEvidence("HTTP fixture summary prefers the prior reply over trailing sole pre-tool text", "The production session.read adapter read a synthetic HTTP transcript: normal read retained the trailing pre-tool text, while text-only and text+tool summaries selected msg_reply instead of msg_pretool. No inference or real session creation is claimed.", true);
     const toolRead = await query("session.read", { sessionId: session.id, parts: ["tool"] });
-    const readTools = records(toolRead.messages).flatMap((message) => records(message.tools));
+    const readTools = records(toolRead.messages).flatMap((message) => records(message.tools)).map((tool) => openworkSessionToolProjectionSchema.parse(tool));
+    expect(openworkSessionPartPageSchema.parse(toolRead.partPage)).toMatchObject({ returned: 3, nextOffset: null, truncated: false });
     expect(readTools.map((tool) => tool.callId)).toEqual(["call_1", "call_2", "call_3"]);
     expect(text(readTools[0]?.input)).toContain(needle);
     expect(JSON.stringify(normal)).not.toContain(needle);
@@ -133,9 +159,12 @@ test("HTTP transcript fixture preserves the prior reply and counts three session
     const searched = await query("session.search", { query: needle, in: ["tool"] });
     expect(records(searched.results)).toHaveLength(1);
     expect(records(searched.results)[0]).toMatchObject({ sessionId: session.id, kind: "tool", tool: "openwork_execute", callId: "call_1", snippet: { match: needle } });
-    const activity = await query("session.activity", { sessionId: session.id });
+    const activity = openworkSessionActivityResultSchema.parse(await query("session.activity", { sessionId: session.id }));
     expect(activity.toolCalls).toEqual({ total: 3, byTool: { openwork_execute: 3 }, byAffordanceId: { "session.create": 3 } });
-    expect(activity.errors).toEqual({ total: 1, list: [{ callId: "call_3", tool: "openwork_execute", affordanceId: "session.create", message: failure, at: 331 }] });
+    expect(activity.errors).toEqual({ total: 1, list: [{ callId: "call_3", tool: "openwork_execute", affordanceId: "session.create", code: "too_big", message: "Tool input exceeded a size limit", at: 331 }], truncated: false, nextOffset: null });
+    for (const value of [needle, failure, preTool, reply]) expect(JSON.stringify(activity)).not.toContain(value);
+    expect(activity.scope.complete).toBe(true);
+    expect(requests).toContain(`GET ${base}/session/ses_fixture/message?limit=100`);
     expect(activity.messages).toEqual({ user: 1, assistant: 2 });
     expect(unexpected).toEqual([]);
     expect(requests.every((request) => request.startsWith("GET "))).toBe(true);
@@ -159,7 +188,13 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
     Buffer.from(JSON.stringify({ sub: "synthetic-user", iat: 1234567890 })).toString("base64url"),
     synthetic(43),
   ].join(".");
+  const opaqueCredential = "opaque-key-fixture-private-7p9";
+  const benignKeys = { monkey: "useful-control", statusCode: 422, exitCode: 1, tokenCount: 3 };
   const fixtures = [
+    ...["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken"].map((key) => ({
+      source: JSON.stringify({ nested: [{ [key]: opaqueCredential }], encoded: JSON.stringify({ [key]: opaqueCredential }), ...benignKeys }),
+      marker: JSON.stringify({ nested: [{ [key]: "[redacted]" }], encoded: JSON.stringify({ [key]: "[redacted]" }), ...benignKeys }),
+    })),
     { source: "AKIA" + "BCDEFGHIJKLM2345", marker: "[redacted:aws-access-token]" },
     { source: `-----BEGIN PRIVATE KEY-----\n${synthetic(128)}\n-----END PRIVATE KEY-----`, marker: "[redacted:private-key]" },
     { source: "ghp_" + synthetic(36), marker: "[redacted:github-pat]" },
@@ -205,6 +240,7 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
     if (path === `${base}/session`) return json(200, [session]);
     if (path === `${base}/session/${session.id}`) return json(200, session);
     if (path === `${base}/session/${session.id}/message`) return json(200, messages);
+    if (path === `${base}/provider`) return json(200, { connected: [], all: [] });
     if (path === `${base}/session/status`) return json(200, {});
     if ([`${base}/session/${session.id}/children`, `${base}/permission`, `${base}/question`].includes(path)) return json(200, []);
     unexpected.push(path);
@@ -234,11 +270,20 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
       expect(tools[index * 2]?.output).toBe(JSON.stringify(marker));
       expect(tools[index * 2]?.input).toBe(JSON.stringify({ nested: [{ value: marker }, JSON.stringify({ detail: marker })] }));
       expect(tools[index * 2 + 1]?.error).toBe(JSON.stringify(marker));
-      expect(errors[index]?.message).toBe(marker);
+      expect(errors[index]).toMatchObject({ code: "tool_error", message: "Tool execution failed" });
+      expect(JSON.stringify(activity)).not.toContain(source);
       expect((await query("session.search", { query: JSON.stringify(source).slice(1, -1), in: ["tool"], match: "phrase" })).results).toEqual([]);
       expect(records((await query("session.search", { query: JSON.stringify(marker).slice(1, -1), in: ["tool"], match: "phrase" })).results)).toHaveLength(1);
     }
-    evidence.recordAssertionEvidence("Pinned Gitleaks rules redact credentials across production read, search and activity", "A test-owned read-only HTTP witness supplied one synthetic positive for each of the 17 selected Gitleaks rule IDs at b58d3f102cf3a2c84cb7f923d05c25c9b1aed84b. Exact rule-ID markers replaced secrets in output, nested input, JSON-encoded nested strings and tool errors; generic-api-key preserved assignment context. Activity, negative secret searches and positive marker searches agreed. No live credentials or inference were used.", true);
+    expect(JSON.stringify(read)).not.toContain(opaqueCredential);
+    expect((await query("session.search", { query: opaqueCredential, in: ["tool"] })).results).toEqual([]);
+    expect(records((await query("session.search", { query: "useful-control", in: ["tool"] })).results)).toHaveLength(1);
+    for (let index = 0; index < 3; index += 1) {
+      const projected = record(JSON.parse(text(JSON.parse(text(tools[index * 2]?.output)))));
+      expect(projected).toMatchObject(benignKeys);
+    }
+    evidence.recordAssertionEvidence("Opaque cloud credentials are removed by key context", "AWS_SECRET_ACCESS_KEY, SecretAccessKey and SessionToken were redacted in nested objects and encoded JSON strings through tool input/output/error. Searching the opaque value returned no result; monkey/statusCode/exitCode/tokenCount survived byte-for-byte and their benign control remained searchable.", true);
+    evidence.recordAssertionEvidence("Pinned Gitleaks rules redact credentials across production read, search and activity", "A test-owned read-only HTTP witness supplied one synthetic positive for each of the 17 selected Gitleaks rule IDs at b58d3f102cf3a2c84cb7f923d05c25c9b1aed84b. Exact rule-ID markers replaced secrets in output, nested input, JSON-encoded nested strings and tool errors; generic-api-key preserved assignment context. Activity emitted only fixed failure labels with no credential payload; negative secret searches and positive marker searches agreed. No live credentials or inference were used.", true);
     const capped = tools.find((tool) => tool.callId === "call_cap");
     expect(JSON.stringify(prefix).length - 1).toBe(1975);
     expect(JSON.stringify(prefix + capSecret).slice(0, 2000)).toContain(capSecret.slice(0, 20));
@@ -339,6 +384,23 @@ test("session.read and session.activity expose a real isolated headless shell ca
     expect(records(defaultRead.messages).some((message) => message.text === firstUser)).toBe(true);
     expect(records(defaultRead.messages).every((message) => message.tools === undefined && message.reasoning === undefined)).toBe(true);
     expect(JSON.stringify(defaultRead)).not.toContain(outputMarker);
+    const newest = await query("session.read", { sessionId, count: 1, parts: ["text", "tool"] });
+    const history = record(newest.history);
+    expect(history.complete).toBe(false);
+    if (typeof history.nextBefore === "string") {
+      const older = await query("session.read", { sessionId, count: 1, parts: ["text", "tool"], before: history.nextBefore });
+      const nativeOlder = records(await request(`${base}/${sessionId}/message?${new URLSearchParams({ limit: "1", before: history.nextBefore })}`));
+      expect(nativeOlder).toHaveLength(1);
+      expect(record(nativeOlder[0]?.info).id).not.toBe(records(newest.messages)[0]?.id);
+      const visible = nativeOlder.filter((message) => records(message.parts).some((part) =>
+        (part.type === "text" && !part.synthetic && !part.ignored && typeof part.text === "string" && part.text.trim())
+        || (part.type === "tool" && part.tool && part.callID && part.state)));
+      expect(records(older.messages).map((message) => message.id)).toEqual(visible.map((message) => record(message.info).id));
+      evidence.recordAssertionEvidence("Native history cursor advances", "The isolated engine advertised X-Next-Cursor; replaying it as before returned a different older native message with count=1. The read projection matched its eligible text/tool parts, excluding synthetic-only messages. No unsupported cursor parameter was sent.", true);
+    } else {
+      expect(history.nextBefore).toBeNull();
+      evidence.recordAssertionEvidence("Native history without a cursor remains incomplete", "The isolated engine did not advertise X-Next-Cursor at count=1. The adapter returned complete=false and no invented continuation; HTTP witnesses separately exercise supported before pagination.", true);
+    }
     const summary = await query("session.read", { sessionId, summary: true, parts: ["text", "tool"] });
     expect(record(summary.firstUser).text).toBe(firstUser);
     expect(summary.lastAssistant).toBeNull();
@@ -358,8 +420,9 @@ test("session.read and session.activity expose a real isolated headless shell ca
     const failures = records(errors.list);
     expect(failures).toHaveLength(1);
     expect(failures[0]).toMatchObject({ callId, tool: "bash" });
-    expect(text(failures[0]?.message)).toHaveLength(300);
-    expect(text(failures[0]?.message)).toContain("token=[redacted]");
+    expect(failures[0]).toMatchObject({ code: "failed_outcome", message: "Tool reported a failed outcome" });
+    expect(JSON.stringify(activity)).not.toContain("intentional failure");
+    openworkSessionActivityResultSchema.parse(activity);
     expect(JSON.stringify(activity)).not.toContain("fixture-secret");
     expect(activity.firstAt).toBeTypeOf("number");
     expect(activity.lastAt).toBeTypeOf("number");
@@ -371,8 +434,8 @@ test("session.read and session.activity expose a real isolated headless shell ca
     expect(future).toMatchObject({ toolCalls: { total: 0, byTool: {}, byAffordanceId: {} }, errors: { total: 0, list: [] }, messages: { user: 0, assistant: 0 }, firstAt: null, lastAt: null });
     const neighbor = await query("session.activity", { sessionId: neighborId });
     expect(neighbor.toolCalls).toEqual({ total: 0, byTool: {}, byAffordanceId: {} });
-    expect(neighbor.errors).toEqual({ total: 0, list: [] });
-    evidence.recordAssertionEvidence("Activity counts the real call and its failed JSON outcome exactly once", "Activity changed from zero to one bash call and one completed ok:false outcome with the same call ID. Error text was redacted before its 300-character cap. Inclusive since preserved the call, future since returned honest zeros, and the neighbor retained zero tool calls/errors.", true);
+    expect(neighbor.errors).toEqual({ total: 0, list: [], truncated: false, nextOffset: null });
+    evidence.recordAssertionEvidence("Activity counts the real call and its failed JSON outcome exactly once", "Activity changed from zero to one bash call and one completed ok:false outcome with the same call ID. Activity used a fixed failure code/label rather than copying any error payload. Inclusive since preserved the call, future since returned honest zeros, and the neighbor retained zero tool calls/errors.", true);
     const context = record(JSON.parse(await plugin.tool.openwork_context.execute()));
     const listing = records(record(context.context).availableAffordances).find((entry) => entry.id === "session.list_sessions");
     if (!listing) throw new Error("Isolated app did not advertise session.list_sessions");

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { ApiError } from "../errors.js";
-import { redactedResponseBodyExcerpt } from "@openwork/enterprise-mcp-client";
+import { redactedResponseBodyExcerpt, redactSensitiveText, isSensitiveCredentialKey } from "@openwork/enterprise-mcp-client";
 import { uiBridgeRequest } from "./openwork-ui-bridge.js";
 import { createGmailAttachmentFulfillment, type GmailAttachmentDependencies } from "./gmail-attachment-fulfillment.js";
 import { z } from "zod";
@@ -10,6 +10,7 @@ import { redactSecretPatterns } from "./secret-patterns.js";
 import { visualizationSchema } from "@openwork/types/visualization";
 import {
   OPENWORK_SESSION_DETAIL_LIMITS,
+  OPENWORK_SESSION_TOOL_FAILURE_LABELS,
   openworkSessionDetailPageArgsSchema,
   openworkSessionActivityResultSchema,
   openworkSessionToolFailureCodeSchema,
@@ -628,24 +629,7 @@ function redactSessionText(text: string): string {
     const parsed: unknown = JSON.parse(text);
     if (isRecord(parsed) || Array.isArray(parsed)) return JSON.stringify(redactSessionValue(parsed));
   } catch {}
-  // Supplementary legacy compatibility from 6707de554, not Gitleaks rules.
-  // Preserve complete typed markers when legacy assignments match them.
-  return redactSecretPatterns(text)
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>()]+/gi, (url) => {
-      const start = url.indexOf("//") + 2;
-      const end = url.slice(start).search(/[/?#]/);
-      const authorityEnd = end === -1 ? url.length : start + end;
-      const safe = url.slice(0, start) + url.slice(start, authorityEnd).replace(/^.*(@|%40)/i, "") + url.slice(authorityEnd);
-      const cut = safe.search(/[?#]/);
-      return cut === -1 ? safe : safe.slice(0, cut) + (/(:\d+){1,2}$/.exec(safe)?.[0] ?? "");
-    })
-    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
-    .replace(/\bow[thc]_[A-Za-z0-9_-]+\b/g, "[redacted]")
-    .replace(/((["'])(?:token|grant|code|secret|key|password|authorization)\2\s*:\s*)("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^,\s"'{}\[\]]+)/gi,
-      (assignment: string, prefix: string, _quote: string, value: string) => /^["']?\[redacted:[a-z-]+\]["']?$/.test(value) ? assignment : `${prefix}"[redacted]"`)
-    .replace(/\b((?:(?:api|access|refresh|client|authorization)[_-])?(?:token|grant|code|secret|key)|password|passwd|authorization|cookie)\s*[=:]\s*("(?:\\[\s\S]?|[^"\\])*(?:"|$)|'(?:\\[\s\S]?|[^'\\])*(?:'|$)|[^&\s"'<>()]+)/gi,
-      (assignment: string, key: string, value: string) => /^["']?\[redacted:[a-z-]+\]["']?$/.test(value) ? assignment : `${key}=[redacted]`);
+  return redactSensitiveText(redactSecretPatterns(text));
 }
 
 function redactSessionValue(value: unknown): unknown {
@@ -653,7 +637,7 @@ function redactSessionValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactSessionValue);
   if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([key, nested]) => [
     redactSessionText(key),
-    /^(?:(?:(?:api|access|refresh|client|authorization)[_-]?)?(?:token|grant|code|secret|key)|password|passwd|authorization|cookie)$/i.test(key.trim()) ? "[redacted]" : redactSessionValue(nested),
+    isSensitiveCredentialKey(key) ? "[redacted]" : redactSessionValue(nested),
   ]));
   return value ?? null;
 }
@@ -1146,18 +1130,8 @@ async function locateOpenWorkSession(
   return { error: `Session ${sessionId} was not found in matching OpenWork workspaces` };
 }
 
-const toolFailureLabels: Record<z.infer<typeof openworkSessionToolFailureCodeSchema>, string> = {
-  tool_error: "Tool execution failed",
-  failed_outcome: "Tool reported a failed outcome",
-  too_big: "Tool input exceeded a size limit",
-  "invalid-args": "Tool arguments were rejected",
-  unavailable: "Requested action is unavailable",
-  model_unavailable: "Requested model is unavailable",
-  conflict: "Requested action conflicted with current state",
-};
-
 function sessionToolFailure(state: NonNullable<z.infer<typeof sessionPartSchema>["state"]>) {
-  if (state.status === "error") return { code: openworkSessionToolFailureCodeSchema.enum.tool_error, message: toolFailureLabels.tool_error };
+  if (state.status === "error") return { code: openworkSessionToolFailureCodeSchema.enum.tool_error, message: OPENWORK_SESSION_TOOL_FAILURE_LABELS.tool_error };
   if (state.status !== "completed" || state.output === undefined) return null;
   if (state.output.length > OPENWORK_SESSION_DETAIL_LIMITS.outcomeChars) return "uninspected";
   try {
@@ -1167,7 +1141,7 @@ function sessionToolFailure(state: NonNullable<z.infer<typeof sessionPartSchema>
     if (!failure) return null;
     const parsed = openworkSessionToolFailureCodeSchema.safeParse(failure.code);
     const code = parsed.success ? parsed.data : openworkSessionToolFailureCodeSchema.enum.failed_outcome;
-    return { code, message: toolFailureLabels[code] };
+    return { code, message: OPENWORK_SESSION_TOOL_FAILURE_LABELS[code] };
   } catch {}
   return null;
 }

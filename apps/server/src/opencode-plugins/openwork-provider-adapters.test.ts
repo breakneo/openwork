@@ -138,6 +138,10 @@ describe("OpenWork provider adapters", () => {
     expect(openworkSessionToolProjectionSchema.safeParse({ ...tool, output: "x".repeat(2001) }).success).toBe(false);
     expect(openworkSessionToolProjectionSchema.safeParse({ ...tool, callId: "x".repeat(129) }).success).toBe(false);
     expect(openworkSessionActivityResultSchema.shape.errors.shape.list.safeParse(Array.from({ length: 51 }, () => ({ callId: "call", tool: "bash", code: "tool_error", message: "Tool execution failed", at: null }))).success).toBe(false);
+    const failure = { callId: "call", tool: "bash", code: "tool_error", message: "Tool execution failed", at: null };
+    expect(openworkSessionActivityResultSchema.shape.errors.shape.list.safeParse([failure]).success).toBe(true);
+    expect(openworkSessionActivityResultSchema.shape.errors.shape.list.safeParse([{ ...failure, message: "PROMPT_CANARY" }]).success).toBe(false);
+    expect(openworkSessionActivityResultSchema.shape.errors.shape.list.safeParse([{ ...failure, code: "failed_outcome" }]).success).toBe(false);
   });
 
   test("activity advertises its query, error cap and timestamp semantics", () => {

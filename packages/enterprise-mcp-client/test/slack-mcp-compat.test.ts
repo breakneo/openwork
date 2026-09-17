@@ -10,7 +10,7 @@ import {
   type EnterpriseMcpDiagnosticEvent,
 } from "../src/index.js"
 import { createEnterpriseMcpRequestObserver } from "../src/request-observer.js"
-import { redactedResponseBodyExcerpt } from "../src/response-body-excerpt.js"
+import { isSensitiveCredentialKey, redactSensitiveText, redactedSensitiveResponseString, redactedResponseBodyExcerpt } from "../src/response-body-excerpt.js"
 
 const SAFE_SLACK_ERROR = "Slack-style provider error: invalid_refresh_token"
 const AUTHORIZATION_CODE = "SECRETVALUE123"
@@ -218,6 +218,39 @@ describe("Slack-style MCP compatibility", () => {
     assert.match(failed.responseBodyExcerpt ?? "", /\[redacted\]/)
     assert.doesNotMatch(failed.responseBodyExcerpt ?? "", /must-not-appear|also-secret/)
     assert.ok((failed.responseBodyExcerpt?.length ?? 0) <= 2_000)
+  })
+
+  it("shares credential handling across selective and conservative policies", () => {
+    for (const key of ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey"]) {
+      assert.equal(isSensitiveCredentialKey(key), true)
+      for (const redact of [redactSensitiveText, redactedSensitiveResponseString]) {
+        const value = "opaque-short-fixture"
+        assert.equal(redact(`${key}=${value}`), `${key}=[redacted]`)
+        assert.equal(redact(JSON.stringify({ [key]: value })), JSON.stringify({ [key]: "[redacted]" }))
+      }
+    }
+    for (const key of ["monkey", "statusCode", "exitCode", "tokenCount"]) {
+      assert.equal(isSensitiveCredentialKey(key), false)
+      assert.equal(redactSensitiveText(`${key}=useful`), `${key}=useful`)
+    }
+    for (const source of [JWT, SLACK_REFRESH_TOKEN, BEARER_TOKEN, GITHUB_TOKEN, "password=short", "https://user:short@host.invalid/path?token=short"]) {
+      assert.equal(redactSensitiveText(source), redactedSensitiveResponseString(source))
+      assert.notEqual(redactSensitiveText(source), source)
+    }
+    for (const redact of [redactSensitiveText, redactedSensitiveResponseString]) {
+      for (const source of ['process.stdout.write({error:"intentional failure token=short"})', 'log {"details":"password=short"}']) {
+        const clean = redact(source)
+        assert.ok(!clean.includes("short"))
+        assert.equal(redact(clean), clean)
+      }
+    }
+    const sha = "0123456789abcdef".repeat(2) + "01234567"
+    const uuid = "12345678-1234-4123-8123-123456789012"
+    const image = "data:image/png;base64," + Buffer.from("synthetic-image-bytes".repeat(6)).toString("base64")
+    for (const source of [sha, uuid, image]) assert.equal(redactSensitiveText(source), source)
+    assert.equal(redactedSensitiveResponseString(sha), "[redacted]")
+    assert.notEqual(redactedSensitiveResponseString(image), image)
+    assert.equal(redactSensitiveText("token=[redacted:openai-api-key]"), "token=[redacted:openai-api-key]")
   })
 
   it("redacts credential content inside non-sensitive fields and raw text", () => {

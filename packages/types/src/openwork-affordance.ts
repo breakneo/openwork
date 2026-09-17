@@ -250,6 +250,16 @@ export const openworkSessionPartPageSchema = z.object({
 
 export const openworkSessionToolFailureCodeSchema = z.enum(["tool_error", "failed_outcome", "too_big", "invalid-args", "unavailable", "model_unavailable", "conflict"])
 
+export const OPENWORK_SESSION_TOOL_FAILURE_LABELS: Record<z.infer<typeof openworkSessionToolFailureCodeSchema>, string> = {
+  tool_error: "Tool execution failed",
+  failed_outcome: "Tool reported a failed outcome",
+  too_big: "Tool input exceeded a size limit",
+  "invalid-args": "Tool arguments were rejected",
+  unavailable: "Requested action is unavailable",
+  model_unavailable: "Requested model is unavailable",
+  conflict: "Requested action conflicted with current state",
+}
+
 export const openworkSessionActivityResultSchema = z.object({
   ok: z.literal(true),
   sessionId: z.string().max(OPENWORK_SESSION_DETAIL_LIMITS.identifierChars),
@@ -268,7 +278,7 @@ export const openworkSessionActivityResultSchema = z.object({
       code: openworkSessionToolFailureCodeSchema,
       message: z.string().max(300),
       at: z.number().nullable(),
-    }).strict()).max(OPENWORK_SESSION_DETAIL_LIMITS.activityErrors),
+    }).strict().refine((failure) => failure.message === OPENWORK_SESSION_TOOL_FAILURE_LABELS[failure.code], "Activity failures require a fixed label matching their code")).max(OPENWORK_SESSION_DETAIL_LIMITS.activityErrors),
     truncated: z.boolean(),
     nextOffset: z.number().int().nonnegative().nullable(),
   }),
