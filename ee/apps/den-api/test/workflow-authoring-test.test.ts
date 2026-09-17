@@ -117,7 +117,7 @@ test("rejects invalid time zones, adhoc time zones and top-level forged runtime"
   }
 })
 
-test("live strips mutation, external hinted and undeclared paths even inside try/catch", async () => {
+test("live rejects mutation, external hinted and undeclared paths even inside try/catch", async () => {
   for (const path of ["tools.den.write", "tools.external.hinted", "tools.den.legacy", "tools.den.hidden", "tools.den['write']"]) {
     const direct = fixture()
     const denied = await execute({ mode: "live", code: `return await ${path}({})` }, direct.context)
@@ -125,6 +125,8 @@ test("live strips mutation, external hinted and undeclared paths even inside try
     expect(direct.calls).toEqual([])
     expect(direct.retainSource).not.toHaveBeenCalled()
     expect(direct.receipts[0]?.status).toBe("failed")
+    expect(direct.receipts[0]?.errorKind).toBe(path === "tools.den.hidden" ? "UnknownTool" : "ToolUnavailable")
+    if (path !== "tools.den.hidden") expect(JSON.stringify(denied.content)).toContain("live_capability_ineligible")
     const caught = fixture()
     const result = await execute({ mode: "live", code: `try { await ${path}({}) } catch (error) { return 2 } return 3` }, caught.context)
     expect(result.isError).not.toBe(true)
@@ -134,14 +136,32 @@ test("live strips mutation, external hinted and undeclared paths even inside try
   }
 })
 
-test("live interpreter discovery sees only the restricted read-only catalog", async () => {
+test("interpreter discovery explains live eligibility without exposing undeclared live paths", async () => {
+  for (const mode of ["live", "adhoc"]) {
+    const f = fixture()
+    const result = await execute({ mode, code: 'return await tools.$codemode.search({})' }, f.context)
+    expect(result.isError).not.toBe(true)
+    const value = record(record(result.structuredContent).value)
+    expect(value.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "tools.den.read", metadata: { liveEligibility: { eligible: true } } }),
+      expect.objectContaining({ path: "tools.den.write", metadata: { liveEligibility: { eligible: false, reason: "not_read_only" } } }),
+      expect.objectContaining({ path: "tools.external.hinted", metadata: { liveEligibility: { eligible: false, reason: "external_authority" } } }),
+      expect.objectContaining({ path: "tools.den.legacy", metadata: { liveEligibility: { eligible: false, reason: "authority_unknown" } } }),
+    ]))
+    if (mode === "live") expect(JSON.stringify(value)).not.toContain("den.hidden")
+    expect(f.calls).toEqual([])
+  }
+})
+
+test("live unknown names stay unknown and conflicting manifest entries fail closed", async () => {
   const f = fixture()
-  const result = await execute({ mode: "live", code: 'return await tools.$codemode.search({query:"read write hinted hidden"})' }, f.context)
-  expect(result.isError).not.toBe(true)
-  const value = JSON.stringify(record(result.structuredContent).value)
-  expect(value).not.toContain("den.write")
-  expect(value).not.toContain("external.hinted")
-  expect(value).not.toContain("den.hidden")
+  f.built.manifest.push({ scriptPath: "tools.den.read", capabilityName: "read", authority: "external", readOnly: true })
+  const rejected = await execute({ mode: "live", code: "return await tools.den.read({})" }, f.context)
+  expect(rejected.isError).toBe(true)
+  expect(f.receipts[0]?.errorKind).toBe("ToolUnavailable")
+  const unknown = await execute({ mode: "live", code: "return await tools.unknown.read({})" }, f.context)
+  expect(unknown.isError).toBe(true)
+  expect(f.receipts[1]?.errorKind).toBe("UnknownTool")
   expect(f.calls).toEqual([])
 })
 

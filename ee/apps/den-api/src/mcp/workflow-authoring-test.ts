@@ -13,7 +13,7 @@ import type { RecordWorkflowRunInput } from "../workflow-runs.js"
 import type { ExecuteCapabilityToolResult } from "./capability-registry.js"
 import { runCodemodeScript } from "./codemode-run.js"
 import { validateCodemodeScriptInput, validateCodemodeScriptOutput } from "./codemode-script-object.js"
-import { restrictReadOnlyCodemodeToolTree, type BuiltCodemodeTools } from "./codemode-tools.js"
+import { codemodeAuthoringToolTree, type BuiltCodemodeTools } from "./codemode-tools.js"
 import { normalizeToolBody } from "./invoke.js"
 
 export const workflowAuthoringTestInputSchema = z.object({
@@ -76,9 +76,7 @@ export async function executeWorkflowAuthoringTest(request: unknown, context: {
     }
   }
   const built = await context.buildTools()
-  const tools = mode === "live"
-    ? restrictReadOnlyCodemodeToolTree({ built, requiredCapabilities: built.manifest.filter((entry) => entry.readOnly === true) }).tools
-    : built.tools
+  const tools = codemodeAuthoringToolTree(built, mode === "live")
   const startedAt = new Date()
   const result = await runCodemodeScript({ code, scriptInput, readOnlyInput: mode === "live", tools, timeoutMs: 170_000 })
   const finishedAt = new Date()
