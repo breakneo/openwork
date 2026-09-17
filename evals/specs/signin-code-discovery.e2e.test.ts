@@ -2,6 +2,7 @@ import { expect } from "vitest";
 import { test, attachSurface, evaluateOnSurface, eventually, screenshot } from "@openwork/testkit";
 import { clickTarget, typeText, readDom } from "@openwork/cdp";
 import { localHost } from "@openwork/hosts";
+import { validate } from "@openwork/test-evidence";
 
 test("enterprise sign-in exposes its existing manual handoff path", { timeout: 300_000 }, async ({ place, evidence }) => {
   const bootstrap = { baseUrl: "https://den.example.test", requireSignin: true, requireActivation: true };
@@ -23,7 +24,9 @@ test("enterprise sign-in exposes its existing manual handoff path", { timeout: 3
     expect(geometry.elements).toHaveLength(2);
     expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewportWidth);
     expect(geometry.elements.every((element) => element.rect.width > 0 && element.rect.height > 0)).toBe(true);
-    await screenshot(desktop);
+    await validate(await screenshot(desktop), [
+      "The activation form shows Workspace address or sign-in code and a readable full-link helper without clipping or overlap.",
+    ]);
     evidence.recordAssertionEvidence("The activation field names sign-in codes and explains the full-link requirement", "Label and associated helper visible; recovery action absent before browser sign-in; controls have healthy dimensions", true);
 
     await clickTarget(desktop, { label: "Workspace address or sign-in code" });
@@ -37,7 +40,9 @@ test("enterprise sign-in exposes its existing manual handoff path", { timeout: 3
       within: 15_000, label: "browser-return recovery", until: (value) => value.includes("Sign-in didn’t come back?"),
     });
     expect(waiting).toContain("Finish signing in in your browser");
-    await screenshot(desktop);
+    await validate(await screenshot(desktop), [
+      "The activation screen shows the readable Sign-in didn’t come back? Paste the code from the browser recovery action without clipping or overlap.",
+    ]);
     await clickTarget(desktop, { role: "button", text: "Sign-in didn’t come back? Paste the code from the browser" });
     const focused = await evaluateOnSurface(desktop, () => {
       const input = document.getElementById("organization-server-input");
@@ -53,7 +58,9 @@ test("enterprise sign-in exposes its existing manual handoff path", { timeout: 3
     expect(confirmation).toContain("https://den.example.test");
     expect(confirmation).not.toContain("Continue in browser");
     expect(confirmation).not.toContain("fixture-one-time-grant");
-    await screenshot(desktop);
+    await validate(await screenshot(desktop), [
+      "The server confirmation shows den.example.test and Confirm and finish sign-in without displaying a grant or one-time code.",
+    ]);
     evidence.recordAssertionEvidence("Browser-return recovery focuses and selects the existing field, and a pasted link reaches manual origin confirmation", "The recovery control selected the complete address; the pasted link offered Confirm and finish sign-in, not another browser launch; the grant was not rendered in confirmation", true);
   } finally {
     await host.disposeSurface(handle);
