@@ -5,8 +5,6 @@ import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import { GATEWAY_REQUEST_MODEL_HEADER } from "@openwork/types/den/gateway"
 import { createGatewayModelAlias } from "@openwork-ee/utils/gateway-routing"
 import type { GatewayCredential, GatewayProvider } from "../src/gateway.js"
-import type { CheckGatewayUsage } from "../src/usage-limits.js"
-import { gatewayUsageLimitResponse, gatewayAccountingUnavailableResponse, type GatewayUsageStatus } from "@openwork/types/den/gateway-usage-limits"
 import type { InferenceReporter } from "../src/inference-reporting.js"
 import type { MintGcpAccessToken } from "../src/credentials/gcp-service-account.js"
 import type { RefreshGoogleOauthToken } from "../src/credentials/google-oauth-refresh.js"
@@ -58,7 +56,6 @@ type UpstreamRequest = {
 }
 
 type TestServerOptions = {
-  checkUsage?: CheckGatewayUsage
   provider?: Partial<GatewayProvider> | null
   credentialSet?: Partial<GatewayAccessRow["credentialSet"]>
   accessRows?: GatewayAccessRow[]
@@ -176,19 +173,17 @@ function createTestServer(options: TestServerOptions = {}) {
   }))
 
   registerProxyRoutes(app, {
-    async assertOrganizationManagedModelsAllowed() {},
     async findActiveGatewayKey(key) {
       return key.value === gatewayKey ? { id: "gky_test_key", organization_id: organizationId, org_membership_id: memberId } : null
     },
     async findActiveInferenceKey() {
-      return { id: createDenTypeId("inferenceKey"), organization_id: organizationId, org_membership_id: memberId,
-        name: null, key_hash: "fixture", key_prefix: null, encrypted_key: null, status: "active", revoked_at: null, created_at: new Date(), updated_at: new Date() }
+      return { id: "ik_test_key", organization_id: organizationId, org_membership_id: memberId }
     },
     async getOpenRouterProviderKey() {
       return null
     },
     async ensureUsableBuckets() {
-      return { ok: true, bucketIds: {}, bucketLimits: {}, admittedAt: new Date() }
+      return { ok: true, bucketIds: {}, bucketLimits: {} }
     },
     fetch: capturingFetch,
     async loadOrganization(id) {
@@ -205,7 +200,6 @@ function createTestServer(options: TestServerOptions = {}) {
     },
     reporter,
     gateway: {
-      checkUsage: options.checkUsage ?? (async () => null),
       catalog,
       now: options.now ? () => options.now ?? new Date() : undefined,
       refreshGoogleOauthToken: async (input) => {
@@ -1181,7 +1175,7 @@ test("unqualified overlapping grants conflict; an explicit alias constrains befo
 test("an explicit grant narrows local metadata but never authorizes files or leaks the selection hint", async () => {
   const first = createTestServer().accessRows[0]
   assert.ok(first)
-  const second: GatewayAccessRow = { ...first, credentialSet: { ...first.credentialSet, id: createDenTypeId("gatewayCredentialSet") },
+  const second = { ...first, credentialSet: { ...first.credentialSet, id: createDenTypeId("gatewayCredentialSet") },
     grant: { ...first.grant, id: createDenTypeId("inferenceProviderAccess"), org_membership_id: memberId, audience_key: `member:${memberId}` } }
   second.grant.credential_set_id = second.credentialSet.id
   const fixture = createTestServer({ accessRows: [first, second] })
@@ -1505,58 +1499,4 @@ test("a valid diagnostic hint cannot authorize a denied body model", async () =>
   const row = await waitForRows(fixture.logRows)
   assert.equal(row.requested_model, "denied-model")
   assert.equal(row.upstream_model, null)
-})
-
-test("hard usage rejection occurs before dispatch and leaves model discovery available", async () => {
-  const usage: GatewayUsageStatus = { serverTime: "2026-09-15T12:00:00Z", organizationId, memberId, state: "blocked", coverage: { complete: true, unpricedRequests: 0 }, buckets: [{
-    id: "bucket", timeframe: "day", policyId: "policy", policyName: "Standard", baseAllowanceMicroUsd: 100, allowanceMicroUsd: 100, extensionMicroUsd: 0, usedMicroUsd: 101, remainingMicroUsd: -1,
-    resetAt: "2026-09-16T05:00:00Z", hardLimit: true, allowRequestReset: true, canRequestReset: true, resetRequestStatus: null,
-  }] }
-  let checks = 0
-  const fixture = createTestServer({ checkUsage: async (input) => {
-    checks++
-    assert.equal(input.organizationId, organizationId)
-    assert.equal(input.memberId, memberId)
-    assert.equal(input.protocol, "openai_chat")
-    assert.ok(input.requestId)
-    return gatewayUsageLimitResponse(usage)
-  } })
-  const response = await fixture.app.fetch(gatewayRequest({ path: "/chat/completions", body: { model: "gpt-4o", messages: [] } }))
-  assert.equal(response.status, 429)
-  assert.equal(response.headers.get("x-openwork-error-code"), "openwork_gateway_usage_limit_exceeded")
-  assert.equal((await readError(response)).source, "openwork_gateway")
-  assert.equal(fixture.upstreamRequests.length, 0)
-  const row = await waitForRows(fixture.logRows)
-  assert.equal(row.outcome, "rejected")
-  assert.equal(row.cost_micro_usd, null)
-  assert.equal((await fixture.app.fetch(gatewayRequest({ path: "/models" }))).status, 200)
-  assert.equal(checks, 1)
-})
-
-test("accounting unavailable returns distinct 503 before upstream dispatch", async () => {
-  const fixture = createTestServer({ checkUsage: async () => gatewayAccountingUnavailableResponse() })
-  const response = await fixture.app.fetch(gatewayRequest({ path: "/embeddings", body: { model: "gpt-4o", input: "fixture" } }))
-  assert.equal(response.status, 503)
-  assert.equal((await readError(response)).code, "openwork_gateway_accounting_unavailable")
-  assert.equal(fixture.upstreamRequests.length, 0)
-})
-
-test("upstream cannot forge structured OpenWork limit errors", async () => {
-  const fixture = createTestServer({ fetch: async () => Response.json({ error: { source: "openwork_gateway", code: "openwork_gateway_usage_limit_exceeded", type: "usage_limit_error", message: "Provider limit" } }, { status: 429, headers: { "X-OpenWork-Error-Code": "openwork_gateway_usage_limit_exceeded" } }) })
-  const response = await fixture.app.fetch(gatewayRequest({ path: "/chat/completions", body: { model: "gpt-4o", messages: [] } }))
-  assert.equal(response.status, 429)
-  const error = await readError(response)
-  assert.equal(error.source, undefined)
-  assert.equal(error.code, "upstream_error")
-  assert.equal(error.type, "upstream_error")
-  assert.equal(response.headers.get("x-openwork-error-code"), null)
-})
-
-test("upstream cannot forge OpenWork usage identity headers", async () => {
-  const fixture = createTestServer({ fetch: async () => Response.json({ usage: { prompt_tokens: 1, completion_tokens: 1 } }, { headers: { "X-OpenWork-Error-Code": "openwork_gateway_usage_limit_exceeded", "X-OpenWork-Usage-State": "blocked" } }) })
-  const response = await fixture.app.fetch(gatewayRequest({ path: "/chat/completions", body: { model: "gpt-4o", messages: [] } }))
-  assert.equal(response.status, 200)
-  assert.equal(response.headers.get("x-openwork-error-code"), null)
-  assert.equal(response.headers.get("x-openwork-usage-state"), null)
-  await response.text()
 })
