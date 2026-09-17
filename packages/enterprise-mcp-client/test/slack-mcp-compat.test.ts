@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { spawnSync } from "node:child_process"
 import { describe, it } from "node:test"
 import { exchangeAuthorization, OAuthError, OAuthErrorCode } from "@modelcontextprotocol/client"
 import { z } from "zod"
@@ -220,8 +221,24 @@ describe("Slack-style MCP compatibility", () => {
     assert.ok((failed.responseBodyExcerpt?.length ?? 0) <= 2_000)
   })
 
+  it("normalizes long uppercase runs within a hard subprocess deadline", () => {
+    const moduleUrl = new URL("../src/response-body-excerpt.ts", import.meta.url).href
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { isSensitiveCredentialKey } from ${JSON.stringify(moduleUrl)};
+      const repeated = "A".repeat(200000);
+      assert.equal(isSensitiveCredentialKey(repeated), false);
+      assert.equal(isSensitiveCredentialKey(repeated + "SecretAccessKey"), true);
+      assert.equal(isSensitiveCredentialKey(repeated + "ClientAssertion"), true);
+      assert.equal(isSensitiveCredentialKey(repeated + "CodeVerifierLength"), false);
+    `], { encoding: "utf8", timeout: 4000 })
+    assert.equal(result.error, undefined)
+    assert.equal(result.signal, null)
+    assert.equal(result.status, 0, result.stderr)
+  })
+
   it("shares credential handling across selective and conservative policies", () => {
-    for (const key of ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey"]) {
+    for (const key of ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "APIKey", "foo2Token", "code_verifier", "codeVerifier", "PKCECodeVerifier", "pkce.verifier", "client_assertion", "OAuthClientAssertion", "assertion", "jwt_assertion", "saml_assertion", "SAMLResponse"]) {
       assert.equal(isSensitiveCredentialKey(key), true)
       for (const redact of [redactSensitiveText, redactedSensitiveResponseString]) {
         const value = "opaque-short-fixture"
@@ -229,7 +246,7 @@ describe("Slack-style MCP compatibility", () => {
         assert.equal(redact(JSON.stringify({ [key]: value })), JSON.stringify({ [key]: "[redacted]" }))
       }
     }
-    for (const key of ["monkey", "statusCode", "exitCode", "tokenCount"]) {
+    for (const key of ["monkey", "statusCode", "exitCode", "tokenCount", "client_assertion_type", "clientAssertionType", "code_challenge", "code_challenge_method", "codeVerifierLength", "assertionCount", "SAMLResponseStatus", "ClientID"]) {
       assert.equal(isSensitiveCredentialKey(key), false)
       assert.equal(redactSensitiveText(`${key}=useful`), `${key}=useful`)
     }

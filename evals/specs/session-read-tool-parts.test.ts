@@ -64,7 +64,7 @@ test("session tool descriptors advertise accepted enums, text defaults, caps and
 for (const { name, command, args } of [
   { name: "prompt isolation, shared redaction, 1301-part continuation, native before pagination and bounded incomplete scans", command: "bun", args: ["--conditions=development", "test", "apps/server/src/opencode-plugins/openwork-extensions-preview.test.ts"] },
   { name: "shared result bounds, cursor schema identity and descriptor drift", command: "bun", args: ["--conditions=development", "test", "apps/server/src/opencode-plugins/openwork-provider-adapters.test.ts"] },
-  { name: "existing shared credential redaction compatibility", command: "pnpm", args: ["--filter", "@openwork/enterprise-mcp-client", "exec", "tsx", "--test", "test/slack-mcp-compat.test.ts"] },
+  { name: "shared credential redaction compatibility and bounded long-uppercase normalization", command: "pnpm", args: ["--filter", "@openwork/enterprise-mcp-client", "exec", "tsx", "--test", "test/slack-mcp-compat.test.ts"] },
 ]) {
   test(`session detail regressions prove ${name}`, async ({ evidence }) => {
     needs({ commands: [command], placement: "local" });
@@ -189,9 +189,10 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
     synthetic(43),
   ].join(".");
   const opaqueCredential = "opaque-key-fixture-private-7p9";
-  const benignKeys = { monkey: "useful-control", statusCode: 422, exitCode: 1, tokenCount: 3 };
+  const benignKeys = { monkey: "useful-control", statusCode: 422, exitCode: 1, tokenCount: 3, client_assertion_type: "jwt-bearer", code_challenge: "public-challenge", code_challenge_method: "S256", assertionCount: 2, codeVerifierLength: 43 };
+  const credentialKeys = ["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "code_verifier", "codeVerifier", "pkce_verifier", "client_assertion", "clientAssertion", "jwt_assertion", "saml_assertion", "SAMLResponse"];
   const fixtures = [
-    ...["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken"].map((key) => ({
+    ...credentialKeys.map((key) => ({
       source: JSON.stringify({ nested: [{ [key]: opaqueCredential }], encoded: JSON.stringify({ [key]: opaqueCredential }), ...benignKeys }),
       marker: JSON.stringify({ nested: [{ [key]: "[redacted]" }], encoded: JSON.stringify({ [key]: "[redacted]" }), ...benignKeys }),
     })),
@@ -278,11 +279,11 @@ test("HTTP credential witness redacts unstructured secrets before tool caps and 
     expect(JSON.stringify(read)).not.toContain(opaqueCredential);
     expect((await query("session.search", { query: opaqueCredential, in: ["tool"] })).results).toEqual([]);
     expect(records((await query("session.search", { query: "useful-control", in: ["tool"] })).results)).toHaveLength(1);
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < credentialKeys.length; index += 1) {
       const projected = record(JSON.parse(text(JSON.parse(text(tools[index * 2]?.output)))));
       expect(projected).toMatchObject(benignKeys);
     }
-    evidence.recordAssertionEvidence("Opaque cloud credentials are removed by key context", "AWS_SECRET_ACCESS_KEY, SecretAccessKey and SessionToken were redacted in nested objects and encoded JSON strings through tool input/output/error. Searching the opaque value returned no result; monkey/statusCode/exitCode/tokenCount survived byte-for-byte and their benign control remained searchable.", true);
+    evidence.recordAssertionEvidence("Opaque cloud credentials are removed by key context", "AWS keys, SessionToken, PKCE code_verifier and client/JWT/SAML assertions were redacted in nested objects and encoded JSON strings through tool input/output/error. Searching the opaque value returned no result; benign keys, assertion-type metadata, public code challenges and length/count fields survived byte-for-byte and remained searchable.", true);
     evidence.recordAssertionEvidence("Pinned Gitleaks rules redact credentials across production read, search and activity", "A test-owned read-only HTTP witness supplied one synthetic positive for each of the 17 selected Gitleaks rule IDs at b58d3f102cf3a2c84cb7f923d05c25c9b1aed84b. Exact rule-ID markers replaced secrets in output, nested input, JSON-encoded nested strings and tool errors; generic-api-key preserved assignment context. Activity emitted only fixed failure labels with no credential payload; negative secret searches and positive marker searches agreed. No live credentials or inference were used.", true);
     const capped = tools.find((tool) => tool.callId === "call_cap");
     expect(JSON.stringify(prefix).length - 1).toBe(1975);

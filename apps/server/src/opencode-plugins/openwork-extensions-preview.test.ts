@@ -904,9 +904,9 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     expect(fake.requests).toHaveLength(0);
   });
 
-  test.each(["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "aws.secret.access.key"])("credential key %s is redacted in nested tool objects and JSON strings before search", async (key) => {
+  test.each(["AWS_SECRET_ACCESS_KEY", "SecretAccessKey", "SessionToken", "AWS_SESSION_TOKEN", "awsSecretAccessKey", "aws.secret.access.key", "code_verifier", "codeVerifier", "pkce_verifier", "client_assertion", "clientAssertion", "jwt_assertion", "saml_assertion", "SAMLResponse"])("credential key %s is redacted in nested tool objects and JSON strings before search", async (key) => {
     const secret = "opaque-fixture-credential-7p9";
-    const benign = { monkey: "useful", statusCode: 422, exitCode: 1, tokenCount: 3 };
+    const benign = { monkey: "useful", statusCode: 422, exitCode: 1, tokenCount: 3, client_assertion_type: "jwt-bearer", code_challenge: "public-challenge", code_challenge_method: "S256", assertionCount: 2, codeVerifierLength: 43 };
     const payload = { credentials: { [key]: secret }, encoded: JSON.stringify({ nested: [{ [key]: secret }] }), ...benign };
     const expected = { credentials: { [key]: "[redacted]" }, encoded: JSON.stringify({ nested: [{ [key]: "[redacted]" }] }), ...benign };
     startFakeOpenWorkServer({ messages: [{ info: { id: "msg_credentials", role: "assistant" }, parts: [

@@ -11,12 +11,36 @@ const LONG_OPAQUE_CREDENTIAL = /[A-Za-z0-9_~+/=-]{40,}/g
 
 type CredentialPolicy = "conservative" | "selective"
 
+function normalizeCredentialKey(key: string): string {
+  const value = key.trim()
+  const normalized: string[] = []
+  let separating = false
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === "." || character === "-" || character.trim() === "") {
+      if (!separating) normalized.push("_")
+      separating = true
+      continue
+    }
+    separating = false
+    const current = value.charCodeAt(index)
+    const previous = value.charCodeAt(index - 1)
+    const next = value.charCodeAt(index + 1)
+    if (current >= 65 && current <= 90
+      && ((previous >= 97 && previous <= 122) || (previous >= 48 && previous <= 57)
+        || (previous >= 65 && previous <= 90 && next >= 97 && next <= 122))) normalized.push("_")
+    normalized.push(character)
+  }
+  return normalized.join("").toLowerCase()
+}
+
 export function isSensitiveCredentialKey(key: string): boolean {
-  const normalized = key.trim().replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[.\s-]+/g, "_").toLowerCase()
-  return /(?:^|_)(?:token|grant|secret|password|passwd|authorization|cookie)$/.test(normalized)
+  const normalized = normalizeCredentialKey(key)
+  return /(?:^|_)(?:token|grant|secret|password|passwd|authorization|cookie|assertion)$/.test(normalized)
     || /(?:^|_)(?:api|access|private|signing|encryption)_key(?:_id)?$/.test(normalized)
     || /(?:^|_)(?:authorization|auth)_code$/.test(normalized)
-    || /^(?:key|code|(?:api|access|refresh|session|client)(?:key|token|secret))$/.test(normalized)
+    || /(?:^|_)(?:(?:code|pkce)_verifier|saml_response)$/.test(normalized)
+    || /^(?:key|code|codeverifier|pkceverifier|samlresponse|clientassertion|(?:api|access|refresh|session|client)(?:key|token|secret))$/.test(normalized)
 }
 
 function credentialKey(key: string, policy: CredentialPolicy): boolean {
