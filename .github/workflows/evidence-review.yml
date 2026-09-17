@@ -3,18 +3,6 @@ name: Evidence review
 # Publication runs after existing checks, on its own workflow. Never require
 # this check in branch protection: storage and presentation do not gate shipping.
 on:
-  pull_request:
-    paths:
-      - apps/review/**
-      - packages/review/**
-      - evals/packages/test-artifacts/**
-      - evals/scripts/publish-review*.mjs
-      - evals/packages/test-evidence/src/vitest.ts
-      - evals/bin/evals.mjs
-      - evals/docs-shots/run.ts
-      - evals/specs/evidence-review.test.ts
-      - evals/worlds/evidence-review.ts
-      - .github/workflows/evidence-review.yml
   workflow_run:
     workflows: [Build and core checks, Product journeys]
     types: [completed]
@@ -113,6 +101,8 @@ jobs:
     if: >-
       always() &&
       github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.event != 'pull_request_target' &&
       vars.OPENWORK_REVIEW_URL != '' &&
       (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
     runs-on: ubuntu-latest

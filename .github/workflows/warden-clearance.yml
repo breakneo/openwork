@@ -19,9 +19,7 @@
 name: Warden Clearance
 
 on:
-  workflow_run:
-    workflows: [Warden]
-    types: [completed]
+  workflow_dispatch:
 
 permissions:
   actions: read

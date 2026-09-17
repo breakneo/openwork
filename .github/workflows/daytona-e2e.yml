@@ -16,9 +16,6 @@ on:
         required: false
         default: ""
         type: string
-  workflow_run:
-    workflows: [Warden]
-    types: [completed]
 
 permissions:
   actions: read

@@ -80,8 +80,8 @@ test('GitHub mocked HTTP is read-only, bounded and no redirects', async () => {
 test('workflow security invariants and no arbitrary execution', async () => {
   const workflow = await readFile(new URL('../workflows/jev-test-coverage-review.yml', import.meta.url), 'utf8');
   const helper = await readFile(new URL('./jev-test-coverage-review.mjs', import.meta.url), 'utf8');
-  assert.match(workflow, /pull_request_target:/);
-  assert.match(workflow, /\n  pull_request:\n    branches: \[dev\]/);
+  assert.match(workflow, /\non:\n  workflow_dispatch:\npermissions:/);
+  assert.doesNotMatch(workflow, /\n  pull_request(?:_target)?:/);
   assert.match(workflow, /if: github.event_name == 'pull_request_target' &&/);
   const validation = workflow.split('  validation:')[1].split('\n  review:')[0];
   assert.match(validation, /if: github.event_name == 'pull_request'/);
@@ -95,8 +95,6 @@ test('workflow security invariants and no arbitrary execution', async () => {
   assert.match(workflow, /version: 11.4.0\n          run_install: false/);
   assert.ok(!workflow.includes('corepack'));
   assert.match(workflow, /group: jev-coverage-\$\{\{ github.event_name \}\}-/);
-  assert.match(workflow, /branches: \[dev\]/);
-  assert.match(workflow, /opened, synchronize, reopened, ready_for_review/);
   assert.match(workflow, /head.repo.full_name == github.repository/);
   assert.match(workflow, /checkout@d23441a48e516b6c34aea4fa41551a30e30af803/);
   assert.match(workflow, /ref: \$\{\{ github.event.pull_request.base.sha \}\}/);

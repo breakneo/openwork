@@ -1,14 +1,7 @@
 name: Required verification contracts
 
 on:
-  pull_request:
-    paths:
-      - .github/scripts/required-verification*
-      - .github/workflows/required-verification.yml
-      - .github/workflows/daytona-e2e.yml
-      - .github/workflows/evidence-review.yml
-      - evals/scripts/journey-report.mjs
-      - evals/scripts/journey-catalog.mjs
+  workflow_dispatch:
 
 permissions:
   contents: read
