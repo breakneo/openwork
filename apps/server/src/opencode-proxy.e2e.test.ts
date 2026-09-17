@@ -407,6 +407,70 @@ describe("workspace OpenCode proxy", () => {
     expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/todo")).toHaveLength(1);
   });
 
+  for (const mount of ["/workspace/ws_1/opencode", "/opencode"]) {
+    for (const sessionId of ["ses_1", "ses_foreign"]) {
+      test.serial(`v1 ${mount} ${sessionId} history transport rejection stays request-scoped while ownership is pending`, async () => {
+        const workspaceRoot = await createWorkspaceRoot();
+        const release = deferred();
+        const metadataPath = `/session/${sessionId}`;
+        const historyPath = `${metadataPath}/message`;
+        const engine = startMockOpencode({
+          foreignSessionDirectory: "/workspace/foreign",
+          onRead: async (request) => {
+            if (new URL(request.url).pathname === metadataPath) await release.promise;
+          },
+        });
+        const engineUrl = `http://127.0.0.1:${engine.server.port}`;
+        const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: engineUrl });
+        const base = `http://127.0.0.1:${openwork.server.port}`;
+        const originalFetch = globalThis.fetch;
+        const unhandled: unknown[] = [];
+        const onUnhandled = (error: unknown) => { unhandled.push(error); };
+        let rejected = false;
+        globalThis.fetch = Object.assign(
+          (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+            const url = new URL(input instanceof Request ? input.url : String(input));
+            if (url.origin === engineUrl && url.pathname === historyPath) {
+              rejected = true;
+              return Promise.reject(Object.assign(new Error("Synthetic history connection reset"), { code: "ECONNRESET" }));
+            }
+            return originalFetch(input, init);
+          },
+          { preconnect: originalFetch.preconnect },
+        );
+        process.on("unhandledRejection", onUnhandled);
+        const result = originalFetch(`${base}${mount}${historyPath}`, {
+          headers: auth(openwork.token), signal: AbortSignal.timeout(2_000),
+        });
+        void result.catch(() => undefined);
+        try {
+          expect(await waitUntil(() => rejected && engine.requests.some(({ pathname }) => pathname === metadataPath), 100)).toBe(true);
+          expect(await Promise.race([result.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 20))])).toBe("pending");
+          expect((await originalFetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).status).toBe(200);
+          expect(unhandled).toEqual([]);
+          release.resolve();
+          const response = await result;
+          if (sessionId === "ses_1") {
+            expect(response.status).toBe(502);
+            expect(await response.json()).toMatchObject({
+              code: "opencode_unreachable",
+              details: { path: `/opencode${historyPath}`, cause: "Synthetic history connection reset" },
+            });
+          } else {
+            expect(response.status).toBe(404);
+            expect(await response.json()).toEqual({ code: "session_not_found", message: "Session not found" });
+          }
+          expect((await originalFetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).status).toBe(200);
+        } finally {
+          release.resolve();
+          await result.catch(() => undefined);
+          process.off("unhandledRejection", onUnhandled);
+          globalThis.fetch = originalFetch;
+        }
+      });
+    }
+  }
+
   for (const version of ["v1", "v2"]) {
     for (const phase of ["ownership", "history"]) {
       test.serial(`${version} history disconnect cancels the upstream ${phase} GET`, async () => {

@@ -673,6 +673,8 @@ async function assertWorkspaceOwnsProxiedSessionRead(
  */
 async function sendWithOwnershipProof(proof: Promise<void>, send: () => Promise<Response>): Promise<Response> {
   const sending = send();
+  // Observe rejection while ownership is pending; return the original promise below.
+  void sending.catch(() => undefined);
   try {
     await proof;
   } catch (error) {
