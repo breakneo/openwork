@@ -1316,14 +1316,15 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const readOpening = useCallback(async (signal: AbortSignal, window: OpeningHistoryWindow) => {
     if (evalSnapshotFailureRef.current) throw new Error("eval: forced session snapshot failure");
     const startedAt = Date.now();
+    // The opening read keeps its original endpoint for its whole lifetime, so a
+    // retained read never follows a later owner. Its bounded retry only covers
+    // transient failures; permanent ones settle immediately into Retry.
     const target = { owner: sessionOwner, sessionId: props.sessionId,
       endpoint: { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken } };
-    const item = useDesktopLoopbackSnapshotRetry
-      ? await opencodeSessionNative.composeNativeSessionHistoryWithRetry(sessionOwner, () => target, { ...window, signal })
-      : await opencodeSessionNative.composeNativeSessionHistory(target.endpoint, target.sessionId, { ...window, signal });
+    const item = await opencodeSessionNative.composeNativeSessionHistoryWithRetry(sessionOwner, () => target, { ...window, signal });
     markSessionSnapshotFetchStart(item, startedAt);
     return item;
-  }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner, useDesktopLoopbackSnapshotRetry]);
+  }, [props.opencodeBaseUrl, props.openworkToken, props.sessionId, sessionOwner]);
   const readLatest = useCallback(async (signal: AbortSignal, options?: { desktopTransport: "main" }) => {
     const endpoint = { opencodeBaseUrl: props.opencodeBaseUrl, token: props.openworkToken, ...options };
     const [session, messages] = await Promise.all([
