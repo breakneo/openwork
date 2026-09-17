@@ -211,13 +211,13 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
   const entry = useMemo<{
     warm: boolean;
     fullRead: { baseline: UIMessage[]; updateCount: number } | null;
-    /** The latest newest read matched the cached complete history's tail. */
-    fullConfirmed: boolean;
+    /** The exact cached complete history whose tail the latest newest read matched. */
+    confirmedFull: OpenworkSessionHistory | null;
     readers: Set<AbortController>;
   }>(() => ({
     warm: !input.ignoreCached && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.id === input.sessionId,
     fullRead: null,
-    fullConfirmed: false,
+    confirmedFull: null,
     readers: new Set<AbortController>(),
   }), [client, input.owner, input.sessionId, credential]);
   const pages = useSessionHistoryPages({ ...input, credential, initial: openingSnapshot, saved, complete: hasFullSnapshot });
@@ -233,7 +233,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       const initial = client.getQueryData<LatestSessionHistory>(latestKey) ?? {
         messages: mergeHistoryWindow(projectHistoryRead(full), readSource()), source: readSource(),
       };
-      entry.fullConfirmed = false;
+      entry.confirmedFull = null;
       const history = await readLatestHistory(input.readLatest, signal);
       signal.throwIfAborted();
       if (history.session.id !== input.sessionId || history.messages.some(({ info, parts }) =>
@@ -243,7 +243,7 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
       }
       // Judge the cache as it stands now: live events may have changed it during the read.
       const cachedNow = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
-      entry.fullConfirmed = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history);
+      entry.confirmedFull = cachedNow !== undefined && latestConfirmsFullHistory(cachedNow, history) ? cachedNow : null;
       const current = applyHistorySourceChanges(client.getQueryData<LatestSessionHistory>(latestKey) ?? initial, readSource());
       if (history.session.revert?.messageID || client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey)?.session.revert?.messageID) return current;
       return {
@@ -449,9 +449,11 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     backgroundReady: paginated && !needsRevertHistory ? false : hasFullSnapshot
       ? !entry.warm || !input.readLatest || !latestQuery.isFetching
       : backgroundOwner === entry,
-    // Cached complete history whose tail the newest read just matched needs no
-    // uncapped re-read; terminal-edge invalidation still refreshes it later.
-    fullCurrent: hasFullSnapshot && entry.warm && latestQuery.isSuccess && entry.fullConfirmed,
+    // The cached complete history whose tail the newest read matched needs no
+    // uncapped re-read. Only that exact object is current: a later refresh or
+    // terminal-edge invalidation replaces it and returns to the default policy.
+    fullCurrent: hasFullSnapshot && entry.warm && latestQuery.isSuccess && entry.confirmedFull !== null
+      && client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey) === entry.confirmedFull,
     pages,
     complete: hasFullSnapshot || pages.complete,
     paginated,
