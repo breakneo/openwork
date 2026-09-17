@@ -78,6 +78,8 @@ const ACTIONABLE_MCP_APP_RESOLUTION_CODES = new Set([
   "invalid_resource_uri",
   "invalid_launch_reference",
   "mcp_unreachable",
+  "mcp_auth_required",
+  "mcp_access_denied",
   "resource_read_failed",
   "resource_too_large",
   "server_unavailable",

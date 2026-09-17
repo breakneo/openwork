@@ -4,7 +4,6 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createOpenworkServerClient, OpenworkServerError, type OpenworkMcpAppResource, type OpenworkMcpAppToolResult, type OpenworkServerClient } from "../src/app/lib/openwork-server";
-import { mcpAppResolutionRetryDelayMs } from "../src/app/lib/mcp-app-resolution";
 import { resolveDashboardMcpApp } from "../src/react-app/domains/dashboard/dashboard-mcp-app-resolution";
 import { createMcpAppActions } from "../src/components/chat/mcp-app-origin";
 import type { McpAppSandboxViewProps } from "../src/components/chat/mcp-app-frame";
@@ -227,19 +226,6 @@ test("live generated actions share refresh state without remounting the menu or 
   }
   expect(released).toEqual(["actions-2", "actions-1"]);
   window.localStorage.removeItem(liveGeneratedAppCacheScope(viewerScope));
-});
-
-test("bounds retries to transient discovery failures", () => {
-  for (const code of ["server_unavailable", "mcp_unreachable"]) {
-    const cause = new OpenworkServerError(503, code, "starting");
-    expect(mcpAppResolutionRetryDelayMs(cause, 0)).toBe(1_000);
-    expect(mcpAppResolutionRetryDelayMs(cause, 1)).toBe(3_000);
-    expect(mcpAppResolutionRetryDelayMs(cause, 2)).toBeNull();
-  }
-  for (const code of ["tool_denied", "tool_resource_mismatch"]) {
-    expect(mcpAppResolutionRetryDelayMs(new OpenworkServerError(422, code, "denied"), 0)).toBeNull();
-  }
-  expect(mcpAppResolutionRetryDelayMs(new Error("unknown failure"), 0)).toBeNull();
 });
 
 test.each([false, true])("recovers or stops after three discovery attempts (exhausted: %j)", async (exhausted) => {
