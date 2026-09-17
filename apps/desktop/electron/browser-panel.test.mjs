@@ -43,10 +43,12 @@ export const menuTemplates = [];
 export const Menu = { buildFromTemplate(template) { menuTemplates.push(template); return template; }, setApplicationMenu() {} };
 export const createdViews = [];
 export const navigation = { load: async () => {} };
+export const createdWindows = [];
 export class BrowserWindow {
   static getAllWindows() { return []; }
   constructor(options) {
     if (options.show !== false || options.focusable !== false) throw new Error("background host must never show or focus");
+    createdWindows.push(this);
     const children = [];
     this.contentView = {
       children,
@@ -198,7 +200,7 @@ export function load(url, context, next) {
 register(`data:text/javascript,${encodeURIComponent(hooks)}`);
 const { createBrowserPanel } = await import("./browser-panel.mjs");
 // @ts-expect-error The registered test-only Electron stub exports its witnesses.
-const { createdViews, effects, controls, browserSession, navigation, requestHooks, exposed, webFrame, preloadCalls, ipcRenderer, menuTemplates } = await import("electron");
+const { createdViews, createdWindows, effects, controls, browserSession, navigation, requestHooks, exposed, webFrame, preloadCalls, ipcRenderer, menuTemplates } = await import("electron");
 const { createApplicationMenu } = await import("./app-menu.mjs");
 
 const PANEL_BOUNDS = { x: 800, y: 40, width: 400, height: 900 };
@@ -295,6 +297,63 @@ function createPanel(checkPolicy = async (_request) => {}, remoteDebugPort = 0) 
     return { ...menus.at(-1), done };
   }
   return { invoke, emit, mainWindow, mainContents, menus, onScreen, commands, children, messages, views, policies, openLinkMenu, openTabMenu, panel, approve };
+}
+
+function watchNativePlacement(t, { mainWindow, views }) {
+  const snapshots = [];
+  const record = () => snapshots.push(mainWindow.contentView.children.map(view => ({
+    view, bounds: { ...view.getBounds() }, visible: view.getVisible(), destroyed: view.webContents.isDestroyed(),
+  })));
+  for (const [target, methods] of [
+    [mainWindow.contentView, ["addChildView", "removeChildView"]],
+    ...views().map(view => [view, ["setBounds", "setVisible"]]),
+  ]) {
+    for (const method of methods) {
+      const original = target[method].bind(target);
+      t.mock.method(target, method, (...args) => {
+        const result = original(...args);
+        record();
+        return result;
+      });
+    }
+  }
+  return (expectedView, expectedBounds, visible = true) => {
+    record();
+    assert.deepEqual(mainWindow.contentView.children, expectedView ? [expectedView] : []);
+    for (const snapshot of snapshots.splice(0)) {
+      assert.ok(snapshot.length <= 1, "never attach two pages above the app");
+      for (const entry of snapshot) {
+        assert.equal(entry.view, expectedView, "only the intended page may be attached");
+        assert.deepEqual(entry.bounds, expectedBounds, "size before attachment, never at background viewport dimensions");
+        assert.equal(entry.visible, visible);
+        assert.equal(entry.destroyed, false);
+      }
+    }
+  };
+}
+
+function enforceDebuggerAttachment(t, view, beforeReply = async (_method, _params) => {}) {
+  const contents = view.webContents;
+  const cdp = contents.debugger;
+  const send = cdp.sendCommand.bind(cdp);
+  const witness = { inFlight: 0, maxInFlight: 0, detachedCommands: 0 };
+  t.mock.method(cdp, "sendCommand", async (method, params) => {
+    if (contents.isDestroyed()) throw new Error("WebContents is destroyed");
+    if (!cdp.isAttached()) {
+      witness.detachedCommands++;
+      throw new Error("Debugger is not attached");
+    }
+    witness.inFlight++;
+    witness.maxInFlight = Math.max(witness.maxInFlight, witness.inFlight);
+    try {
+      const result = await send(method, params);
+      await beforeReply(method, params);
+      return result;
+    } finally {
+      witness.inFlight--;
+    }
+  });
+  return witness;
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -1022,6 +1081,226 @@ test("geometry IPC accepts only the main renderer main frame without mutating st
   panel.destroy();
 });
 
+test("neighbor reattachment clips and invalidates collapsed geometry across zoom without touching the background owner", async (t) => {
+  for (const { zoomFactor, expected } of [
+    { zoomFactor: 0.8, expected: { x: 320, y: 240, width: 200, height: 160 } },
+    { zoomFactor: 1.25, expected: { x: 501, y: 376, width: 312, height: 250 } },
+  ]) {
+    const harness = createPanel();
+    const { invoke, mainWindow, mainContents, views, children, messages, panel } = harness;
+    t.after(() => panel.destroy());
+    mainContents.zoomFactor = zoomFactor;
+    invoke("openwork:browser:setVisibleSession", "A");
+    const first = invoke("openwork:browser:createTab", "about:blank", "A");
+    const second = invoke("openwork:browser:createTab", "about:blank", "A");
+    const background = invoke("openwork:browser:createTab", "about:blank", "B");
+    await flush();
+    const [firstView, secondView, backgroundView] = views();
+    const host = createdWindows.at(-1);
+    const backgroundState = invoke("openwork:browser:state").tabs.find(tab => tab.id === background.tabId);
+    const loads = views().map(view => [...view.webContents.loads]);
+    const bounds = { x: 400.4, y: 300.4, width: 250.2, height: 200.2, zoomFactor };
+    invoke("openwork:browser:show", bounds, "A");
+    await flush();
+    const verify = watchNativePlacement(t, harness);
+    const before = messages("openwork:browser:bounds-invalidated").length;
+    mainWindow.contentSize = [expected.x + 61, expected.y + 47];
+    await invoke("openwork:browser:selectTab", first.tabId);
+    const clipped = { ...expected, width: 61, height: 47 };
+    verify(firstView, clipped);
+    assert.equal(messages("openwork:browser:bounds-invalidated").length, before + 1);
+    assert.deepEqual(firstView.getBounds(), clipped);
+    mainWindow.contentSize = [1600, 1200];
+    await invoke("openwork:browser:selectTab", second.tabId);
+    verify(secondView, clipped);
+    assert.deepEqual(secondView.getBounds(), clipped, "growth alone cannot expand cached placement into unmeasured app space");
+    mainWindow.contentSize = [expected.x, 1200];
+    await invoke("openwork:browser:selectTab", first.tabId);
+    verify(null, null);
+    assert.deepEqual(children, []);
+    mainWindow.contentSize = [1600, 1200];
+    await invoke("openwork:browser:selectTab", second.tabId);
+    assert.deepEqual(children, [], "growth cannot revive the fully clipped cache");
+    assert.equal(invoke("openwork:browser:bounds", bounds), true);
+    verify(secondView, expected);
+    assert.deepEqual(children, [secondView]);
+    assert.deepEqual(views().map(view => view.webContents.loads), loads);
+    mainWindow.contentSize = [1600, expected.y + 23];
+    invoke("openwork:browser:closeTab", second.tabId);
+    verify(firstView, { ...expected, height: 23 });
+    assert.deepEqual(children, [firstView], "closing the active page sizes its surviving neighbor before attaching");
+    mainWindow.contentSize = [0, 0];
+    assert.equal(invoke("openwork:browser:bounds", bounds), false);
+    verify(null, null);
+    mainWindow.contentSize = [1600, 1200];
+    await invoke("openwork:browser:selectTab", first.tabId);
+    assert.deepEqual(children, []);
+    assert.equal(invoke("openwork:browser:bounds", bounds), true);
+    verify(firstView, expected);
+    assert.deepEqual(firstView.webContents.loads, loads[0]);
+    assert.equal(firstView.webContents.isDestroyed(), false);
+    assert.deepEqual(host.contentView.children, [backgroundView]);
+    assert.equal(host.isDestroyed(), false);
+    assert.deepEqual(backgroundView.getBounds(), { x: 0, y: 0, width: 1280, height: 800 });
+    assert.deepEqual(invoke("openwork:browser:state").tabs.find(tab => tab.id === background.tabId), backgroundState);
+    assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.B, background.tabId);
+    panel.destroy();
+  }
+});
+
+test("direct multi-tab session switches and hidden stale updates never attach a background-sized page", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, mainContents, children } = harness;
+  t.after(() => panel.destroy());
+  invoke("openwork:browser:setVisibleSession", "A");
+  const first = invoke("openwork:browser:createTab", "about:blank", "A");
+  const second = invoke("openwork:browser:createTab", "about:blank", "A");
+  const b1 = invoke("openwork:browser:createTab", "about:blank", "B");
+  const b2 = invoke("openwork:browser:createTab", "about:blank", "B");
+  const other = invoke("openwork:browser:createTab", "about:blank", "C");
+  await flush();
+  const [a1View, a2View, b1View, b2View, cView] = views();
+  const host = createdWindows.at(-1);
+  const loads = views().map(view => [...view.webContents.loads]);
+  const otherState = invoke("openwork:browser:state").tabs.find(tab => tab.id === other.tabId);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  const verify = watchNativePlacement(t, harness);
+  await invoke("openwork:browser:selectTab", first.tabId);
+  verify(a1View, PANEL_BOUNDS);
+  b1View.webContents.emit("did-start-navigation", "https://example.com/background", false, true);
+  assert.deepEqual(children, [a1View]);
+  assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.B, b1.tabId);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  verify(b1View, PANEL_BOUNDS);
+  await invoke("openwork:browser:selectTab", b2.tabId);
+  verify(b2View, PANEL_BOUNDS);
+  invoke("openwork:browser:hide");
+  verify(null, null);
+  mainContents.zoomFactor = 0.8;
+  assert.equal(invoke("openwork:browser:show", { ...PANEL_BOUNDS, zoomFactor: 1 }, "A"), false);
+  assert.equal(invoke("openwork:browser:bounds", { ...PANEL_BOUNDS, zoomFactor: 1 }), false);
+  assert.equal(invoke("openwork:browser:state").visibleSessionId, "B");
+  a2View.webContents.emit("did-start-navigation", "https://example.com/hidden", false, true);
+  await invoke("openwork:browser:selectTab", b1.tabId);
+  assert.equal(invoke("openwork:browser:bounds", { ...PANEL_BOUNDS, zoomFactor: 0.8 }), true);
+  assert.deepEqual(children, [], "hidden selection, navigation and fresh bounds never restore show intent");
+  invoke("openwork:browser:show", { ...PANEL_BOUNDS, zoomFactor: 0.8 }, "A");
+  verify(a2View, { x: 640, y: 32, width: 320, height: 720 });
+  await flush();
+  assert.equal(invoke("openwork:browser:state").activeTabId, second.tabId);
+  assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.B, b1.tabId);
+  assert.deepEqual(children, [a2View]);
+  assert.deepEqual(new Set(host.contentView.children), new Set([b1View, b2View, cView]));
+  assert.equal(host.isDestroyed(), false);
+  assert.deepEqual(invoke("openwork:browser:state").tabs.find(tab => tab.id === other.tabId), otherState);
+  assert.deepEqual(views().map(view => view.webContents.loads), loads);
+  assert.ok(views().every(view => !view.webContents.isDestroyed()));
+});
+
+test("pending approval masks survive tab and session reattachment and hidden acceptance cannot cover the neighbor", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, approve, children } = harness;
+  t.after(() => panel.destroy());
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://example.com/review" } });
+  await flush();
+  approve();
+  const { tabId } = await opening;
+  const neighbor = invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:createTab", "about:blank", "B");
+  await flush();
+  const [reviewView, neighborView, bView] = views();
+  const loads = views().map(view => [...view.webContents.loads]);
+  const { inputs } = mockPage(reviewView.webContents);
+  await invoke("openwork:browser:selectTab", tabId);
+  const observed = await panel.browserTask({ sessionId: "A", operation: "observe", args: { tabId } });
+  const pending = panel.browserTask({ sessionId: "A", operation: "act", args: {
+    tabId, observationId: observed.observationId, action: { type: "fill", ref: "e1", text: "Reviewed text" },
+  } });
+  await flush();
+  const review = invoke("openwork:browser:state").tabs.find(tab => tab.id === tabId).browserApproval;
+  assert.ok(review);
+  assert.equal(reviewView.getVisible(), false);
+  const verify = watchNativePlacement(t, harness);
+  await invoke("openwork:browser:selectTab", neighbor.tabId);
+  verify(neighborView, PANEL_BOUNDS);
+  await invoke("openwork:browser:selectTab", tabId);
+  verify(reviewView, PANEL_BOUNDS, false);
+  invoke("openwork:browser:hide");
+  verify(null, null);
+  invoke("openwork:browser:bounds", PANEL_BOUNDS);
+  assert.deepEqual(children, []);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  verify(bView, PANEL_BOUNDS);
+  assert.equal(invoke("openwork:browser:approve", tabId, review.id, true), false, "another owner cannot finish the masked approval");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  verify(reviewView, PANEL_BOUNDS, false);
+  assert.deepEqual(invoke("openwork:browser:state").tabs.find(tab => tab.id === tabId).browserApproval, review);
+  await invoke("openwork:browser:selectTab", neighbor.tabId);
+  verify(neighborView, PANEL_BOUNDS);
+  approve(true, tabId);
+  const result = await pending;
+  verify(neighborView, PANEL_BOUNDS);
+  assert.equal(result.ok, false);
+  assert.equal(result.dispatched, false);
+  assert.equal(invoke("openwork:browser:approve", tabId, review.id, true), false);
+  assert.deepEqual(inputs, []);
+  assert.deepEqual(children, [neighborView]);
+  assert.deepEqual(views().map(view => view.webContents.loads), loads);
+  assert.ok(views().every(view => !view.webContents.isDestroyed()));
+});
+
+test("late restoration after renderer loss or owner switching never reuses the previous native rectangle", async (t) => {
+  for (const ending of ["hide", "renderer-crash", "session-switch", "close"]) {
+    const harness = createPanel();
+    const { invoke, panel, views, mainContents, children } = harness;
+    const document = gate();
+    t.after(() => { document.finish(); panel.destroy(); });
+    invoke("openwork:browser:setVisibleSession", "A");
+    const saved = invoke("openwork:browser:createTab", "about:blank", "A");
+    const neighbor = invoke("openwork:browser:createTab", "about:blank", "B");
+    await flush();
+    controls.confirm = async () => 1;
+    await invoke("openwork:browser:suspendTab", saved.tabId);
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+    const host = createdWindows.at(-1);
+    const backgroundView = views()[1];
+    controls.beforeLoad = () => document.promise;
+    const restoring = invoke("openwork:browser:selectTab", saved.tabId);
+    const settled = restoring.then(value => ({ value }), error => ({ error }));
+    const restoredView = views()[2];
+    assert.deepEqual(children, [restoredView]);
+    const verify = watchNativePlacement(t, harness);
+    if (ending === "renderer-crash") mainContents.emit("render-process-gone");
+    else if (ending === "session-switch") invoke("openwork:browser:setVisibleSession", "B");
+    else if (ending === "close") invoke("openwork:browser:closeTab", saved.tabId);
+    else invoke("openwork:browser:hide");
+    verify(null, null);
+    invoke("openwork:browser:bounds", PANEL_BOUNDS);
+    document.finish();
+    const result = await settled;
+    await flush();
+    verify(null, null);
+    assert.deepEqual(children, [], ending);
+    assert.equal(backgroundView.webContents.isDestroyed(), false);
+    assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.B, neighbor.tabId);
+    if (ending === "close") {
+      assert.match(result.error.message, /destroyed|closed/);
+      assert.equal(restoredView.webContents.isDestroyed(), true);
+    } else {
+      assert.equal(result.value, saved.tabId);
+      assert.equal(restoredView.webContents.isDestroyed(), false);
+      assert.deepEqual(restoredView.webContents.loads, ["about:blank"]);
+      invoke("openwork:browser:show", { x: 100, y: 50, width: 200, height: 300 }, "A");
+      verify(restoredView, { x: 100, y: 50, width: 200, height: 300 });
+    }
+    assert.deepEqual(host.contentView.children, [backgroundView]);
+    assert.equal(host.isDestroyed(), false);
+    panel.destroy();
+  }
+});
+
 test("host clipping or invalidation asks preload and the renderer to resend identical fresh bounds", async (t) => {
   const { invoke, mainWindow, mainContents, onScreen, panel } = createPanel();
   const { tabId } = invoke("openwork:browser:createTab", "about:blank", "A");
@@ -1260,6 +1539,276 @@ test("switching conversations detaches before surfacing and waits for fresh show
   assert.deepEqual(views().map(view => view.webContents.loads), loads);
   assert.ok(views().every(view => !view.webContents.isDestroyed()));
   panel.destroy();
+});
+
+test("rapid conversation round trips cannot let a late foreground cleanup clear background emulation", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, commands, children } = harness;
+  const pending = gate();
+  t.after(() => { pending.finish(); panel.destroy(); });
+  invoke("openwork:browser:setVisibleSession", "A");
+  invoke("openwork:browser:createTab", "about:blank", "A");
+  const b = invoke("openwork:browser:createTab", "about:blank", "B");
+  invoke("openwork:browser:createTab", "about:blank", "C");
+  await flush();
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  const [aView, bView, cView] = views();
+  const loads = views().map(view => [...view.webContents.loads]);
+  const host = createdWindows.at(-1);
+  const cCommands = [...commands(cView)];
+  const verify = watchNativePlacement(t, harness);
+  const send = bView.webContents.debugger.sendCommand.bind(bView.webContents.debugger);
+  t.mock.method(bView.webContents.debugger, "sendCommand", async (method, params) => {
+    await send(method, params);
+    if (method === "Emulation.setFocusEmulationEnabled" && params.enabled === false) await pending.promise;
+  });
+  commands(bView).length = 0;
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  verify(bView, PANEL_BOUNDS);
+  await flush();
+  assert.deepEqual(commands(bView), [FOREGROUND_SEQUENCE[0]], "hold foreground cleanup between its CDP commands");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  verify(aView, PANEL_BOUNDS);
+  await flush();
+  pending.finish();
+  await flush();
+  verify(aView, PANEL_BOUNDS);
+  assert.deepEqual(commands(bView).slice(-2), BACKGROUND_SEQUENCE, "the final background transition must win over late cleanup");
+  assert.equal(bView.webContents.debugger.isAttached(), true, "late cleanup cannot release the background owner's debugger");
+  assert.deepEqual(children, [aView]);
+  assert.deepEqual(host.contentView.children, [cView, bView]);
+  assert.equal(host.isDestroyed(), false);
+  assert.deepEqual(commands(cView), cCommands);
+  assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.B, b.tabId);
+  assert.deepEqual(views().map(view => view.webContents.loads), loads);
+  assert.ok(views().every(view => !view.webContents.isDestroyed()));
+});
+
+test("a queued foreground viewport reset cannot outlive a same-turn background transition", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, commands, children } = harness;
+  t.after(() => panel.destroy());
+  invoke("openwork:browser:setVisibleSession", "A");
+  const a = invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:createTab", "about:blank", "B");
+  await flush();
+  const [aView, bView] = views();
+  commands(aView).length = 0;
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const verify = watchNativePlacement(t, harness);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  verify(bView, PANEL_BOUNDS);
+  await flush();
+  assert.deepEqual(commands(aView), BACKGROUND_SEQUENCE, "queued user reset cannot clear the background viewport or release its debugger");
+  assert.equal(aView.webContents.debugger.isAttached(), true);
+  assert.deepEqual(children, [bView]);
+  assert.deepEqual(createdWindows.at(-1).contentView.children, [aView]);
+  assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.A, a.tabId);
+  assert.deepEqual(aView.getBounds(), { x: 0, y: 0, width: 1280, height: 800 });
+});
+
+test("in-flight viewport resets stop after backgrounding or destruction without touching surviving pages", async (t) => {
+  for (const ending of ["background", "closed"]) {
+    const harness = createPanel();
+    const { invoke, panel, views, commands, children } = harness;
+    const pending = gate();
+    t.after(() => { pending.finish(); panel.destroy(); });
+    invoke("openwork:browser:setVisibleSession", "A");
+    const a = invoke("openwork:browser:createTab", "about:blank", "A");
+    const b = invoke("openwork:browser:createTab", "about:blank", "B");
+    await flush();
+    const [aView, bView] = views();
+    const cdp = aView.webContents.debugger;
+    const send = cdp.sendCommand.bind(cdp);
+    t.mock.method(cdp, "sendCommand", async (method, params) => {
+      await send(method, params);
+      if (method === "Emulation.setDeviceMetricsOverride" && params.width === 0) await pending.promise;
+    });
+    const detach = t.mock.method(cdp, "detach");
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+    await flush();
+    assert.deepEqual(commands(aView), [RESET_SEQUENCE[0]]);
+    const verify = watchNativePlacement(t, harness);
+    if (ending === "closed") {
+      invoke("openwork:browser:closeTab", a.tabId);
+      verify(null, null);
+    }
+    invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+    verify(bView, PANEL_BOUNDS);
+    await flush();
+    assert.deepEqual(commands(aView), [RESET_SEQUENCE[0]], "background initialization waits for the foreground reply");
+    pending.finish();
+    await flush();
+    verify(bView, PANEL_BOUNDS);
+    assert.deepEqual(commands(aView), [RESET_SEQUENCE[0], ...(ending === "background" ? BACKGROUND_SEQUENCE : [])],
+      "only queued background work may follow the obsolete foreground command, never a late clear");
+    assert.equal(detach.mock.callCount(), 0, "no late debugger detach after destruction or background ownership");
+    assert.equal(aView.webContents.isDestroyed(), ending === "closed");
+    if (ending === "background") {
+      assert.deepEqual(commands(aView).slice(-2), BACKGROUND_SEQUENCE);
+      assert.equal(cdp.isAttached(), true);
+    }
+    assert.deepEqual(children, [bView]);
+    assert.equal(invoke("openwork:browser:state").activeTabIdByOwner.B, b.tabId);
+    assert.equal(bView.webContents.isDestroyed(), false);
+    assert.deepEqual(bView.webContents.loads, ["about:blank"]);
+    panel.destroy();
+  }
+});
+
+test("delayed background metrics serialize an A-B-A round trip without detached commands or a poisoned queue", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, commands, children } = harness;
+  const pending = gate();
+  const errors = t.mock.method(console, "error", () => {});
+  t.after(async () => { pending.finish(); panel.destroy(); await flush(); });
+  invoke("openwork:browser:setVisibleSession", "A");
+  invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:createTab", "about:blank", "C");
+  await flush();
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  const b = invoke("openwork:browser:createTab", "about:blank", "B");
+  const [aView, cView, bView] = views();
+  let delayed = false;
+  const debuggerState = enforceDebuggerAttachment(t, bView, async (method, params) => {
+    if (!delayed && method === "Emulation.setDeviceMetricsOverride" && params.width === 1280) {
+      delayed = true;
+      await pending.promise;
+    }
+  });
+  await flush();
+  assert.deepEqual(commands(bView), [BACKGROUND_SEQUENCE[0]]);
+  const loads = views().map(view => [...view.webContents.loads]);
+  const cCommands = [...commands(cView)];
+  const host = createdWindows.at(-1);
+  const verify = watchNativePlacement(t, harness);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  await flush();
+  verify(bView, PANEL_BOUNDS);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  verify(aView, PANEL_BOUNDS);
+  pending.finish();
+  await flush();
+  assert.equal(debuggerState.detachedCommands, 0, "late background focus must not use a debugger detached by foreground cleanup");
+  assert.equal(debuggerState.maxInFlight, 1, "all transitions for this page share one queue");
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments), []);
+  assert.deepEqual(commands(bView).slice(-2), BACKGROUND_SEQUENCE);
+  assert.equal(bView.webContents.debugger.isAttached(), true);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  await flush();
+  verify(bView, PANEL_BOUNDS);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  verify(aView, PANEL_BOUNDS);
+  const handle = await invoke("openwork:browser:restoreTab", b.tabId, "B");
+  assert.equal(handle.target_id, bView.webContents.targetId);
+  assert.deepEqual(commands(bView).filter(command => command.method.startsWith("Emulation.")).slice(-2), BACKGROUND_SEQUENCE);
+  assert.deepEqual(children, [aView]);
+  assert.deepEqual(host.contentView.children, [cView, bView]);
+  assert.deepEqual(commands(cView), cCommands);
+  assert.deepEqual(views().map(view => view.webContents.loads), loads);
+  assert.equal(views().length, 3);
+  assert.ok(views().every(view => !view.webContents.isDestroyed()));
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments), []);
+});
+
+test("failed emulation transitions log their own error and later background initialization recovers", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  for (const phase of ["background", "foreground", "reset"]) {
+    errors.mock.resetCalls();
+    const { invoke, panel, views, commands } = createPanel();
+    t.after(() => panel.destroy());
+    invoke("openwork:browser:setVisibleSession", "A");
+    invoke("openwork:browser:createTab", "about:blank", "A");
+    const b = invoke("openwork:browser:createTab", "about:blank", "B");
+    await flush();
+    const [aView, bView] = views();
+    if (phase !== "foreground") {
+      invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+      await flush();
+    }
+    const failure = new Error(`test ${phase} emulation failure`);
+    let failed = false;
+    const debuggerState = enforceDebuggerAttachment(t, bView, async (method) => {
+      if (!failed && method.startsWith("Emulation.")) { failed = true; throw failure; }
+    });
+    invoke("openwork:browser:show", PANEL_BOUNDS, phase === "background" ? "A" : "B");
+    await flush();
+    assert.equal(failed, true);
+    await assert.rejects(invoke("openwork:browser:restoreTab", b.tabId, "B"), error => error === failure,
+      "the failed transition is observable to a handle waiter, not silently converted to success");
+    invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+    await flush();
+    invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+    await flush();
+    assert.deepEqual(commands(bView).slice(-2), BACKGROUND_SEQUENCE, "a failed promise must not poison later initialization");
+    const handle = await invoke("openwork:browser:restoreTab", b.tabId, "B");
+    assert.equal(handle.target_id, bView.webContents.targetId);
+    assert.equal(handle.owner_session_id, "B");
+    assert.equal(bView.webContents.debugger.isAttached(), true);
+    assert.equal(debuggerState.detachedCommands, 0);
+    assert.equal(debuggerState.maxInFlight, 1);
+    const label = phase === "background" ? "emulate background browser tab"
+      : phase === "foreground" ? "restore foreground browser tab" : "reset browser viewport emulation";
+    assert.deepEqual(errors.mock.calls.map(call => call.arguments), [[`[desktop] ${label} failed`, failure]],
+      "each failed operation is logged once under its own label, not relogged by recovery");
+    assert.deepEqual(aView.webContents.loads, ["about:blank"]);
+    assert.deepEqual(bView.webContents.loads, ["about:blank"]);
+    assert.ok(views().every(view => !view.webContents.isDestroyed()));
+    panel.destroy();
+  }
+});
+
+test("destroyed tab emulation cannot act on a restored native instance sharing its logical id", async (t) => {
+  const harness = createPanel();
+  const { invoke, panel, views, commands, children } = harness;
+  const pending = gate();
+  const errors = t.mock.method(console, "error", () => {});
+  t.after(async () => { pending.finish(); panel.destroy(); await flush(); });
+  invoke("openwork:browser:setVisibleSession", "A");
+  invoke("openwork:browser:createTab", "about:blank", "A");
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  const b = invoke("openwork:browser:createTab", "about:blank", "B");
+  const [aView, oldView] = views();
+  enforceDebuggerAttachment(t, oldView, async (method) => {
+    if (method === "Emulation.setDeviceMetricsOverride") await pending.promise;
+  });
+  await flush();
+  assert.deepEqual(commands(oldView), [BACKGROUND_SEQUENCE[0]]);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "B");
+  await flush();
+  assert.deepEqual(commands(oldView), [BACKGROUND_SEQUENCE[0]], "foreground cleanup is queued behind the old reply");
+  controls.confirm = async () => 1;
+  await invoke("openwork:browser:suspendTab", b.tabId);
+  assert.equal(oldView.webContents.isDestroyed(), true);
+  invoke("openwork:browser:show", PANEL_BOUNDS, "A");
+  const restoring = invoke("openwork:browser:selectTab", b.tabId);
+  const restoredView = views()[2];
+  const restoredDebugger = enforceDebuggerAttachment(t, restoredView);
+  assert.equal(await restoring, b.tabId, "the new instance's queue is independent of the old unresolved reply");
+  assert.notEqual(restoredView.webContents.targetId, oldView.webContents.targetId);
+  assert.deepEqual(commands(restoredView), BACKGROUND_SEQUENCE);
+  const verify = watchNativePlacement(t, harness);
+  pending.finish();
+  await flush();
+  verify(aView, PANEL_BOUNDS);
+  assert.deepEqual(commands(oldView), [BACKGROUND_SEQUENCE[0]], "the old loop stops at the destroyed instance");
+  assert.deepEqual(commands(restoredView), BACKGROUND_SEQUENCE, "old cleanup cannot clear or focus the replacement");
+  assert.equal(restoredView.webContents.debugger.isAttached(), true);
+  assert.equal(restoredDebugger.detachedCommands, 0);
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments), []);
+  const state = invoke("openwork:browser:state");
+  assert.equal(state.activeTabIdByOwner.B, b.tabId);
+  assert.equal(state.tabs.find(tab => tab.id === b.tabId).ownerSessionId, "B");
+  assert.deepEqual(children, [aView]);
+  assert.deepEqual(createdWindows.at(-1).contentView.children, [restoredView]);
+  assert.deepEqual(aView.webContents.loads, ["about:blank"]);
+  assert.deepEqual(restoredView.webContents.loads, ["about:blank"]);
+  assert.equal(restoredView.webContents.isDestroyed(), false);
 });
 
 test("closing a conversation's last tab tells only that conversation its panel is empty", async () => {
