@@ -60,16 +60,16 @@ async function readConfigFile(config: ServerConfig): Promise<Record<string, unkn
 }
 
 describe("openwork runtime config file", () => {
-  test("signed-out runtime file ignores cached org restrictions and preserves local models", async () => {
+  test("signed-in and signed-out runtime ignores cached org restrictions and preserves local models", async () => {
     const { config } = await setup();
     const provider = { ollama: { models: { "local-model": { name: "Local model" } } } };
     await writeGlobalRuntimeOpencodeConfig(config, (current) => ({ ...current, provider }));
     await writeManagedDesktopPolicy(config, {
-      allowCustomProviders: false, allowZenModel: false, execution: { commands: "deny" },
+      allowCustomProviders: false, allowZenModel: false,
+      execution: { commands: "deny", blockedCommands: [], blockBrowserUploads: false },
     });
     const snapshot = await readGlobalRuntimeOpencodeConfig(config);
-    expect(buildOpenworkRuntimeConfigObjectFromSnapshot(snapshot, true).enabled_providers).toEqual([]);
-    expect(buildOpenworkRuntimeConfigObjectFromSnapshot(snapshot, false).enabled_providers).toBeUndefined();
+    expect(buildOpenworkRuntimeConfigObjectFromSnapshot(snapshot).enabled_providers).toBeUndefined();
     await writeOpenworkRuntimeConfigFile(config);
     const rendered = await readConfigFile(config);
     expect(rendered.enabled_providers).toBeUndefined();
@@ -81,9 +81,9 @@ describe("openwork runtime config file", () => {
     cleanups.push(() => den.stop(true));
     const policy = managedDesktopPolicy(config);
     await policy.setSession({ baseUrl: `http://127.0.0.1:${den.port}`, token: "test-token", orgId: "test-org" });
-    await expect(policy.assert("provider", { providerID: "ollama" })).rejects.toMatchObject({ code: "organization_policy_denied" });
+    await expect(policy.assert("provider", { providerID: "ollama" })).resolves.toBeUndefined();
     await writeOpenworkRuntimeConfigFile(config);
-    expect((await readConfigFile(config)).enabled_providers).toEqual([]);
+    expect(await readConfigFile(config)).toEqual(rendered);
     await policy.clearSession();
     await expect(policy.assert("provider", { providerID: "ollama" })).resolves.toBeUndefined();
     await expect(policy.assert("model", { providerID: "ollama", modelID: "local-model" })).resolves.toBeUndefined();
@@ -91,15 +91,15 @@ describe("openwork runtime config file", () => {
     expect(await readConfigFile(config)).toEqual(rendered);
   });
 
-  test("restricted runtime enables materialized org gateway rows, not ordinary custom providers", () => {
+  test("restrictive policy does not filter materialized or local providers", () => {
     const provider = { lpr_legacy: {}, ipr_gateway: {}, openwork: {}, personal: {}, opencode: {} };
     const restricted = buildOpenworkRuntimeConfigObjectFromSnapshot({
       managedPolicy: { allowCustomProviders: false, allowZenModel: false }, provider,
     });
-    expect(restricted.enabled_providers).toEqual(["lpr_legacy", "ipr_gateway", "openwork"]);
+    expect(restricted.enabled_providers).toBeUndefined();
     expect(buildOpenworkRuntimeConfigObjectFromSnapshot({
       managedPolicy: { allowCustomProviders: false }, provider,
-    }).enabled_providers).toEqual(["lpr_legacy", "ipr_gateway", "openwork", "opencode"]);
+    }).enabled_providers).toBeUndefined();
     expect(buildOpenworkRuntimeConfigObjectFromSnapshot({ provider }).enabled_providers).toBeUndefined();
   });
 
@@ -120,8 +120,9 @@ describe("openwork runtime config file", () => {
     expect(JSON.stringify(snapshot)).toBe(before);
     expect(JSON.stringify(rendered.provider)).not.toContain("openworkNativeFast");
   });
-  test("managed browser restrictions use scalar actions in global and agent permissions", () => {
+  test("managed execution restrictions are omitted while user permissions and plugins survive", () => {
     const parsed = buildOpenworkRuntimeConfigObjectFromSnapshot({
+      permission: { external_directory: { "*": "ask" } },
       plugin: [managedPolicyPluginPath(), pathToFileURL(managedPolicyPluginPath(true)).href,
         "ordinary-plugin", "/user/plugins/managed-policy.ts"],
       managedPolicy: {
@@ -131,9 +132,8 @@ describe("openwork runtime config file", () => {
         },
       },
     });
-    const permission = { bash: { "*": "deny", "curl *": "deny" }, webfetch: "deny", websearch: "deny" };
-    expect(parsed.permission).toEqual(permission);
-    expect(parsed.agent).toMatchObject({ openwork: { permission } });
+    expect(parsed.permission).toEqual({ external_directory: { "*": "ask" } });
+    expect(parsed.agent).toMatchObject({ openwork: { permission: { skill: { "customize-opencode": "deny" } } } });
     expect(parsed.managedPolicy).toBeUndefined();
     expect(parsed.plugin).not.toContain(managedPolicyPluginPath());
     expect(parsed.plugin).not.toContain(pathToFileURL(managedPolicyPluginPath(true)).href);

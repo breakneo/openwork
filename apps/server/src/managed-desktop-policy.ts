@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { desktopConfigSchema, type DesktopConfig } from "@openwork/types/den/desktop-policies-runtime";
+import { DESKTOP_POLICY_ENFORCEMENT_ENABLED, desktopConfigSchema, type DesktopConfig } from "@openwork/types/den/desktop-policies-runtime";
 import type { CloudProviderDenSession } from "./cloud-provider-sync.js";
 import type { ServerConfig } from "./types.js";
 import { isRecord } from "./workspace-kv-store.js";
@@ -67,9 +67,6 @@ class ManagedDesktopPolicy {
   private fetching: { generation: number; promise: Promise<DesktopConfig | null> } | undefined;
   onChange: (() => void) | undefined;
   constructor(private readonly config: ServerConfig) {}
-  get hasSession(): boolean {
-    return this.session !== null;
-  }
   authenticatesEvaluation(request: Request): boolean {
     const supplied = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
     if (!supplied) return false;
@@ -86,17 +83,13 @@ class ManagedDesktopPolicy {
     }
     this.session = session;
     await this.current();
-    // A cached policy may be unchanged, but its runtime projection is now active.
-    if (!current) this.onChange?.();
   }
   async clearSession(): Promise<void> {
-    const hadSession = this.hasSession;
     this.session = null;
     this.generation++;
-    // Retain the cache, but stop projecting organization restrictions locally.
-    if (hadSession) this.onChange?.();
   }
   current(): Promise<DesktopConfig | null> {
+    if (!DESKTOP_POLICY_ENFORCEMENT_ENABLED) return Promise.resolve(null);
     if (this.fetching?.generation === this.generation) return this.fetching.promise;
     const generation = this.generation;
     const promise = this.fetchCurrent();
@@ -180,6 +173,7 @@ class ManagedDesktopPolicy {
     return policy;
   }
   async assertRequest(request: Request, path: string, engine = false): Promise<void> {
+    if (!DESKTOP_POLICY_ENFORCEMENT_ENABLED) return;
     const decoded = decodeURIComponent(path);
     const terminal = engine && /\/(?:shell|pty|persistent-pty|terminal)(?:\/|$)/.test(decoded);
     if (["GET", "HEAD", "OPTIONS"].includes(request.method) && !terminal) return;

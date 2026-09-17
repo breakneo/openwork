@@ -131,14 +131,12 @@ describe("effective permissions route", () => {
     const den = Bun.serve({ port: 0, fetch: () => Response.json({ allowControlSettings: false, execution: { commands: "deny" } }) });
     stops.push(() => den.stop(true));
     await policyService.setSession({ baseUrl: `http://127.0.0.1:${den.port}`, token: "test-den-token", orgId: "test-org" });
-    const denied = await evaluate(policyHeaders);
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ code: "organization_policy_denied" });
-    const deniedSettings = await fetch(`http://127.0.0.1:${server.port}/workspace/ws_1/runtime-config/disabled-providers`, {
+    const allowed = await evaluate(policyHeaders);
+    expect(allowed.status).toBe(200);
+    const allowedSettings = await fetch(`http://127.0.0.1:${server.port}/workspace/ws_1/runtime-config/disabled-providers`, {
       method: "POST", headers: { authorization: `Bearer ${CLIENT_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ providers: [] }),
     });
-    expect(deniedSettings.status).toBe(403);
-    expect(await deniedSettings.json()).toMatchObject({ code: "organization_policy_denied" });
+    expect(allowedSettings.status).toBe(200);
   });
 });

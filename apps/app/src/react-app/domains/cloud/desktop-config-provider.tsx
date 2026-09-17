@@ -12,7 +12,7 @@ import {
 } from "react";
 import { MCP_QUICK_CONNECT } from "../../../app/constants";
 import { isOpenWorkExtensionEnabled, OPENWORK_EXTENSION_STATE_CHANGED } from "../settings/extension-state";
-import { desktopPolicyKeys } from "@openwork/types/den/desktop-policies";
+import { DESKTOP_POLICY_ENFORCEMENT_ENABLED, desktopCapabilityConfig, desktopPolicyKeys } from "@openwork/types/den/desktop-policies";
 
 import {
   checkDesktopAppRestriction,
@@ -214,9 +214,9 @@ type DesktopConfigState = {
  *
  * Fetches the org-scoped desktop policy config
  * (`packages/types/den/desktop-policies.ts` shape) and caches it in
- * localStorage so gates like `allowZenModel` can apply immediately on the
- * next boot without waiting for the HTTP round-trip. Re-fetches on Den
- * session / settings events and on a one-hour interval.
+ * localStorage. The runtime projection omits desktop restrictions while
+ * enforcement is suspended; Cloud entitlements and branding stay intact.
+ * Re-fetches on Den session / settings events and on a one-hour interval.
  */
 export function DesktopConfigProvider({ children }: DesktopConfigProviderProps) {
   const denAuth = useDenAuth();
@@ -250,7 +250,7 @@ export function DesktopConfigProvider({ children }: DesktopConfigProviderProps) 
   }, [config.allowBuiltInExtensions]);
 
   const applyDesktopConfigActions = useCallback((latestConfig: DenDesktopConfig) => {
-    const normalizedConfig = normalizeDenDesktopConfig(latestConfig);
+    const normalizedConfig = desktopCapabilityConfig(normalizeDenDesktopConfig(latestConfig));
     const actions = getDesktopConfigActions({
       currentConfig: currentDesktopConfigRef.current,
       latestConfig: normalizedConfig,
@@ -379,7 +379,9 @@ export function DesktopConfigProvider({ children }: DesktopConfigProviderProps) 
     [desktopConfigHandler],
   );
   const refreshFresh = useCallback(
-    () => desktopConfigHandler(true),
+    () => DESKTOP_POLICY_ENFORCEMENT_ENABLED
+      ? desktopConfigHandler(true)
+      : Promise.resolve(currentDesktopConfigRef.current),
     [desktopConfigHandler],
   );
 
