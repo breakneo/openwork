@@ -25,6 +25,7 @@ import { readSignedSessionCookieToken } from "../../session.js"
 import { ensureOrganizationAdmin, ensureOrganizationAdminRole, idParamSchema, memberHasRole, orgAccessFailureStatus } from "./shared.js"
 import type { OrgRouteVariables } from "./shared.js"
 import { registerOrgGatewayUsageRoutes } from "./gateway-usage.js"
+import { registerOrgGatewayUsageLimitRoutes } from "./gateway-usage-limits.js"
 
 const paramsSchema = idParamSchema("inferenceProviderId", "inferenceProvider")
 const groupParams = paramsSchema.extend(idParamSchema("groupId", "gatewayModelGroup").shape)
@@ -173,6 +174,7 @@ async function selectOAuthSet(provider: GatewayProvider, memberId: GatewayMember
 
 export function registerOrgInferenceProviderRoutes<T extends { Variables: OrgRouteVariables }>(app: Hono<T>) {
   registerOrgGatewayUsageRoutes(app)
+  registerOrgGatewayUsageLimitRoutes(app)
   app.get("/v1/inference-providers", route("List organization inference gateway providers", "Defaults to scope=usable: returns active providers granted to the caller through active model groups and credential sets, with usable model aliases and any member authorization requests. A granted provider can remain discoverable with no usable models. scope=manageable requires owner/admin permission and enabled Gateway management, and returns provider details including disabled providers; credential secrets are never returned.", z.object({ inferenceProviders: z.array(z.union([detailsSchema, summarySchema])) })), orgMemberRoute(), queryValidator(z.object({ scope: z.enum(["usable", "manageable"]).default("usable") })), async (c) => {
     try {
     const actor = c.get("organizationContext")

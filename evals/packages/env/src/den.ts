@@ -51,6 +51,7 @@ export interface ServerOptions {
   org?: OrgShape;
   /** Set to false for an infra-only Den boot that creates no default organization or accounts. */
   provision?: boolean;
+  schema?: "push" | "migrate";
   web?: boolean;
   env?: Record<string, string | undefined>;
   reuse?: { apiUrl: string; webUrl?: string };
@@ -274,9 +275,11 @@ async function waitForAuthProbe(ref: DenRef, service: SpawnedService): Promise<v
   throw new Error(`Den auth behavioral probe failed at ${url}; expected a non-403 response. Last: ${last}. Log:\n${await logTail(service.logPath)}`);
 }
 
-async function runDbPush(databaseUrl: string): Promise<void> {
+async function runDbPush(databaseUrl: string, schema: "push" | "migrate" = "push"): Promise<void> {
   try {
-    const commands = process.env.OPENWORK_EVAL_DEN_RUNTIME_PREPARED === "1"
+    const commands = schema === "migrate"
+      ? [["--filter", "@openwork-ee/den-db", "db:migrate:local"]]
+      : process.env.OPENWORK_EVAL_DEN_RUNTIME_PREPARED === "1"
       ? [
           ["--filter", "@openwork-ee/den-db", "exec", "node", "--import", "tsx", "./node_modules/drizzle-kit/bin.cjs", "push", "--config", "drizzle.config.ts"],
           ["--filter", "@openwork-ee/den-db", "exec", "node", "--import", "tsx", "scripts/ensure-schema-repairs.ts"],
@@ -298,7 +301,7 @@ async function runDbPush(databaseUrl: string): Promise<void> {
     const stderr = typeof error === "object" && error !== null && typeof Reflect.get(error, "stderr") === "string"
       ? Reflect.get(error, "stderr")
       : "";
-    throw new Error(`Ephemeral Den database push failed: ${messageText(error)}${stderr ? `\n${stderr}` : ""}`);
+    throw new Error(`Ephemeral Den database ${schema} failed: ${messageText(error)}${stderr ? `\n${stderr}` : ""}`);
   }
 }
 
@@ -782,8 +785,8 @@ export async function server(options: ServerOptions): Promise<Den> {
     const databaseStep = steps.step("den-db", "Den database");
     database = await options.place.db(ephemeralDatabaseName());
     await trackResource({ kind: "mysql-db", id: database.name, label: "den-mysql" });
-    await databaseStep.note("schema push");
-    await runDbPush(database.url);
+    await databaseStep.note(`schema ${options.schema ?? "push"}`);
+    await runDbPush(database.url, options.schema);
     await databaseStep.ok(database.name);
     let apiPort: number;
     let webPort: number;

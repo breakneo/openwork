@@ -6,6 +6,7 @@ import type { FieldPacket, QueryOptions, QueryResult } from "mysql2"
 import mysql from "mysql2/promise"
 import { parseMySqlConnectionConfig } from "./mysql-config"
 import * as schema from "./schema"
+import type { Logger } from "drizzle-orm/logger"
 
 export type DenDbMode = "mysql" | "planetscale"
 type DenDb = ReturnType<typeof drizzlePlanetScale>
@@ -113,6 +114,7 @@ export function createDenDb(input: {
   databaseUrl?: string | null
   mode?: DenDbMode
   planetscale?: PlanetScaleCredentials | null
+  logger?: Logger
 }) {
   const mode = resolveDbMode(input)
 
@@ -125,7 +127,7 @@ export function createDenDb(input: {
     const client = new Client({ ...credentials, fetch: createRetryingPlanetScaleFetch() })
     return {
       client,
-      db: drizzlePlanetScale(client, { schema }) as unknown as DenDb,
+      db: drizzlePlanetScale(client, { schema, logger: input.logger }) as unknown as DenDb,
     }
   }
 
@@ -178,6 +180,6 @@ export function createDenDb(input: {
 
   return {
     client,
-    db: drizzle(client, { schema, mode: "default" }) as unknown as DenDb,
+    db: drizzle(client, { schema, mode: "default", logger: input.logger }) as unknown as DenDb,
   }
 }
