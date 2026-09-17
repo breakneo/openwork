@@ -141,7 +141,13 @@ test("a queued follow-up already admitted to the engine is neither duplicated no
   });
 });
 
-const desktopTest = spec.world(restartUpdateTaskWorld, { timeout: 600_000 });
+const desktopTest = spec.world(restartUpdateTaskWorld, {
+  resources: {
+    surfaces: ["desktop"], services: ["mock"],
+    nativeReason: "Both restart dialogs and the queued-draft recovery boundary require a real Electron main-process relaunch.",
+  },
+  timeout: 600_000,
+});
 
 desktopTest("both restart dialogs count only waiting messages and a confirmed Settings restart restores them unsent", async ({ world, user, agent, probe, step }) => {
   user = user.on(world.app);
@@ -170,6 +176,18 @@ desktopTest("both restart dialogs count only waiting messages and a confirmed Se
       return parts.map(record).flatMap((part) => typeof part.text === "string" ? [part.text] : []);
     });
   };
+  const active = async () => {
+    const response = await probe.desktopApi(`${mount}${v2 ? "/session/active" : "/session/status"}`);
+    expect(response.status).toBe(200);
+    const value = v2 ? record(response.body).data : response.body;
+    const status = record(value)[world.active.sessionId];
+    return status !== undefined && ["running", "busy", "retry"].includes(String(record(status).type));
+  };
+  const activeSessionExists = async () => {
+    const response = await probe.desktopApi(`${mount}/session`);
+    if (response.status !== 200 || !Array.isArray(response.body)) return false;
+    return response.body.some((entry: unknown) => record(entry).id === world.active.sessionId);
+  };
   const waitingNotice = async () => {
     const elements = (await probe.dom('[data-testid="update-restart-waiting-messages"]')).elements;
     return { count: elements.length, text: elements.map((element) => element.text).join(" ") };
@@ -195,6 +213,7 @@ desktopTest("both restart dialogs count only waiting messages and a confirmed Se
     await user.see({ text: "Restart OpenWork?" });
   };
   const openActiveSession = async () => {
+    await user.click({ role: "button", label: "Back to app" });
     await agent.run("session.open", { sessionId: world.active.sessionId });
     await probe.eventually(() => probe.hash(), { within: 30_000, label: "the active task is selected",
       until: (hash) => hash.includes(`/session/${world.active.sessionId}`) });
@@ -208,6 +227,9 @@ desktopTest("both restart dialogs count only waiting messages and a confirmed Se
     await user.type("composer", world.active.prompt, { verify: true });
     await user.press(enter);
     await probe.eventually(userTexts, { within: 30_000, label: "the task's prompt is admitted", until: (texts) => texts.length === 1 });
+    await probe.eventually(active, { within: 30_000, label: "the task is active before opening either restart dialog", until: Boolean });
+    await user.see({ role: "button", label: "Stop" });
+    await world.mirrorActiveStatusForSettingsRoute();
   });
 
   await step("both dialogs omit the waiting-message line when the queue is empty", async () => {
@@ -248,6 +270,7 @@ desktopTest("both restart dialogs count only waiting messages and a confirmed Se
   await step("after the relaunch both follow-ups are an unsent draft while the interrupted task resumes without them", async () => {
     const restart = await world.reconnectAfterRestart();
     expect(restart.timeOrigin).not.toBe(restart.originalTimeOrigin);
+    await probe.eventually(activeSessionExists, { within: 60_000, label: "the interrupted session is available after engine restart", until: Boolean });
     await agent.run("session.open", { sessionId: world.active.sessionId });
     await user.see("composer", { editable: true, text: new RegExp(`${firstQueuedText}[\\s\\S]*${secondQueuedText}`), timeoutMs: 60_000 });
     await user.notSee({ text: /2 queued/ });
