@@ -9,13 +9,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
 import { captureAnalyticsEvent } from "@/app/lib/analytics";
-import { observeSendStep } from "@/app/lib/send-step-diagnostics";
 import { hasTerminalSessionReply, interruptSessionTurn, sessionHasPendingSubmission, sessionNeedsStop, sessionWorkHeld, submitAfterInterruption, submitImmediateSessionTurn, subscribeSessionInterruption } from "@/app/lib/opencode-interruption";
 import { createClient, createPromptMessageID, isPromptAdmissionUnknown, promptAdmissionFailure, readPromptAdmission, unwrap } from "@/app/lib/opencode";
 import { createClientV2, isOpencodeV2BaseUrl, v2PromptText } from "@/app/lib/opencode-v2-adapter";
 import * as opencodeSessionNative from "@/app/lib/opencode-session-native";
 import type { NativeSessionSnapshotTarget } from "@/app/lib/opencode-session-native";
 import { isDesktopRuntime } from "@/app/lib/runtime-env";
+import { observeSendStep } from "@/app/lib/send-step-diagnostics";
 import { setThemeMode } from "@/app/theme";
 import { t } from "@/i18n";
 import type { ComposerSettingsSection } from "@/react-app/domains/settings/library";
