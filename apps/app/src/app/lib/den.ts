@@ -6,6 +6,7 @@ import {
   AUTOMATION_MODEL_ATTENTION_CAPABILITY,
   AUTOMATION_MODEL_ATTENTION_CAPABILITY_HEADER,
 } from "@openwork/types/automations";
+import type { GatewayProviderSummary } from "@openwork/types/den/gateway";
 import type {
   AutomationDetail,
   AutomationDesktopRunnerPresence,
@@ -313,6 +314,8 @@ export type DenMcpToken = {
   scopes: string[];
   resource: string;
 };
+
+export type DenOrgGatewayProvider = Pick<GatewayProviderSummary, "id" | "providerId" | "name" | "source">;
 
 export type DenOrgLlmProviderModel = {
   id: string;
@@ -2129,6 +2132,35 @@ function getDenOrgLlmProviders(payload: unknown): DenOrgLlmProvider[] {
   });
 }
 
+function getDenOrgGatewayProviders(payload: unknown): DenOrgGatewayProvider[] {
+  const invalidPayload = () => new DenApiError(
+    500,
+    "invalid_gateway_providers_payload",
+    "AI Gateway provider response was invalid.",
+  );
+  if (!isRecord(payload) || !Array.isArray(payload.inferenceProviders)) {
+    throw invalidPayload();
+  }
+
+  return payload.inferenceProviders.map((provider: unknown) => {
+    if (
+      !isRecord(provider) ||
+      typeof provider.id !== "string" || !provider.id.trim() ||
+      typeof provider.providerId !== "string" || !provider.providerId.trim() ||
+      typeof provider.name !== "string" || !provider.name.trim() ||
+      provider.source !== "openwork_gateway"
+    ) {
+      throw invalidPayload();
+    }
+    return {
+      id: provider.id,
+      providerId: provider.providerId,
+      name: provider.name,
+      source: provider.source,
+    };
+  });
+}
+
 function parseDenExternalMcpConnection(value: unknown): DenExternalMcpConnection | null {
   if (
     !isRecord(value) ||
@@ -3299,6 +3331,20 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
         organizationId: orgId,
       });
       return getDenOrgLlmProviders(payload);
+    },
+
+    async listOrgGatewayProviders(orgId: string): Promise<DenOrgGatewayProvider[]> {
+      try {
+        const payload = await requestJson<unknown>(baseUrls, "/v1/inference-providers?scope=usable", {
+          method: "GET",
+          token,
+          organizationId: orgId,
+        });
+        return getDenOrgGatewayProviders(payload);
+      } catch (error) {
+        if (error instanceof DenApiError && [404, 405, 501].includes(error.status)) return [];
+        throw error;
+      }
     },
 
     async listAutomations(
