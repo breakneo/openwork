@@ -406,7 +406,7 @@ export function ThreadsPanel({
   const [workerRecords, setWorkerRecords] = useState<WorkerSummary[]>([]);
   const threads = useMemo(
     () =>
-      coworker.workspaceId
+      runtime.engineManaged && coworker.workspaceId
         ? createCoworkerThreads({
             serverUrl: runtime.serverUrl,
             workspaceId: coworker.workspaceId,
@@ -419,7 +419,7 @@ export function ThreadsPanel({
             owner: { slug: coworker.slug, createdAt: coworker.createdAt },
           })
         : null,
-    [runtime.serverUrl, runtime.ownerToken, coworker.workspaceId, coworker.slug, coworker.createdAt, coworker.model, coworker.modelVariant, discussionThreadId, discussionThreadIds, workerThreadIds],
+    [runtime.engineManaged, runtime.serverUrl, runtime.ownerToken, coworker.workspaceId, coworker.slug, coworker.createdAt, coworker.model, coworker.modelVariant, discussionThreadId, discussionThreadIds, workerThreadIds],
   );
   const [openThreadId, setOpenThreadId] = useState("");
   const [preparationAttempt, setPreparationAttempt] = useState(0);

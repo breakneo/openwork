@@ -4,10 +4,12 @@ import { readFile } from "node:fs/promises";
 import { runInNewContext } from "node:vm";
 import { transform } from "esbuild";
 import type { CoworkerSummary, RuntimeInfo } from "./bridge.ts";
+import { configureCoworkerSessionAccess } from "./session-routing.ts";
 import { DEFAULT_MODEL_DEFAULTS } from "./model-defaults.ts";
 import { resolveDiscussionModel } from "./model-choice.ts";
 import {
   coalesceCalls,
+  createCoworkerThreads,
   connectedModelCatalog,
   createWorkspaceReadiness,
   createWorkspaceReadinessCache,
@@ -25,6 +27,42 @@ import {
 } from "./threads.ts";
 import { fixtureCatalog, fixtureModel, fixtureProvider } from "./provider-catalog.fixture.ts";
 import { MODEL_INTELLIGENCE_INDEX, normalizeModelIntelligence } from "./model-intelligence.ts";
+
+test("renderer clients wait for the native server independently of the page origin", async (t) => {
+  configureCoworkerSessionAccess({ workspace: () => "ws_team", list: async () => [], binding: async () => { throw new Error("No fixture binding"); }, create: async () => { throw new Error("No fixture writes"); } });
+  t.after(() => configureCoworkerSessionAccess(undefined));
+  t.mock.method(globalThis, "fetch", () => { throw new Error("Client construction must not send requests"); });
+  for (const file of ["threads", "openwork-settings", "model-picker"]) {
+    const source = await readFile(new URL(`../ui/${file}.tsx`, import.meta.url), "utf8");
+    const start = source.indexOf("  const threads = useMemo(");
+    const end = source.indexOf("\n  );", start);
+    assert.ok(start > 0 && end > start);
+    const script = await transform(`(() => { ${source.slice(start, end + 5)}\nreturn threads; })()`, { loader: "tsx", target: "es2022" });
+    const coworker = { workspaceId: "ws_fixture", slug: "fixture", createdAt: "original", model: "", modelVariant: "" };
+    for (const href of ["file:///Applications/Fixture.app/Contents/Resources/dist/index.html", "opencoworker://app/index.html", "http://localhost:5173/"]) {
+      let dependencies: unknown[] = [];
+      let calls = 0;
+      const runtime = { serverUrl: "", ownerToken: "fixture", engineManaged: false };
+      const context = { runtime, coworker, catalogCoworker: coworker, sharedCatalog: undefined, discussionThreadId: "", discussionThreadIds: [], workerThreadIds: [], window: { location: new URL(href) }, useMemo: (factory: () => unknown, deps: unknown[]) => { dependencies = deps; return factory(); }, createCoworkerThreads: (options: Parameters<typeof createCoworkerThreads>[0]) => { calls++; return createCoworkerThreads(options); } };
+      for (const base of ["", "null", "/relative", new URL(href).origin]) {
+        runtime.serverUrl = base;
+        assert.equal(runInNewContext(script.code, context), null);
+      }
+      assert.equal(calls, 0);
+      runtime.serverUrl = "http://127.0.0.1:8790";
+      assert.equal(runInNewContext(script.code, context), null);
+      const unavailableDependencies = dependencies;
+      runtime.engineManaged = true;
+      assert.ok(runInNewContext(script.code, context));
+      assert.notDeepEqual(dependencies, unavailableDependencies, "native readiness must invalidate the client memo even with an unchanged URL");
+      assert.equal(calls, 1);
+      for (const base of ["", "null", "/relative", "file:///fixture", "opencoworker://app", "http://user:secret@localhost", "http://localhost/?token=fixture"]) {
+        runtime.serverUrl = base;
+        assert.throws(() => runInNewContext(script.code, context));
+      }
+    }
+  }
+});
 
 test("startup readiness is bounded, cancellation-safe and cannot publish a stale ready result", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });

@@ -128,14 +128,14 @@ export function ModelPicker({
 }) {
   const threads = useMemo(
     () =>
-      !sharedCatalog && coworker?.workspaceId
+      !sharedCatalog && runtime.engineManaged && coworker?.workspaceId
         ? createCoworkerThreads({
             serverUrl: runtime.serverUrl,
             workspaceId: coworker.workspaceId,
             token: runtime.ownerToken,
           })
         : null,
-    [sharedCatalog, coworker?.workspaceId, runtime.ownerToken, runtime.serverUrl],
+    [sharedCatalog, coworker?.workspaceId, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl],
   );
   const [localCatalog, setCatalog] = useState<EngineModelCatalog>(EMPTY_CATALOG);
   const [query, setQuery] = useState("");

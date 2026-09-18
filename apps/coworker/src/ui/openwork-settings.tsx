@@ -189,14 +189,14 @@ export function OpenWorkSettings({
     : (coworkers.find((coworker) => coworker.workspaceId) ?? null);
   const threads = useMemo(
     () =>
-      catalogCoworker?.workspaceId
+      runtime.engineManaged && catalogCoworker?.workspaceId
         ? createCoworkerThreads({
             serverUrl: runtime.serverUrl,
             workspaceId: catalogCoworker.workspaceId,
             token: runtime.ownerToken,
           })
         : null,
-    [catalogCoworker?.workspaceId, runtime.ownerToken, runtime.serverUrl],
+    [catalogCoworker?.workspaceId, runtime.engineManaged, runtime.ownerToken, runtime.serverUrl],
   );
 
   const refreshConfiguration = useCallback(async (options: { sync?: boolean } = {}) => {
