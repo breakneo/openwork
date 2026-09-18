@@ -107,6 +107,7 @@ const transactionDb = {
       if (projection && (table === ConfigObjectVersionTable || table === ArtifactViewRevisionTable) && isRecord(table)) {
         const columns = Object.entries(table)
         const fields = Object.entries(projection).map(([alias, column]) => {
+          if (alias === "rank" && table === ArtifactViewRevisionTable) return { alias, key: "rank" }
           const entry = columns.find(([, candidate]) => candidate === column)
           if (!entry) throw new Error(`Unsupported test database projection: ${alias}`)
           return { alias, key: entry[0] }
@@ -116,6 +117,19 @@ const transactionDb = {
       return result
     }
     const query = {
+      as: (name: string) => {
+        if (name !== "ranked_revisions" || table !== ArtifactViewRevisionTable || !projection) {
+          throw new Error(`Unsupported test database subquery: ${name}`)
+        }
+        const ranked = { ...projection }
+        const counts = new Map<unknown, number>()
+        tables.set(ranked, selected().reverse().map(row => {
+          const rank = (counts.get(row.artifact_view_id) ?? 0) + 1
+          counts.set(row.artifact_view_id, rank)
+          return { ...row, rank }
+        }))
+        return ranked
+      },
       where: (condition: unknown) => { values = parameters(condition); queries.push({ table, values }); return query },
       innerJoin: (_table: unknown, _condition: unknown) => query,
       leftJoin: (_table: unknown, _condition: unknown) => query,
