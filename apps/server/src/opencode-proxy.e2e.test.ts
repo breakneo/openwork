@@ -368,18 +368,16 @@ describe("workspace OpenCode proxy", () => {
     }
   });
 
-  async function signedInPromptFixture(options?: { rejectIdentity?: boolean; onPrompt?: () => Response }) {
+  async function signedInPromptFixture(options?: { rejectPolicyRead?: boolean; onPrompt?: () => Response }) {
     const workspaceRoot = await createWorkspaceRoot();
     const engine = startMockOpencode({ onPrompt: options?.onPrompt });
     const denRequests: Array<{ method: string; pathname: string }> = [];
-    let outage = false;
     const den = Bun.serve({
       hostname: "127.0.0.1", port: 0,
       fetch(request) {
         const pathname = new URL(request.url).pathname;
         denRequests.push({ method: request.method, pathname });
-        if (options?.rejectIdentity) return Response.json({ error: "unauthorized" }, { status: 401 });
-        if (outage) return Response.json({ error: "unavailable" }, { status: 503 });
+        if (options?.rejectPolicyRead) return Response.json({ error: "unauthorized" }, { status: 401 });
         if (request.method === "GET" && pathname === "/v1/me/desktop-config") {
           return Response.json({ allowCustomProviders: true });
         }
@@ -396,10 +394,9 @@ describe("workspace OpenCode proxy", () => {
       body: JSON.stringify({ baseUrl: `http://127.0.0.1:${den.port}`, token: "den-fixture-token", orgId: "org_test" }),
       signal: AbortSignal.timeout(1_000),
     });
-    expect(identity.status).toBe(options?.rejectIdentity ? 403 : 204);
-    if (options?.rejectIdentity) await expect(identity.json()).resolves.toMatchObject({ code: "policy_unavailable" });
-    expect(denRequests).toEqual([{ method: "GET", pathname: "/v1/me/desktop-config" }]);
-    outage = true;
+    expect(identity.status).toBe(204);
+    await identity.body?.cancel();
+    expect(denRequests).toEqual([]);
     const denCount = denRequests.length;
     const prompt = (providerID: string, token = openwork.token) => fetch(`${base}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
       method: "POST", headers: { ...auth(token), "Content-Type": "application/json" },
@@ -446,15 +443,11 @@ describe("workspace OpenCode proxy", () => {
     expect(fixture.denRequests).toHaveLength(fixture.denCount);
   });
 
-  test.serial("unverified identity fails closed before forwarding a prompt", async () => {
-    // Immediate 401 avoids retry delays while exercising failed initial verification.
-    const fixture = await signedInPromptFixture({ rejectIdentity: true });
-    const engineCount = fixture.engine.requests.length;
+  test.serial("suspended policy does not probe a rejected policy endpoint before a local prompt", async () => {
+    const fixture = await signedInPromptFixture({ rejectPolicyRead: true });
     const response = await fixture.prompt("local-byok");
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ code: "policy_unavailable" });
-    expect(fixture.prompts()).toHaveLength(0);
-    expect(fixture.engine.requests).toHaveLength(engineCount);
+    expect(response.status).toBe(204);
+    expect(fixture.prompts()).toHaveLength(1);
     expect(fixture.denRequests).toHaveLength(fixture.denCount);
   });
 
