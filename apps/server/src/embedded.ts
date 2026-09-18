@@ -37,7 +37,6 @@ import { keepOpenworkRuntimeConfigFileFresh, writeOpenworkRuntimeConfigFile } fr
 import { migrateOpenworkCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
 import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
-import type { ServeResult } from "./serve-node.js";
 import type { LocalManagedMcpVaultKeyProvider, ServerConfig } from "./types.js";
 
 export type EmbeddedServerOptions = CliArgs & {
@@ -82,7 +81,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   let engineSpawnTemplate: EngineSpawnTemplate | null = null;
   let enginePool: EnginePool | null = null;
   let stopRuntimeConfigFileRefresh: (() => void) | null = null;
-  let server: ServeResult | null = null;
+  let server: Awaited<ReturnType<typeof startServer>> | null = null;
   let stopPromise: Promise<void> | null = null;
 
   const releaseResources = async (): Promise<void> => {
@@ -187,12 +186,15 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   // requested one. Proxy requests that land in the short window before the
   // engine is ready fail with opencode_unconfigured and clients retry; the
   // desktop only learns the server URL after this function returns.
-  server = await duringStartup(() => startServer(config));
+  const managedWorkspace = !config.opencodeBaseUrl && options.manageOpencode
+    ? findManagedEngineWorkspace(config.workspaces)
+    : undefined;
+  server = await duringStartup(() => startServer(config, { deferManagedEngineStartup: Boolean(managedWorkspace) }));
   config.port = server.port;
   const serverUrl = `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`;
 
   if (!config.opencodeBaseUrl && options.manageOpencode) {
-    const workspace = findManagedEngineWorkspace(config.workspaces);
+    const workspace = managedWorkspace;
     if (workspace) {
       // Reap engines recorded by servers that died without cleanup. Best
       // effort: a failed reap must never block startup.
@@ -306,6 +308,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
       registryId: managedEngineRecordId,
       trustedIdentity: managedOpencodeIdentity,
     });
+    await duringStartup(server.completeManagedEngineStartup);
   }
 
   const initialManagedOpencode = managedOpencode;
