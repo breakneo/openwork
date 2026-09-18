@@ -916,7 +916,7 @@ export function McpConnectionsScreen({ view = "catalog", connectorId }: { view?:
       )}
       {showStagingBanner ? (
         <div data-testid="mcp-connections-staging-banner" className="mb-6 rounded-[24px] border border-[var(--dls-border)] bg-[var(--dls-hover)] px-5 py-4 text-[14px] leading-6 text-[var(--dls-text-primary)]">
-          <p className="font-semibold text-amber-900">OpenWork Connect (beta) is staged for this org.</p>
+          <p className="font-semibold">OpenWork Connect (beta) is staged for this org.</p>
           <p className="mt-1">
             Connectors and collection capabilities you set up here stay staged and invisible to members until a platform admin enables OpenWork Connect (beta) for this org. Admin management remains fully usable.
           </p>

@@ -1200,7 +1200,7 @@ function RetryActionButton(props: { label: string; onClick: () => void }) {
     <Button
       variant="outline"
       size="sm"
-      className="h-7 border-amber-500/70 bg-amber-50 text-xs text-amber-950 hover:bg-amber-100"
+      className="h-7 border-border bg-background text-xs text-foreground hover:bg-muted"
       onClick={props.onClick}
     >
       {props.label}
@@ -1238,18 +1238,18 @@ const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
           <div className="flex items-start gap-2">
             <LoaderCircle size={16} className="mt-0.5 shrink-0 animate-spin text-amber-700" />
             <div className="min-w-0 space-y-1">
-              <p className="whitespace-pre-wrap text-sm font-medium text-amber-900">
+              <p className="whitespace-pre-wrap text-sm font-medium text-foreground">
                 {freeModelLimit ? "The free starter model is busy right now" : status.message}
               </p>
-              <p className="text-xs text-amber-800">{info}</p>
+              <p className="text-xs text-muted-foreground">{info}</p>
             </div>
           </div>
           {action ? (
-            <div className="ml-6 space-y-1 border-t border-amber-400/60 pt-2">
-              <p className="text-xs font-medium text-amber-950">
+            <div className="ml-6 space-y-1 border-t border-border pt-2">
+              <p className="text-xs font-medium text-foreground">
                 {freeModelLimit ? "Free model limit reached" : action.title}
               </p>
-              <p className="text-xs text-amber-900">
+              <p className="text-xs text-muted-foreground">
                 {freeModelLimit
                   ? "OpenWork will keep retrying. To keep working now, connect your own model provider."
                   : action.message}

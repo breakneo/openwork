@@ -3505,7 +3505,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
             onClick={() => props.onOpenSettingsSection?.("providers")}
           >
             <span className="font-medium">No AI model connected.</span>
-            <span className="text-amber-11/70">Add a provider to run tasks.</span>
+            <span className="text-dls-secondary">Add a provider to run tasks.</span>
           </button>
         ) : null}
         {props.cloudMcpSubmissionState.status === "failed" ? (
