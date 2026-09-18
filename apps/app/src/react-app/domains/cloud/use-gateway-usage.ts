@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createDenClient } from "@/app/lib/den";
+import { createDenClient, denOriginComparisonKey } from "@/app/lib/den";
 import { readGatewayUsageScope as readScope, subscribeGatewayUsageScope } from "@/app/lib/gateway-usage-scope";
 import { getReactQueryClient } from "@/react-app/infra/query-client";
 import { useDenAuth } from "./den-auth-provider";
@@ -113,5 +113,8 @@ export function useGatewayUsage(requested: boolean, panelOpen = false, refreshKe
       if (readScope() === scope) await queryClient.invalidateQueries({ queryKey, exact: true });
     },
   });
-  return { query, reset, authorized, active: enabled && authorized, scopeKey: `${scope.generation}:${auth.verifiedIdentity?.principalId ?? ""}`, data: authorized ? query.data : undefined };
+  const approvalScopeKey = authorized && auth.verifiedIdentity?.principalId
+    ? JSON.stringify([denOriginComparisonKey(scope.baseUrl), scope.organizationId, auth.verifiedIdentity.principalId])
+    : null;
+  return { query, reset, authorized, approvalScopeKey, active: enabled && authorized, scopeKey: `${scope.generation}:${auth.verifiedIdentity?.principalId ?? ""}`, data: authorized ? query.data : undefined };
 }

@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
-import { CheckCircle2, Gauge, LockKeyhole } from "lucide-react";
+import { CheckCircle2, Gauge, LockKeyhole, X } from "lucide-react";
 import type { GatewayUsageBucket, GatewayUsageStatus } from "@openwork/types/den/gateway-usage-limits";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { formatGatewayMoney, gatewayTimeframeLabels } from "./gateway-usage-state";
 import { useGatewayUsage } from "./use-gateway-usage";
+import { gatewayApprovalKey, useGatewayApprovalDismissals } from "./gateway-usage-approval-store";
 
 export function GatewayResetTime({ value, localOnly = false }: { value: string; localOnly?: boolean }) {
   return <time dateTime={value} title={localOnly ? undefined : new Date(value).toUTCString()}>{new Date(value).toLocaleString()}{localOnly ? null : ` (${new Date(value).toUTCString()})`}</time>;
@@ -127,8 +128,13 @@ export function GatewayUsageTrigger({ compact = true }: { compact?: boolean }) {
 
 export function GatewayUsageApprovalNotice() {
   const usage = useGatewayUsage(true);
-  const approved = approvedUsageIncreases(usage.data);
-  if (!usage.active || usage.query.isError || !approved.length) return null;
+  const dismissedKeys = useGatewayApprovalDismissals((state) => state.dismissedKeys);
+  const dismiss = useGatewayApprovalDismissals((state) => state.dismiss);
+  const scopeKey = usage.approvalScopeKey;
+  const approved = scopeKey ? approvedUsageIncreases(usage.data).filter((bucket) =>
+    !dismissedKeys.includes(gatewayApprovalKey(scopeKey, bucket))) : [];
+  if (!usage.active || usage.query.isError || !scopeKey || !approved.length) return null;
+  const onDismiss = () => dismiss(approved.map((bucket) => gatewayApprovalKey(scopeKey, bucket)));
 
   return <Alert role="status" className="mx-auto mb-2 max-w-3xl border-green-a6 bg-green-3 text-green-11" data-testid="gateway-usage-approved-notice">
     <CheckCircle2 aria-hidden="true" className="size-4" />
@@ -137,8 +143,14 @@ export function GatewayUsageApprovalNotice() {
       <p>Your request for a one-time usage increase has been approved.</p>
       {approved.map((bucket) => <p key={bucket.id}>{bucket.policyName} - {gatewayTimeframeLabels[bucket.timeframe]}: +{formatGatewayMoney(bucket.extensionMicroUsd)} ({formatGatewayMoney(bucket.allowanceMicroUsd)} total)</p>)}
       {usage.data?.state === "blocked" ? <p>One or more usage limits are still exhausted.</p> : null}
-      <GatewayUsageTrigger compact={false} />
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <GatewayUsageTrigger compact={false} />
+        <Button type="button" size="sm" variant="ghost" className="ms-auto" onClick={onDismiss}>Dismiss</Button>
+      </div>
     </AlertDescription>
+    <AlertAction>
+      <Button type="button" size="icon-sm" variant="ghost" aria-label="Dismiss usage increase approval" onClick={onDismiss}><X aria-hidden="true" /></Button>
+    </AlertAction>
   </Alert>;
 }
 

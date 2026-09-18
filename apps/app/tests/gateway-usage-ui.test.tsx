@@ -17,10 +17,12 @@ const { getReactQueryClient } = await import("../src/react-app/infra/query-clien
 const { disposeGatewayUsageRefresh, refreshGatewayUsageAfterCompletion } = await import("../src/react-app/domains/cloud/gateway-usage-refresh");
 let organizationId = "org_test";
 let signedIn = true;
+let principalId = "user_test";
 mock.module("../src/react-app/domains/cloud/den-auth-provider", () => ({
-  useDenAuth: () => ({ isSignedIn: signedIn, verifiedIdentity: signedIn ? { organizationId, principalId: "user_test" } : null }),
+  useDenAuth: () => ({ isSignedIn: signedIn, verifiedIdentity: signedIn ? { organizationId, principalId } : null }),
 }));
 const { GatewayUsageSummary, GatewayUsageNotice, GatewayUsageTrigger, GatewayResetForm, GatewayUsageApprovalNotice } = await import("../src/react-app/domains/cloud/gateway-usage-panel");
+const { useGatewayApprovalDismissals, GATEWAY_APPROVAL_DISMISSALS_KEY } = await import("../src/react-app/domains/cloud/gateway-usage-approval-store");
 const { useGatewayUsage, useGatewayUsageErrorHandled } = await import("../src/react-app/domains/cloud/use-gateway-usage");
 const { __applySessionSyncEventForTest, __createWorkspaceSessionSyncForTest } = await import("../src/react-app/domains/session/sync/session-sync");
 const originalFetch = globalThis.fetch;
@@ -79,6 +81,8 @@ function changeSettings(org = "org_test", token = "member-token") {
 
 beforeEach(() => {
   organizationId = "org_test";
+  principalId = "user_test";
+  useGatewayApprovalDismissals.setState({ dismissedKeys: [] });
   signedIn = true;
   enabled = true;
   refreshKey = "session-a:idle";
@@ -299,6 +303,108 @@ test("pending is amber and closed-panel polling discovers approval across non-Ga
   expect(container.querySelector('[data-testid="gateway-usage-notice"]')).toBeNull();
   expect(document.querySelector('[data-slot="popover-title"]')).toBeNull();
 }, 40_000);
+
+test.each(["button", "icon"])("approval %s dismisses all sessions, survives rehydration, and leaves future approvals visible", async (control) => {
+  enabled = false;
+  approvalNotices = true;
+  paneCount = 2;
+  status = approvedUsageStatus();
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => renderProbe());
+  await flush();
+  const notices = () => container.querySelectorAll('[data-testid="gateway-usage-approved-notice"]');
+  expect(notices()).toHaveLength(2);
+  const button = control === "icon"
+    ? container.querySelector<HTMLButtonElement>('[aria-label="Dismiss usage increase approval"]')
+    : [...container.querySelectorAll("button")].find((item) => item.textContent === "Dismiss");
+  if (!button) throw new Error("Missing dismissal control");
+  await act(async () => button.click());
+  expect(notices()).toHaveLength(0);
+  expect(writes).toBe(0);
+  expect(latest().data?.buckets[0].resetRequestStatus).toBe("approved");
+  expect(container.querySelector('[aria-label="Usage limits"]')).not.toBeNull();
+  // Restore only the persisted data, as a fresh renderer would on restart.
+  const saved = localStorage.getItem(GATEWAY_APPROVAL_DISMISSALS_KEY);
+  expect(saved).not.toBeNull();
+  expect(saved).not.toContain("member-token");
+  await act(async () => {
+    root?.unmount();
+    useGatewayApprovalDismissals.setState({ dismissedKeys: [] });
+    if (saved) localStorage.setItem(GATEWAY_APPROVAL_DISMISSALS_KEY, saved);
+    await useGatewayApprovalDismissals.persist.rehydrate();
+    root = createRoot(container);
+    refreshKey = "session-new:idle";
+    changeSettings(organizationId, "rotated-token");
+    renderProbe();
+  });
+  await flush();
+  expect(notices()).toHaveLength(0);
+  await act(async () => { await latest().query.refetch(); });
+  await flush();
+  expect(notices()).toHaveLength(0);
+  const first = status.buckets[0];
+  status = { ...status, buckets: [first, { ...first, id: "another-bucket", policyName: "Another" }] };
+  await act(async () => { await latest().query.refetch(); });
+  await flush();
+  expect(notices()).toHaveLength(2);
+  expect(notices()[0].textContent).toContain("Another - Daily");
+  expect(notices()[0].textContent).not.toContain("Standard - Daily");
+  status = { ...status, buckets: [{ ...first, resetAt: "2099-01-02T05:00:00.000Z" }] };
+  await act(async () => { await latest().query.refetch(); });
+  await flush();
+  expect(notices()).toHaveLength(2);
+});
+
+test("approval dismissals are scoped to control plane, organization and user", async () => {
+  approvalNotices = true;
+  status = approvedUsageStatus();
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => renderProbe());
+  await flush();
+  const button = container.querySelector<HTMLButtonElement>('[aria-label="Dismiss usage increase approval"]');
+  if (!button) throw new Error("Missing dismissal control");
+  await act(async () => button.click());
+  for (const identity of [
+    { org: "org_next", user: "user_test", origin: "https://den.test", shown: true },
+    { org: "org_test", user: "other_user", origin: "https://den.test", shown: true },
+    { org: "org_test", user: "user_test", origin: "https://other-den.test", shown: true },
+    { org: "org_test", user: "user_test", origin: "https://den.test", shown: false },
+  ]) {
+    await act(async () => {
+      organizationId = identity.org;
+      principalId = identity.user;
+      status = { ...status, organizationId };
+      writeDenSettings({ baseUrl: identity.origin, activeOrgId: organizationId, authToken: "member-token" }, { persistBootstrap: false });
+      renderProbe();
+    });
+    await flush();
+    expect(Boolean(container.querySelector('[data-testid="gateway-usage-approved-notice"]'))).toBe(identity.shown);
+  }
+});
+
+test("malformed dismissal storage is ignored and a failed write still dismisses every pane", async () => {
+  for (const stored of ["{broken", JSON.stringify({ state: { dismissedKeys: [42] }, version: 0 })]) {
+    localStorage.setItem(GATEWAY_APPROVAL_DISMISSALS_KEY, stored);
+    await useGatewayApprovalDismissals.persist.rehydrate();
+    expect(useGatewayApprovalDismissals.getState().dismissedKeys).toEqual([]);
+  }
+  approvalNotices = true;
+  paneCount = 2;
+  status = approvedUsageStatus();
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  await act(async () => renderProbe());
+  await flush();
+  const button = container.querySelector<HTMLButtonElement>('[aria-label="Dismiss usage increase approval"]');
+  if (!button) throw new Error("Missing dismissal control");
+  const originalSetItem = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error("Storage full"); };
+  try {
+    await act(async () => button.click());
+    expect(container.querySelectorAll('[data-testid="gateway-usage-approved-notice"]')).toHaveLength(0);
+  } finally {
+    localStorage.setItem = originalSetItem;
+  }
+});
 
 test("approval notice and gauge reject stale, expired, zero-extension, switched-org and signed-out truth", async () => {
   enabled = false;
