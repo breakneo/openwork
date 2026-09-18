@@ -3483,6 +3483,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
           sessionId={props.sessionId}
           owner={sessionOwner}
           isStreaming={chatStreaming}
+          historyReady={snapshot !== null && !pendingSessionLoad}
+          hasNewer={!hasFullHistory && openingHistory.pages.ready && openingHistory.pages.hasNewer}
+          containerRef={scrollRef}
+          contentRef={contentRef}
           onJumpToLatest={sessionScroll.jumpToLatest}
           onJumpToStartOfMessage={sessionScroll.jumpToStartOfMessage}
         />
