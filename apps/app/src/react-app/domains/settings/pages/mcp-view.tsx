@@ -1415,7 +1415,7 @@ export function McpView(props: McpViewProps) {
         </div>
       ) : null}
       {props.builtInExtensionsDisabled && props.allowManageExtensions ? (
-        <div className="mb-5 rounded-xl border border-amber-6 bg-amber-2 px-4 py-3 text-xs text-amber-11">
+        <div className="mb-5 rounded-xl border border-border bg-muted/30 px-4 py-3 text-xs text-foreground">
           {t("extensions.builtins_disabled_notice")}
         </div>
       ) : null}
@@ -1492,7 +1492,7 @@ export function McpView(props: McpViewProps) {
       {filter === "mcp" && localServers.length > 0 && props.managedOAuthAvailable === false ? (
         <div
           data-testid="mcp-managed-oauth-unavailable"
-          className="mb-4 rounded-lg border border-amber-6 bg-amber-2 px-3 py-2 text-xs text-amber-11"
+          className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-foreground"
         >
           {t("mcp.managed_oauth_unavailable")}
         </div>
@@ -2251,7 +2251,7 @@ function McpConfiguredServerDetails(props: McpConfiguredServerDetailsProps) {
       {props.entry.managedOAuth?.status === "reconnect_required" && props.entry.managedOAuth.lastError ? (
         <div
           data-testid="mcp-managed-reconnect-reason"
-          className="rounded-lg border border-amber-6 bg-amber-2 px-3 py-2 text-xs text-amber-11"
+          className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-foreground"
         >
           {props.entry.managedOAuth.lastError}
         </div>

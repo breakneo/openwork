@@ -643,7 +643,7 @@ function RemoteConnectionIssueCard(props: {
       <div
         className={cn(
           "w-full rounded-[15px] border border-red-7/35 bg-red-1/40 px-3 py-3 text-left",
-          isOffline && "border-amber-7/35 bg-amber-2/45",
+          isOffline && "border-sidebar-border/70 bg-sidebar-accent/60",
         )}
       >
         <div className="flex items-start gap-2.5">
@@ -665,7 +665,7 @@ function RemoteConnectionIssueCard(props: {
             <div
               className={cn(
                 "mt-2 rounded-lg border border-red-7/25 bg-red-1/40 px-2 py-1.5 text-[11px] leading-4 text-red-11 whitespace-pre-wrap wrap-anywhere",
-                isOffline && "border-amber-7/25 bg-amber-1/40 text-amber-11",
+                isOffline && "border-sidebar-border/70 bg-sidebar-accent/60 text-sidebar-foreground",
               )}
               title={props.message}
             >

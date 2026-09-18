@@ -69,7 +69,7 @@ type ReadinessState = "ready" | "partial" | "none";
 // A connected item reads as calm: the Connected chip is the only green, so
 // the card shell and icon stay neutral. Partial setup still asks for attention.
 function readinessSurface(state: ReadinessState) {
-  if (state === "partial") return "border-amber-6 bg-amber-2";
+  if (state === "partial") return "border-dls-border bg-dls-hover";
   return "border-dls-border bg-dls-hover";
 }
 
@@ -196,7 +196,7 @@ export function ExtensionCard(props: ExtensionCardProps) {
   const readiness: ReadinessState = allMet ? "ready" : someMet ? "partial" : "none";
   const resolvedIconSrc = resolveExtensionIconUrl({ iconSrc, iconSlug, serviceUrl: url }) ?? null;
   const shellState = readiness === "partial"
-    ? "border-amber-6 bg-amber-2"
+    ? "border-dls-border bg-dls-hover"
     : "border-dls-border bg-dls-surface hover:bg-dls-hover";
   const shellClassName = `group w-full border text-left transition-all ${shellState} ${hidden ? "border-dashed opacity-70" : ""}`;
   const badges = (

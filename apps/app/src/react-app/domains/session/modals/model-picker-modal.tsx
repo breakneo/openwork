@@ -339,7 +339,7 @@ export function ModelPickerModal(props: ModelPickerModalProps) {
           </div>
 
           {props.openWorkModelsSyncing ? (
-            <div className="mb-3 flex shrink-0 items-center overflow-hidden rounded-2xl border border-amber-6/60 bg-amber-2/40">
+            <div className="mb-3 flex shrink-0 items-center overflow-hidden rounded-2xl border border-dls-border bg-dls-hover">
               <div className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5">
                 <ProviderIcon providerId={OPENWORK_MODELS_PROVIDER_ID} providerName={OPENWORK_MODELS_PROVIDER_NAME} size={18} className="shrink-0 text-amber-11" />
                 <div className="min-w-0 flex-1">

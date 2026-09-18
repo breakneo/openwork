@@ -202,7 +202,7 @@ function DenSigninGate({ children }: DenSigninGateProps) {
           <div
             role="status"
             aria-live="polite"
-            className="pointer-events-auto flex max-w-xl items-center gap-3 rounded-2xl border border-amber-7/50 bg-popover/95 px-4 py-3 text-popover-foreground shadow-md backdrop-blur-sm"
+            className="pointer-events-auto flex max-w-xl items-center gap-3 rounded-2xl bg-popover/95 px-4 py-3 text-popover-foreground shadow-md backdrop-blur-sm"
           >
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">{t("den.cloud_unavailable_title")}</p>

@@ -601,7 +601,7 @@ export function ModelSelect({
                 <CommandInput ref={searchInputRef} placeholder="Search models..." className="h-9 text-sm" />
               </CommandHeader>
               {openWorkModelsSyncing ? (
-                <div className="mx-1 mb-1 flex items-center gap-2 rounded-md border border-amber-6/60 bg-amber-2/40 px-2 py-1.5">
+                <div className="mx-1 mb-1 flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
                   <ProviderIcon providerId={OPENWORK_MODELS_PROVIDER_ID} providerName={OPENWORK_MODELS_PROVIDER_NAME} className="size-3.5 shrink-0 text-amber-11" size={14} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-medium text-foreground">{OPENWORK_MODELS_PROVIDER_NAME}</span>

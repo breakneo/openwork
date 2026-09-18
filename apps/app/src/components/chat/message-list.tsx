@@ -204,7 +204,7 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
   if (lifecycle === "waiting") {
     return (
       <div
-        className="flex items-start gap-2 rounded-md border border-amber-7 bg-amber-2 px-3 py-2 text-sm text-amber-12"
+        className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-foreground"
         data-tool-lifecycle="waiting"
         role="status"
       >
@@ -1234,7 +1234,7 @@ const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
   return (
     <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 md:px-10">
       <div className="group flex w-full flex-col items-start gap-0">
-        <div className="text-foreground flex min-w-0 flex-1 flex-col gap-2 rounded-lg border-2 border-amber-300 bg-amber-300/20 px-3 py-2">
+        <div className="text-foreground flex min-w-0 flex-1 flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2">
           <div className="flex items-start gap-2">
             <LoaderCircle size={16} className="mt-0.5 shrink-0 animate-spin text-amber-700" />
             <div className="min-w-0 space-y-1">

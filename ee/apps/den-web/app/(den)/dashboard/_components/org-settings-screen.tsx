@@ -723,7 +723,7 @@ export function OrgSettingsScreen() {
           ) : null}
 
           {desktopVersionOptionsError ? (
-            <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-[14px] text-amber-800">
+            <div className="rounded-[24px] border border-[var(--dls-border)] bg-[var(--dls-hover)] px-5 py-4 text-[14px] text-[var(--dls-text-primary)]">
               {desktopVersionOptionsError}
             </div>
           ) : null}

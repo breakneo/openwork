@@ -468,9 +468,9 @@ export function CloudWorkspaceBootTakeover(props: { decision: CloudWorkspaceMain
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.32, ease: "easeOut" }}
           className={cn(
-            "w-full max-w-md rounded-[20px] border p-6 shadow-[var(--dls-card-shadow)]",
+            "w-full max-w-md rounded-[20px] p-6 shadow-[var(--dls-card-shadow)]",
             attention
-              ? "border-amber-7/35 bg-amber-3/30"
+              ? "border-dls-border bg-dls-hover"
               : "border-dls-border bg-dls-surface",
           )}
         >
@@ -659,7 +659,7 @@ function CloudWorkspaceOverlayInner() {
                 className={cn(
                   "h-8 gap-1.5 rounded-full border bg-popover/90 px-3 text-xs shadow-sm backdrop-blur-sm",
                   viewModel.tone === "amber"
-                    ? "border-amber-7/70 bg-amber-3 text-amber-12 hover:bg-amber-4"
+                    ? "border-dls-border bg-dls-hover text-dls-text hover:bg-dls-active"
                     : "border-border/80 text-muted-foreground hover:text-foreground",
                 )}
                 aria-label={`Open cloud workspace status: ${viewModel.label}`}

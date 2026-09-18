@@ -257,7 +257,7 @@ export function LlmProvidersScreen() {
           </p>
         ) : null}
         {!policiesBusy && !defaultPolicy ? (
-          <p className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-[14px] text-amber-800">
+          <p className="rounded-[24px] border border-[var(--dls-border)] bg-[var(--dls-hover)] px-5 py-4 text-[14px] text-[var(--dls-text-primary)]">
             Default desktop policy not found.
           </p>
         ) : null}
