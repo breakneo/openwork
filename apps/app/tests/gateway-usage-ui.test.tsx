@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -14,7 +14,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import("react-dom/client");
 const { QueryClientProvider, focusManager, isServer } = await import("@tanstack/react-query");
 const { getReactQueryClient } = await import("../src/react-app/infra/query-client");
-const { disposeGatewayUsageRefresh, refreshGatewayUsageAfterCompletion } = await import("../src/react-app/domains/cloud/gateway-usage-refresh");
+const { disposeGatewayUsageRefresh, refreshGatewayUsageAfterCompletion, refreshGatewayUsageAfterCloudSync } = await import("../src/react-app/domains/cloud/gateway-usage-refresh");
 let organizationId = "org_test";
 let signedIn = true;
 mock.module("../src/react-app/domains/cloud/den-auth-provider", () => ({
@@ -211,6 +211,36 @@ test("trigger observes approval before opening and panel exposes a titled loadin
   expect(document.querySelector('[data-slot="popover-content"] [role="alert"]')?.classList.contains("text-destructive")).toBe(true);
 });
 
+test("closed and open usage never schedule polling; opening and manual refresh fetch even fresh data", async () => {
+  const interval = spyOn(globalThis, "setInterval");
+  status = usageStatus({ state: "within_limit" });
+  status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
+  try {
+    await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageTrigger /></QueryClientProvider>));
+    await flush();
+    expect(reads).toBe(1);
+    expect(document.querySelector('[data-slot="popover-title"]')).toBeNull();
+    const trigger = container.querySelector("button");
+    if (!trigger) throw new Error("Missing usage trigger");
+    await act(async () => trigger.click());
+    await flush();
+    expect(reads).toBe(2);
+    const refresh = [...document.querySelectorAll("button")].find((button) => button.textContent === "Refresh usage");
+    if (!refresh) throw new Error("Missing refresh button");
+    await act(async () => refresh.click());
+    await flush();
+    expect(reads).toBe(3);
+    for (const state of ["blocked", "over_limit", "within_limit"] satisfies Array<typeof status.state>) {
+      status = { ...status, state, buckets: status.buckets.map((bucket) => ({ ...bucket, resetRequestStatus: "pending" })) };
+      await act(async () => { await refreshGatewayUsageAfterCloudSync(readGatewayUsageScope()); });
+      await flush();
+    }
+    await act(async () => trigger.click());
+    await flush();
+    expect(interval.mock.calls.some((call) => call[1] === 30_000)).toBe(false);
+  } finally { interval.mockRestore(); }
+});
+
 test("eligible bucket opens a titled reset dialog and pending status removes its action", async () => {
   await act(async () => root?.render(<QueryClientProvider client={getReactQueryClient()}><GatewayUsageTrigger /></QueryClientProvider>));
   const trigger = container.querySelector("button");
@@ -260,7 +290,7 @@ test("direct notice opens an increase dialog with a required reason and submits 
   expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Request Increase")).toBe(false);
 });
 
-test("pending is amber and closed-panel polling discovers approval across non-Gateway session panes", async () => {
+test("pending is amber and Cloud sync refresh discovers approval across closed non-Gateway session panes", async () => {
   expect(isServer).toBe(false);
   enabled = false;
   approvalNotices = true;
@@ -278,9 +308,9 @@ test("pending is amber and closed-panel polling discovers approval across non-Ga
   const before = reads;
   status = approvedUsageStatus();
   status.buckets[0].resetAt = "2099-01-01T05:00:00.000Z";
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30_100)); });
+  await act(async () => { await refreshGatewayUsageAfterCloudSync(readGatewayUsageScope()); });
   await flush();
-  expect(reads).toBeGreaterThan(before);
+  expect(reads).toBe(before + 1);
   const notices = container.querySelectorAll('[data-testid="gateway-usage-approved-notice"]');
   expect(notices).toHaveLength(2);
   const gauges = container.querySelectorAll('[aria-label="Usage limits"]');
@@ -298,7 +328,7 @@ test("pending is amber and closed-panel polling discovers approval across non-Ga
   }
   expect(container.querySelector('[data-testid="gateway-usage-notice"]')).toBeNull();
   expect(document.querySelector('[data-slot="popover-title"]')).toBeNull();
-}, 40_000);
+});
 
 test("approval notice and gauge reject stale, expired, zero-extension, switched-org and signed-out truth", async () => {
   enabled = false;

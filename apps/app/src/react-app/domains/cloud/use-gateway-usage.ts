@@ -64,8 +64,6 @@ export function useGatewayUsage(requested: boolean, panelOpen = false, refreshKe
     refetchOnMount: panelOpen ? "always" : true,
     retry: false,
     refetchOnWindowFocus: "always",
-    refetchInterval: (state) => enabled && (panelOpen || state.state.data?.state === "blocked" || state.state.data?.state === "over_limit" || state.state.data?.buckets.some((bucket) => bucket.resetRequestStatus === "pending")) ? 30_000 : false,
-    refetchIntervalInBackground: false,
   });
   const { refetch } = query;
   const refreshScope = `${scope.generation}:${auth.verifiedIdentity?.principalId ?? ""}`;

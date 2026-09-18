@@ -16,6 +16,7 @@ import {
   type DenOrgLlmProviderConnection,
 } from "../../../../app/lib/den";
 import { readGatewayUsageScope } from "../../../../app/lib/gateway-usage-scope";
+import { refreshGatewayUsageAfterCloudSync } from "../../cloud/gateway-usage-refresh";
 import { getOpenworkGatewayOrigin } from "../../../../app/lib/gateway-runtime";
 import { unwrap, waitForHealthy } from "../../../../app/lib/opencode";
 import {
@@ -2308,7 +2309,21 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   async function runCloudProviderSync(reason: CloudProviderSyncReason): Promise<void | { outcome: "handled_server_side" }> {
     if (disposed) return;
     const delivery = syncDenSessionDelivery();
+    const contextKey = getCloudProviderSyncContextKey();
+    const usageScope = readGatewayUsageScope();
+    const isCurrent = () => !disposed && usageScope === readGatewayUsageScope()
+      && contextKey === getCloudProviderSyncContextKey();
+    const refreshUsageOnly = () => {
+      if (!usageScope.token || !usageScope.organizationId) return Promise.resolve();
+      return enqueueGlobalCloudProviderSync(
+        `usage:${contextKey}`,
+        async () => { void refreshGatewayUsageAfterCloudSync(usageScope); },
+        isCurrent,
+      ).catch(() => {});
+    };
     if (!hasCloudProviderSyncPrerequisites()) {
+      await refreshUsageOnly();
+      if (!isCurrent()) return;
       if (reason === "settings_cloud_opened") {
         setStateField("providerAuthError", null);
       }
@@ -2324,6 +2339,8 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       return;
     }
     if (getOpenworkGatewayOrigin()) {
+      await refreshUsageOnly();
+      if (!isCurrent()) return;
       if (!loggedGatewayCloudProviderSyncSkip) {
         loggedGatewayCloudProviderSyncSkip = true;
         console.info(
@@ -2334,9 +2351,8 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     }
 
     if (serverHandlesProviderSync()) {
-      const contextKey = getCloudProviderSyncContextKey();
-      const usageScope = readGatewayUsageScope();
-      const isCurrent = () => isCurrentDenSessionDelivery(delivery) && contextKey === getCloudProviderSyncContextKey();
+      const isCurrent = () => isCurrentDenSessionDelivery(delivery) && usageScope === readGatewayUsageScope()
+        && contextKey === getCloudProviderSyncContextKey();
       try {
         const result = await enqueueGlobalCloudProviderSync(
           `server:${contextKey}`,
@@ -2353,6 +2369,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
               if (!await pushDenSession("sync", true) || !isCurrent()) return;
               result = await openworkClient.runCloudProviderSyncNow(reason, delivery?.controller.signal);
             }
+            if (isCurrent()) void refreshGatewayUsageAfterCloudSync(usageScope);
             return result;
           },
           isCurrent,
@@ -2395,11 +2412,15 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
       }
     }
 
-    const contextKey = getCloudProviderSyncContextKey();
-    const isCurrent = () => !disposed && contextKey === getCloudProviderSyncContextKey();
     await enqueueGlobalCloudProviderSync(
       `client:${contextKey}`,
-      () => performCloudProviderSync(reason),
+      async () => {
+        try {
+          await performCloudProviderSync(reason);
+        } finally {
+          if (isCurrent()) void refreshGatewayUsageAfterCloudSync(usageScope);
+        }
+      },
       isCurrent,
     ).catch((error) => {
       if (!isCurrent()) return;
