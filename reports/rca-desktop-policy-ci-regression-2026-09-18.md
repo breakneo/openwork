@@ -20,6 +20,7 @@ No browser-panel or external-link routing code changes here.
 | --- | --- | --- | --- |
 | Workspace OpenCode proxy | 29 passed, 0 failed | 17 passed, 6 failed | 30 passed, 0 failed |
 | Packaged Cloud first launch | 1 passed in 9.55s | 1 failed after the 60s gate timeout | 1 passed in 9.55s |
+| Activated Enterprise launch | 1 passed at the former sign-in gate | 1 failed after the 60s gate timeout on the intended local session shell | 1 passed on the local session shell |
 
 The CI artifact and local packaged reproduction showed the same red surface: the Cloud artifact mounted the ordinary signed-out session shell (`Create or connect a workspace` / `What do you need done?`) instead of `Welcome to OpenWork`.
 
@@ -53,6 +54,8 @@ The fix keeps the non-blocking read/startup call and policy-action no-op from #5
 
 The fix distinguishes the Cloud distribution requirement from optional bootstrap policy. Public and Enterprise desktop policy sign-in remains suspended; web sign-in is unchanged.
 
+The activated Enterprise package check still expected the policy sign-in surface removed by #5131. It now proves the activation gate steps aside to the local session shell while both the activation gate and suspended policy sign-in gate stay absent. The unmodified `1bb9145f1` control reproduced its former 60-second timeout on that same local session shell.
+
 ## Link-policy ownership and compatibility
 
 [#5123](https://github.com/different-ai/openwork/pull/5123) remains open and owns primary-link routing, affirmative `managed`/`unmanaged` authority, and the fail-closed dialogs for unknown authority, outages, and sign-in races. It was inspected but not merged or copied into this repair.
@@ -84,6 +87,9 @@ cd packages/types && pnpm build
 
 OPENWORK_EVAL_ELECTRON_BINARY=<fresh-packaged-cloud-binary> pnpm evals:e2e packaged-first-launch --local
 # 1 passed; exit 0
+
+OPENWORK_EVAL_ELECTRON_BINARY=<fresh-packaged-enterprise-binary> pnpm evals:e2e packaged-activated-launch --local
+# 1 passed; exit 0
 ```
 
-The packaged proof used a fresh unsigned macOS arm64 Cloud directory artifact. CI's Linux packaged artifact independently recorded the same pre-fix DOM and timeout.
+The packaged proofs used fresh unsigned macOS arm64 Cloud and Enterprise directory artifacts. CI's Linux packaged artifacts independently recorded the same DOM states and timeouts.
