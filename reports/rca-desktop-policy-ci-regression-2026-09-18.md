@@ -7,6 +7,7 @@ The failures in [CI run 35308558274](https://github.com/different-ai/openwork/ac
 This repair keeps desktop restrictions and ordinary desktop bootstrap sign-in optional. It restores the independent request-validation and product behavior that the suspension accidentally bypassed:
 
 - request bodies are still validated before they reach the engine;
+- identity installation remains authenticated by the host token;
 - an unauthorized OpenWork client still fails closed before the engine;
 - local prompts remain independent of the suspended policy endpoint;
 - the Cloud distribution's immutable first-launch sign-in gate still renders.
@@ -17,7 +18,7 @@ No browser-panel or external-link routing code changes here.
 
 | Check | Green control `071181d2d` | Red `1bb9145f1` | Repaired branch |
 | --- | --- | --- | --- |
-| Workspace OpenCode proxy | 29 passed, 0 failed | 17 passed, 6 failed | 29 passed, 0 failed |
+| Workspace OpenCode proxy | 29 passed, 0 failed | 17 passed, 6 failed | 30 passed, 0 failed |
 | Packaged Cloud first launch | 1 passed in 9.55s | 1 failed after the 60s gate timeout | 1 passed in 9.55s |
 
 The CI artifact and local packaged reproduction showed the same red surface: the Cloud artifact mounted the ordinary signed-out session shell (`Create or connect a workspace` / `What do you need done?`) instead of `Welcome to OpenWork`.
@@ -44,7 +45,7 @@ The repaired packaged Cloud artifact mounts its expected sign-in gate on a fresh
 2. malformed engine JSON was unintentionally forwarded rather than rejected with `400 invalid_request`;
 3. the test named “unverified identity” only made `/v1/me/desktop-config` return `401`; it did not fail the host-token authentication on `/den-session/identity` or the client-token authentication on the prompt.
 
-The fix keeps the non-blocking read/startup call and policy-action no-op from #5131, but lets requests continue through the existing body parser before policy actions are skipped. The proxy tests now assert zero policy requests, keep the unauthorized-client and engine-error ordering checks, and explicitly prove that a rejected policy endpoint does not block a local provider prompt.
+The fix keeps the non-blocking read/startup call and policy-action no-op from #5131, but lets requests continue through the existing body parser before policy actions are skipped. The proxy tests now assert zero policy requests, prove host-token verification still guards identity installation, keep the unauthorized-client and engine-error ordering checks, and explicitly prove that a rejected policy endpoint does not block a local provider prompt.
 
 ### Packaged first launch
 
@@ -64,7 +65,7 @@ All checks used pnpm 11.4.0, Bun 1.4.0, and Node 24.20.0 on the local macOS lane
 
 ```text
 cd apps/server && bun --conditions=development test src/opencode-proxy.e2e.test.ts
-# 29 passed, 0 failed; exit 0
+# 30 passed, 0 failed; exit 0
 
 cd apps/server && bun --conditions=development test src/managed-desktop-policy.test.ts
 # 5 passed, 0 failed; exit 0

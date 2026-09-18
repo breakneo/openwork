@@ -368,7 +368,11 @@ describe("workspace OpenCode proxy", () => {
     }
   });
 
-  async function signedInPromptFixture(options?: { rejectPolicyRead?: boolean; onPrompt?: () => Response }) {
+  async function signedInPromptFixture(options?: {
+    installIdentity?: boolean;
+    rejectPolicyRead?: boolean;
+    onPrompt?: () => Response;
+  }) {
     const workspaceRoot = await createWorkspaceRoot();
     const engine = startMockOpencode({ onPrompt: options?.onPrompt });
     const denRequests: Array<{ method: string; pathname: string }> = [];
@@ -389,13 +393,16 @@ describe("workspace OpenCode proxy", () => {
       workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}`, readOnly: false,
     });
     const base = `http://127.0.0.1:${openwork.server.port}`;
-    const identity = await fetch(`${base}/den-session/identity`, {
-      method: "PUT", headers: { "x-openwork-host-token": openwork.config.hostToken, "Content-Type": "application/json" },
+    const installIdentity = (hostToken: string) => fetch(`${base}/den-session/identity`, {
+      method: "PUT", headers: { "x-openwork-host-token": hostToken, "Content-Type": "application/json" },
       body: JSON.stringify({ baseUrl: `http://127.0.0.1:${den.port}`, token: "den-fixture-token", orgId: "org_test" }),
       signal: AbortSignal.timeout(1_000),
     });
-    expect(identity.status).toBe(204);
-    await identity.body?.cancel();
+    if (options?.installIdentity !== false) {
+      const identity = await installIdentity(openwork.config.hostToken);
+      expect(identity.status).toBe(204);
+      await identity.body?.cancel();
+    }
     expect(denRequests).toEqual([]);
     const denCount = denRequests.length;
     const prompt = (providerID: string, token = openwork.token) => fetch(`${base}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
@@ -404,8 +411,20 @@ describe("workspace OpenCode proxy", () => {
       signal: AbortSignal.timeout(1_000),
     });
     const prompts = () => engine.requests.filter(({ method, pathname }) => method === "POST" && pathname === "/session/ses_created/prompt_async");
-    return { prompt, prompts, engine, denRequests, denCount, workspaceRoot };
+    return { prompt, prompts, engine, denRequests, denCount, workspaceRoot, installIdentity, hostToken: openwork.config.hostToken };
   }
+
+  test.serial("policy suspension preserves host verification for identity installation", async () => {
+    const fixture = await signedInPromptFixture({ installIdentity: false, rejectPolicyRead: true });
+    const rejected = await fixture.installIdentity("invalid-host-token");
+    expect(rejected.status).toBe(401);
+    await rejected.body?.cancel();
+
+    const accepted = await fixture.installIdentity(fixture.hostToken);
+    expect(accepted.status).toBe(204);
+    await accepted.body?.cancel();
+    expect(fixture.denRequests).toEqual([]);
+  });
 
   for (const providerID of ["local-byok", "alternate-byok"]) {
     test.serial(`signed-in ${providerID} prompt reaches the engine once without Den after identity installation`, async () => {
