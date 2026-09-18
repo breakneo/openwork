@@ -157,7 +157,42 @@ describe("SCIM proxy safe classification", () => {
 });
 
 describe("SCIM failure response and non-SCIM isolation", () => {
-  test("keeps Expect, request bytes, queries, authorization and the 502 response unchanged", async () => {
+  test.each([201, 409])("POST with mixed-case Expect preserves body and upstream %s", async (status) => {
+    const body = JSON.stringify({ userName: "synthetic@example.test", displayName: "Synthetic – test" });
+    const upstreamBody = JSON.stringify(status === 201
+      ? { id: "synthetic-user", userName: "synthetic@example.test" }
+      : { schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status: "409", scimType: "uniqueness", detail: "Conflict" });
+    let calls = 0;
+    globalThis.fetch = async (url, init) => {
+      calls += 1;
+      // Model Node's rejection so this regression fails with the old forwarding.
+      if (init.headers.has("expect")) {
+        throw new TypeError("fetch failed", { cause: { code: "UND_ERR_NOT_SUPPORTED", message: "expect header not supported" } });
+      }
+      expect(url).toBe("https://api.example.test/api/auth/scim/v2/Users");
+      expect(init.method).toBe("POST");
+      expect(init.headers.get("content-type")).toBe("application/scim+json");
+      expect(init.headers.get("authorization")).toBe("Bearer synthetic-token");
+      expect(init.headers.has("content-length")).toBe(false);
+      expect(new Uint8Array(await init.body.arrayBuffer())).toEqual(new TextEncoder().encode(body));
+      return new Response(upstreamBody, { status, headers: { "content-type": "application/scim+json" } });
+    };
+    const request = new NextRequest("https://app.example.test/api/auth/scim/v2/Users", {
+      method: "POST", body, headers: {
+        ExPeCt: "100-continue", authorization: "Bearer synthetic-token",
+        "content-type": "application/scim+json", "content-length": String(new TextEncoder().encode(body).byteLength),
+      },
+    });
+    const response = await proxyUpstream(request, [], options);
+    expect(calls).toBe(1);
+    expect(request.headers.get("expect")).toBe("100-continue");
+    expect(response.status).toBe(status);
+    expect(response.headers.get("content-type")).toBe("application/scim+json");
+    expect(await response.text()).toBe(upstreamBody);
+    expect(logs.some((entry) => entry[0] === "error")).toBe(false);
+  });
+
+  test("strips Expect while preserving bytes, queries, authorization and unrelated fetch failures", async () => {
     const body = JSON.stringify({ userName: privateText });
     let forwarded;
     globalThis.fetch = async (url, init) => {
@@ -171,7 +206,7 @@ describe("SCIM failure response and non-SCIM isolation", () => {
         cookie: "better-auth.session_token=private-fixture", "content-type": "application/scim+json",
       } },
     ), [], options);
-    expect(forwarded.init.headers.get("expect")).toBe("100-continue");
+    expect(forwarded.init.headers.get("expect")).toBeNull();
     expect(forwarded.init.headers.get("authorization")).toBe("Bearer private-fixture");
     expect(forwarded.init.headers.get("cookie")).toBe("better-auth.session_token=private-fixture");
     expect(forwarded.init.redirect).toBe("manual");
@@ -185,7 +220,7 @@ describe("SCIM failure response and non-SCIM isolation", () => {
     expect(logs).toHaveLength(1);
     expect(logs[0][2]).toMatchObject({
       error_name: "TypeError", failure_class: "unsupported_request", cause_code: "UND_ERR_NOT_SUPPORTED",
-      upstream_path: "/api/auth/scim/v2/Users/:id", has_expect: true, expect_100_continue: true,
+      upstream_path: "/api/auth/scim/v2/Users/:id", has_expect: false, expect_100_continue: false,
       method: "PATCH", observed_bytes: new TextEncoder().encode(body).byteLength,
     });
     expect(logs[0][2].duration_ms).toBeGreaterThanOrEqual(0);

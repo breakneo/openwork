@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
-import { useAppsClient } from "./use-apps";
+import { useAppsClient, dashboardManagementReason } from "./use-apps";
 import type { DashboardLaunchEndpoint } from "../dashboard/mcp-app-tile";
 import { loadSavedAppForDisplay, viewerLocalDate } from "./live-generated-app-model";
 import { LiveGeneratedApp, isLiveGeneratedApp, useViewerDay } from "./live-generated-app";
@@ -19,7 +19,7 @@ import { connectionCardPayloadFromChatToolResult, reconnectActionFromChatToolRes
 export type AppReference = { appId: string; revisionId?: string; receiptId?: string };
 
 export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk, fallbackEndpoints }: AppReference & { fallbackEndpoints?: DashboardLaunchEndpoint[]; onClose?: () => void; onAsk?: (prompt: string) => Promise<void> }) {
-  const { client, orgId, scope } = useAppsClient();
+  const { client, orgId, scope, canManage } = useAppsClient();
   const navigate = useNavigate();
   const { timeZone, now } = useViewerDay();
   const cache = useQueryClient();
@@ -48,12 +48,13 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk, fall
   const toolName = `openwork-cloud_run_artifact_${appId}`;
   const connectionOutput = app?.runError?.connectionCard;
   const connection = connectionCardPayloadFromChatToolResult(toolName, connectionOutput);
-  const updatePrompt = getAppUpdatePrompt(app);
+  const updatePrompt = canManage ? getAppUpdatePrompt(app) : undefined;
   const onUpdate = onAsk && updatePrompt ? () => void ask(updatePrompt) : undefined;
   const revision = app?.revision;
   const saved = Boolean(revision && app?.view.activeRevisionId === revision.id);
   const save = useMutation({
     mutationFn: async () => {
+      if (!canManage || !app?.canManage) throw new Error(dashboardManagementReason);
       if (!client || !orgId || !app || !revision) throw new Error("The app is not ready to save yet.");
       return client.saveApp(orgId, appId, { revisionId: revision.id, title: name.trim(), useInWorkflow, expectedActiveRevisionId: app.view.activeRevisionId });
     },
@@ -80,13 +81,13 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk, fall
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        {app.canManage && !saved ? <Button size="sm" disabled={!revision || revision.buildStatus !== "ready"} onClick={() => {
+        {canManage && app.canManage && !saved ? <Button size="sm" disabled={!revision || revision.buildStatus !== "ready"} onClick={() => {
           setName(app.view.title); setUseInWorkflow(app.view.activeRevisionId ? app.view.useInWorkflow !== false : true); setSaveOpen(true); save.reset();
         }}>{app.view.activeRevisionId ? "Save changes" : "Save"}</Button> : null}
-        <AppActionsMenu appId={appId} title={app.view.title} canDelete={app.canManage && app.view.status !== "retired"}
+        <AppActionsMenu appId={appId} title={app.view.title} canManage={app.canManage} canDelete={app.canManage && app.view.status !== "retired"}
           busy={asking} onUpdate={onUpdate} onDeleted={onClose ?? (() => navigate("/dashboard"))}
           onRun={onAsk && saved ? () => void ask(`Run my saved app “${app.view.title}” with fresh data and show the new results in the saved app.`) : undefined}
-          onEdit={onAsk && app.canManage ? () => void ask(`Help me improve my saved app “${app.view.title}”. Read its existing app source, ask what I want to change, and show a draft preview for me to save.`) : undefined} />
+          onEdit={onAsk ? () => void ask(`Help me improve my saved app “${app.view.title}”. Read its existing app source, ask what I want to change, and show a draft preview for me to save.`) : undefined} />
         {onClose ? <Button variant="ghost" size="icon-sm" className="text-muted-foreground" onClick={onClose} aria-label="Close app"><X className="size-4" /></Button> : null}
       </div>
     </header>
@@ -99,9 +100,9 @@ export function AppArtifact({ appId, revisionId, receiptId, onClose, onAsk, fall
         <p role="status" className="text-sm text-muted-foreground">{app.previewNotice}</p>
         {onUpdate ? <Button variant="outline" size="sm" disabled={asking} onClick={onUpdate}>{asking ? "Opening conversation…" : "Update app"}</Button> : null}
       </div>}
-      {!saved ? <p className="text-xs text-muted-foreground">Your draft is kept. Ask for changes in the conversation, then save the app to use it again.</p> : null}
+      {canManage && app.canManage && !saved ? <p className="text-xs text-muted-foreground">Your draft is kept. Ask for changes in the conversation, then save the app to use it again.</p> : null}
     </div>
-    <Dialog open={saveOpen} onOpenChange={(open) => { if (!save.isPending) setSaveOpen(open); }}>
+    <Dialog open={canManage && app.canManage && saveOpen} onOpenChange={(open) => { if (!save.isPending) setSaveOpen(open); }}>
       <DialogContent>
         <form onSubmit={(event) => { event.preventDefault(); if (name.trim() && !save.isPending) save.mutate(); }}>
           <DialogHeader><DialogTitle>{app.view.activeRevisionId ? "Save changes" : "Save to your dashboard"}</DialogTitle><DialogDescription>Save this app for future use. Each new run supplies fresh results.</DialogDescription></DialogHeader>

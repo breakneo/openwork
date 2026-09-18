@@ -380,8 +380,9 @@ export function registerPluginArchRoutes<T extends { Variables: OrgRouteVariable
     jsonValidator(configObjectCreateSchema),
     describeRoute({
       tags: ["Config Objects"],
-      summary: "Create config object",
-      description: "Creates a new private config object and initial immutable version.",
+      summary: "Create a skill, agent, or other config object; optionally add it to an existing plugin",
+      description: "Creates a config object and initial immutable version. Pass pluginIds to add the new component to existing plugins without creating a duplicate plugin; omit pluginIds for a private standalone object. Skills require complete SKILL.md in input.rawSourceText.",
+      ...{ "x-mcp-search-aliases": ["add skill to existing plugin", "create skill in plugin", "add component to plugin"] },
       responses: {
         201: jsonResponse("Config object created successfully.", configObjectMutationResponseSchema),
         400: jsonResponse("The config object creation request was invalid.", invalidRequestSchema),

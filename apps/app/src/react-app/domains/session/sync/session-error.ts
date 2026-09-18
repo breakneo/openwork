@@ -1,4 +1,5 @@
 import type { UIMessage } from "ai";
+import { parseGatewayUsageError, gatewayUsageErrorEvidenceSchema, type GatewayUsageErrorEvidence } from "../../cloud/gateway-usage-state";
 
 import { safeStringify } from "../../../../app/utils";
 import { normalizeErrorText } from "../../../../lib/error-text";
@@ -17,6 +18,8 @@ export type OpencodeSessionErrorPresentation = {
    * it — the renderer then deep-links to Settings > AI providers. Additive.
    */
   connectUrl?: string | null;
+  gatewayUsage?: GatewayUsageErrorEvidence;
+  providerId?: string | null;
 };
 
 /** Error code the OpenWork inference gateway returns when the member's own sign-in is missing or revoked. */
@@ -250,6 +253,7 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
   const fields = sessionErrorFields(error, fallback);
   const gatewayAuth = detectGatewayAuthRequired(error, fields);
   const gatewaySelection = safeStringify(error)?.includes("gateway_selection_required") === true;
+  const gatewayUsage = parseGatewayUsageError(error);
   const kind = gatewayAuth ? "gateway-auth-required" : gatewaySelection ? "gateway-selection-required" : sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody);
   const fallbackTitle = normalizeSessionError(fields.message ?? defaultErrorMessage(fields.name, fallback));
   return {
@@ -259,6 +263,7 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
     technicalDetails: kind === "gateway-selection-required" ? "Error code: gateway_selection_required\nStatus: 409" : gatewayAuth ? "Error code: openwork_auth_required\nStatus: 401" : technicalErrorDetails(error, fallback, fields),
     recoveryPrompt: errorRecoveryPrompt(kind),
     ...(gatewayAuth ? { connectUrl: gatewayAuth.connectUrl } : {}),
+    ...(gatewayUsage ? { gatewayUsage, providerId: fields.provider } : {}),
   };
 }
 
@@ -289,5 +294,7 @@ export function sessionErrorPresentationFromUIMessage(message: UIMessage): Openc
   ) {
     return null;
   }
+  if (candidate.gatewayUsage !== undefined && !gatewayUsageErrorEvidenceSchema.safeParse(candidate.gatewayUsage).success) return null;
+  if (candidate.providerId !== undefined && candidate.providerId !== null && typeof candidate.providerId !== "string") return null;
   return candidate as OpencodeSessionErrorPresentation;
 }

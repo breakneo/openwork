@@ -194,6 +194,7 @@ export function buildDenCatalogToolTree(input: {
   const definitions = operations.map((operation) => [operation.name, Tool.make({
     description: operation.operation.summary ?? operation.operation.description ?? operation.name,
     input: denInputJsonSchema(operation),
+    output: operation.outputSchema,
     run: (toolInput) => Effect.promise(() => invokeMcpOperation({
       app: input.app,
       env: input.env,
@@ -264,6 +265,7 @@ export async function buildNativeProviderToolTree(input: {
     const definitions = nativeOperations(input.catalog, connection.nativeProviderKey).map((operation) => [operation.name, Tool.make({
       description: operation.operation.summary ?? operation.operation.description ?? operation.name,
       input: denInputJsonSchema(operation),
+      output: operation.outputSchema,
       run: (toolInput) => Effect.promise(() => executeNativeCapability({
         app: input.app,
         env: input.env,

@@ -20,7 +20,7 @@ import { createClient, isPromptAdmissionUnknown, unwrap } from "@/app/lib/openco
 import { createClientV2, isOpencodeV2BaseUrl, v2PromptText, V2_SESSION_ARCHIVE_UNAVAILABLE } from "@/app/lib/opencode-v2-adapter";
 import { abortSessionSafe, forkSession, listCommands, revertSession, shellInSession, unrevertSession } from "@/app/lib/opencode-session";
 import { composeNativeSessionHistory, getNativeSessionMessages } from "@/app/lib/opencode-session-native";
-import { prefetchOpeningSessionHistory, sessionHistoryIdentity } from "@/react-app/domains/session/surface/session-history";
+import { prefetchOpeningSessionHistory, sessionHistoryIdentity, sessionHistoryRuntimeOwner, useSessionHistoryRuntimeOwners } from "@/react-app/domains/session/surface/session-history";
 import { sendSessionCommand, sessionWorkHeld } from "@/app/lib/opencode-interruption";
 import { useSessionManagementStore as sessionManagementStore } from "@/react-app/domains/session/sidebar/session-management-store";
 import { getSessionDescendantIds } from "@/react-app/domains/session/sidebar/utils";
@@ -73,7 +73,7 @@ import {
   resolveModelDisplayName,
   safeStringify,
 } from "@/app/utils";
-import { t } from "@/i18n";
+import { currentLocale, t } from "@/i18n";
 import {
   type RouteWorkspace,
   type RouteSession,
@@ -92,6 +92,7 @@ import {
   mapDesktopWorkspace,
   mergeRouteWorkspaces,
   orderRouteWorkspaces,
+  startSidebarTask,
   TASK_CREATE_RETRY_DELAYS_MS,
   toSessionGroups,
   withTransientEngineRetry,
@@ -120,8 +121,8 @@ import { isDesktopProviderBlocked } from "@/app/cloud/desktop-app-restrictions";
 import { useCheckDesktopRestriction } from "@/react-app/domains/cloud/desktop-config-provider";
 import { useRestrictionNotice } from "@/react-app/domains/cloud/restriction-notice-provider";
 import { ReactSessionRuntime } from "@/react-app/domains/session/sync/runtime-sync";
-import { useSessionActivityStore } from "@/react-app/domains/session/status/session-activity-store";
-import { selectSessionAttention, sessionAttentionLabel, sessionAttentionSidebarStatus } from "@/react-app/domains/session/status/session-attention";
+import { createSessionChildIdsSelector, useSessionActivityStore } from "@/react-app/domains/session/status/session-activity-store";
+import { createWorkspaceSessionAttentionSelector, sessionAttentionLabel, sessionAttentionSidebarStatus } from "@/react-app/domains/session/status/session-attention";
 import { buildOpenworkSessionSystemContext } from "@/react-app/domains/session/sync/env-context";
 import {
   applySessionRevert,
@@ -480,6 +481,7 @@ export function SessionRoute() {
     selectedSessionId,
     loading,
     effectiveLoading,
+    connectionPending,
     client,
     baseUrl,
     token,
@@ -490,6 +492,8 @@ export function SessionRoute() {
     setWorkspaceOrderIds,
     workspaceOrderIdsRef,
     sessionsByWorkspaceId,
+    sessionReferenceInventories,
+    isSessionReferenceCurrent,
     setSessionsByWorkspaceId,
     sessionsByWorkspaceIdRef,
     errorsByWorkspaceId,
@@ -513,9 +517,11 @@ export function SessionRoute() {
     selectedWorkspaceError,
     routeNotFoundMessage,
     endpointForWorkspace,
+    endpointForSessionWorkspace,
     refreshRouteState,
     reloadWorkspaceSessions,
     rememberPendingCreatedSession,
+    createWorkspaceSessionMetadataCallbacks,
     handleRuntimeSessionCreated,
     handleRuntimeSessionUpdated,
     handleRuntimeSessionDeleted,
@@ -826,7 +832,9 @@ export function SessionRoute() {
   const seedWorkspaceActivitySessions = useSessionActivityStore((state) => state.seedWorkspaceSessions);
   const sessionActivityByWorkspaceId = useSessionActivityStore((state) => state.statusesByWorkspaceId);
   const sessionWaitingByWorkspaceId = useSessionActivityStore((state) => state.waitingByWorkspaceId);
-  const sessionRecordsByWorkspaceId = useSessionActivityStore((state) => state.recordsByWorkspaceId);
+  const selectSessionChildIds = useMemo(createSessionChildIdsSelector, []);
+  const sessionChildIdsByWorkspaceId = useSessionActivityStore(selectSessionChildIds);
+  const selectWorkspaceAttention = useMemo(createWorkspaceSessionAttentionSelector, []);
 
   useEffect(() => {
     for (const group of workspaceSessionGroups) {
@@ -838,29 +846,21 @@ export function SessionRoute() {
     }
   }, [seedWorkspaceActivitySessions, workspaceSessionGroups]);
 
+  const attentionLocale = currentLocale();
   const sidebarSessionAttention = useMemo(() => {
     const statusById: Record<string, string> = {};
     const labelById: Record<string, string> = {};
     const sourceById: Record<string, "child" | "descendant"> = {};
     for (const group of workspaceSessionGroups) {
       const serverId = workspaceServerId(group.workspace);
-      const workspaceStatuses = {
-        ...(sessionActivityByWorkspaceId[group.workspace.id] ?? {}),
-        ...(serverId ? sessionActivityByWorkspaceId[serverId] ?? {} : {}),
-      };
-      const workspaceWaiting = {
-        ...(sessionWaitingByWorkspaceId[group.workspace.id] ?? {}),
-        ...(serverId ? sessionWaitingByWorkspaceId[serverId] ?? {} : {}),
-      };
-      const attention = selectSessionAttention(
-        group.sessions,
-        (sessionId) => workspaceStatuses[sessionId],
-        (sessionId) => workspaceWaiting[sessionId],
-        (sessionId) => [
-          ...(sessionRecordsByWorkspaceId[group.workspace.id]?.[sessionId]?.childSessionIds ?? []),
-          ...(serverId ? sessionRecordsByWorkspaceId[serverId]?.[sessionId]?.childSessionIds ?? [] : []),
-        ],
-      );
+      const attention = selectWorkspaceAttention(group.sessions, {
+        statuses: sessionActivityByWorkspaceId[group.workspace.id],
+        waiting: sessionWaitingByWorkspaceId[group.workspace.id],
+        childIds: sessionChildIdsByWorkspaceId[group.workspace.id],
+        serverStatuses: serverId ? sessionActivityByWorkspaceId[serverId] : undefined,
+        serverWaiting: serverId ? sessionWaitingByWorkspaceId[serverId] : undefined,
+        serverChildIds: serverId ? sessionChildIdsByWorkspaceId[serverId] : undefined,
+      });
       for (const session of group.sessions) {
         const entry = attention.get(session.id);
         if (!entry) continue;
@@ -872,7 +872,7 @@ export function SessionRoute() {
       }
     }
     return { statusById, labelById, sourceById };
-  }, [sessionActivityByWorkspaceId, sessionWaitingByWorkspaceId, sessionRecordsByWorkspaceId, workspaceSessionGroups]);
+  }, [attentionLocale, selectWorkspaceAttention, sessionActivityByWorkspaceId, sessionWaitingByWorkspaceId, sessionChildIdsByWorkspaceId, workspaceSessionGroups]);
   const sidebarSessionStatusById = sidebarSessionAttention.statusById;
 
   const sidebarActiveWorkspaceId = useMemo(() => {
@@ -900,6 +900,21 @@ export function SessionRoute() {
     }
     return next;
   }, [errorsByWorkspaceId, workspaceConnectionOverrides, workspaces]);
+  useSessionHistoryRuntimeOwners(workspaces.flatMap((workspace) => {
+    if (connectionPending && workspace.workspaceType !== "remote") return [];
+    const connection = workspaceConnectionStateById[workspace.id];
+    const runtime = resolveWorkbenchPaneEndpoint({
+      workspaceId: workspace.id,
+      workspaceTitle: workspaceLabel(workspace),
+      workspace,
+      endpoint: endpointForSessionWorkspace(workspace),
+      connectionError: connection?.status === "error" ? connection.message : errorsByWorkspaceId[workspace.id]?.trim(),
+    });
+    if (runtime.status === "unavailable") return [];
+    return [{ owner: sessionHistoryRuntimeOwner({ draftScope: sessionDraftScope,
+      opencodeBaseUrl: runtime.endpoint.opencodeBaseUrl, runtimeWorkspaceId: runtime.endpoint.workspaceId }),
+      authToken: runtime.endpoint.token }];
+  }));
 
   const mcpConnectedCount = useMcpConnectedCount(opencodeClient, selectedWorkspaceRoot);
   const providerListQuery = useProviderListQuery({
@@ -1439,6 +1454,8 @@ export function SessionRoute() {
         modelPicker.setOpen(true);
       },
       providerCatalog,
+      gatewayProviderIds,
+      gatewayUsageProviderScope: sessionProviderAuthSnapshot.gatewayUsageProviderScope ?? null,
       modelPickerOpen: modelPicker.compactOpen,
       // Legacy fallback only; each surface resolves availability for its own
       // effective session model through `resolveModelAvailability`.
@@ -1505,7 +1522,11 @@ export function SessionRoute() {
           skipGate: true,
           send: async () => {
             assertCurrent();
-            if (unwrap(await opencodeClient.session.get({ sessionID: targetSessionId })).time.archived) {
+            const promptClient = draft.mode === "shell" || draft.command || isOpencodeV2BaseUrl(opencodeBaseUrl)
+              ? opencodeClient
+              : createClient(opencodeBaseUrl, selectedWorkspaceRoot || undefined,
+                { token: selectedWorkspaceServerToken, mode: "openwork" }, { desktopTransport: "main" });
+            if (unwrap(await promptClient.session.get({ sessionID: targetSessionId })).time.archived) {
               throw new Error("This session is archived. Restore it before sending.");
             }
             assertCurrent();
@@ -1583,10 +1604,11 @@ export function SessionRoute() {
                   workspaceId: selectedWorkspaceId,
                   cacheKey: targetSessionId,
                   runtimeKey: environmentRuntimeKey,
+                  desktopTransport: isOpencodeV2BaseUrl(opencodeBaseUrl) ? undefined : "main",
                 });
                 assertCurrent();
                 onPrepared?.(v2PromptText(parts));
-                const result = await opencodeClient.session.promptAsync({
+                const result = await promptClient.session.promptAsync({
                   sessionID: targetSessionId,
                   messageID: draft.messageId,
                   parts,
@@ -1703,6 +1725,7 @@ export function SessionRoute() {
           ...current,
           [selectedWorkspaceId]: mergeWorkspaceRouteSession(current[selectedWorkspaceId] ?? [], forked),
         }));
+        void reloadWorkspaceSessions(selectedWorkspaceId);
         navigateToWorkspaceSession(selectedWorkspaceId, forked.id);
         void refreshRouteState();
       },
@@ -1741,11 +1764,14 @@ export function SessionRoute() {
     modelVariantValue,
     navigate,
     providerCatalog,
+    gatewayProviderIds,
+    sessionProviderAuthSnapshot.gatewayUsageProviderScope,
     openWorkModelsEntitled,
     openWorkModelsSyncing,
     refreshCloudProviderSync,
     refreshOrganizationModelAccess,
     resolveModelAvailability,
+    reloadWorkspaceSessions,
     opencodeBaseUrl,
     opencodeClient,
     providerConnectedIds,
@@ -1757,6 +1783,7 @@ export function SessionRoute() {
     selectedWorkspace,
     selectedWorkspaceId,
     selectedWorkspaceRoot,
+    selectedWorkspaceServerToken,
     sessionsByWorkspaceId,
     submitWithCloudMcpReadiness,
     token,
@@ -1771,7 +1798,7 @@ export function SessionRoute() {
       workspaceId: session.workspaceId,
       workspaceTitle,
       workspace: candidateWorkspace,
-      endpoint: endpointForWorkspace(candidateWorkspace),
+      endpoint: endpointForSessionWorkspace(candidateWorkspace),
       connectionError: connection?.status === "error" ? connection.message : workspaceError,
     });
     if (paneEndpoint.status === "unavailable") return paneEndpoint;
@@ -1864,7 +1891,11 @@ export function SessionRoute() {
           skipGate: true,
           send: async () => {
             assertCurrent();
-            if (unwrap(await workspaceOpencodeClient.session.get({ sessionID: targetSessionId })).time.archived) {
+            const promptClient = draft.mode === "shell" || draft.command || isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl)
+              ? workspaceOpencodeClient
+              : createClient(endpoint.opencodeBaseUrl, workspaceRoot || undefined,
+                { token: endpoint.token, mode: "openwork" }, { desktopTransport: "main" });
+            if (unwrap(await promptClient.session.get({ sessionID: targetSessionId })).time.archived) {
               throw new Error("This session is archived. Restore it before sending.");
             }
             assertCurrent();
@@ -1927,10 +1958,11 @@ export function SessionRoute() {
                   workspaceId: workspace.id,
                   cacheKey: targetSessionId,
                   runtimeKey: workspace.workspaceType === "remote" ? null : environmentRuntimeKey,
+                  desktopTransport: isOpencodeV2BaseUrl(endpoint.opencodeBaseUrl) ? undefined : "main",
                 });
                 assertCurrent();
                 onPrepared?.(v2PromptText(parts));
-                const result = await workspaceOpencodeClient.session.promptAsync({
+                const result = await promptClient.session.promptAsync({
                   sessionID: targetSessionId,
                   messageID: draft.messageId,
                   parts,
@@ -2005,6 +2037,7 @@ export function SessionRoute() {
           ...current,
           [workspace.id]: mergeWorkspaceRouteSession(current[workspace.id] ?? [], forked),
         }));
+        void reloadWorkspaceSessions(workspace.id);
         navigateToWorkspaceSession(workspace.id, forked.id);
         void refreshRouteState();
       },
@@ -2024,7 +2057,7 @@ export function SessionRoute() {
     };
   }, [
     client,
-    endpointForWorkspace,
+    endpointForSessionWorkspace,
     engineReloadVersion,
     environmentRuntimeKey,
     errorsByWorkspaceId,
@@ -2034,6 +2067,7 @@ export function SessionRoute() {
     modelVariantValue,
     navigateToWorkspaceSession,
     refreshRouteState,
+    reloadWorkspaceSessions,
     rememberPendingCreatedSession,
     newTaskAgent,
     selectedWorkspaceId,
@@ -2371,6 +2405,7 @@ export function SessionRoute() {
         sessionsByWorkspaceIdRef.current = next;
         return next;
       });
+      void reloadWorkspaceSessions(workspaceId);
       if (openAs === "primary") {
         navigateToWorkspaceSession(workspaceId, session.id);
       } else {
@@ -2426,7 +2461,7 @@ export function SessionRoute() {
       }
       return null;
     }
-  }, [applyLastUsedModelToSession, developerMode, endpointForWorkspace, loading, navigateToWorkspaceSession, newTaskAgent, refreshCloudProviderSync, refreshRouteState, rememberPendingCreatedSession, retryingWorkspaceIds, selectedWorkspaceId, workspaces]);
+  }, [applyLastUsedModelToSession, developerMode, endpointForWorkspace, loading, navigateToWorkspaceSession, newTaskAgent, refreshCloudProviderSync, refreshRouteState, reloadWorkspaceSessions, rememberPendingCreatedSession, retryingWorkspaceIds, selectedWorkspaceId, workspaces]);
 
   const handleCreateTaskInWorkspace = useCallback((workspaceId: string): Promise<string | null> => {
     const { focusedPane, secondary } = useWorkbenchStore.getState();
@@ -3255,6 +3290,7 @@ export function SessionRoute() {
             sessionsByWorkspaceIdRef.current = next;
             return next;
           });
+          void reloadWorkspaceSessions(targetWorkspaceId);
         }
         navigateToWorkspaceSession(targetWorkspaceId, session?.id ?? null, { replace: true });
         if (session?.id) focusPromptSoon();
@@ -3265,7 +3301,7 @@ export function SessionRoute() {
     } finally {
       setCreateWorkspaceBusy(false);
     }
-  }, [baseUrl, client, local, navigateToWorkspaceSession, newTaskAgent, refreshRouteState, rememberPendingCreatedSession, token]);
+  }, [baseUrl, client, local, navigateToWorkspaceSession, newTaskAgent, refreshRouteState, reloadWorkspaceSessions, rememberPendingCreatedSession, token]);
 
   /**
    * Chat-first onboarding: the empty-state composer creates a default chat
@@ -3418,6 +3454,9 @@ export function SessionRoute() {
       />
     ) : null}
     <SessionPage
+      sessionReferenceInventories={sessionReferenceInventories}
+      createWorkspaceSessionMetadataCallbacks={createWorkspaceSessionMetadataCallbacks}
+      isSessionReferenceCurrent={isSessionReferenceCurrent}
       sessionNumberShortcuts={sessionNumberShortcuts}
       selectedSessionId={selectedSessionId}
       selectedWorkspaceId={selectedWorkspaceId}
@@ -3589,22 +3628,21 @@ export function SessionRoute() {
         },
         onPrefetchSession: handlePrefetchSession,
         onCreateTaskInWorkspace: (workspaceId, groupId) => {
-          const { focusedPane, secondary } = useWorkbenchStore.getState();
-          const hasWorkspaceError = Boolean(errorsByWorkspaceId[workspaceId]?.trim())
-            || workspaceConnectionStateById[workspaceId]?.status === "error";
-          if (!groupId && !hasWorkspaceError && !(focusedPane === "secondary" && secondary)) {
-            // The empty composer creates its session on submit. Opening it must
-            // not wait for an engine request, especially on a cold v2 runtime.
-            setLegacySelectedWorkspaceId(workspaceId);
-            writeActiveWorkspaceId(workspaceId);
-            navigateToWorkspaceSession(workspaceId);
-            focusPromptSoon();
-            return;
-          }
-          void handleCreateTaskInWorkspace(workspaceId).then((sessionId) => {
-            if (sessionId && groupId) {
-              sessionManagementStore.getState().assignGroup(workspaceId, sessionId, groupId);
-            }
+          void startSidebarTask({
+            workspaceId,
+            groupId,
+            hasWorkspaceError: Boolean(errorsByWorkspaceId[workspaceId]?.trim())
+              || workspaceConnectionStateById[workspaceId]?.status === "error",
+            openEmptyComposer: (id) => {
+              setLegacySelectedWorkspaceId(id);
+              writeActiveWorkspaceId(id);
+              navigateToWorkspaceSession(id);
+              focusPromptSoon();
+            },
+            createTask: handleCreateTaskInWorkspaceWithOpenMode,
+            assignGroup: (id, sessionId, targetGroupId) => {
+              sessionManagementStore.getState().assignGroup(id, sessionId, targetGroupId);
+            },
           });
         },
         onCreateSplitTaskInWorkspace: (workspaceId) => {
@@ -3684,6 +3722,7 @@ export function SessionRoute() {
             ...current,
             [workspaceId]: mergeWorkspaceRouteSession(current[workspaceId] ?? [], session),
           }));
+          void reloadWorkspaceSessions(workspaceId);
           const stillOwnsNavigation = navigationOwner.workspaceId === workspaceId
             && selectedConversationRef.current.workspaceId === navigationOwner.workspaceId
             && selectedConversationRef.current.sessionId === navigationOwner.sessionId

@@ -59,11 +59,10 @@ import {
   searchCapabilityRegistry,
   type ExecuteCapabilityToolResult,
 } from "./capability-registry.js"
-import { runCodemodeScript } from "./codemode-run.js"
-import { normalizeToolBody } from "./invoke.js"
+import { executeWorkflowAuthoringTest, workflowAuthoringTestInputSchema } from "./workflow-authoring-test.js"
 import { parseNativeCapabilityName } from "./native-capabilities.js"
 import { gmailFileInputPreflightSchema } from "../capability-sources/gmail-file-input.js"
-import { recordWorkflowResult } from "../workflow-runs.js"
+import { recordWorkflowRun } from "../workflow-runs.js"
 import {
   activateArtifactViewRevision,
   getGeneratedArtifactViewRevision,
@@ -95,6 +94,7 @@ import {
   connectionActionPayloadSchema,
 } from "./connection-action.js"
 import { registerAgentPluginFlowApp } from "./plugin-flow-app.js"
+import { needsGeneratedArtifactCatalog } from "./generated-artifact-catalog-request.js"
 import {
   createConfigObjectVersion,
   createPluginBundle,
@@ -152,6 +152,7 @@ const capabilityMatchOutputSchema = z.object({
   hasBody: z.boolean(),
   bodySchema: z.unknown().optional(),
   querySchema: z.unknown().optional(),
+  outputSchema: z.unknown().optional(),
   argumentsSchema: z.unknown().optional(),
   schemaDigest: z.string().optional(),
   invocation: z.object({ argumentsField: z.literal("body") }).optional(),
@@ -190,8 +191,8 @@ export const AGENT_MCP_INSTRUCTIONS = [
   "Successful postMarketplacesPlugins, postPluginsAccess, and postMarketplacesAccess calls render a confirmation card automatically in compatible hosts; report the outcome in text as well.",
 ].join("\n")
 
-async function mcpRequestInfo(request: Request): Promise<{ method: string | null; resourceUri: string | null }> {
-  if (request.method.toUpperCase() !== "POST") return { method: null, resourceUri: null }
+async function mcpRequestInfo(request: Request): Promise<{ method: string | null; resourceUri: string | null; generatedCatalog: boolean }> {
+  if (request.method.toUpperCase() !== "POST") return { method: null, resourceUri: null, generatedCatalog: false }
   const body: unknown = await request.clone().json().catch(() => null)
   const method = typeof body === "object"
     && body !== null
@@ -203,7 +204,7 @@ async function mcpRequestInfo(request: Request): Promise<{ method: string | null
     ? body.params
     : null
   const resourceUri = params && "uri" in params && typeof params.uri === "string" ? params.uri : null
-  return { method, resourceUri }
+  return { method, resourceUri, generatedCatalog: needsGeneratedArtifactCatalog(method, params) }
 }
 
 export const AGENT_SKILL_INDEX_URI = "skill://index.json"
@@ -900,7 +901,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
         }
         return { html: revision.compiled_html, resourceDigest: revision.resource_digest, csp: revision.csp }
       }
-      const generatedViews = await listArtifactViews({ context: artifactContext })
+      const generatedViews = requestInfo.generatedCatalog ? await listArtifactViews({ context: artifactContext }) : []
       registerAgentGeneratedArtifactViews({
         server,
         views: generatedViews,
@@ -933,60 +934,23 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       {
         title: "Execute capability script",
         description: [
-          "Run confined JavaScript orchestration over this organization's capabilities.",
-          "Den REST operations are available at tools.den.<operation>; connected MCP tools are available at tools.<connection>.<tool>.",
-          "search_capabilities results include scriptPath for exact paths, and tools.$codemode.search({ query }) works in-program.",
-          "The code is a plain function body in a restricted JavaScript subset: data literals, control flow, arrow functions, template strings, try/catch, common Array/String/Object/Math/JSON methods, await, and Promise.all.",
-          "Not available: import/require, classes, generators, .then/.catch chaining, timers, fetch, process, and other host globals — call tools for all external work.",
-          "Send plain source only (no markdown fences). End with `return <json-safe value>`; use console.log for progress logs.",
-          "Run independent tool calls in parallel with Promise.all and return only the fields needed.",
-          "Parameters go in `input` (a JSON object) and are read inside the script as `input.<field>`; never hardcode values that should be parameters.",
-          "Typical Workflows are recurring digests (Slack/Gmail/Calendar summaries), inbox or ticket triage, lead alerts and CRM syncs, and status reports. Put everything a person might change (channel, recipient, lookback hours, thresholds) in `input` so the saved Workflow can be scheduled as an Automation with different parameters. tools.$codemode.search is fine while exploring but a saved Workflow must call tools directly.",
+          "Test a confined JavaScript function body; end with return of JSON-safe data. No imports, fetch, process or host access; use tools for external work and Promise.all for independent calls.",
+          "mode defaults to adhoc with optional input parameters. Explicit live mode is Den-authorized read-only, rejects all caller input, and supplies only input.runtime.{now,today,dayStart,dayEnd,timeZone} from the server; optional IANA timeZone defaults to UTC and is live-only.",
+          "Use exact scriptPath from search_capabilities, never guessed namespaces or operation names. For a discovered Den/native path call it with {path:{...},query:{...},body:{...}} only as advertised; native query parameters must be wrapped in query, e.g. {query:{q:input.query}}. External MCP paths take their argumentsSchema object directly.",
+          "Example adhoc code: return 1 + 1. Example live code: return {today:input.runtime.today}. tools.$codemode.search({query}) is for adhoc exploration; saved Workflows must call discovered paths directly.",
+          "Optional inputSchema is checked before dispatch and outputSchema after execution; inspect discovered outputSchema for result shape rather than guessing. Successful tests return value plus authoring-test metadata and receiptId; source retention availability/scope controls whether saveWorkflow can reuse that receipt. This is not a saved Workflow artifact snapshot. For live apps: test with mode:live and outputSchema, saveWorkflow with receiptId and the same schemas (omit code/currentInput), run the saved version with mode:live and timeZone, then save_artifact_view for draft preview; the user chooses Save.",
         ].join(" "),
         annotations: EXECUTE_CAPABILITY_ANNOTATIONS,
-        inputSchema: z.object({
-          code: z.string().min(1),
-          input: z.unknown().optional().describe("Optional parameters for the script, bound read-only as `input`. Pass a JSON object (not a JSON string). It becomes the Workflow's example input when the run is saved with saveWorkflow."),
-        }),
+        inputSchema: workflowAuthoringTestInputSchema,
       },
-      async ({ code, input }) => executeCapabilityWithBudget({
+      async (request) => executeCapabilityWithBudget({
         capability: EXECUTE_CAPABILITY_SCRIPT_TOOL_NAME,
-        invoke: async (): Promise<ExecuteCapabilityToolResult> => {
-          const { tools } = await buildCapabilityToolTree(capabilityContext)
-          const startedAt = new Date()
-          const result = await runCodemodeScript({
-            code,
-            scriptInput: normalizeToolBody(input),
-            tools,
-            timeoutMs: 170_000,
-          })
-          const finishedAt = new Date()
-          await recordWorkflowResult(db, {
-            organizationId,
-            orgMembershipId: memberIdentity?.orgMembershipId,
-            source: "adhoc",
-            code,
-            startedAt,
-            finishedAt,
-          }, result)
-          if (!result.ok) {
-            return {
-              isError: true,
-              content: textContent(JSON.stringify({
-                error: "script_failed",
-                kind: result.error.kind,
-                message: result.error.message,
-                ...(result.error.suggestions ? { suggestions: result.error.suggestions } : {}),
-                toolCalls: result.toolCalls,
-              })),
-            }
-          }
-          const value = typeof result.value === "string"
-            ? result.value
-            : JSON.stringify(result.value, null, 2)
-          const logs = result.logs.length > 0 ? `\n\nLogs:\n${result.logs.join("\n")}` : ""
-          return { content: textContent(`${value}${logs}`) }
-        },
+        invoke: () => executeWorkflowAuthoringTest(request, {
+          organizationId,
+          orgMembershipId: memberIdentity?.orgMembershipId,
+          buildTools: () => buildCapabilityToolTree(capabilityContext),
+          recordRun: (receipt) => recordWorkflowRun(db, receipt),
+        }),
       }),
     )
 

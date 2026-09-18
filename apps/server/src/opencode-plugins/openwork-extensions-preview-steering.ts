@@ -142,6 +142,10 @@ export const OPENWORK_CLOUD_SKILL_AUTHORING_INSTRUCTION =
 export const OPENWORK_LOCAL_SKILL_AUTHORING_INSTRUCTION =
   "Skill creation: Local. Create or update a workspace-local skill only when the user requests one. Keep one skill in .opencode/skills/<skill-name>/SKILL.md, validate it, and re-read it after writing. Do not create a Cloud copy.";
 
+export const OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION =
+  `For remote skills and plugin instructions, execute the exact known remote skill capability with openwork-cloud_execute_capability; otherwise discover it with openwork-cloud_search_capabilities, then execute the exact returned name and follow its instructions. Discover Workflows and Automations on demand; read live before reporting their current state. Follow the openwork-cloud server instructions when its tools are exposed. No Cloud readiness probe has been performed for this prompt; do not infer that Cloud is ready, disconnected, or unavailable.
+When the user asks to create a Cloud skill, discover the create-skill remote skill and follow it to create a private Cloud plugin. For skill creation without an explicit local request, discover create-skill rather than defaulting to a local copy because Cloud is unprobed. Discover share-plugin for requested sharing, or add-to-marketplace and add-user-to-marketplace when requested. Do not create both copies. ${OPENWORK_LOCAL_SKILL_AUTHORING_INSTRUCTION}`;
+
 // Cloud availability plus shared Google guidance. The base agent prompt names the two
 // Connect tools and the catalog rule, and the detailed Connect contract
 // (search-first discovery, MCP Apps, connection_status handling, schema

@@ -11,12 +11,12 @@ import {
   SlidersHorizontal,
   Sparkles,
   Users,
-  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import {
   type DenOrgAccessFlags,
   type DenOrgCapabilities,
+  getAiGatewayRoute,
   getAnalyticsRoute,
   getApiKeysRoute,
   getAutomationsRoute,
@@ -57,7 +57,7 @@ export type DashboardNavItem = {
   testId?: string;
   /** Extra pathname prefixes that select this entry. */
   matchHrefs?: string[];
-  /** Grouped entries link to the first child and expand on child pages. */
+  /** Grouped entries link to their own href and expand on parent or child pages. */
   children?: DashboardNavChild[];
 };
 
@@ -119,15 +119,13 @@ export function buildDashboardNavSections({
     && gatewayAccess !== "checking";
   const modelsGroup: DashboardNavItem | null = access.isAdmin && orgSlug
     ? {
-        href: showOpenWorkModels
-          ? getInferenceRoute(orgSlug)
-          : getCustomLlmProvidersRoute(orgSlug),
-        label: "Models",
+        href: getAiGatewayRoute(orgSlug),
+        label: "AI Gateway",
         icon: Sparkles,
-        badge: "Providers",
+        badge: "Models",
         children: [
           ...((gatewayAccess === "enabled" || gatewayAccess === "unavailable") && capabilities.gatewayDashboard === true
-            ? [{ href: getGatewayProvidersRoute(orgSlug), label: "Gateway", badge: "New" }]
+            ? [{ href: getGatewayProvidersRoute(orgSlug), label: "Old Gateway", badge: "New" }]
             : []),
           ...(showOpenWorkModels
             ? [{ href: getInferenceRoute(orgSlug), label: "OpenWork Models" }]
@@ -145,9 +143,6 @@ export function buildDashboardNavSections({
           icon: Plug,
           badge: "MCPs",
         },
-        ...(capabilities.mcpConnections && access.isAdmin
-          ? [{ href: getToolTesterRoute(orgSlug), label: "Tool Tester", icon: Wrench }]
-          : []),
         ...(capabilities.orgManagedDashboards
           ? [{ href: getManagedDashboardsRoute(orgSlug), label: "Dashboards", icon: LayoutDashboard }]
           : []),
@@ -179,6 +174,9 @@ export function buildDashboardNavSections({
               { href: getSsoRoute(orgSlug), label: "SSO" },
               { href: getScimRoute(orgSlug), label: "SCIM" },
             ]
+          : []),
+        ...(capabilities.mcpConnections && access.isAdmin
+          ? [{ href: getToolTesterRoute(orgSlug), label: "Tool Tester" }]
           : []),
       ]
     : [];

@@ -1,8 +1,8 @@
 /**
  * Base prompt of the `openwork` agent, injected through the runtime OpenCode
  * config. It replaces the engine's provider prompt, so it carries only the
- * stable identity and operating rules; situational facts (Connect readiness,
- * catalogs, browser and app-control mechanics) are appended per request by the
+ * stable identity and operating rules; static discovery guidance,
+ * browser and app-control mechanics are appended per request by the
  * server plugins, and the user's time zone and locale arrive from the app.
  *
  * Kept dependency-free so tests and specs can import it without the runtime
@@ -44,4 +44,4 @@ OpenWork can preview, edit, and download standard artifacts when you create or u
 
 ## Connected work
 
-Org-connected services, remote skills, Workflows, and Automations reach you through OpenWork Connect: discover with openwork-cloud_search_capabilities, then run with openwork-cloud_execute_capability using an exact returned name. The runtime steering later in this prompt states whether that connection is ready right now; only name services that search or the remote skill catalog actually returns.`;
+Org-connected services, remote skills, Workflows, and Automations reach you through OpenWork Connect: discover with openwork-cloud_search_capabilities, then run with openwork-cloud_execute_capability using an exact returned name. Discover on demand; only name services that search or the remote skill catalog actually returns.`;

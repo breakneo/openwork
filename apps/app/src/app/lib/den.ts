@@ -19,6 +19,7 @@ import type {
   UpdateAutomation,
 } from "@openwork/types/automations";
 import { generatedArtifactViewSchema, savedAppDetailSchema, savedAppSummarySchema, type SaveApp, type WorkflowDetail } from "@openwork/types/workflows";
+import { gatewayUsageStatusSchema, gatewayUsageResetRequestSchema } from "@openwork/types/den/gateway-usage-limits";
 
 // Re-export the shared schema under the local alias so React consumers
 // (e.g. the cloud domain's desktop-config provider) can import it alongside
@@ -42,6 +43,7 @@ import {
   type DesktopBootstrapConfig as ShellDesktopBootstrapConfig,
 } from "./desktop";
 import { enterpriseActivationRequired } from "./enterprise-activation";
+import { observeDenRequest } from "./den-request-diagnostics";
 import { getOpenworkGatewayOrigin } from "./gateway-runtime";
 import { clearDesktopSignInIntent, clearOrgSelectionPending } from "./den-sign-in-intent";
 import { clearDashboardTileCacheStorage } from "./dashboard-cache-storage";
@@ -296,9 +298,11 @@ export type DenCloudStartupFailure = {
   occurredAt: string;
 };
 
+export type DenCloudInstanceUpdateDeferral = "busy" | "activity_unknown";
+
 export type DenCloudInstanceUpdateResult =
   | { ok: true; status: "update_requested" }
-  | { ok: false; error: "already_current" | "flush_failed" };
+  | { ok: false; error: "already_current" | "flush_failed" | DenCloudInstanceUpdateDeferral };
 
 export type DenMcpToken = {
   token: string;
@@ -2020,7 +2024,13 @@ function parseCloudInstanceUpdateResult(payload: unknown): DenCloudInstanceUpdat
     return { ok: true, status: "update_requested" };
   }
 
-  if (payload.ok === false && (payload.error === "already_current" || payload.error === "flush_failed")) {
+  if (
+    payload.ok === false
+    && (payload.error === "already_current"
+      || payload.error === "flush_failed"
+      || payload.error === "busy"
+      || payload.error === "activity_unknown")
+  ) {
     return { ok: false, error: payload.error };
   }
 
@@ -2843,7 +2853,7 @@ type DenRequestOptions = {
   automationModelAttentionCapable?: boolean;
 };
 
-async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit, timeoutMs: number) {
+async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit, timeoutMs: number, onTimeout?: () => void) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return fetchImpl(url, init);
   }
@@ -2855,6 +2865,7 @@ async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: Request
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
+      onTimeout?.();
       try {
         controller?.abort();
       } catch {
@@ -2895,26 +2906,29 @@ async function requestJsonRaw<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetchWithTimeout(
-    resolveFetch(url),
-    url,
-    {
-      method: options.method ?? "GET",
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: "include",
-    },
-    options.timeoutMs ?? DEFAULT_DEN_TIMEOUT_MS,
-  );
+  return observeDenRequest(async (onTimeout) => {
+    const response = await fetchWithTimeout(
+      resolveFetch(url),
+      url,
+      {
+        method: options.method ?? "GET",
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        credentials: "include",
+      },
+      options.timeoutMs ?? DEFAULT_DEN_TIMEOUT_MS,
+      onTimeout,
+    );
 
-  const text = await response.text();
-  let json: T | null = null;
-  try {
-    json = text ? (JSON.parse(text) as T) : null;
-  } catch {
-    json = null;
-  }
-  return { ok: response.ok, status: response.status, json };
+    const text = await response.text();
+    let json: T | null = null;
+    try {
+      json = text ? (JSON.parse(text) as T) : null;
+    } catch {
+      json = null;
+    }
+    return { ok: response.ok, status: response.status, json };
+  });
 }
 
 async function requestJson<T>(
@@ -3076,6 +3090,24 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
       };
     },
 
+    async getGatewayUsageStatus(orgId: string) {
+      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to view usage limits.");
+      const status = gatewayUsageStatusSchema.parse(await requestJson<unknown>(baseUrls, "/v1/gateway/usage-limits/me", {
+        method: "GET", token, organizationId: orgId,
+      }));
+      if (status.organizationId !== orgId) throw new Error("Usage response belongs to a different organization.");
+      return status;
+    },
+    async requestGatewayUsageReset(orgId: string, input: { bucketId: string; reason: string }) {
+      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to request an increase.");
+      const reason = input.reason.trim();
+      if (!reason || reason.length > 2000 || !input.bucketId || input.bucketId.length > 64) {
+        throw new Error("Choose a usage bucket and enter a reason (1–2000 characters).");
+      }
+      return gatewayUsageResetRequestSchema.parse(await requestJson<unknown>(baseUrls, "/v1/gateway/usage-limit-reset-requests", {
+        method: "POST", token, organizationId: orgId, body: { bucketId: input.bucketId, reason },
+      }));
+    },
     async listSavedApps(orgId: string) {
       const payload = await requestJson<unknown>(baseUrls, "/v1/apps", {
         method: "GET", token, organizationId: orgId,
@@ -3249,7 +3281,9 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
         method: "POST",
         token,
         organizationId: orgId,
-        body: {},
+        // Tell Den this shell understands a deferred update; shells that do not
+        // opt in keep receiving the older already_current / flush_failed answers.
+        body: { acceptsDeferral: true },
       });
       const result = parseCloudInstanceUpdateResult(payload);
       if (!result) {

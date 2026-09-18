@@ -1,6 +1,7 @@
 import { expect } from "vitest";
 import { browserScript, resolveEvalEngine, spec } from "@openwork/testkit";
 import { sessionlessFirstSendWorld } from "../worlds/first-run.ts";
+import { localSendDenOutageWorld } from "../worlds/local-send-den-outage.ts";
 
 const test = spec.world(sessionlessFirstSendWorld, {
   timeout: 420_000,
@@ -11,6 +12,82 @@ const test = spec.world(sessionlessFirstSendWorld, {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+const outageTest = spec.world(localSendDenOutageWorld, {
+  timeout: 420_000,
+  resources: { surfaces: ["appWeb"], services: ["mock"] },
+  needs: { placement: "local", env: ["OPENWORK_EVAL_ENGINE"] },
+});
+
+outageTest("DEN-LOCAL-SEND configured v1 identity sends to inference while Den is unavailable", async ({ world, user, probe, evidence }) => {
+  await world.openNewTask();
+  expect(world.hostedServerIdentityInstalled).toBe(true);
+  expect(world.rendererCloudSignedIn).toBe(false);
+  expect(await world.route()).toBe(world.sessionlessRoute);
+  await user.see("composer", { editable: true });
+  const sessionsBefore = await world.readNative(world.sessionsPath);
+  expect(sessionsBefore.status).toBe(200);
+  expect(await world.requests()).toHaveLength(0);
+  expect(await world.denUnavailable()).toBe(503);
+  const denBefore = world.denRequests(); // Baseline includes the sole explicit outage probe.
+  evidence.recordJsonArtifact("Pre-outage engine readiness", { ...world.readiness, denBefore });
+  await user.type("composer", world.prompt);
+  await probe.eventually(() => probe.composer(), {
+    within: 30_000, label: "configured local provider enables Run task during Den outage",
+    until: (state) => state.runTaskEnabled && state.draftText.trim() === world.prompt,
+  });
+  await user.press("Enter");
+  const prefix = `${world.sessionlessRoute}/`;
+  const route = await probe.eventually(() => world.route(), {
+    within: 30_000, label: "persisted v1 session route during Den outage",
+    until: (value) => value.startsWith(prefix) && /^ses_[^/?#]+$/.test(value.slice(prefix.length)),
+  });
+  const sessionId = route.slice(prefix.length);
+  try {
+    const text = await probe.eventually(() => probe.text(), {
+      within: 30_000, label: "local inference reply during Den outage",
+      until: (value) => value.includes(world.reply) || value.includes("Task interrupted"),
+    });
+    expect(text, "engine must not interrupt the configured-provider task").not.toContain("Task interrupted");
+    await user.see({ text: world.reply }, { timeoutMs: 5_000 });
+  } finally {
+    const reads = await Promise.allSettled([
+      world.readNative(world.messagesPath(sessionId)),
+      world.readNative("/cloud-provider-sync/status"),
+      world.requests().then((requests) => ({ finalMarkerMatchedRequests: requests.length })),
+      probe.text(),
+    ]);
+    evidence.recordJsonArtifact("Outage send diagnostics", {
+      sessionId, denBefore, denAfter: world.denRequests(),
+      reads: reads.map((result, index) => ({
+        boundary: ["nativeMessages", "reloadStatus", "mockInference", "visibleText"][index],
+        ...(result.status === "fulfilled" ? { value: result.value } : { error: String(result.reason) }),
+      })),
+    });
+  }
+  const native = await probe.eventually(() => world.readNative(world.messagesPath(sessionId)), {
+    within: 20_000, label: "native v1 persists the inference reply",
+    until: (response) => response.status === 200 && nativeMessages(response.body)
+      .some((message) => message.role === "assistant" && message.text.includes(world.reply)),
+  });
+  const messages = nativeMessages(native.body);
+  expect(messages.filter((message) => message.role === "user" && message.text.includes(world.prompt))).toHaveLength(1);
+  expect(messages.some((message) => message.role === "assistant" && message.text.includes(world.reply))).toBe(true);
+  const sessionsAfter = await world.readNative(world.sessionsPath);
+  expect(sessionsAfter.status).toBe(200);
+  expect(nativeSessionIds(sessionsAfter.body)).toEqual([...nativeSessionIds(sessionsBefore.body), sessionId].sort());
+  expect(await world.route()).toBe(route);
+  expect(await world.requests()).toHaveLength(1); // Base witness filters final requests by this prompt's unique marker.
+  expect((await probe.composer()).userMessageCount).toBe(1);
+  expect(world.denRequests()).toEqual(denBefore);
+  evidence.recordJsonArtifact("Den outage request counts", {
+    hostedServerIdentityInstalled: world.hostedServerIdentityInstalled,
+    rendererCloudSignedIn: world.rendererCloudSignedIn,
+    before: denBefore, after: world.denRequests(), sessionId,
+  });
+  evidence.recordAssertionEvidence("Configured local v1 inference does not preflight Den",
+    "Host-side Den identity installed against healthy policy; renderer is not Cloud-signed-in. After explicit Den 503 probe, real Enter submission persisted one prompt and its visible reply through exactly one marker-matched mock final request, with no further Den requests.", true);
+});
 
 function textOf(value: unknown): string {
   return isRecord(value) && typeof value.text === "string" ? value.text : "";

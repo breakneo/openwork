@@ -1,4 +1,5 @@
 import {
+  DESKTOP_POLICY_ENFORCEMENT_ENABLED,
   desktopPolicyUserNotices,
   type DesktopPolicyKey,
 } from "@openwork/types/den/desktop-policies";
@@ -17,7 +18,7 @@ export function checkDesktopAppRestriction(input: {
   config: DenDesktopConfig | null | undefined;
   restriction: DesktopAppRestrictionKey;
 }) {
-  return input.config?.[input.restriction] === false;
+  return DESKTOP_POLICY_ENFORCEMENT_ENABLED && input.config?.[input.restriction] === false;
 }
 
 /** Catalog copy explaining why the organization blocked a capability. */

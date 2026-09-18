@@ -1,4 +1,5 @@
 import { ComputerUseControls } from "../domains/session/surface/computer-use-controls";
+import { desktopSigninRequired } from "@openwork/types/den/desktop-policies";
 /** @jsxImportSource react */
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -73,9 +74,9 @@ const subscribeToDenBootstrap = (onStoreChange: () => void) => {
 /**
  * Forced-signin gate ported from the Solid shell.
  *
- * When the desktop bootstrap config has `requireSignin: true` (persisted by
- * the Tauri shell via `desktop-bootstrap.json`), the UI is held at `/signin`
- * until the user authenticates with Den. When sign-in is NOT required, we
+ * Desktop policy enforcement is suspended, so persisted bootstrap sign-in
+ * requirements cannot hold local work at `/signin`. Web sign-in still applies.
+ * When sign-in is NOT required, we
  * never let users land on `/signin` — redirect them to `/session` instead.
  *
  * While we're still checking the Den session AND sign-in is required, we
@@ -92,11 +93,11 @@ function DenSigninGate({ children }: DenSigninGateProps) {
     readDenBootstrapSnapshot,
     readDenBootstrapSnapshot,
   );
-  const requireSignin = bootstrap.requireSignin;
+  const requireSignin = desktopSigninRequired(bootstrap.requireSignin, isDesktopRuntime());
   const path = location.pathname.toLowerCase();
   const onSignin = path === "/signin" || path.startsWith("/signin/");
   const onOnboarding = path === "/onboarding" || path.startsWith("/onboarding/");
-  const hasPreparedBootstrap = Boolean(bootstrap.prepared);
+  const hasPreparedBootstrap = Boolean(bootstrap.prepared) && (!isDesktopRuntime() || requireSignin);
   const redirectingPreparedWorkspace =
     denAuth.status !== "checking" &&
     !requireSignin &&
@@ -379,10 +380,8 @@ let appOpenedCaptured = false;
 
 /**
  * Analytics and the Cloud inventory prefetch mount above the activation gate.
- * An activation-required install holds them back until it is activated and
- * its desktop config has resolved once — the same readiness the updater waits
- * for — so nothing leaves the machine before the organization server is known
- * and an organization policy could be honoured. Other installs are unaffected.
+ * An activation-required install holds them back until it is activated.
+ * Desktop policy readiness is optional while enforcement is suspended.
  */
 function useOutboundEgressAllowed() {
   const bootstrap = useSyncExternalStore(

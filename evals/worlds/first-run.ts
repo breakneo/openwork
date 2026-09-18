@@ -490,6 +490,15 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
     return responses.every((response) => response.ok);
   }, [base.workspace.workspaceId, tableMarkdown]), { awaitPromise: true });
   if (wrote !== true) throw new Error("Could not seed artifact code files.");
+  await waitForBehavior(
+    base.app,
+    () => window.__openworkControl.listActions().some((action) => action.id === "eval.markdown_primitive.seed_chat" && !action.disabled),
+    { timeoutMs: 30_000, label: "chat markdown seed action enabled" },
+  );
+  const fileLinkPath = `${base.workspacePath}/docs/Unlisted Report.pdf`;
+  const fileLinkMarkdown = `[Unlisted report](file://${encodeURI(fileLinkPath)}) and [Relative report](docs/Unlisted-Relative.pdf)`;
+  const chat = await seed.evalIn(base.app, browserScript((text) => window.__openworkControl.execute("eval.markdown_primitive.seed_chat", { text }), [fileLinkMarkdown]), { awaitPromise: true });
+  if (!isRecord(chat) || chat.ok !== true) throw new Error("Could not seed chat file links.");
   // TODO(primitive): open an initial built-in browser artifact tab.
   await seed.evalIn(base.app, () => (window.__openworkControl.execute("browser.open_url", { url: "about:blank" })), { awaitPromise: true });
   await waitForBehavior(
@@ -503,6 +512,7 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
   return {
     ...base,
     tableMarkdown,
+    fileLinkPath,
     async visibleArtifactCode() {
       return seed.evalIn(base.app, () => {
         const root = document.querySelector<HTMLElement>("[data-artifact-code-view]");
