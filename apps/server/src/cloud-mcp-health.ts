@@ -2471,7 +2471,8 @@ export async function refreshOpenworkCloudMcpCatalog(input: ReadOpenworkCloudMcp
   if (!cloudMcp || cloudMcp.enabled === false) return health;
   const servers = await reconcileConnectMcpCatalog({ ...input, directory: input.directory, cloudMcp });
   if (servers.directNames.length > 0) {
-    await input.registerRuntimeMcp(input.config, input.workspace, servers.directNames, { throwOnFailure: false })
+    // Direct registration results and latency do not determine central Cloud health.
+    void input.registerRuntimeMcp(input.config, input.workspace, servers.directNames, { throwOnFailure: false })
       .catch(() => undefined);
   }
   return { ...health, connectCatalogDiagnostic: servers.diagnostic };
@@ -2579,9 +2580,9 @@ export async function reconcileOpenworkCloudMcp(input: {
     return healthWithFailure(await readHealth(), registrationError);
   }
   // Directly exposed connections ride the same credential but are separate
-  // servers: one unreachable provider must not mark central Cloud MCP unhealthy.
+  // servers: their registration results and latency must not gate central Cloud health.
   if (connectServers.directNames.length > 0) {
-    await input.registerRuntimeMcp(input.config, input.workspace, connectServers.directNames, { throwOnFailure: false })
+    void input.registerRuntimeMcp(input.config, input.workspace, connectServers.directNames, { throwOnFailure: false })
       .catch(() => undefined);
   }
 
