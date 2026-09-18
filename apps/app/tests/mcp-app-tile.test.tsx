@@ -208,12 +208,13 @@ test.each([false, true])("recovers a Cloud tile on matching credential refresh (
   } finally { await host.dispose(); }
 });
 
-test.each(["access-denied", "local-provider", "provider-result", "unmounted", "workspace-changed", "requires-approval", "approved-launch"])("credential refresh leaves %s tiles alone", async scenario => {
+test.each(["access-denied", "local-provider", "provider-result", "unmounted", "workspace-changed", "requires-approval", "approved-launch", "manual-launch"])("credential refresh leaves %s tiles alone", async scenario => {
   const fixture = continuityFixture({
     entry: {
       connectionId: scenario === "local-provider" ? undefined : "emc_fixture",
       requiresApproval: scenario === "requires-approval",
       launchApproved: scenario === "approved-launch",
+      autoLaunch: scenario !== "manual-launch",
     },
     resolve: async index => {
       if (scenario === "provider-result") return continuityResource(index);
@@ -224,7 +225,7 @@ test.each(["access-denied", "local-provider", "provider-result", "unmounted", "w
   });
   const host = await mountContinuityTile(fixture);
   try {
-    if (scenario === "requires-approval" || scenario === "approved-launch") {
+    if (scenario === "requires-approval" || scenario === "approved-launch" || scenario === "manual-launch") {
       const run = host.container.querySelector<HTMLButtonElement>('button[aria-label="Run Fixture"]');
       if (!run) throw new Error("Missing manual Run button");
       await act(async () => run.click());
@@ -236,6 +237,28 @@ test.each(["access-denied", "local-provider", "provider-result", "unmounted", "w
     await act(async () => { markCloudCredentialRefreshed(credentialScope); });
     expect(fixture.resolutions).toHaveLength(1);
     expect(fixture.calls).toHaveLength(calls);
+  } finally { await host.dispose(); }
+});
+
+test("credential refresh does not replay a tile after the live server requires approval", async () => {
+  const fixture = continuityFixture({
+    entry: { connectionId: "emc_fixture" },
+    call: async (_request, index) => {
+      if (index <= 2) throw new OpenworkServerError(403, "tool_requires_approval", "Run this app manually.");
+      throw new OpenworkServerError(401, "mcp_auth_required", "Sign in to this connection.");
+    },
+  });
+  const host = await mountContinuityTile(fixture);
+  try {
+    expect(fixture.calls).toHaveLength(1);
+    const run = host.container.querySelector<HTMLButtonElement>('button[aria-label="Run Fixture"]');
+    if (!run) throw new Error("Missing manual Run button");
+    await act(async () => run.click());
+    expect(fixture.calls).toHaveLength(3);
+    expect(fixture.calls[2].request.approved).toBe(true);
+    await act(async () => { markCloudCredentialRefreshed(credentialScope); });
+    expect(fixture.calls).toHaveLength(3);
+    expect(fixture.resolutions).toHaveLength(2);
   } finally { await host.dispose(); }
 });
 
