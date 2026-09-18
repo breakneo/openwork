@@ -192,7 +192,7 @@ describe("Automation normalized model authority", () => {
     }
   })
 
-  test("provider filters preserve legacy admission but block capable Desktop and Cloud clients", async () => {
+  test("provider filters preserve published Desktop admission, including model-attention v1, but block Cloud", async () => {
     for (const selection of [
       { providerId: customProvider.id, modelId: customModel.modelId },
       { providerId: "openwork", modelId: "z-ai/glm-5.2" },
@@ -204,8 +204,11 @@ describe("Automation normalized model authority", () => {
         }))
         expect(failure).toMatchObject({ ok: false, code: "model_access_lost", reason: "provider_model_disabled" })
         if (failure.ok) throw new Error("Expected provider filter failure")
-        expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable: false })).toBe(false)
-        expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable: true })).toBe(true)
+        for (const modelAttentionCapable of [false, true]) {
+          expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable })).toBe(false)
+          expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable, executionTarget: "desktop" })).toBe(false)
+          expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable, executionTarget: "cloud" })).toBe(true)
+        }
       }
     }
   })
@@ -231,7 +234,9 @@ describe("Automation normalized model authority", () => {
         if (failure.ok) throw new Error("Expected authority failure")
         expect(failure.reason).toBeUndefined()
         for (const modelAttentionCapable of [false, true]) {
-          expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable })).toBe(true)
+          for (const executionTarget of ["desktop", "cloud"] as const) {
+            expect(shouldApplyAutomationModelAccessFailure({ model: selection, failure, modelAttentionCapable, executionTarget })).toBe(true)
+          }
         }
       }
     }

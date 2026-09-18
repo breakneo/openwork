@@ -91,6 +91,65 @@ for (const failure of [
   })
 }
 
+for (const stage of ["before-runtime", "before-thread", "before-prompt", "recovery"]) {
+  test(`Cloud authority revocation at ${stage} prevents prompt dispatch`, async () => {
+    const workerId = createDenTypeId("worker")
+    const access: CloudWorkerAccess = {
+      workerId, url: "https://worker.example.test", expiresAt: new Date("2026-12-01T00:00:00.000Z"),
+      clientToken: "client-token", hostToken: "host-token",
+    }
+    const order: string[] = []
+    const requests: string[] = []
+    let authorityChecks = 0
+    const revokeAt = stage === "before-runtime" ? 1 : stage === "before-prompt" ? 3 : 2
+    const result = await executeCloudAgent({
+      organizationId: createDenTypeId("organization"), ownerMemberId: createDenTypeId("member"),
+      automationRunId: "run-fixture", automationName: "Authority", workspaceId: "workspace-pinned",
+      action: { kind: "agent", instructions: "Prepare the result", model: { providerId: "lpr_fixture", modelId: "model" } },
+      maximumRuntimeMs: 10_000, signal: new AbortController().signal,
+      previousReceipt: stage === "recovery" ? {
+        workerId, workspaceId: "workspace-pinned", nativeThreadId: "session-fixture", messageId: "msg_fixture",
+      } : null,
+      onAdmitted: async () => { order.push("persist") },
+    }, {
+      authority: async () => {
+        order.push("authority")
+        return ++authorityChecks === revokeAt
+          ? { ok: false, status: "failed", code: "model_access_lost", message: "Revoked", retryable: false, needsAttention: true }
+          : null
+      },
+      runtime: async () => {
+        order.push("runtime")
+        return { ok: true, workerId, access, baseUrl: access.url, workspaceId: "workspace-active" }
+      },
+      connect: async () => { order.push("connect"); return { ok: true } },
+      fetchImpl: async (url, init) => {
+        const path = new URL(String(url)).pathname
+        requests.push(`${init?.method ?? "GET"} ${path}`)
+        expect(path.startsWith("/workspace/workspace-pinned/opencode/")).toBe(true)
+        if (path.endsWith("/config/providers")) return Response.json({ providers: [{ id: "lpr_fixture", models: { model: {} } }] })
+        if (path.endsWith("/session") && init?.method === "POST") {
+          order.push("create")
+          return Response.json({ id: "session-fixture" })
+        }
+        if (path.endsWith("/abort")) { order.push("abort"); return Response.json(true) }
+        if (path.endsWith("/message") || path.endsWith("/todo")) return Response.json([])
+        if (path.endsWith("/status")) { order.push("observe-idle"); return Response.json({}) }
+        if (path.endsWith("/session/session-fixture")) return Response.json({ id: "session-fixture" })
+        throw new Error(`Unexpected request ${path}`)
+      },
+    })
+    expect(result).toMatchObject({ ok: false, code: "model_access_lost", message: "Revoked", retryable: false })
+    expect(requests.some((request) => request.endsWith("/prompt_async"))).toBe(false)
+    const expected = stage === "before-runtime" ? ["authority"]
+      : stage === "before-thread" ? ["authority", "runtime", "connect", "authority"]
+      : stage === "before-prompt" ? ["authority", "runtime", "connect", "authority", "create", "persist", "authority"]
+      : ["authority", "runtime", "connect", "authority", "abort", "observe-idle"]
+    expect(order).toEqual(expected)
+    if (stage === "before-runtime" || stage === "before-thread") expect(requests).toEqual([])
+  })
+}
+
 test("an in-progress Cloud Automation wake preserves the single-attempt terminal baseline", () => {
   const result = cloudAgentRuntimeUnavailableResult({
     reason: "waking",
