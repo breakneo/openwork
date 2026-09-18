@@ -189,10 +189,11 @@ async function packagedLaunchWorld(name: string, bootstrap: ElectronSurfaceOptio
         const root = document.getElementById("root");
         return {
           rootText: root?.innerText ?? "",
-          controls: Array.from(root?.querySelectorAll("input, button") ?? [], (control) => ({
+          controls: Array.from(root?.querySelectorAll("input, button, [contenteditable]") ?? [], (control) => ({
             tag: control.tagName.toLowerCase(),
             text: control.textContent?.trim() ?? "",
             testId: control.getAttribute("data-testid"),
+            editable: control instanceof HTMLElement && control.isContentEditable,
             visible: control.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
               && control.getBoundingClientRect().width > 0 && control.getBoundingClientRect().height > 0,
             enabled: !control.matches(":disabled") && control.getAttribute("aria-disabled") !== "true"

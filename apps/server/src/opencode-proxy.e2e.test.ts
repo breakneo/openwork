@@ -396,9 +396,8 @@ describe("workspace OpenCode proxy", () => {
       body: JSON.stringify({ baseUrl: `http://127.0.0.1:${den.port}`, token: "den-fixture-token", orgId: "org_test" }),
       signal: AbortSignal.timeout(1_000),
     });
-    expect(identity.status).toBe(options?.rejectIdentity ? 403 : 204);
-    if (options?.rejectIdentity) await expect(identity.json()).resolves.toMatchObject({ code: "policy_unavailable" });
-    expect(denRequests).toEqual([{ method: "GET", pathname: "/v1/me/desktop-config" }]);
+    expect(identity.status).toBe(204);
+    expect(denRequests).toEqual([]);
     outage = true;
     const denCount = denRequests.length;
     const prompt = (providerID: string, token = openwork.token) => fetch(`${base}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
@@ -446,16 +445,12 @@ describe("workspace OpenCode proxy", () => {
     expect(fixture.denRequests).toHaveLength(fixture.denCount);
   });
 
-  test.serial("unverified identity fails closed before forwarding a prompt", async () => {
-    // Immediate 401 avoids retry delays while exercising failed initial verification.
+  test.serial("optional desktop policy does not verify Den identity or block a local prompt", async () => {
     const fixture = await signedInPromptFixture({ rejectIdentity: true });
-    const engineCount = fixture.engine.requests.length;
     const response = await fixture.prompt("local-byok");
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ code: "policy_unavailable" });
-    expect(fixture.prompts()).toHaveLength(0);
-    expect(fixture.engine.requests).toHaveLength(engineCount);
-    expect(fixture.denRequests).toHaveLength(fixture.denCount);
+    expect(response.status).toBe(204);
+    expect(fixture.prompts()).toHaveLength(1);
+    expect(fixture.denRequests).toEqual([]);
   });
 
   test.serial("native history pagination exposes cursors to browsers, preserves upstream headers, and verifies every page owner", async () => {
@@ -780,11 +775,11 @@ describe("workspace OpenCode proxy", () => {
     expect(resumed()).toHaveLength(1);
   });
 
-  test("accepts empty engine request bodies and rejects malformed JSON before forwarding", async () => {
+  test.each(["/workspace/ws_1/opencode", "/w/ws_1/opencode", "/opencode"])("%s accepts empty engine request bodies and rejects malformed JSON before forwarding", async (mount) => {
     const workspaceRoot = await createWorkspaceRoot();
     const mock = startMockOpencode();
     const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${mock.server.port}`, readOnly: false });
-    const url = `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode/session`;
+    const url = `http://127.0.0.1:${openwork.server.port}${mount}/session`;
     for (const body of [undefined, ""]) {
       const response = await fetch(url, { method: "POST", headers: auth(openwork.token), body });
       expect(response.status).toBe(200);
@@ -794,7 +789,18 @@ describe("workspace OpenCode proxy", () => {
     expect(sessionPosts()).toHaveLength(2);
     const malformed = await fetch(url, { method: "POST", headers: auth(openwork.token), body: "{" });
     expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toMatchObject({ code: "invalid_request" });
     expect(sessionPosts()).toHaveLength(2);
+  });
+
+  test.serial("native malformed JSON is rejected before execution preparation or forwarding", async () => {
+    const fixture = await startV2Proxy();
+    const response = await fixture.request("/api/session", { method: "POST", body: "{" });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: "invalid_request" });
+    expect(fixture.provider.calls).toEqual([]);
+    expect(fixture.mcp.calls).toEqual([]);
+    expect(fixture.engine.requests).toEqual([]);
   });
 
   test("accepts guest-side rem_ workspace aliases", async () => {
