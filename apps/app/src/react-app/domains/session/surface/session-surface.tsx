@@ -87,9 +87,12 @@ import {
   messageHasVisibleAssistantOutput,
   resolveAdmissionOutcome,
 } from "./session-admission-outcome";
-import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError } from "@/react-app/domains/session/sync/session-error";
+import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError, sessionErrorPresentationFromUIMessage, type OpencodeSessionErrorPresentation } from "@/react-app/domains/session/sync/session-error";
 import { createSessionErrorUIMessage } from "@/react-app/domains/session/sync/usechat-adapter";
 import { useLocal } from "@/react-app/kernel/local-provider";
+import { useGatewayUsage, useGatewayUsageErrorHandled } from "../../cloud/use-gateway-usage";
+import { GatewayUsageApprovalNotice, GatewayUsageNotice } from "../../cloud/gateway-usage-panel";
+import { gatewayUsageNoticeState, gatewayUsageRefreshKey, isGatewayUsageModel } from "../../cloud/gateway-usage-state";
 import { resolveAttachmentFileMetadata } from "@/react-app/domains/session/sync/attachment-file-part";
 import { deriveSessionRenderModel } from "@/react-app/domains/session/sync/transition-controller";
 import { setQueuedSendContext } from "@/react-app/domains/session/sync/queued-send-context";
@@ -222,6 +225,7 @@ as $5 and $10 stay plain text.`,
 
 type SessionError = {
   message: string;
+  presentation?: OpencodeSessionErrorPresentation;
   kind?: "model-not-found" | "generic";
   /** For model-not-found: the model that failed. */
   failedModel?: { providerID: string; modelID: string };
@@ -603,6 +607,8 @@ export type SessionSurfaceProps = {
   selectedModel: ModelRef;
   /** providerID → modelID → provider model, for per-session variant options. */
   providerCatalog?: ProviderCatalog;
+  gatewayProviderIds?: ReadonlySet<string>;
+  gatewayUsageProviderScope?: number | null;
   /** Den/import includes OpenWork Models for this org member (not just local sync). */
   openWorkModelsEntitled?: boolean;
   /** The server is waiting to reload this workspace with OpenWork Models. */
@@ -873,7 +879,9 @@ function parseSessionError(thrown: unknown): SessionError {
   if (/ProviderModelNotFoundError/i.test(raw) || /model.*not found/i.test(raw)) {
     return { message: raw, kind: "model-not-found" };
   }
-  return { message: raw || "Failed to send prompt." };
+  let structured: unknown = thrown;
+  try { structured = JSON.parse(raw); } catch { structured = thrown; }
+  return { message: raw || "Failed to send prompt.", presentation: presentOpencodeSessionError(structured) };
 }
 
 function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOpenModelPicker }: {
@@ -883,7 +891,7 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
   onChangeModel?: (model: { providerID: string; modelID: string }) => void;
   onOpenModelPicker?: () => void;
 }) {
-  const presentation = presentOpencodeSessionError(error.message);
+  const presentation = error.presentation ?? presentOpencodeSessionError(error.message);
   return (
     <div className="mx-auto max-w-[720px] px-3 py-3 sm:px-5" data-testid="session-error-card" role="alert">
       <div className="rounded-2xl border border-red-6/30 bg-red-3/15 px-5 py-4">
@@ -1604,6 +1612,27 @@ export function SessionSurface(props: SessionSurfaceProps) {
     autoSendComposer: autoSendPayload?.composer,
     composer: { draft, attachments, pasteParts },
   });
+  const gatewaySelected = isGatewayUsageModel(sessionModel.selectedModel.providerID, props.gatewayProviderIds);
+  const latestUsageMessage = renderedMessages.at(-1);
+  const latestUsageEvidence = useMemo(() => latestUsageMessage ? sessionErrorPresentationFromUIMessage(latestUsageMessage)?.gatewayUsage ?? null : null, [latestUsageMessage]);
+  const gatewayUsage = useGatewayUsage(gatewaySelected, false, gatewayUsageRefreshKey({
+    sessionOwner,
+    providerId: sessionModel.selectedModel.providerID,
+    modelId: sessionModel.selectedModel.modelID,
+    runState: liveStatus.type,
+    latestMessageId: latestUsageMessage?.id,
+    errorKey: JSON.stringify([error?.message ?? null, error?.presentation?.gatewayUsage ?? null, latestUsageEvidence]),
+  }), liveStatus.type === "idle", props.gatewayUsageProviderScope ?? null);
+  const gatewayNotice = gatewayUsageNoticeState({ gatewaySelected: gatewayUsage.active, status: gatewayUsage.data });
+  const hideGatewayError = useGatewayUsageErrorHandled({
+    scopeKey: gatewayUsage.scopeKey, sessionOwner, gatewaySelected: gatewayUsage.active, status: gatewayUsage.data,
+    errorKey: latestUsageMessage?.id ?? null, evidence: latestUsageEvidence,
+  });
+  const hideDirectGatewayError = useGatewayUsageErrorHandled({
+    scopeKey: gatewayUsage.scopeKey, sessionOwner, gatewaySelected: gatewayUsage.active, status: gatewayUsage.data,
+    errorKey: error?.message ?? null, evidence: error?.presentation?.gatewayUsage ?? null,
+  });
+  const visibleMessages = hideGatewayError ? renderedMessages.filter((message) => message !== latestUsageMessage) : renderedMessages;
   const renderedMessagesRef = useRef(renderedMessages);
   useEffect(() => {
     renderedMessagesRef.current = renderedMessages;
@@ -3361,7 +3390,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                 onRestore={handleRestoreRevertedSession}
               />
             ) : null}
-            {error && snapshot && snapshot.messages.length > 0 ? (
+            {error && !hideDirectGatewayError && snapshot && snapshot.messages.length > 0 ? (
               <SessionErrorCard
                 developerMode={props.developerMode}
                 error={error}
@@ -3376,7 +3405,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
               <div className="px-6 py-12">
                 <AssistantWaitingCard label={getSessionActivityStatusLabel(effectiveActivityStatus)} />
               </div>
-            ) : renderedMessages.length === 0 && snapshot && snapshot.messages.length === 0 && error ? (
+            ) : renderedMessages.length === 0 && snapshot && snapshot.messages.length === 0 && error && !hideDirectGatewayError ? (
               <SessionErrorCard
                 developerMode={props.developerMode}
                 error={error}
@@ -3430,7 +3459,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                       <MessageList
                         messageIdReplacements={pendingReconciliation.messageIdReplacements}
                         viewport={messageViewport}
-                        messages={renderedMessages}
+                        messages={visibleMessages}
                         status={status}
                         activityStatus={effectiveActivityStatus}
                         retryStatus={liveStatus.type === "retry" ? liveStatus : null}
@@ -3467,6 +3496,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
       </div>
 
       <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2">
+        <GatewayUsageApprovalNotice />
+        {gatewayNotice && gatewayUsage.data ? <GatewayUsageNotice key={`${gatewayUsage.scopeKey}:${sessionOwner}`} state={gatewayNotice} status={gatewayUsage.data} stale={gatewayUsage.query.isError} /> : null}
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button
             type="button"

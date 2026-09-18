@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, sql } from "@openwork-ee/den-db/drizzle"
+import { expireUsageRequestsForMembers } from "@openwork-ee/den-db/gateway-usage-limits"
 import { revokeGoogleCredentials, revokeInferenceCredentialsForMembers } from "../../llm/inference-provider-lifecycle.js"
 import type { SQL } from "@openwork-ee/den-db/drizzle"
 import {
@@ -1602,6 +1603,7 @@ export function registerAdminRoutes<T extends { Variables: AuthContextVariables 
       const { oauthConsentRows, gatewayCredentials } = await db.transaction(async (tx) => {
         const members = await tx.select({ id: MemberTable.id }).from(MemberTable)
           .where(eq(MemberTable.userId, userId)).orderBy(MemberTable.id).for("update")
+        await expireUsageRequestsForMembers(tx, members.map((member) => member.id))
         const credentials = await revokeInferenceCredentialsForMembers(tx, members.map((member) => member.id))
         const removedAt = new Date()
         const consentRows = await tx

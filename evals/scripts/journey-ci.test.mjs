@@ -156,6 +156,11 @@ test('registered case metadata names exact files, supported execution axes, and 
       engines: ['v1', 'v2'],
     },
     {
+      spec: 'v2-sessionless-first-send.e2e.test.ts',
+      id: 'DEN-LOCAL-SEND',
+      engines: ['v1'],
+    },
+    {
       spec: 'streamed-markdown-answer.e2e.test.ts',
       id: 'CONT-01',
       engines: ['v1', 'v2'],

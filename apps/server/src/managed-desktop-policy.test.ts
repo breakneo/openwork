@@ -35,7 +35,7 @@ test.each([401, 403, 503])("desktop actions never depend on policy verification 
           url: "https://example.com", hasUpload: true, filePath: "/tmp/opencode.json",
         })).resolves.toBeUndefined();
       }
-      for (const path of ["/opencode/auth/ollama", "/opencode/session/test/shell", "/opencode/pty"]) {
+      for (const path of ["/opencode/auth/ollama", "/opencode/session/test/shell", "/opencode/pty", "/opencode/session/test/prompt_async", "/opencode/session", "/opencode/session/test/abort"]) {
         await expect(service.assertRequest(new Request(`http://localhost${path}`, { method: "POST" }), path, true))
           .resolves.toBeUndefined();
       }
