@@ -2412,7 +2412,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
       // passes the workspace root), so the abort must target the same scope —
       // without it the server resolves the default project, finds no live run,
       // and answers `200: false` while the stream keeps going (#2014).
-      await interruptSessionTurn(props.opencodeBaseUrl, interruptionClient, props.sessionId,
+      const stopClient = createSessionInterruptionClient(props.opencodeBaseUrl, opencodeClient, props.workspaceRoot, props.openworkToken);
+      await interruptSessionTurn(props.opencodeBaseUrl, stopClient, props.sessionId,
         props.workspaceRoot.trim() || undefined, {
           admissionUnknown: phase.kind === "admission_unknown",
           admissionMessageID: phase.kind === "admission_unknown" ? phase.messageID : undefined,
@@ -2434,7 +2435,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
       pendingStopsRef.current.delete(sessionOwner);
       setPendingStopSessions([...pendingStopsRef.current]);
     }
-  }, [chatStreaming, clearQueuedDrafts, interruptionClient, openingHistory.refreshFullSnapshot, props.opencodeBaseUrl, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
+  }, [chatStreaming, clearQueuedDrafts, opencodeClient, openingHistory.refreshFullSnapshot, props.opencodeBaseUrl, props.openworkToken, props.sessionId, props.workspaceRoot, queryClient, sessionOwner, snapshotQueryKey, setError]);
 
   const checkUnknownAdmission = useCallback(async (notify = false) => {
     const phase = getQueuedDrainState(props.sessionId).phase;
