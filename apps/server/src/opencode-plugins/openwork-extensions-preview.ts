@@ -24,7 +24,8 @@ import {
   createInstructionSection,
 } from "./agent-instruction-compose.js";
 import {
-  composeSkillAuthoringInstruction,
+  OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION,
+  OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION,
   resolveOpenWorkAutomationInstruction,
   resolveOpenWorkConnectSkillInstruction,
   resolveOpenWorkExtensionDiscoveryInstruction,
@@ -304,19 +305,6 @@ function normalizeOpenCodeContext(value: unknown): OpenCodeContext {
     ...(worktree ? { worktree } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     ...(workspaceID ? { workspaceID } : {}),
-  };
-}
-
-function mergeTransformInputWithFactoryContext(input: unknown, factoryContext: OpenCodeContext): unknown {
-  if (Object.keys(factoryContext).length === 0) return input;
-  const inputRecord = isRecord(input) ? input : {};
-  const inputContext = isRecord(inputRecord.context) ? inputRecord.context : {};
-  return {
-    ...inputRecord,
-    context: {
-      ...factoryContext,
-      ...inputContext,
-    },
   };
 }
 
@@ -1298,38 +1286,14 @@ export const OpenWorkExtensionsPreview = async (factoryInput?: unknown, _options
     // so OpenWork can host the UI without replaying the tool call.
     preserveMcpResult(output);
   },
-  "experimental.chat.system.transform": async (input: unknown, output: { system: string[] }) => {
-    const mergedInput = mergeTransformInputWithFactoryContext(input, factoryContext);
-    const [extensionInstruction, skillInstruction, automationInstruction] = await Promise.all([
-      resolveOpenWorkExtensionDiscoveryInstruction(mergedInput, fetch, {
-        client: engineMcpStatusClient,
-        directory: engineMcpStatusDirectory,
-      }),
-      resolveOpenWorkConnectSkillInstruction(mergedInput, fetch),
-      resolveOpenWorkAutomationInstruction(mergedInput, fetch),
-    ]);
-    const skillAuthoring = composeSkillAuthoringInstruction(extensionInstruction);
-    if (process.env.OPENWORK_DEV_MODE === "1") {
-      console.log("[openwork:skill-authoring] system prompt selected", {
-        mode: skillAuthoring.mode,
-        prompt: skillAuthoring.prompt,
-        directory: normalizeOpenCodeContext(mergedInput).directory ?? factoryContext.directory ?? null,
-      });
-    }
-    // One section id per concern — composition drops empties/duplicates so routing,
-    // remote skills, session, and browser guidance never overlap by accident.
-    // Appended into the engine's existing system entry so the request still
-    // carries a single system message. Order: stable mechanics first, then the
-    // live Connect steering and skill-authoring mode, then the catalogs, so
-    // rules are read before the data they govern.
+  "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
+    // Prompt composition is static: live discovery belongs to explicit tool calls.
     appendAgentInstructions(
       output.system,
       createInstructionSection("agent-surface", OPENWORK_AGENT_SURFACE_INSTRUCTION),
       createInstructionSection("browser", OPENWORK_BROWSER_INSTRUCTION),
-      createInstructionSection("routing", extensionInstruction),
-      createInstructionSection("skill-authoring", skillAuthoring.prompt),
-      createInstructionSection("connect-skills", skillInstruction),
-      createInstructionSection("automations", automationInstruction),
+      createInstructionSection("routing", OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION),
+      createInstructionSection("discovery", OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION),
     );
   },
   tool: {
@@ -1344,8 +1308,17 @@ export const OpenWorkExtensionsPreview = async (factoryInput?: unknown, _options
       description: "Read one semantic snapshot of OpenWork: current screen, retained conversation tabs, split view and focused pane, sidebar and side panel state, settings panel, provider contributions, remote skill guidance, and available affordances with explicit effects and executors.",
       args: {},
       async execute() {
+        const [context, routing, skills, automations] = await Promise.all([
+          readOpenworkAgentContext(engineMcpStatusClient, engineMcpStatusDirectory),
+          resolveOpenWorkExtensionDiscoveryInstruction({ context: factoryContext }, fetch, {
+            client: engineMcpStatusClient,
+            directory: engineMcpStatusDirectory,
+          }),
+          resolveOpenWorkConnectSkillInstruction(),
+          resolveOpenWorkAutomationInstruction(),
+        ]);
         return JSON.stringify(
-          await readOpenworkAgentContext(engineMcpStatusClient, engineMcpStatusDirectory),
+          { ...context, instructions: { routing, skills, automations } },
           null,
           2,
         );

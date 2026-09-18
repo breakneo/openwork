@@ -746,10 +746,6 @@ function admitSessionCommand(
   return "accepted";
 }
 
-function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
-  return method === "POST" && /^\/session\/[^/]+\/prompt_async$/.test(normalizeOpencodeProxyPath(proxyPath));
-}
-
 export async function startServer(config: ServerConfig): Promise<ServeResult> {
   let taskRecovery: Awaited<ReturnType<typeof createTaskRecovery>> | undefined;
   const approvals = new ApprovalService(config.approval);
@@ -1725,9 +1721,6 @@ export async function proxyOpencodeRequest(input: {
     return sanitizeProxyResponse(response);
   };
 
-  if (workspace && workspace.workspaceType !== "remote" && isPromptAsyncProxyRequest(method, proxyPath)) {
-    return withEngineDirectoryFence(input.config, workspace, forward);
-  }
   return forward();
 }
 
@@ -5123,8 +5116,8 @@ async function withEngineMcpRegistrationLock<Result>(
   }
 }
 
-// Reuse verified clients and fence necessary replacements against local prompt
-// admission. A health observation alone is not proof of config delivery.
+// Reuse verified clients and defer replacements while tasks are observed busy.
+// A health observation alone is not proof of config delivery.
 async function registerRuntimeMcpEntry(
   config: ServerConfig,
   workspace: WorkspaceInfo,
@@ -5156,8 +5149,8 @@ async function registerRuntimeMcpEntry(
       const sessions: unknown = JSON.parse(await readBoundedEngineMcpRegistrationResponse(activity));
       if (!isRecord(sessions)) throw new Error("Invalid session activity response");
       if (Object.values(sessions).some((session) => !isRecord(session) || session.type !== "idle")) {
-        // The directory fence also covers prompt admission, so a task cannot
-        // start between this activity check and replacing its client's tools.
+        // Prompt admission does not take the maintenance fence: this activity
+        // check is not atomic with replacement, and a new task can start after it.
         return {
           name, status: "failed", source: "transport_failure", errorSummary: null,
           failure: { name, status: 503, deferredForActivity: true, message: "MCP replacement deferred until active tasks finish" },

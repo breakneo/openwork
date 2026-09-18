@@ -128,9 +128,16 @@ describe("effective permissions route", () => {
       const rejected = await fetch(`http://127.0.0.1:${server.port}${path}`, { method, headers: policyHeaders });
       expect({ method, path, status: rejected.status }).toEqual({ method, path, status: 401 });
     }
-    const den = Bun.serve({ port: 0, fetch: () => Response.json({ allowControlSettings: false, execution: { commands: "deny" } }) });
+    let offline = false;
+    let policyReads = 0;
+    const den = Bun.serve({ port: 0, fetch: () => {
+      policyReads++;
+      return offline ? new Response(null, { status: 503 })
+        : Response.json({ allowControlSettings: false, execution: { commands: "deny" } });
+    } });
     stops.push(() => den.stop(true));
     await policyService.setSession({ baseUrl: `http://127.0.0.1:${den.port}`, token: "test-den-token", orgId: "test-org" });
+    offline = true;
     const denied = await evaluate(policyHeaders);
     expect(denied.status).toBe(403);
     expect(await denied.json()).toMatchObject({ code: "organization_policy_denied" });
@@ -140,5 +147,6 @@ describe("effective permissions route", () => {
     });
     expect(deniedSettings.status).toBe(403);
     expect(await deniedSettings.json()).toMatchObject({ code: "organization_policy_denied" });
+    expect(policyReads).toBe(1);
   });
 });

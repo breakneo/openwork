@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { proxyOpencodeRequest, startServer } from "./server.js";
+import { withEngineDirectoryFence } from "./engine-directory-fence.js";
 import * as engineV2Preview from "./engine-v2-preview.js";
 import { ApiError } from "./errors.js";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
@@ -40,6 +41,7 @@ function auth(token: string) {
 }
 
 type MockReadOptions = {
+  onPrompt?: () => Response;
   onRead?: (request: Request) => Promise<void>;
   sessions?: unknown;
   messagePage?: (request: Request) => Response;
@@ -186,6 +188,7 @@ function startMockOpencode(input?: MockReadOptions & { holdCommand?: Promise<voi
       }
 
       if (url.pathname === "/session/ses_created/prompt_async" && request.method === "POST") {
+        if (input?.onPrompt) return input.onPrompt();
         return new Response(null, { status: 204 });
       }
 
@@ -329,6 +332,132 @@ async function waitUntil(predicate: () => boolean, attempts = 20) {
 }
 
 describe("workspace OpenCode proxy", () => {
+  test.serial("prompt admission bypasses held same-directory maintenance", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const engine = startMockOpencode();
+    const openwork = await startOpenworkServer({
+      workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}`, readOnly: false,
+    });
+    const entered = deferred();
+    const release = deferred();
+    let maintenanceFinished = false;
+    const maintenance = withEngineDirectoryFence(openwork.config, openwork.config.workspaces[0]!, async () => {
+      entered.resolve();
+      await release.promise;
+      maintenanceFinished = true;
+    });
+    const caller = new AbortController();
+    const deadline = setTimeout(() => caller.abort(), 1_000);
+    try {
+      await entered.promise;
+      const response = await fetch(`http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
+        method: "POST", headers: { ...auth(openwork.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ parts: [] }), signal: caller.signal,
+      });
+      expect(response.status).toBe(204);
+      expect(maintenanceFinished).toBe(false);
+      expect(engine.requests).toEqual([{
+        pathname: "/session/ses_created/prompt_async", search: `?directory=${encodeURIComponent(workspaceRoot)}`,
+        directory: workspaceRoot, method: "POST", body: { parts: [] },
+      }]);
+    } finally {
+      clearTimeout(deadline);
+      caller.abort();
+      release.resolve();
+      await maintenance;
+    }
+  });
+
+  async function signedInPromptFixture(options?: { rejectIdentity?: boolean; onPrompt?: () => Response }) {
+    const workspaceRoot = await createWorkspaceRoot();
+    const engine = startMockOpencode({ onPrompt: options?.onPrompt });
+    const denRequests: Array<{ method: string; pathname: string }> = [];
+    let outage = false;
+    const den = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(request) {
+        const pathname = new URL(request.url).pathname;
+        denRequests.push({ method: request.method, pathname });
+        if (options?.rejectIdentity) return Response.json({ error: "unauthorized" }, { status: 401 });
+        if (outage) return Response.json({ error: "unavailable" }, { status: 503 });
+        if (request.method === "GET" && pathname === "/v1/me/desktop-config") {
+          return Response.json({ allowCustomProviders: true });
+        }
+        return Response.json({ error: "unexpected_den_request" }, { status: 404 });
+      },
+    });
+    stops.push(() => den.stop(true));
+    const openwork = await startOpenworkServer({
+      workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}`, readOnly: false,
+    });
+    const base = `http://127.0.0.1:${openwork.server.port}`;
+    const identity = await fetch(`${base}/den-session/identity`, {
+      method: "PUT", headers: { "x-openwork-host-token": openwork.config.hostToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${den.port}`, token: "den-fixture-token", orgId: "org_test" }),
+      signal: AbortSignal.timeout(1_000),
+    });
+    expect(identity.status).toBe(options?.rejectIdentity ? 403 : 204);
+    if (options?.rejectIdentity) await expect(identity.json()).resolves.toMatchObject({ code: "policy_unavailable" });
+    expect(denRequests).toEqual([{ method: "GET", pathname: "/v1/me/desktop-config" }]);
+    outage = true;
+    const denCount = denRequests.length;
+    const prompt = (providerID: string, token = openwork.token) => fetch(`${base}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
+      method: "POST", headers: { ...auth(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ model: { providerID, modelID: "fixture" }, parts: [] }),
+      signal: AbortSignal.timeout(1_000),
+    });
+    const prompts = () => engine.requests.filter(({ method, pathname }) => method === "POST" && pathname === "/session/ses_created/prompt_async");
+    return { prompt, prompts, engine, denRequests, denCount, workspaceRoot };
+  }
+
+  for (const providerID of ["local-byok", "alternate-byok"]) {
+    test.serial(`signed-in ${providerID} prompt reaches the engine once without Den after identity installation`, async () => {
+      const fixture = await signedInPromptFixture();
+      const response = await fixture.prompt(providerID);
+      expect(response.status).toBe(204);
+      expect(fixture.prompts()).toHaveLength(1);
+      expect(fixture.prompts()[0]).toMatchObject({
+        directory: fixture.workspaceRoot,
+        body: { model: { providerID, modelID: "fixture" }, parts: [] },
+      });
+      expect(fixture.denRequests).toHaveLength(fixture.denCount);
+    });
+  }
+
+  test.serial("signed-in prompt rejects an unauthorized client before the engine without Den", async () => {
+    const fixture = await signedInPromptFixture();
+    const engineCount = fixture.engine.requests.length;
+    const response = await fixture.prompt("local-byok", "invalid-client-token");
+    expect(response.status).toBe(401);
+    await response.body?.cancel();
+    expect(fixture.prompts()).toHaveLength(0);
+    expect(fixture.engine.requests).toHaveLength(engineCount);
+    expect(fixture.denRequests).toHaveLength(fixture.denCount);
+  });
+
+  test.serial("signed-in prompt forwards engine credential rejection unchanged without Den", async () => {
+    // This is an engine stand-in error, not evidence of actual provider inference.
+    const rejection = { code: "upstream_credential_rejected", message: "Fixture provider rejected credentials" };
+    const fixture = await signedInPromptFixture({ onPrompt: () => Response.json(rejection, { status: 401 }) });
+    const response = await fixture.prompt("local-byok");
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual(rejection);
+    expect(fixture.prompts()).toHaveLength(1);
+    expect(fixture.denRequests).toHaveLength(fixture.denCount);
+  });
+
+  test.serial("unverified identity fails closed before forwarding a prompt", async () => {
+    // Immediate 401 avoids retry delays while exercising failed initial verification.
+    const fixture = await signedInPromptFixture({ rejectIdentity: true });
+    const engineCount = fixture.engine.requests.length;
+    const response = await fixture.prompt("local-byok");
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ code: "policy_unavailable" });
+    expect(fixture.prompts()).toHaveLength(0);
+    expect(fixture.engine.requests).toHaveLength(engineCount);
+    expect(fixture.denRequests).toHaveLength(fixture.denCount);
+  });
+
   test.serial("native history pagination exposes cursors to browsers, preserves upstream headers, and verifies every page owner", async () => {
     const workspaceRoot = await createWorkspaceRoot();
     const cursor = "opaque+/=%25?older&owner=one";

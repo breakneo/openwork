@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import type { ServerConfig } from "./types.js";
+import type { DesktopConfig } from "@openwork/types/den/desktop-policies-runtime";
 
 // Bun 1.3.4 cannot isolate files; mock.restore() does not undo mock.module().
 // Run these replacements in a child so they cannot contaminate other files.
@@ -16,7 +17,7 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
     expect(result.status).toBe(0);
   }, 10000);
 } else {
-  const policy = { allowCustomProviders: false };
+  const policy: Pick<DesktopConfig, "allowCustomProviders" | "execution"> = { allowCustomProviders: false };
   const session = { baseUrl: "https://den.invalid", token: "old-token", orgId: "old-org" };
   let waiting = Promise.withResolvers<number>();
   let release = Promise.withResolvers<void>();
@@ -35,7 +36,6 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
   mock.module("./workspace-kv-store.js", () => ({
     isRecord: (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
   }));
-  mock.module("./managed-policy-rules.js", () => ({ policyDenial: () => null, policyRequestActions: () => [] }));
   const { managedDesktopPolicy } = await import("./managed-desktop-policy.js");
   const config: ServerConfig = {
     host: "127.0.0.1", port: 0, token: "test", hostToken: "test",
@@ -52,10 +52,103 @@ if (process.env.OPENWORK_MANAGED_POLICY_TEST_CHILD !== "1") {
     externalFetch.mockReset().mockImplementation(async () => Response.json(policy));
     parse.mockReset().mockImplementation(() => policy);
     read.mockReset().mockImplementation(async () => ({}));
-    write.mockClear();
+    write.mockReset().mockImplementation(async () => ({ changed: false }));
     service = managedDesktopPolicy({ ...config });
   });
   afterEach(() => { release.resolve(); });
+
+  test.each(["hanging", "503"])("installed permissive policy sends locally with Den %s", async (outage) => {
+    parse.mockReturnValue({ allowCustomProviders: true });
+    await service.setSession(session);
+    externalFetch.mockImplementation(() => outage === "hanging"
+      ? new Promise<Response>(() => {}) : Promise.resolve(new Response(null, { status: 503 })));
+    for (let repeat = 0; repeat < 3; repeat++) {
+      for (const path of ["/session/test/prompt_async", "/session", "/session/test/abort"]) {
+        await service.assertRequest(new Request("http://engine" + path, {
+          method: "POST", body: JSON.stringify({ model: { providerID: "local", modelID: "byok" } }),
+        }), path, true);
+      }
+    }
+    expect(externalFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("explicit refresh installs new restrictions; failed same-identity refresh preserves them", async () => {
+    parse.mockReturnValueOnce({ allowCustomProviders: true });
+    await service.setSession(session);
+    await service.assert("provider");
+    parse.mockReturnValue({ ...policy, execution: { commands: "deny", blockedCommands: [], blockBrowserUploads: false } });
+    await service.current();
+    expect(externalFetch).toHaveBeenCalledTimes(2);
+    externalFetch.mockImplementation(async () => new Response(null, { status: 503 }));
+    release.resolve();
+    await expect(service.setSession(session)).rejects.toMatchObject({ code: "policy_unavailable" });
+    for (const path of ["/config", "/session/test/shell", "/auth/local"]) {
+      await expect(service.assertRequest(new Request("http://engine" + path, { method: "POST" }), path, true))
+        .rejects.toMatchObject({ code: "organization_policy_denied" });
+    }
+    expect(externalFetch).toHaveBeenCalledTimes(4);
+  });
+
+  test("failed refresh preserves installed allowance but a failed new identity cannot borrow it", async () => {
+    parse.mockReturnValue({ allowCustomProviders: true });
+    await service.setSession(session);
+    externalFetch.mockImplementation(async () => new Response(null, { status: 401 }));
+    await expect(service.current()).rejects.toMatchObject({ code: "policy_unavailable" });
+    await service.assert("provider");
+    await expect(service.setSession({ ...session, token: "new" })).rejects.toMatchObject({ code: "policy_unavailable" });
+    await expect(service.assert("provider")).rejects.toMatchObject({ code: "policy_unavailable" });
+    expect(externalFetch).toHaveBeenCalledTimes(3);
+  });
+
+  test("unverified generation blocks immediately without joining its hanging fetch", async () => {
+    const response = Promise.withResolvers<Response>();
+    externalFetch.mockImplementationOnce(() => response.promise);
+    const installing = service.setSession(session);
+    await expect(service.assert("sync")).rejects.toMatchObject({ code: "policy_unavailable" });
+    expect(externalFetch).toHaveBeenCalledTimes(1);
+    response.resolve(Response.json(policy));
+    await installing;
+  });
+
+  test("previous identity cannot publish after persistence finishes", async () => {
+    const writing = Promise.withResolvers<void>();
+    const persisted = Promise.withResolvers<{ changed: boolean }>();
+    write.mockImplementationOnce(() => { writing.resolve(); return persisted.promise; });
+    const installing = service.setSession(session).catch((error: unknown) => error);
+    await writing.promise;
+    externalFetch.mockImplementation(async () => new Response(null, { status: 401 }));
+    await expect(service.setSession({ ...session, token: "new" })).rejects.toMatchObject({ code: "policy_unavailable" });
+    persisted.resolve({ changed: true });
+    expect(await installing).toMatchObject({ code: "policy_identity_changed" });
+    await expect(service.assert("sync")).rejects.toMatchObject({ code: "policy_unavailable" });
+    expect(externalFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("model runtime read retains the assertion generation across identity changes", async () => {
+    await service.setSession(session);
+    const reading = Promise.withResolvers<void>();
+    const runtime = Promise.withResolvers<Awaited<ReturnType<typeof read>>>();
+    read.mockImplementationOnce(() => { reading.resolve(); return runtime.promise; });
+    const assertion = service.assert("model", { providerID: "lpr_test", modelID: "test" }).catch((error: unknown) => error);
+    await reading.promise;
+    await service.setSession({ ...session, token: "new" });
+    runtime.resolve({});
+    expect(await assertion).toMatchObject({ code: "policy_identity_changed" });
+    expect(externalFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("restricted models still verify live grants offline and clearSession invalidates allowance", async () => {
+    await service.setSession(session);
+    externalFetch.mockImplementation(async () => new Response(null, { status: 401 }));
+    await expect(service.assert("model", { providerID: "lpr_test", modelID: "test" }))
+      .rejects.toMatchObject({ code: "policy_unavailable" });
+    expect(externalFetch.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      `${session.baseUrl}/v1/llm-providers?scope=usable`, `${session.baseUrl}/v1/inference-providers?scope=usable`,
+    ]);
+    await service.clearSession();
+    read.mockResolvedValue({ managedPolicy: policy });
+    await expect(service.assert("sync")).rejects.toMatchObject({ code: "policy_unavailable" });
+  });
 
   test.each([false, true])("no-session browser evaluation fences identity installation during its persisted read (install=%s)", async (install) => {
     const reading = Promise.withResolvers<void>();
