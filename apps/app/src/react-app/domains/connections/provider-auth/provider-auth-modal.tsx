@@ -69,6 +69,7 @@ export type ProviderAuthModalProps = {
   workerType?: "local" | "remote";
   providers: ProviderAuthProvider[];
   connectedProviderIds: string[];
+  gatewayProviderIds?: ReadonlySet<string>;
   authMethods: Record<string, ProviderAuthMethod[]>;
   onSelect: (providerId: string, methodIndex?: number) => Promise<ProviderOAuthStartResult>;
   onSubmitApiKey: (providerId: string, apiKey: string) => Promise<string | void>;
@@ -174,6 +175,7 @@ export default function ProviderAuthModal(props: ProviderAuthModalProps) {
 
     const providersById = new Map(providers.map((provider) => [provider.id, provider]));
     const nextEntries = Object.keys(methods)
+      .filter((id) => !props.gatewayProviderIds?.has(id))
       .flatMap((id) => {
         const provider = providersById.get(id);
         const entryMethods = (methods[id] ?? []).filter((method) => {
@@ -211,7 +213,7 @@ export default function ProviderAuthModal(props: ProviderAuthModalProps) {
     }
 
     return nextEntries;
-  }, [isRemoteWorker, props.authMethods, props.connectedProviderIds, props.providers, props.showOpenWorkModelsSubscribe]);
+  }, [isRemoteWorker, props.authMethods, props.connectedProviderIds, props.gatewayProviderIds, props.providers, props.showOpenWorkModelsSubscribe]);
 
   const selectedEntry = useMemo(
     () => entries.find((entry) => entry.id === selectedProviderId) ?? null,

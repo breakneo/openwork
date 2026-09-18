@@ -2839,6 +2839,7 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
             }),
         )}
         connectedProviderIds={providerConnectedIds}
+        gatewayProviderIds={gatewayProviderIds}
         authMethods={Object.fromEntries(
           Object.entries(providerAuthSnapshot.providerAuthMethods).filter(
             ([providerId]) =>
