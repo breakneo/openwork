@@ -278,7 +278,9 @@ describe("embedded server lifecycle", () => {
         }
         if (!boundServer || !startupConfig) throw new Error("Expected a bound startup server");
         expect(authSpy).toHaveBeenCalledTimes(1);
-        expect(authSpy.mock.calls[0]?.[0].env).toBe(serverModule.envServiceForConfig(startupConfig));
+        const env = serverModule.envServiceForConfig(startupConfig);
+        if (!env) throw new Error("Expected startup environment service");
+        expect(authSpy.mock.calls[0]?.[0].env).toBe(env);
         const lines = await logLines(fixture.logPath);
         expect(lines).toContain('auth-body:{"type":"api","key":"synthetic-startup-key"}');
         expect(lines).toContain("auth-health:/health:503:false");
