@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
+import type { BufferEncodingOption, ObjectEncodingOptions, PathLike } from "node:fs";
+import * as nodeServer from "./serve-node.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -631,6 +633,84 @@ describe("workspace OpenCode proxy", () => {
           caller.abort();
           release.resolve();
           await result;
+        }
+      });
+    }
+  }
+
+  for (const mount of ["/workspace/ws_1/opencode", "/w/ws_1/opencode", "/opencode"]) {
+    for (const method of ["GET", "HEAD"]) {
+      test.serial(`${method} ${mount} cancellation after ownership metadata stays request-scoped`, async () => {
+        const workspaceRoot = await createWorkspaceRoot();
+        const release = deferred();
+        let proofStarted = false;
+        let canonicalizationPending = false;
+        const engine = startMockOpencode({
+          foreignSessionDirectory: "/workspace/foreign",
+          onRead: async (request) => {
+            if (new URL(request.url).pathname === "/session/ses_1") proofStarted = true;
+          },
+        });
+        // Capture the real HTTP handler so the server's response remains
+        // observable after cancellation (a disconnected HTTP client cannot read it).
+        const transport: { handle?: nodeServer.ServeOptions["fetch"] } = {};
+        const originalServe = nodeServer.serve;
+        const serveSpy = spyOn(nodeServer, "serve").mockImplementation((options) => {
+          transport.handle = options.fetch;
+          return originalServe(options);
+        });
+        const previousTelemetry = globalThis.__openworkDesktopTelemetry;
+        const captured: unknown[] = [];
+        globalThis.__openworkDesktopTelemetry = { captureException: (error) => { captured.push(error); return true; } };
+        let restorePath = () => {};
+        const caller = new AbortController();
+        let result: Promise<Response> | undefined;
+        try {
+          const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+          const handle = transport.handle;
+          if (!handle) throw new Error("Missing server request handler");
+          const originalRealpath = fs.realpath;
+          function delayedRealpath(path: PathLike, options?: ObjectEncodingOptions | BufferEncoding | null): Promise<string>;
+          function delayedRealpath(path: PathLike, options: BufferEncodingOption): Promise<Buffer<ArrayBuffer>>;
+          function delayedRealpath(path: PathLike, options?: ObjectEncodingOptions | BufferEncoding | BufferEncodingOption | null): Promise<string | Buffer<ArrayBuffer>>;
+          async function delayedRealpath(path: PathLike, options?: ObjectEncodingOptions | BufferEncoding | BufferEncodingOption | null): Promise<string | Buffer<ArrayBuffer>> {
+            if (proofStarted && path === workspaceRoot) {
+              canonicalizationPending = true;
+              await release.promise;
+            }
+            const encoding = typeof options === "object" && options !== null ? options.encoding : options;
+            return encoding === "buffer" ? originalRealpath(path, { encoding: "buffer" }) : originalRealpath(path, encoding);
+          }
+          const pathSpy = spyOn(fs, "realpath").mockImplementation(delayedRealpath);
+          restorePath = () => pathSpy.mockRestore();
+          const base = `http://127.0.0.1:${openwork.server.port}`;
+          result = Promise.resolve(handle(new Request(`${base}${mount}/session/ses_1/message`, {
+            method, headers: auth(openwork.token), signal: caller.signal,
+          })));
+          void result.catch(() => undefined);
+          expect(await waitUntil(() => canonicalizationPending, 2_000)).toBe(true);
+          expect(engine.requests.some((entry) => entry.pathname === "/session/ses_1/message")).toBe(true);
+          caller.abort();
+          release.resolve();
+          const response = await result;
+          expect(response.status, JSON.stringify(captured.map((error) => error instanceof Error
+            ? { name: error.name, message: error.message, stack: error.stack } : error))).toBe(499);
+          expect(await response.json()).toEqual({ code: "request_aborted", message: "Request was canceled" });
+          expect(captured).toEqual([]);
+          restorePath();
+          restorePath = () => {};
+          const control = await handle(new Request(`${base}${mount}/session/ses_1/todo`, { headers: auth(openwork.token) }));
+          expect(control.status).toBe(200);
+          expect(await control.json()).toEqual([{ content: "Validate session reads", status: "completed", priority: "high" }]);
+          const foreign = await handle(new Request(`${base}${mount}/session/ses_foreign/message`, { headers: auth(openwork.token) }));
+          expect(foreign.status).toBe(404);
+          expect(await foreign.text()).not.toContain("msg_foreign");
+        } finally {
+          release.resolve();
+          await result?.catch(() => undefined);
+          restorePath();
+          serveSpy.mockRestore();
+          globalThis.__openworkDesktopTelemetry = previousTelemetry;
         }
       });
     }
