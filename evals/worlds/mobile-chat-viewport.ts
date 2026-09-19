@@ -35,6 +35,7 @@ export async function mobileChatGeometry(app: Surface) {
       pageScroll: document.scrollingElement?.scrollTop ?? 0,
       viewport: { height: window.visualViewport?.height ?? 0, top: window.visualViewport?.offsetTop ?? 0 },
       editorFontSize: editor ? parseFloat(getComputedStyle(editor).fontSize) : 0,
+      editorFocused: editor === document.activeElement,
       userCount: users.length,
     };
   });

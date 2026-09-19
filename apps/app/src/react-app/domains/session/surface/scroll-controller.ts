@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, type RefObject, type UIEventHandler } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type RefObject, type UIEventHandler } from "react";
 
 import { flushSessionScrollState, getSessionScrollState, sessionScrollKey, useSessionScrollStore, type SessionScrollAnchor, type SessionHistoryPagePosition } from "./scroll-store";
 import { mobileTurnSpace } from "./mobile-turn-space";
@@ -88,6 +88,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
   const { selectedSessionId, geometryOwner, viewOwner, containerRef, contentRef } = options;
   const scrollKey = selectedSessionId ? sessionScrollKey(selectedSessionId, geometryOwner) : null;
   const controllerRef = useRef<ScrollController | null>(null);
+  const [mobileTurnFullyVisible, setMobileTurnFullyVisible] = useState(false);
   const optionsRef = useRef(options);
   optionsRef.current = options;
   // Consumed (including cancelled) submissions survive session effect recreation.
@@ -199,10 +200,20 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     };
     const refreshTopClippedMessage = () => {
       if (active && historyReady) store.setTopClippedMessageId(scrollKey, latestMessageTopClippedId(container));
+      // Manual mode also represents our mobile turn anchor, not just a reader
+      // who scrolled away. Ignore reserved blank space only for that anchor.
+      const viewport = container.getBoundingClientRect();
+      const turn = mobileTurnId ? messageElementById(container, mobileTurnId) : null;
+      setMobileTurnFullyVisible(Boolean(active && historyReady && mobileTurnPinned && turn
+        && window.matchMedia("(max-width: 1023px)").matches
+        && !optionsRef.current.historyPages?.hasNewer && !hasPendingPlaceholders()
+        && turn.getBoundingClientRect().top >= viewport.top - EXACT_BOTTOM_GAP_PX
+        && content.getBoundingClientRect().bottom - turnSpace <= viewport.bottom + EXACT_BOTTOM_GAP_PX));
     };
     const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
       if (!active) return;
       mobileTurnPinned = false;
+      setMobileTurnFullyVisible(false);
       mobileTurnId = null;
       turnSpace = 0;
       content.style.paddingBottom = previousPaddingBottom;
@@ -329,6 +340,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
         if (mobile && mobileTurnPinned && mobileTurnId) store.setManualScroll(scrollKey, container.scrollTop, clipped, { messageId: mobileTurnId, offset: 0 });
         else if (isExactlyAtBottom(container)) store.setStickyBottom(scrollKey, clipped);
         else store.setManualScroll(scrollKey, container.scrollTop, clipped, readingAnchor(container));
+        refreshTopClippedMessage();
         return;
       }
       if (!historyReady) {
@@ -381,6 +393,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     const scrollToTop = async () => {
       if (!active) return false;
       mobileTurnPinned = false;
+      setMobileTurnFullyVisible(false);
       restoredPageAnchorId = undefined;
       cancelTop();
       cancelFrames();
@@ -409,6 +422,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       if (nested && nested !== container) return;
       mobileTurnPinned = false;
       cancelTop();
+      setMobileTurnFullyVisible(false);
       container.dispatchEvent(new Event(SESSION_SCROLL_NAVIGATION_EVENT));
       optionsRef.current.historyPages?.cancelRestore?.();
       // Pointer presses may just be clicks. Defer cancelling restoration until
@@ -435,6 +449,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
       // actual input may replace the saved reading position or change its mode.
       if (hasScrollGesture() && container.scrollTop !== lastKnownScrollTop) {
         mobileTurnPinned = false;
+        setMobileTurnFullyVisible(false);
         // Trackpad momentum can outlast the original wheel/touch event.
         lastGestureAt = Date.now();
         if (activePointerId !== null) {
@@ -569,6 +584,7 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
 
     return () => {
       active = false;
+      setMobileTurnFullyVisible(false);
       cancelTop();
       cancelFrames();
       if (smoothJump) container.scrollTo({ top: container.scrollTop, behavior: "instant" });
@@ -621,5 +637,5 @@ export function useSessionScrollController(options: SessionScrollControllerOptio
     }
   }, [scrollKey, options.historyReady, options.submittedMessageId]);
 
-  return { handleScroll, markScrollGesture, scrollToBottom, scrollToTop, jumpToLatest, jumpToStartOfMessage, refresh };
+  return { handleScroll, markScrollGesture, scrollToBottom, scrollToTop, jumpToLatest, jumpToStartOfMessage, refresh, mobileTurnFullyVisible };
 }

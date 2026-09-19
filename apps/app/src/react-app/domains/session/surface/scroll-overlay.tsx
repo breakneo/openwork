@@ -62,6 +62,7 @@ type SessionScrollOverlayProps = {
   sessionId: string;
   owner?: string;
   isStreaming: boolean;
+  mobileTurnFullyVisible?: boolean;
   onJumpToLatest: (behavior?: ScrollBehavior) => void;
   onJumpToStartOfMessage: (behavior?: ScrollBehavior) => void;
 };
@@ -70,12 +71,13 @@ export const SessionScrollOverlay = memo(function SessionScrollOverlay({
   sessionId,
   owner,
   isStreaming,
+  mobileTurnFullyVisible = false,
   onJumpToLatest,
   onJumpToStartOfMessage,
 }: SessionScrollOverlayProps) {
   const { isAtBottom, topClippedMessageId } = useSessionScrollOverlayState(sessionScrollKey(sessionId, owner));
   const showJumpToStart = !isStreaming && Boolean(topClippedMessageId);
-  const showJumpToLatest = !isAtBottom;
+  const showJumpToLatest = !isAtBottom && !mobileTurnFullyVisible;
 
   if (!showJumpToStart && !showJumpToLatest) {
     return null;

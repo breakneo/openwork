@@ -3427,6 +3427,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           owner={sessionOwner}
           isStreaming={chatStreaming}
           onJumpToLatest={sessionScroll.jumpToLatest}
+          mobileTurnFullyVisible={sessionScroll.mobileTurnFullyVisible}
           onJumpToStartOfMessage={sessionScroll.jumpToStartOfMessage}
         />
         <SessionFindBar

@@ -20,6 +20,7 @@ const mobileTest = spec.world(mobileChatInteractionWorld, {
 
 mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat layout", async ({ world, user, probe, step, evidence }) => {
   await world.app.client.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await world.app.client.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
   await world.openNewTask();
   await user.see("composer", { editable: true });
   await user.looks(["At phone width, the new-chat composer sits near the bottom of the app rather than directly below the heading."]);
@@ -40,9 +41,14 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
   await probe.eventually(() => probe.composer(), { within: 30_000, label: "mobile send enabled", until: (value) => value.runTaskEnabled });
   const before = await read();
   await using transition = await world.transition(evidence.dir);
-  await user.click("Run task");
+  if (!before.send) throw new Error("Missing mobile send control");
+  await world.app.client.send("Input.dispatchTouchEvent", {
+    type: "touchStart", touchPoints: [{ x: (before.send.left + before.send.right) / 2, y: (before.send.top + before.send.bottom) / 2 }],
+  });
+  await world.app.client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await probe.eventually(() => transition.read(), { within: 10_000, label: "held first mobile session creation", until: (value) => value.held === 1 });
   const held = await read();
+  expect(held.editorFocused).toBe(true);
   expect(Math.abs((held.editor?.bottom ?? 0) - (before.editor?.bottom ?? 0))).toBeLessThanOrEqual(2);
   await user.looks(["The mobile composer remains visible inside the shortened app viewport while the first send is pending; the header remains visible."]);
   await transition.release();
@@ -69,8 +75,20 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
       until: (value) => Boolean(value.shell?.height === 844 && value.latestUser && value.thread && Math.abs(value.latestUser.top - value.thread.top) <= 8),
     });
     expect(dismissed.pageScroll).toBe(0);
+    await user.notSee({ role: "button", label: "Jump to latest" });
     evidence.recordJsonArtifact("New turn before and after simulated keyboard dismissal", { anchored, dismissed });
     await user.looks(["At full phone height, the latest user turn remains at the top of the conversation pane and the composer stays at the bottom."]);
+    if (!dismissed.thread) throw new Error("Missing mobile transcript viewport");
+    await world.app.client.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel", x: 195, y: dismissed.thread.top + 100, deltaX: 0, deltaY: -240,
+    });
+    const reading = await probe.eventually(read, {
+      within: 10_000, label: "manual reading takes precedence over new-turn anchoring",
+      until: (value) => value.scrollTop < dismissed.scrollTop - 100,
+    });
+    await user.see({ role: "button", label: "Jump to latest" });
+    evidence.recordAssertionEvidence("Reserved answer space does not show a false jump affordance or trap manual scrolling", JSON.stringify({ dismissed, reading }), true);
+    await user.click({ role: "button", label: "Jump to latest" });
   });
 
   await step("narrow phone and desktop retain usable composer controls", async () => {
