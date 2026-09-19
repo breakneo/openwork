@@ -1,12 +1,91 @@
 import { expect } from "vitest";
 import { browserScript, resolveEvalEngine, spec } from "@openwork/testkit";
 import { sessionlessFirstSendWorld } from "../worlds/first-run.ts";
+import { mobileChatInteractionWorld } from "../worlds/first-run.ts";
+import { mobileChatGeometry, simulateKeyboardViewport } from "../worlds/mobile-chat-viewport.ts";
+import { setViewport } from "@openwork/cdp";
 import { localSendDenOutageWorld } from "../worlds/local-send-den-outage.ts";
 
 const test = spec.world(sessionlessFirstSendWorld, {
   timeout: 420_000,
   resources: { surfaces: ["appWeb"], services: ["mock"] },
   needs: { env: ["OPENWORK_EVAL_ENGINE"] },
+});
+
+const mobileTest = spec.world(mobileChatInteractionWorld, {
+  timeout: 600_000,
+  resources: { surfaces: ["appWeb"], services: ["mock"] },
+  needs: { env: ["OPENWORK_EVAL_ENGINE"] },
+});
+
+mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat layout", async ({ world, user, probe, step, evidence }) => {
+  await world.app.client.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await world.openNewTask();
+  await user.see("composer", { editable: true });
+  await user.looks(["At phone width, the new-chat composer sits near the bottom of the app rather than directly below the heading."]);
+
+  await simulateKeyboardViewport(world.app, 470, 80);
+  const read = () => mobileChatGeometry(world.app);
+  const keyboard = await probe.eventually(read, {
+    within: 10_000, label: "chat shell follows keyboard viewport shrink and pan",
+    until: (value) => Boolean(value.shell && Math.abs(value.shell.top - 80) < 2 && Math.abs(value.shell.height - 470) < 2),
+  });
+  expect(keyboard.editorFontSize).toBeGreaterThanOrEqual(16);
+  expect(keyboard.editor?.bottom).toBeLessThanOrEqual(550);
+  expect(keyboard.toolbar?.height).toBeLessThanOrEqual(40);
+  expect(keyboard.send?.right).toBeLessThanOrEqual(390);
+  evidence.recordJsonArtifact("Simulated keyboard viewport geometry, not an iOS keyboard", keyboard);
+
+  await user.type("composer", world.prompt);
+  await probe.eventually(() => probe.composer(), { within: 30_000, label: "mobile send enabled", until: (value) => value.runTaskEnabled });
+  const before = await read();
+  await using transition = await world.transition(evidence.dir);
+  await user.click("Run task");
+  await probe.eventually(() => transition.read(), { within: 10_000, label: "held first mobile session creation", until: (value) => value.held === 1 });
+  const held = await read();
+  expect(Math.abs((held.editor?.bottom ?? 0) - (before.editor?.bottom ?? 0))).toBeLessThanOrEqual(2);
+  await user.looks(["The mobile composer remains visible inside the shortened app viewport while the first send is pending; the header remains visible."]);
+  await transition.release();
+  await user.see({ text: "Paragraph 18:" }, { timeoutMs: 120_000 });
+  const persisted = await read();
+  expect(persisted.userCount).toBe(1);
+  expect(persisted.editor?.bottom).toBeLessThanOrEqual(550);
+  expect(Math.abs((persisted.editor?.bottom ?? 0) - (held.editor?.bottom ?? 0))).toBeLessThanOrEqual(16);
+  evidence.recordJsonArtifact("First-send composer handoff geometry", { before, held, persisted });
+
+  await step("a new mobile turn reserves answer space and survives keyboard dismissal", async () => {
+    await user.type("composer", world.followupPrompt);
+    await user.click("Run task");
+    await user.see({ text: world.followupReply }, { timeoutMs: 90_000 });
+    const anchored = await probe.eventually(read, {
+      within: 10_000, label: "new user turn aligned at the transcript start",
+      until: (value) => Boolean(value.latestUser && value.thread && Math.abs(value.latestUser.top - value.thread.top) <= 8),
+    });
+    expect(anchored.userCount).toBe(2);
+    await user.looks(["The latest user message starts near the top of the transcript with the short assistant answer below it and the compact composer at the bottom of the shortened viewport."]);
+    await simulateKeyboardViewport(world.app, 844, 0);
+    const dismissed = await probe.eventually(read, {
+      within: 10_000, label: "keyboard dismissal retains new turn position",
+      until: (value) => Boolean(value.shell?.height === 844 && value.latestUser && value.thread && Math.abs(value.latestUser.top - value.thread.top) <= 8),
+    });
+    expect(dismissed.pageScroll).toBe(0);
+    evidence.recordJsonArtifact("New turn before and after simulated keyboard dismissal", { anchored, dismissed });
+    await user.looks(["At full phone height, the latest user turn remains at the top of the conversation pane and the composer stays at the bottom."]);
+  });
+
+  await step("narrow phone and desktop retain usable composer controls", async () => {
+    await setViewport(world.app, { width: 320, height: 844, deviceScaleFactor: 1 });
+    await simulateKeyboardViewport(world.app, 844, 0);
+    const narrow = await probe.eventually(read, { within: 10_000, label: "narrow phone toolbar fits", until: (value) => Boolean(value.shell?.width === 320 && value.send && value.send.right <= 320) });
+    expect(narrow.toolbar?.height).toBeLessThanOrEqual(40);
+    await user.looks(["At narrow phone width, the composer send button and model control remain inside the viewport without horizontal overflow."]);
+    await setViewport(world.app, { width: 1440, height: 900, deviceScaleFactor: 1 });
+    await simulateKeyboardViewport(world.app, 450, 90);
+    const desktop = await probe.eventually(read, { within: 10_000, label: "desktop ignores mobile keyboard shell geometry", until: (value) => Boolean(value.shell && value.shell.height > 800) });
+    expect(desktop.editor?.height).toBeGreaterThanOrEqual(60);
+    await user.looks(["At desktop width, the normal full-height chat layout and larger composer remain visible."]);
+    evidence.recordAssertionEvidence("Mobile viewport and turn layout do not resize the desktop shell", JSON.stringify({ narrow, desktop }), true);
+  });
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {

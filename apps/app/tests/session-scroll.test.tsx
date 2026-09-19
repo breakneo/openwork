@@ -57,6 +57,63 @@ function state(id = "a", owner?: string) {
   return getSessionScrollState(useSessionScrollStore.getState().sessions, id, owner);
 }
 
+test("mobile send reserves answer space and keeps the new turn through keyboard resize and streaming", async () => {
+  const media = window.matchMedia("(max-width: 1023px)");
+  Object.defineProperty(media, "matches", { value: true });
+  spyOn(window, "matchMedia").mockReturnValue(media);
+  const view = fixture();
+  view.layout.messages = [{ id: "first", top: 0, height: 300 }, { id: "sent", top: 300, height: 48 }];
+  view.layout.height = 348;
+  await view.render("a", true, "sent");
+  expect(view.container.scrollTop).toBe(300);
+  expect(view.container.scrollHeight).toBe(500);
+  expect(state().mode).toBe("manual");
+  view.layout.viewportHeight = 300;
+  for (const observer of observers) observer();
+  runFrames();
+  expect(view.container.scrollTop).toBe(300);
+  expect(view.container.scrollHeight).toBe(600);
+  view.layout.height = 450;
+  await view.render("a", true, "sent");
+  expect(view.container.scrollTop).toBe(300);
+  expect(view.container.scrollHeight).toBe(600);
+  view.layout.height = 900;
+  await view.render("a", true, "sent");
+  expect(view.container.scrollTop).toBe(300);
+  expect(view.container.scrollHeight).toBe(900);
+  view.controls.markScrollGesture();
+  view.container.scrollTop = 150;
+  view.container.dispatchEvent(new Event("scroll", { bubbles: true }));
+  view.layout.height = 950;
+  await view.render("a", true, "sent");
+  expect(view.container.scrollTop).toBe(150);
+  view.layout.messages.push({ id: "next", top: 950, height: 48 });
+  view.layout.height = 998;
+  await view.render("a", true, "next");
+  expect(view.container.scrollTop).toBe(950);
+  expect(view.container.scrollHeight).toBe(1250);
+  view.controls.jumpToLatest("auto");
+  runFrames();
+  view.layout.height = 1400;
+  await view.render("a", true, "next");
+  runFrames();
+  expect(view.container.scrollTop).toBe(1100);
+  expect(state().mode).toBe("stickyBottom");
+});
+
+test("desktop short sends still clamp to the bottom without reserved answer space", async () => {
+  const media = window.matchMedia("(max-width: 1023px)");
+  Object.defineProperty(media, "matches", { value: false });
+  spyOn(window, "matchMedia").mockReturnValue(media);
+  const view = fixture();
+  view.layout.messages = [{ id: "first", top: 0, height: 300 }, { id: "sent", top: 300, height: 48 }];
+  view.layout.height = 348;
+  await view.render("a", true, "sent");
+  expect(view.container.scrollTop).toBe(148);
+  expect(view.container.scrollHeight).toBe(348);
+  expect(state().mode).toBe("stickyBottom");
+});
+
 function runFrames() {
   const pending = [...frames.values()];
   frames.clear();
@@ -96,31 +153,34 @@ function fixture(geometryOwner?: string, pagination: Pick<Parameters<typeof useS
   const scrollWrites: number[] = [];
   let controls: ReturnType<typeof useSessionScrollController> | undefined;
   let unmounted = false;
-  function Harness({ sessionId, ready }: { sessionId: string; ready: boolean }) {
+  function Harness({ sessionId, ready, submittedMessageId }: { sessionId: string; ready: boolean; submittedMessageId: string | null }) {
     const containerRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const setContainer = useCallback((node: HTMLDivElement | null) => {
       containerRef.current = node;
       if (!node) return;
       Object.defineProperties(node, {
-        scrollHeight: { configurable: true, get: () => layout.height },
+        scrollHeight: { configurable: true, get: () => layout.height + Number.parseFloat(contentRef.current?.style.paddingBottom || "0") },
         clientHeight: { configurable: true, get: () => layout.viewportHeight },
         clientWidth: { configurable: true, get: () => 500 },
         scrollTop: { configurable: true, get: () => scrollTop, set: (top: number) => {
           scrollWrites.push(top);
-          scrollTop = Math.max(0, Math.min(top, layout.height - layout.viewportHeight));
+          scrollTop = Math.max(0, Math.min(top, node.scrollHeight - layout.viewportHeight));
         } },
         scrollTo: { configurable: true, value: (options: ScrollToOptions) => { node.scrollTop = options.top ?? scrollTop; } },
         getBoundingClientRect: { configurable: true, value: () => new DOMRect(0, 40, 500, layout.viewportHeight) },
       });
     }, []);
     const scroll = useSessionScrollController({
-      selectedSessionId: sessionId, geometryOwner, submittedMessageId: null, historyReady: ready, renderedMessages: [...layout.messages], containerRef, contentRef, ...pagination,
+      selectedSessionId: sessionId, geometryOwner, submittedMessageId, historyReady: ready, renderedMessages: [...layout.messages], containerRef, contentRef, ...pagination,
     });
     controls = scroll;
     return <div ref={setContainer} onScroll={scroll.handleScroll} onWheel={(event) => scroll.markScrollGesture(event.target)}
       onPointerDown={(event) => { if (event.target === event.currentTarget) scroll.markScrollGesture(event.target); }}>
-      <div ref={contentRef} data-thread-virtualized={layout.virtualized}>
+      <div ref={(node) => {
+        contentRef.current = node;
+        if (node) node.getBoundingClientRect = () => new DOMRect(0, 40 - scrollTop, 500, layout.height + Number.parseFloat(node.style.paddingBottom || "0"));
+      }} data-thread-virtualized={layout.virtualized}>
         <div data-thread-history-complete={layout.complete} data-thread-loading={!ready ? "" : undefined} />
         {layout.messages.map((message) => <Fragment key={message.id}>
           {layout.placeholders.filter((placeholder) => placeholder.before === message.id).map((placeholder) =>
@@ -148,7 +208,7 @@ function fixture(geometryOwner?: string, pagination: Pick<Parameters<typeof useS
     layout,
     scrollWrites,
     unmount,
-    async render(sessionId = "a", ready = true) { await act(async () => root.render(<Harness sessionId={sessionId} ready={ready} />)); },
+    async render(sessionId = "a", ready = true, submittedMessageId: string | null = null) { await act(async () => root.render(<Harness sessionId={sessionId} ready={ready} submittedMessageId={submittedMessageId} />)); },
     get container() {
       const container = host.firstElementChild;
       if (!(container instanceof HTMLDivElement)) throw new Error("Missing scroll viewport");

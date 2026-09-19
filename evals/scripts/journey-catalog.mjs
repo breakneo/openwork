@@ -54,7 +54,10 @@ const definitions = {
   // Serves the model mock from the spec process's 127.0.0.1; only the local lane can reach it.
   'v2-sessionless-first-send.e2e.test.ts': {
     name: 'Send the first prompt from the New task route', placement: 'local',
-    cases: [{ id: 'DEN-LOCAL-SEND', engines: ['v1'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v1' } }],
+    cases: [
+      { id: 'DEN-LOCAL-SEND', engines: ['v1'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v1' } },
+      { id: 'MOBILE-CHAT-01', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--daytona', engine: 'v1' } },
+    ],
   },
   'streamed-markdown-answer.e2e.test.ts': {
     cases: [{ id: 'CONT-01', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v2' } }],

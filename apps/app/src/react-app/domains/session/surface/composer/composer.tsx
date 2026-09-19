@@ -1023,7 +1023,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
       if (useComposerStateStore.getState().pendingFocusSessionId !== props.sessionId) return;
       const editable = rootRef.current?.querySelector<HTMLElement>("[contenteditable='true']");
       if (!editable) return;
-      editable.focus();
+      editable.focus({ preventScroll: window.matchMedia("(max-width: 1023px)").matches });
       useComposerStateStore.setState({ pendingFocusSessionId: null });
     });
     return () => cancelAnimationFrame(frame);
@@ -1037,7 +1037,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
       const root = rootRef.current;
       if (!root) return;
       const editable = root.querySelector<HTMLElement>("[contenteditable='true']");
-      editable?.focus();
+      editable?.focus({ preventScroll: window.matchMedia("(max-width: 1023px)").matches });
     };
     const handleFlush = () => {
       // onDraftChange always runs synchronously on every keystroke, so this
@@ -1321,7 +1321,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     <DevProfiler id="SessionComposer">
     <div
       ref={rootRef}
-      className={props.flush ? `relative ${toolMenuOpen ? "z-50" : "z-20"}` : `sticky bottom-0 ${toolMenuOpen ? "z-50" : "z-20"} bg-gradient-to-t from-dls-surface via-dls-surface/95 to-transparent px-4 pb-[max(0.5rem,calc(env(safe-area-inset-bottom)+var(--keyboard-inset,0px)))] max-lg:px-3 lg:px-8 ${props.compactTopSpacing ? "pt-0" : "pt-1"}`}
+      className={props.flush ? `relative ${toolMenuOpen ? "z-50" : "z-20"}` : `sticky bottom-0 shrink-0 ${toolMenuOpen ? "z-50" : "z-20"} bg-gradient-to-t from-dls-surface via-dls-surface/95 to-transparent px-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] max-lg:px-3 lg:px-8 ${props.compactTopSpacing ? "pt-0" : "pt-1"}`}
       style={{ contain: "layout style" }}
       onKeyDownCapture={handleKeyDownCapture}
       onCompositionStart={() => {
@@ -1455,7 +1455,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 {t("composer.escape_to_stop")}
               </div>
             ) : null}
-            <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 @min-[560px]/composer:flex">
+            <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 max-lg:flex @min-[560px]/composer:flex">
               <div className="contents">
                 <div className="col-start-1 row-start-2 flex shrink-0 items-center gap-1.5">
                 <input
@@ -1723,12 +1723,12 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
 
                 </div>
 
-                <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-wrap items-center gap-1 border-b border-dls-border pb-2 @min-[560px]/composer:flex-1 @min-[560px]/composer:border-0 @min-[560px]/composer:pb-0">
+                <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-wrap items-center gap-1 border-b border-dls-border pb-2 max-lg:flex-1 max-lg:flex-nowrap max-lg:border-0 max-lg:pb-0 @min-[560px]/composer:flex-1 @min-[560px]/composer:border-0 @min-[560px]/composer:pb-0">
                 {/* Agent picker (#2101/#1971). Only shown once a non-default
                     agent is selected. Switching back to Default agent lives in
                     this menu and in the + tools menu. Selection configures
                     subsequent submissions without interrupting the running turn. */}
-                <div ref={agentMenuRef} className={showAgentPicker ? "relative min-w-0 max-w-full shrink-0" : "hidden"}>
+                <div ref={agentMenuRef} className={showAgentPicker ? "relative min-w-0 max-w-full shrink-0 max-lg:max-w-[40%] max-lg:shrink" : "hidden"}>
                   <button
                     type="button"
                     className="flex h-9 max-h-9 max-w-full items-center gap-1 rounded-md px-1.5 text-[12px] font-medium text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12"
@@ -1844,6 +1844,10 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
               <div data-composer-actions className="col-start-2 row-start-2 ml-auto flex shrink-0 items-center gap-1.5">
                 <button
                   type="button"
+                  onPointerDown={(event) => {
+                    // Keep the mobile editor/keyboard in place when tapping send.
+                    if (event.pointerType === "touch" && window.matchMedia("(max-width: 1023px)").matches) event.preventDefault();
+                  }}
                   onClick={
                     props.busy
                       ? props.onStop

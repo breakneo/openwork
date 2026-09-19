@@ -1356,7 +1356,7 @@ export function SessionPage(props: SessionPageProps) {
       isReferenceCurrent={props.isSessionReferenceCurrent}
       onOpenReference={handleOpenSessionReference}
     >
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(74,111,255,0.12),transparent_42%),var(--app-bg,#0b1020)] text-dls-text max-lg:pt-[env(safe-area-inset-top)] mac:bg-transparent">
+    <div data-chat-viewport className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(74,111,255,0.12),transparent_42%),var(--app-bg,#0b1020)] text-dls-text max-lg:fixed max-lg:inset-x-0 max-lg:top-[var(--chat-viewport-top,0px)] max-lg:h-[var(--chat-viewport-height,100dvh)] max-lg:overflow-hidden max-lg:pt-[env(safe-area-inset-top)] mac:bg-transparent">
       <SidebarProvider
         open={sidebarOpen}
         onOpenChange={setSidebarOpen}
@@ -1874,7 +1874,7 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
 
               {!props.primarySlot && !hasMainContentTakeover && !showDelayedSessionLoadingState && !canRenderReactSurface && !showStartupSkeleton ? (
-                <div className={`mx-auto max-w-[800px] px-6 ${showWorkspaceSetupEmptyState ? "pt-20" : "pt-10"}`}>
+                <div className={`mx-auto max-w-[800px] px-6 max-lg:h-full max-lg:min-h-0 max-lg:w-full max-lg:px-0 max-lg:pt-0 ${showWorkspaceSetupEmptyState ? "pt-20" : "pt-10"}`}>
                   {props.notFoundMessage ? (
                     <div className="px-6 py-16 text-center">
                       <div className="mx-auto max-w-md rounded-2xl border border-dls-border bg-dls-card px-5 py-6 shadow-[var(--dls-card-shadow)]">
@@ -1928,7 +1928,7 @@ export function SessionPage(props: SessionPageProps) {
                       {t("session.loading_detail")}
                     </div>
                   ) : (
-                    <div className="flex flex-1 items-center justify-center py-16">
+                    <div className="flex flex-1 items-center justify-center py-16 max-lg:h-full max-lg:min-h-0 max-lg:py-0">
                       <SessionEmptyHero
                         // Remount per draft owner so the hero reads that
                         // workspace's persisted new-task draft instead of

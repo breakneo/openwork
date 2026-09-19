@@ -171,14 +171,15 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
   };
 
   return (
-    <div className="mx-auto w-full max-w-[640px] space-y-6 px-4 max-lg:px-4 sm:px-6">
-      <div className="space-y-1.5 text-center">
+    <div data-chat-empty-hero className="mx-auto w-full max-w-[640px] space-y-6 px-4 max-lg:flex max-lg:h-full max-lg:min-h-0 max-lg:flex-col max-lg:space-y-0 max-lg:gap-4 max-lg:overflow-y-auto max-lg:px-3 max-lg:pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
+      <div className="space-y-1.5 text-center max-lg:pt-6">
         <h2 className="text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-foreground">
           What do you need done?
         </h2>
         <p className="text-[13px] text-muted-foreground">Describe it in plain language</p>
       </div>
 
+      <div data-empty-composer-dock className="max-lg:sticky max-lg:bottom-0 max-lg:order-last max-lg:mt-auto max-lg:shrink-0 max-lg:bg-dls-surface">
       <NewTaskComposer
         draft={prompt}
         onDraftChange={setPrompt}
@@ -186,6 +187,7 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
         busy={props.busy ?? false}
         context={props.composer ?? null}
       />
+      </div>
 
       {showModelsHint ? (
         <div
