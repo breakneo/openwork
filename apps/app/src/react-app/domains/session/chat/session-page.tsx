@@ -53,6 +53,7 @@ import { WorkbenchPanelGroup, PRIMARY_PANEL_ID, SECONDARY_PANEL_ID } from "./wor
 import ProviderAuthModal, { type ProviderAuthModalProps } from "../../connections/provider-auth/provider-auth-modal";
 import { RenameSessionModal } from "../modals/rename-session-modal";
 import { AppSidebar } from "../sidebar/app-sidebar";
+import { MobileChatActions, MobileChatNavigation } from "./mobile-chat-navigation";
 import { useSessionManagementStore } from "../sidebar/session-management-store";
 import { SessionSurface, type SessionSurfaceProps } from "../surface/session-surface";
 import { useSessionFindStore } from "../surface/find-store";
@@ -1003,6 +1004,7 @@ export function SessionPage(props: SessionPageProps) {
   const providerCount = props.hasUsableModel ? 1 : props.providerConnectedIds.length;
   const messageCountVisible = props.selectedSessionId ? 1 : 0;
   const hasMainContentTakeover = Boolean(props.mainContentTakeover);
+  const sidebarOnlyChrome = isMobile && shellConfig.sidebar && !props.primarySlot && !hasMainContentTakeover && !props.mainContentHeaderActionsRef && !props.primaryTitle && !props.mainContentTitle;
   const showWorkspaceSetupEmptyState = props.workspaces.length === 0 && !props.selectedSessionId;
   const showStartupSkeleton =
     !bootOverlayVisible &&
@@ -1423,6 +1425,15 @@ export function SessionPage(props: SessionPageProps) {
           onStartResize={startLeftSidebarResize}
           onOpenAccountSettings={props.onOpenSettings}
           onOpenExtensions={props.onOpenExtensions}
+          mobileChatActions={sidebarOnlyChrome ? (
+            <MobileChatActions
+              onFind={findButtonSessionId ? () => useSessionFindStore.getState().openFind({ sessionId: findButtonSessionId }) : undefined}
+              onFiles={openArtifactRailPane}
+              fileCount={artifactTargetCount}
+              onSignIn={showCloudSignIn ? openCloudSignIn : undefined}
+              onParent={parentSessionLink ? () => openSessionTab(parentSessionLink.workspaceId, parentSessionLink.sessionId) : undefined}
+            />
+          ) : undefined}
           extensionsActive={props.extensionsActive}
           status={{
             clientConnected: props.clientConnected,
@@ -1463,7 +1474,7 @@ export function SessionPage(props: SessionPageProps) {
               below) is invisible — nothing scrolls beneath either — but each
               one forces an extra full-pane blur pass every frame the transcript
               repaints. Keep the pane as the only backdrop surface. */}
-          <header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
+          {sidebarOnlyChrome ? <MobileChatNavigation /> : <header data-session-header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
             <div className="flex min-w-0 items-center gap-3">
               {shellConfig.sidebar ? <SidebarTrigger className="mac:hidden" /> : null}
               {parentSessionLink && !props.primarySlot && !hasMainContentTakeover ? (
@@ -1632,7 +1643,7 @@ export function SessionPage(props: SessionPageProps) {
                 </Button>
               ) : null}
             </div>}
-          </header>
+          </header>}
 
           {showNarrowPaneSwitcher ? (
             <NarrowPaneSwitcher
@@ -2020,7 +2031,7 @@ export function SessionPage(props: SessionPageProps) {
           </aside>
           </div>
         </SidebarInset>
-        {shellConfig.sidebar ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
+        {shellConfig.sidebar && !sidebarOnlyChrome ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
       </SidebarProvider>
 
       {props.providerAuthModal ? <ProviderAuthModal {...props.providerAuthModal} /> : null}

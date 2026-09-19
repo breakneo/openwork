@@ -41,6 +41,10 @@ export async function mobileChatGeometry(app: Surface) {
       suggestionsVisible: Boolean(visible("[data-empty-suggestions]")),
       headerTitleVisible: Boolean(visible("[data-session-header-title]")),
       headerWorkspaceVisible: Boolean(visible("[data-session-header-workspace]")),
+      headerVisible: Boolean(visible("[data-session-header]")),
+      navigation: rect(visible("[data-mobile-chat-navigation]")),
+      navigationCount: [...document.querySelectorAll('[data-session-pane] [data-sidebar="trigger"]')].filter((node) => node.getClientRects().length > 0).length,
+      overflowVisible: Boolean(visible('[data-session-pane] button[aria-label="More actions"]')),
     };
   });
 }
