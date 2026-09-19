@@ -33,6 +33,7 @@ export async function bootAcmeWeb(stack: AsyncDisposableStack): Promise<AcmeWebW
     name: ACME_WEB_NAME,
     state: "isolated",
     env: {
+      ...process.env,
       OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY: "1",
       OPENWORK_DEV_DEN_PROXY_TARGET: den.ref.webUrl,
     },
