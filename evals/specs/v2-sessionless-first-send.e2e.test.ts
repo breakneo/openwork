@@ -82,6 +82,9 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
     await user.notSee({ placeholder: "sk-..." });
     await user.press("Escape");
     await user.notSee({ placeholder: "Filter providers by name or ID" });
+    // CDP's mouse clicks can open the restored model trigger's focus tooltip.
+    // Dismiss it before the separate simulated-keyboard/composer interaction.
+    await user.press("Escape");
     expect(await world.route()).toBe(routeBefore);
     expect((await probe.composer()).draftText).toBe("");
     expect(await world.requests()).toHaveLength(0);
