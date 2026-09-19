@@ -201,6 +201,10 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
     await user.click({ role: "button", label: "Open sidebar" });
     await user.click({ role: "button", label: "Chat actions" });
     await user.click({ role: "menuitem", label: "Find in conversation" });
+    await probe.eventually(() => probe.eval(browserScript(() => {
+      const sidebar = document.querySelector('[data-sidebar="sidebar"][data-mobile="true"]');
+      return !sidebar || sidebar.getClientRects().length === 0;
+    }, [])), { within: 5_000, label: "sidebar exit completes after selecting Find", until: (closed) => closed });
     await user.notSee({ role: "button", label: "Chat actions" });
     await user.see({ placeholder: "Find in conversation" });
     await user.press("Escape");
