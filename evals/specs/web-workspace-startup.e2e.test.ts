@@ -101,6 +101,7 @@ test("WEB-STARTUP-01 real Daytona cold boot keeps one workspace status until cha
     await user.reload();
     await user.see({ text: "Checking workspace access…" });
     await user.looks(["A small Checking workspace access status is visible without a large access card or a Reload action."]);
+    await evalIn(world.app, () => sessionStorage.removeItem("eval.cloud-startup-fault"));
     await user.see("Run task", { timeoutMs: 120_000 });
   });
   await step("a ready instance with delayed workspace data keeps the connection status", async () => {
