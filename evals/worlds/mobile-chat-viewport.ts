@@ -37,6 +37,10 @@ export async function mobileChatGeometry(app: Surface) {
       editorFontSize: editor ? parseFloat(getComputedStyle(editor).fontSize) : 0,
       editorFocused: editor === document.activeElement,
       userCount: users.length,
+      greetingVisible: Boolean(visible("[data-empty-greeting]")),
+      suggestionsVisible: Boolean(visible("[data-empty-suggestions]")),
+      headerTitleVisible: Boolean(visible("[data-session-header-title]")),
+      headerWorkspaceVisible: Boolean(visible("[data-session-header-workspace]")),
     };
   });
 }

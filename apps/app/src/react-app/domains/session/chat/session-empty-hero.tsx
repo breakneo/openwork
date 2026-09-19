@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, X, Zap } from "lucide-react";
 
 import { DEFAULT_MODEL } from "@/app/constants";
+import { useIsMobile } from "@/hooks/use-mobile";
 import type { ComposerAttachment } from "@/app/types";
 import { resolveOrganizationPromptCardContent } from "@/components/chat/task-suggestions";
 import { useCheckDesktopRestriction, useOrgRestrictions } from "@/react-app/domains/cloud/desktop-config-provider";
@@ -23,6 +24,7 @@ import {
   type NewTaskComposerHandoff,
 } from "./new-task-composer";
 import { consumePendingChatSeed, pendingChatSeedEvent } from "./pending-chat-seed";
+import { hideEmptyHeroIntroduction } from "./empty-hero-introduction";
 
 type HeroSuggestion = {
   title: string;
@@ -88,6 +90,27 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
   // continuation. Persisting it here would pre-fill the next new task. On
   // success this hero unmounts, so the flag only resets when the send fails.
   const sendInFlightRef = useRef(false);
+  const [sendInFlight, setSendInFlight] = useState(false);
+  const [composing, setComposing] = useState(false);
+  const composerDockRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const hideIntroduction = hideEmptyHeroIntroduction(isMobile, composing, prompt, sendInFlight || Boolean(props.busy));
+
+  useEffect(() => {
+    // A null blur target can be keyboard dismissal or a touch send. Only a
+    // deliberate interaction outside the dock ends composition, never blur.
+    const leaveComposer = (event: Event) => {
+      if (event.target instanceof Node && !composerDockRef.current?.contains(event.target)) {
+        setComposing(false);
+      }
+    };
+    document.addEventListener("pointerdown", leaveComposer);
+    document.addEventListener("focusin", leaveComposer);
+    return () => {
+      document.removeEventListener("pointerdown", leaveComposer);
+      document.removeEventListener("focusin", leaveComposer);
+    };
+  }, []);
   const persistPrompt = persistedDraft.save;
   const setPrompt = useCallback((value: string) => {
     setPromptState(value);
@@ -154,12 +177,14 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
     const trimmedPrompt = resolvedPrompt.trim();
     if ((!trimmedPrompt && !attachments.length) || props.busy) return;
     sendInFlightRef.current = true;
+    setSendInFlight(true);
     try {
       await props.onRunTask(trimmedPrompt, attachments, handoff);
     } catch (error) {
       // The composer stays on this route, so whatever it holds now is once
       // again the unsent new-task prompt and must stay reachable.
       sendInFlightRef.current = false;
+      setSendInFlight(false);
       persistPrompt({ text: persistableComposerDraftText(promptRef.current), mode: "prompt" });
       throw error;
     }
@@ -172,14 +197,14 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
 
   return (
     <div data-chat-empty-hero className="mx-auto w-full max-w-[640px] space-y-6 px-4 max-lg:flex max-lg:h-full max-lg:min-h-0 max-lg:flex-col max-lg:space-y-0 max-lg:gap-4 max-lg:overflow-y-auto max-lg:px-3 max-lg:pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
-      <div className="space-y-1.5 text-center max-lg:pt-6">
+      <div data-empty-greeting hidden={hideIntroduction} className="space-y-1.5 text-center max-lg:pt-6">
         <h2 className="text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-foreground">
           What do you need done?
         </h2>
         <p className="text-[13px] text-muted-foreground">Describe it in plain language</p>
       </div>
 
-      <div data-empty-composer-dock className="max-lg:sticky max-lg:bottom-0 max-lg:order-last max-lg:mt-auto max-lg:shrink-0 max-lg:bg-dls-surface">
+      <div ref={composerDockRef} onFocusCapture={() => setComposing(true)} data-empty-composer-dock className="max-lg:sticky max-lg:bottom-0 max-lg:order-last max-lg:mt-auto max-lg:shrink-0 max-lg:bg-dls-surface">
       <NewTaskComposer
         draft={prompt}
         onDraftChange={setPrompt}
@@ -230,7 +255,7 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
         </button>
       ) : null}
 
-      <div className="grid gap-2 sm:grid-cols-2">
+      <div data-empty-suggestions hidden={hideIntroduction} className={hideIntroduction ? "hidden" : "grid gap-2 sm:grid-cols-2"}>
         {suggestions.map((suggestion) => (
           <button
             key={suggestion.title}

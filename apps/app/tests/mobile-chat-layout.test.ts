@@ -2,6 +2,29 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { visualViewportGeometry } from "../src/hooks/use-visual-viewport-inset";
 import { mobileTurnSpace } from "../src/react-app/domains/session/surface/mobile-turn-space";
+import { hideEmptyHeroIntroduction } from "../src/react-app/domains/session/chat/empty-hero-introduction";
+
+test("mobile introduction returns only after composition exits with an idle empty draft", () => {
+  expect(hideEmptyHeroIntroduction(true, true, "", false)).toBe(true);
+  expect(hideEmptyHeroIntroduction(true, false, "draft", false)).toBe(true);
+  expect(hideEmptyHeroIntroduction(true, false, "", true)).toBe(true);
+  expect(hideEmptyHeroIntroduction(true, true, "", true)).toBe(true);
+  expect(hideEmptyHeroIntroduction(true, false, "  ", false)).toBe(false);
+  expect(hideEmptyHeroIntroduction(false, true, "draft", true)).toBe(false);
+});
+
+test("mobile header hides only metadata, and composer exit requires an outside interaction", () => {
+  const page = source("react-app/domains/session/chat/session-page.tsx");
+  expect(page).toContain('!props.primaryTitle && !props.mainContentTitle && "max-lg:hidden"');
+  expect(page).toContain('className="hidden min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-dls-secondary lg:flex"');
+  const hero = source("react-app/domains/session/chat/session-empty-hero.tsx");
+  expect(hero).toContain('document.addEventListener("pointerdown", leaveComposer)');
+  expect(hero).toContain('document.addEventListener("focusin", leaveComposer)');
+  expect(hero).not.toContain("onBlur");
+  expect(hero).toContain("setSendInFlight(true)");
+  expect(hero).toContain("data-empty-greeting hidden={hideIntroduction}");
+  expect(hero).toContain("data-empty-suggestions hidden={hideIntroduction}");
+});
 
 describe("mobile viewport geometry", () => {
   test("tracks keyboard height and Safari focus pan independently", () => {

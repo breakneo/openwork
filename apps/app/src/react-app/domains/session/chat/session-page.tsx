@@ -1488,7 +1488,7 @@ export function SessionPage(props: SessionPageProps) {
                   <TooltipContent>Back to parent chat</TooltipContent>
                 </Tooltip>
               ) : null}
-              <h1 className={cn("truncate font-medium text-dls-text", props.mainContentHeaderActionsRef ? "text-base leading-6" : "text-[13px]")}>
+              <h1 data-session-header-title className={cn("truncate font-medium text-dls-text", !props.primaryTitle && !props.mainContentTitle && "max-lg:hidden", props.mainContentHeaderActionsRef ? "text-base leading-6" : "text-[13px]")}>
                 {props.primaryTitle
                   ? props.primaryTitle
                   : props.mainContentTitle
@@ -1501,7 +1501,7 @@ export function SessionPage(props: SessionPageProps) {
                 // Pinned and archived sessions are listed across workspaces, so
                 // the header names the workspace the open session belongs to.
                 <span
-                  className="flex min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-dls-secondary"
+                  className="hidden min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-dls-secondary lg:flex"
                   data-session-header-workspace={workspaceName}
                 >
                   <span aria-hidden="true">·</span>

@@ -37,6 +37,13 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
   expect(keyboard.send?.right).toBeLessThanOrEqual(390);
   evidence.recordJsonArtifact("Simulated keyboard viewport geometry, not an iOS keyboard", keyboard);
 
+  await user.click("composer");
+  const focused = await probe.eventually(read, {
+    within: 10_000, label: "mobile composition hides the greeting, suggestions and header metadata",
+    until: (value) => !value.greetingVisible && !value.suggestionsVisible && !value.headerTitleVisible && !value.headerWorkspaceVisible,
+  });
+  evidence.recordJsonArtifact("Focused mobile composition without introduction or header metadata", focused);
+  await user.looks(["While composing on mobile, greeting and suggestion cards are hidden, and the header shows navigation and actions without the session title or workspace metadata."]);
   await user.type("composer", world.prompt);
   await probe.eventually(() => probe.composer(), { within: 30_000, label: "mobile send enabled", until: (value) => value.runTaskEnabled });
   const before = await read();
@@ -48,12 +55,19 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
   await world.app.client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await probe.eventually(() => transition.read(), { within: 10_000, label: "held first mobile session creation", until: (value) => value.held === 1 });
   const held = await read();
+  expect(held.greetingVisible).toBe(false);
+  expect(held.suggestionsVisible).toBe(false);
+  expect(held.headerTitleVisible).toBe(false);
+  expect(held.headerWorkspaceVisible).toBe(false);
+  expect((await probe.composer()).draftText).toBe("");
   expect(held.editorFocused).toBe(true);
   expect(Math.abs((held.editor?.bottom ?? 0) - (before.editor?.bottom ?? 0))).toBeLessThanOrEqual(2);
   await user.looks(["The mobile composer remains visible inside the shortened app viewport while the first send is pending; the header remains visible."]);
   await transition.release();
   await user.see({ text: "Paragraph 18:" }, { timeoutMs: 120_000 });
   const persisted = await read();
+  expect(persisted.headerTitleVisible).toBe(false);
+  expect(persisted.headerWorkspaceVisible).toBe(false);
   expect(persisted.userCount).toBe(1);
   expect(persisted.editor?.bottom).toBeLessThanOrEqual(550);
   expect(Math.abs((persisted.editor?.bottom ?? 0) - (held.editor?.bottom ?? 0))).toBeLessThanOrEqual(16);
@@ -101,6 +115,8 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
     await simulateKeyboardViewport(world.app, 450, 90);
     const desktop = await probe.eventually(read, { within: 10_000, label: "desktop ignores mobile keyboard shell geometry", until: (value) => Boolean(value.shell && value.shell.height > 800) });
     expect(desktop.editor?.height).toBeGreaterThanOrEqual(60);
+    expect(desktop.headerTitleVisible).toBe(true);
+    expect(desktop.headerWorkspaceVisible).toBe(true);
     await user.looks(["At desktop width, the normal full-height chat layout and larger composer remain visible."]);
     evidence.recordAssertionEvidence("Mobile viewport and turn layout do not resize the desktop shell", JSON.stringify({ narrow, desktop }), true);
   });
