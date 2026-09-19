@@ -23,10 +23,9 @@ async function cloudStartup(seed: Seed) {
       DAYTONA_USE_DEPRECATED_POLLING: "false", DAYTONA_HEALTHCHECK_TIMEOUT_MS: "120000",
       WORKER_PROVISIONING_RECONCILE_INTERVAL_MS: "0", CLOUD_IDLE_LOOP_SECONDS: "0",
     },
-    org: { name: "Startup Test", admin: { name: "Test Admin", email: "startup-admin@openwork.test" }, members: { member: { name: "Test Member" } } },
+    org: { name: "Startup Test", admin: { name: "Test Admin", email: "startup-admin@openwork.test" } },
   });
-  const member = den.members.member;
-  if (!member) throw new Error("Missing isolated test member");
+  const member = den.admin;
   const orgs = await denFetch(den.admin, "/v1/me/orgs", { headers: { authorization: `Bearer ${den.admin.token}` } });
   const rows = record(orgs.body) && Array.isArray(orgs.body.orgs) ? orgs.body.orgs.filter(record) : [];
   const orgId = rows[0]?.id;
