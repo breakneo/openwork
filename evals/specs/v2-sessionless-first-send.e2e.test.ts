@@ -25,6 +25,71 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
   await user.see("composer", { editable: true });
   await user.looks(["At phone width, the new-chat composer sits near the bottom of the app rather than directly below the heading."]);
 
+  const pickerFocus = () => probe.eval(browserScript(() => {
+    const active = document.activeElement;
+    return {
+      activeTag: active?.tagName,
+      activeText: active?.textContent?.trim(),
+      activeLabel: active?.getAttribute("aria-label"),
+      activePlaceholder: active?.getAttribute("placeholder"),
+      rootControlFocused: Boolean(document.querySelector('[data-slot="model-select-root"]')?.contains(active)),
+      inputs: [...document.querySelectorAll<HTMLInputElement>('[role="dialog"] input:not([type="hidden"])')]
+        .filter((input) => input.getClientRects().length > 0)
+        .map((input) => ({ placeholder: input.placeholder, fontSize: Number.parseFloat(getComputedStyle(input).fontSize), focused: input === active })),
+    };
+  }, []));
+
+  await step("mobile model and provider navigation does not reopen search or lose focus", async () => {
+    await probe.eventually(() => probe.composer(), { within: 30_000, label: "fixture model ready", until: (value) => !value.modelUnavailable });
+    const routeBefore = await world.route();
+    await user.click({ role: "button", label: "Change model" });
+    await user.click({ role: "button", label: /^Model\s+First send model/ });
+    await user.see({ placeholder: "Search models..." });
+    const modelSearch = await pickerFocus();
+    expect(modelSearch.inputs.some((input) => input.placeholder === "Search models..." && input.fontSize >= 16)).toBe(true);
+    expect(modelSearch.activeTag).toBe("BUTTON");
+    expect(modelSearch.activeText).toBe("Model");
+    expect(modelSearch.inputs.some((input) => input.focused)).toBe(false);
+    await user.looks(["At phone width, the model picker has a readable search field, a Model back control, and model/provider actions inside the viewport."]);
+    await user.click({ role: "button", label: "Model" });
+    const modelBack = await pickerFocus();
+    expect(modelBack.rootControlFocused).toBe(true);
+    expect(modelBack.activeTag).toBe("BUTTON");
+    expect(modelBack.activeText).toMatch(/^Model/);
+    await user.click({ role: "button", label: /^Model\s+First send model/ });
+    await user.click({ role: "button", label: "Connect more providers" });
+    await user.see({ placeholder: "Filter providers by name or ID" });
+    const providerSearch = await probe.eventually(pickerFocus, {
+      within: 10_000, label: "mobile provider dialog focuses its title, not search",
+      until: (value) => value.activeText === "Connect providers" && value.activeTag !== "INPUT",
+    });
+    expect(providerSearch.inputs.some((input) => input.placeholder === "Filter providers by name or ID" && input.fontSize >= 16)).toBe(true);
+    expect(providerSearch.inputs.some((input) => input.focused)).toBe(false);
+    await user.looks(["At phone width, Connect providers shows a readable filter field, provider rows and a close action without horizontal overflow."]);
+    await user.type({ placeholder: "Filter providers by name or ID" }, "Google");
+    await user.click({ role: "button", label: /^Google/ });
+    await user.see({ placeholder: "sk-..." });
+    const providerSelected = await pickerFocus();
+    expect(providerSelected.inputs.some((input) => input.placeholder === "sk-..." && input.fontSize >= 16)).toBe(true);
+    expect(providerSelected.activeTag).not.toBe("BODY");
+    expect(providerSelected.inputs.some((input) => input.focused)).toBe(false);
+    await user.looks(["The mobile Google provider form shows its API key field and Back/Close actions within the viewport; no credential has been entered."]);
+    await user.click({ role: "button", label: "Back" });
+    const providerBack = await pickerFocus();
+    expect(providerBack.activeTag).toBe("BUTTON");
+    expect(providerBack.activeText).toMatch(/^Google/);
+    expect(providerBack.inputs.some((input) => input.focused)).toBe(false);
+    await user.notSee({ placeholder: "sk-..." });
+    await user.press("Escape");
+    await user.notSee({ placeholder: "Filter providers by name or ID" });
+    expect(await world.route()).toBe(routeBefore);
+    expect((await probe.composer()).draftText).toBe("");
+    expect(await world.requests()).toHaveLength(0);
+    evidence.recordJsonArtifact("Chromium mobile picker focus and computed input fonts (not native Safari zoom)", { modelSearch, modelBack, providerSearch, providerSelected, providerBack });
+    evidence.recordAssertionEvidence("Mobile picker navigation preserves focus without automatic search focus or provider submission",
+      "Model Back restores its root control; provider selection and Back retain dialog/row focus; visible search and API-key inputs compute to at least 16px; no credential is entered, no prompt is sent and the route/draft are unchanged.", true);
+  });
+
   await simulateKeyboardViewport(world.app, 470, 80);
   const read = () => mobileChatGeometry(world.app);
   const keyboard = await probe.eventually(read, {
@@ -119,6 +184,16 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
     expect(desktop.headerWorkspaceVisible).toBe(true);
     await user.looks(["At desktop width, the normal full-height chat layout and larger composer remain visible."]);
     evidence.recordAssertionEvidence("Mobile viewport and turn layout do not resize the desktop shell", JSON.stringify({ narrow, desktop }), true);
+    await user.click({ role: "button", label: "Change model" });
+    await user.click({ role: "button", label: /^Model\s+First send model/ });
+    const desktopSearch = await probe.eventually(pickerFocus, {
+      within: 10_000, label: "desktop model search retains keyboard focus",
+      until: (value) => value.activePlaceholder === "Search models...",
+    });
+    expect(desktopSearch.inputs.find((input) => input.placeholder === "Search models...")?.fontSize).toBe(13);
+    evidence.recordJsonArtifact("Desktop picker retains 13px focused search", desktopSearch);
+    await user.looks(["At desktop width, the model picker shows its compact search field, model options and provider actions."]);
+    await user.press("Escape");
   });
 });
 

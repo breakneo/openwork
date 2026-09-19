@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { t } from "@/i18n";
 import { readDenSettings } from "@/app/lib/den";
 import { FAST_PRICING_WARNING, getModelBehaviorControls, getModelBehaviorSelection } from "@/app/lib/model-behavior";
@@ -146,6 +147,8 @@ export function resolveModelPickerEmptyState(input: {
 
 export function ModelPickerModal(props: ModelPickerModalProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const isMobile = useIsMobile();
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
   const [refreshingOrganizationModels, setRefreshingOrganizationModels] = useState(false);
   const denAuth = useDenAuth();
@@ -170,13 +173,6 @@ export function ModelPickerModal(props: ModelPickerModalProps) {
     if (props.open) {
       props.setQuery("");
     }
-  }, [props.open]);
-
-  // Focus search
-  useEffect(() => {
-    if (!props.open) return;
-    const frame = requestAnimationFrame(() => searchInputRef.current?.focus());
-    return () => cancelAnimationFrame(frame);
   }, [props.open]);
 
   // Filter by search
@@ -316,9 +312,9 @@ export function ModelPickerModal(props: ModelPickerModalProps) {
         if (!open) props.onClose();
       }}
     >
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col overflow-hidden lg:max-w-3xl">
+      <DialogContent initialFocus={() => isMobile ? titleRef.current : searchInputRef.current} className="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col overflow-hidden lg:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>{t("models.title")}</DialogTitle>
+          <DialogTitle ref={titleRef} tabIndex={-1}>{t("models.title")}</DialogTitle>
           <DialogDescription>
             {resolveModelPickerSubtitle(props.subtitle)}
           </DialogDescription>
@@ -331,7 +327,7 @@ export function ModelPickerModal(props: ModelPickerModalProps) {
             <input
               ref={searchInputRef}
               type="text"
-              className="h-10 w-full rounded-xl border border-dls-border bg-dls-surface pl-9 pr-3 text-sm text-dls-text placeholder:text-dls-secondary focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
+              className="h-10 w-full rounded-xl border border-dls-border bg-dls-surface pl-9 pr-3 text-base lg:text-sm text-dls-text placeholder:text-dls-secondary focus:outline-none focus:ring-2 focus:ring-[rgba(var(--dls-accent-rgb),0.2)]"
               placeholder={t("models.search_placeholder")}
               value={props.query}
               onChange={(e) => props.setQuery(e.target.value)}

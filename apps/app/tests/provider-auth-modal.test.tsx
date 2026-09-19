@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import type { ProviderAuthModalProps } from "../src/react-app/domains/connections/provider-auth/provider-auth-modal";
@@ -105,8 +105,12 @@ describe("connect providers gateway visibility", () => {
     const input = dialog().querySelector<HTMLInputElement>('input[placeholder="Filter providers by name or ID"]');
     if (!input) throw new Error("Expected the provider search input");
     await act(async () => {
+      input.focus();
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, query);
       input.dispatchEvent(new Event("input", { bubbles: true }));
+      // Also exercise React's input-event fallback when another isolated test
+      // loaded react-dom before Happy DOM registered its document.
+      input.dispatchEvent(new KeyboardEvent("keyup", { key: query.slice(-1), bubbles: true }));
     });
 
     expect(dialog().textContent).toContain("No providers match your search.");
@@ -148,5 +152,69 @@ describe("connect providers gateway visibility", () => {
     expect(dialog().textContent).not.toContain("All providers");
     expect(providerButton("openai")).toBeDefined();
     expect(providerButton("gateway-openai")).toBeUndefined();
+  });
+
+  test("provider Back restores the selected row, not search, and leaves credentials untouched", async () => {
+    const props = createProps();
+    await act(async () => root.render(<ProviderAuthModal {...props} />));
+    // Base UI queues opening focus to the next animation frame.
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const search = dialog().querySelector("input");
+    expect(search?.classList.contains("text-base")).toBe(true);
+    expect(search?.classList.contains("lg:text-[13px]")).toBe(true);
+    await act(async () => providerButton("google")?.click());
+    expect(document.activeElement?.textContent).toBe("Connect providers");
+    const keyInput = dialog().querySelector("input");
+    expect(keyInput?.classList.contains("text-base")).toBe(true);
+    expect(keyInput?.classList.contains("lg:text-sm")).toBe(true);
+    const back = [...dialog().querySelectorAll("button")].find((button) => button.textContent?.trim() === "Back");
+    await act(async () => back?.click());
+    expect(document.activeElement).toBe(providerButton("google"));
+    expect(dialog().querySelector('input[type="password"]')).toBeNull();
+    // The row's keyboard action must still select that row after resetState.
+    await act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(dialog().textContent).toContain("Google");
+    expect(dialog().querySelector('input[placeholder="Filter providers by name or ID"]')).toBeNull();
+    expect(props.onSubmitApiKey).not.toHaveBeenCalled();
+    expect(props.onSelect).not.toHaveBeenCalled();
+  });
+
+  test.each([390, 1280])("opening focus at %ipx respects the mobile keyboard", async (width) => {
+    const matchMedia = window.matchMedia.bind(window);
+    const mediaSpy = spyOn(window, "matchMedia").mockImplementation((query) => {
+      const result = matchMedia(query);
+      if (query === "(max-width: 1023px)") Object.defineProperty(result, "matches", { value: width < 1024 });
+      return result;
+    });
+    try {
+      expect(window.matchMedia("(max-width: 1023px)").matches).toBe(width < 1024);
+      await act(async () => root.render(<ProviderAuthModal {...createProps()} />));
+      await act(async () => { await new Promise(requestAnimationFrame); });
+      expect(document.activeElement?.getAttribute("data-slot")).toBe(width < 1024 ? "dialog-title" : null);
+      if (width >= 1024) expect(document.activeElement?.tagName).toBe("INPUT");
+    } finally {
+      mediaSpy.mockRestore();
+    }
+  });
+
+  test("nested method Back stays in the dialog, then returns to its provider row", async () => {
+    const props = createProps();
+    props.authMethods.google = [
+      { type: "api", label: "API key", methodIndex: 0 },
+      { type: "oauth", label: "Sign in", methodIndex: 1 },
+    ];
+    await act(async () => root.render(<ProviderAuthModal {...props} />));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    await act(async () => providerButton("google")?.click());
+    const api = [...dialog().querySelectorAll("button")].find((button) => button.textContent?.startsWith("API key"));
+    await act(async () => api?.click());
+    for (const expected of ["Choose how you'd like to connect.", "Filter providers by name or ID"]) {
+      const back = [...dialog().querySelectorAll("button")].find((button) => button.textContent?.trim() === "Back");
+      await act(async () => back?.click());
+      expect(dialog().contains(document.activeElement)).toBe(true);
+      expect(document.activeElement?.tagName).not.toBe("INPUT");
+      if (expected.startsWith("Choose")) expect(dialog().textContent).toContain(expected);
+      else expect(document.activeElement).toBe(providerButton("google"));
+    }
   });
 });

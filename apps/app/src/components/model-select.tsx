@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { FAST_DEFAULT_VARIANT } from "@openwork/types/cloud-model-fast";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Settings2, Star } from "lucide-react";
 
@@ -263,30 +264,26 @@ export function ModelSelect({
   const reverseShortcutLabel = thinkingModeShortcutLabel(shortcutOs, "reverse");
   const favoriteShortcutLabel = shortcutOs === "macos" ? "⌃⇧M" : favoriteModelShortcutLabel;
 
-  const focusSearchInput = React.useCallback(() => {
-    window.requestAnimationFrame(() => {
-      const input = searchInputRef.current;
+  const isMobile = useIsMobile();
+  const modelButtonRef = React.useRef<HTMLButtonElement>(null);
+  const effortButtonRef = React.useRef<HTMLButtonElement>(null);
+  const favoritesButtonRef = React.useRef<HTMLButtonElement>(null);
+  const backButtonRef = React.useRef<HTMLButtonElement>(null);
+  const previousPaneRef = React.useRef(pane);
+  const effortReturnPaneRef = React.useRef<"root" | "model" | "favorites">("root");
 
-      if (!input) {
-        return;
-      }
-
-      input.focus();
-      input.select();
-    });
-  }, []);
-
-  React.useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    if (pane !== "model") {
-      return;
-    }
-
-    focusSearchInput();
-  }, [focusSearchInput, open, pane]);
+  // Base UI owns opening/closing focus. These are panes within one popup, so
+  // restore focus after their DOM commits without reopening the mobile keyboard.
+  React.useLayoutEffect(() => {
+    const previous = previousPaneRef.current;
+    previousPaneRef.current = pane;
+    if (!open || previous === pane) return;
+    const target = pane === "root"
+      ? (previous === "effort" ? effortButtonRef : previous === "favorites" ? favoritesButtonRef : modelButtonRef).current
+      : pane === "model" && !isMobile ? searchInputRef.current : backButtonRef.current;
+    target?.focus({ preventScroll: true });
+    if (target === searchInputRef.current) searchInputRef.current?.select();
+  }, [isMobile, open, pane]);
 
   const selectedOption = modelOptions?.find((option) =>
     isSameModel(value, {
@@ -356,6 +353,7 @@ export function ModelSelect({
   const handleSelect = (option: ModelOption) => {
     const thinking = thinkingOptionsFor(option);
     if (thinking.length > 0 && onBehaviorChange) {
+      effortReturnPaneRef.current = pane === "favorites" ? "favorites" : "model";
       setThinkingFor(option);
       setPane("effort");
       return;
@@ -395,6 +393,7 @@ export function ModelSelect({
   const handleConnectProvider = React.useCallback(() => {
     onOpenChange(false);
     setSearch("");
+    setThinkingFor(null);
     setPane("root");
     window.dispatchEvent(new Event(openProviderAuthEvent));
   }, [onOpenChange]);
@@ -446,16 +445,18 @@ export function ModelSelect({
       <PopoverContent
         className="w-80 overflow-hidden rounded-2xl bg-popover p-0 shadow-xl ring-1 ring-foreground/5 dark:ring-foreground/10"
         align="start"
-        initialFocus={false}
+        initialFocus={true}
       >
         {pane === "root" ? (
           <div data-slot="model-select-root" className="space-y-0.5 p-2">
             <button
+              ref={effortButtonRef}
               type="button"
               disabled={!selectedOption || selectedThinkingOptions.length === 0 || !onBehaviorChange}
               className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent disabled:cursor-default disabled:opacity-50"
               onClick={() => {
                 if (!selectedOption) return;
+                effortReturnPaneRef.current = "root";
                 setThinkingFor(selectedOption);
                 setPane("effort");
               }}
@@ -484,6 +485,7 @@ export function ModelSelect({
               </div>
             ) : null}
             <button
+              ref={favoritesButtonRef}
               type="button"
               disabled={favoriteOptions.length === 0}
               className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent disabled:cursor-default disabled:opacity-50"
@@ -502,6 +504,7 @@ export function ModelSelect({
               type="button"
               className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent"
               onClick={() => setPane("model")}
+              ref={modelButtonRef}
             >
               <span className="min-w-0 flex-1 font-medium text-foreground">Model</span>
               <span className="max-w-36 truncate text-muted-foreground">
@@ -517,6 +520,7 @@ export function ModelSelect({
                 type="button"
                 className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left hover:bg-accent"
                 onClick={() => setPane("root")}
+                ref={backButtonRef}
               >
                 <ChevronLeft className="size-4 shrink-0 text-muted-foreground" />
                 <span className="text-sm font-medium">Favorites</span>
@@ -552,8 +556,9 @@ export function ModelSelect({
               className="flex cursor-pointer items-center gap-2 border-b border-border px-3 py-2 text-left hover:bg-accent"
               onClick={() => {
                 setThinkingFor(null);
-                setPane(isSameModel(value, thinkingFor) ? "root" : "model");
+                setPane(effortReturnPaneRef.current);
               }}
+              ref={backButtonRef}
             >
               <ChevronLeft className="size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0">
@@ -591,6 +596,7 @@ export function ModelSelect({
                 setSearch("");
                 setPane("root");
               }}
+              ref={backButtonRef}
             >
               <ChevronLeft className="size-4 shrink-0 text-muted-foreground" />
               <span className="text-sm font-medium">Model</span>
@@ -598,7 +604,7 @@ export function ModelSelect({
             <Command items={groups} value={search} onValueChange={setSearch}>
               <div className="flex min-h-0 flex-1 flex-col">
               <CommandHeader className="p-1.5 pb-1">
-                <CommandInput ref={searchInputRef} placeholder="Search models..." className="h-9 text-sm" />
+                <CommandInput ref={searchInputRef} autoFocus={false} placeholder="Search models..." className="h-9 text-base sm:text-base md:text-base lg:text-sm" />
               </CommandHeader>
               {openWorkModelsSyncing ? (
                 <div className="mx-1 mb-1 flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5">
