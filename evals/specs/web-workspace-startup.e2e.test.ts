@@ -108,6 +108,8 @@ test("WEB-STARTUP-01 real Daytona cold boot keeps one workspace status until cha
     await evalIn(world.app, () => sessionStorage.setItem("eval.cloud-startup-fault", "connecting"));
     await user.reload();
     await user.see({ text: "Connecting to your workspace…" }, { timeoutMs: 30_000 });
+    await user.notSee({ text: "Pulling in the latest messages for this task." });
+    await user.notSee({ text: "Create or connect a workspace" });
     await user.looks(["The sidebar remains visible with Connecting to your workspace and elapsed time in the main pane, without chat skeleton cards."]);
   });
   await step("a prolonged wake offers a status check without restarting or signing out", async () => {
