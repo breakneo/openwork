@@ -553,16 +553,26 @@ export function useOpeningSessionHistory(input: OpeningHistoryInput & {
     const cached = client.getQueryData<OpenworkSessionHistory>(input.snapshotQueryKey);
     if (!input.ignoreCached && cached?.session.id === input.sessionId) return cached.messages;
     if (options.revealLatest && pages.hasNewer) return pages.readLatestForSend({ desktopTransport: "main" });
-    if (!input.readLatest) return (await ensureFullSnapshot()).messages;
-    const controller = new AbortController();
-    entry.readers.add(controller);
-    try {
-      const latest = await input.readLatest(controller.signal, { desktopTransport: "main" });
-      controller.signal.throwIfAborted();
-      if (activeOwner.current !== entry) throw new CancelledError();
-      if (latest.session.id !== input.sessionId) throw new Error("Conversation history belongs to another session.");
-      return latest.messages;
-    } finally { entry.readers.delete(controller); }
+    const readLatest = input.readLatest;
+    if (!readLatest) return (await ensureFullSnapshot()).messages;
+    const read = async (canRetry: boolean): Promise<OpenworkSessionHistory["messages"]> => {
+      const controller = new AbortController();
+      entry.readers.add(controller);
+      try {
+        const latest = await readLatest(controller.signal, { desktopTransport: "main" });
+        controller.signal.throwIfAborted();
+        if (activeOwner.current !== entry) throw new CancelledError();
+        if (latest.session.id !== input.sessionId) throw new Error("Conversation history belongs to another session.");
+        return latest.messages;
+      } catch (error) {
+        // StrictMode's effect cleanup cancels the hero's first-send read even
+        // when the same owner is immediately restored. Retry only that read,
+        // once; a real unmount or credential/session change stays cancelled.
+        if (!canRetry || !controller.signal.aborted || activeOwner.current !== entry) throw error;
+      } finally { entry.readers.delete(controller); }
+      return read(false);
+    };
+    return read(true);
   }, [client, ensureFullSnapshot, entry, input.ignoreCached, input.readLatest, input.sessionId, input.snapshotQueryKey, pages.hasNewer, pages.readLatestForSend]);
   const runWithFullSnapshot = useCallback(async (
     action: (snapshot: OpenworkSessionHistory) => void | Promise<unknown>,

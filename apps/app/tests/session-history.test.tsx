@@ -1838,6 +1838,33 @@ describe("opening a thread", () => {
     expect(view.reads.filter((read) => read.window === undefined)).toHaveLength(0);
   });
 
+  test("a bounded first-send read retries once after StrictMode restores the same owner", async () => {
+    const view = fixture();
+    let send: Promise<OpenworkSessionHistory["messages"] | string> | undefined;
+    await view.renderInput(view.input(), { strict: true, onMount: () => {
+      send ??= view.readSendHistory().catch((error: unknown) => String(error));
+    } });
+    expect(view.latestReads).toHaveLength(1);
+    expect(view.latestReads[0].signal.aborted).toBe(true);
+    await view.resolveLatest(0, snapshot("a", "Cancelled read", ["stale"]));
+    expect(view.latestReads).toHaveLength(2);
+    expect(view.latestReads[1].signal.aborted).toBe(false);
+    await view.resolveLatest(1, snapshot("a", "Current turn", ["current"]));
+    expect(await send).toEqual(snapshot("a", "Current turn", ["current"]).messages);
+    expect(view.latestReads).toHaveLength(2);
+  });
+
+  test.each(["session", "credentials"])("a cancelled send-history read does not retry after changing %s", async (change) => {
+    const view = fixture();
+    await view.render("a", "first");
+    const send = view.readSendHistory().then(() => "sent", () => "cancelled");
+    await view.render(change === "session" ? "b" : "a", change === "credentials" ? "second" : "first");
+    expect(view.latestReads[0].signal.aborted).toBe(true);
+    await view.resolveLatest(0, snapshot("a", "Old turn", ["stale"]));
+    expect(await send).toBe("cancelled");
+    expect(view.latestReads).toHaveLength(1);
+  });
+
   test("a send started from a mount effect survives StrictMode dropping and re-adding the reader mid-read", async () => {
     // Development builds run every mount effect twice (StrictMode simulates an
     // unmount). The hero's auto-send starts the uncapped read in the first pass;
