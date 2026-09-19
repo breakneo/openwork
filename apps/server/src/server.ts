@@ -4727,10 +4727,11 @@ export async function describeRuntimeActivity(config: ServerConfig): Promise<{
 async function engineHasActiveSessions(config: ServerConfig, workspace: WorkspaceInfo): Promise<boolean> {
   try {
     const opencode = createWorkspaceOpencodeClient(config, workspace);
-    const statuses = unwrapOpencodeResult(await opencode.session.status(), "/session/status");
-    return Object.values(statuses).some((status) => status.type !== "idle");
+    const statuses: unknown = unwrapOpencodeResult(await opencode.session.status(), "/session/status");
+    if (!isRecord(statuses)) return true;
+    return Object.values(statuses).some((status) => !isRecord(status) || status.type !== "idle");
   } catch {
-    return false;
+    return true;
   }
 }
 
