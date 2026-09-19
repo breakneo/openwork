@@ -2,10 +2,21 @@ import { describe, expect, test } from "bun:test"
 
 import {
   attributeChatToolError,
+  describeChatToolFailure,
   connectionCardPayloadFromChatToolResult,
   reconnectActionFromChatToolResult,
 } from "../src/components/tools/error-attribution"
 import { normalizeErrorText } from "../src/lib/error-text"
+
+test("tool failure summaries keep raw transport text in details and preserve uncertain-outcome guidance", () => {
+  const timeout = describeChatToolFailure('Streamable HTTP error: {"diagnostic":{"httpStatus":504}}')
+  expect(timeout).toContain("Check whether the action finished")
+  expect(timeout).not.toContain("Streamable")
+  expect(describeChatToolFailure("access_denied HTTP 403")).toContain("doesn’t have access")
+  expect(describeChatToolFailure("invalid_token HTTP 401")).toContain("sign-in settings")
+  expect(describeChatToolFailure("Internal server error HTTP 500")).toContain("service couldn’t complete")
+  expect(describeChatToolFailure("arbitrary raw engine stack\n at file:123")).not.toContain("file:123")
+})
 
 function reconnectStatus(connectionId = "emc_knowledge", connectionName = "Knowledge Hub") {
   return {

@@ -1086,7 +1086,7 @@ test.each([
     await waitFor(() => container.textContent?.split("Uncertain send").length === 3, "the unrelated same-text turn beside the pending bubble");
     expect(Object.values(useComposerStateStore.getState().pendingMessages).flat()).toHaveLength(1);
     const checkAcceptance = () => {
-      const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Check acceptance");
+      const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Check status");
       if (!button) throw new Error("Expected the read-only acceptance check");
       button.click();
     };
@@ -1662,6 +1662,11 @@ test("new-task composer keeps stable presentation and preserves submission owner
     await act(async () => creation.reject(new Error("Session creation failed")));
     expectSettled();
     expect(container.querySelector('[data-lexical-editor="true"]')?.textContent).toBe("Newer hero draft");
+    expect(container.textContent).toContain("Couldn’t send your message");
+    expect(container.textContent).not.toContain("Session creation failed");
+    const details = container.querySelector<HTMLButtonElement>('button[aria-label="Technical details"]');
+    if (!details) throw new Error("Expected first-send diagnostics");
+    await act(async () => details.click());
     expect(container.textContent).toContain("Session creation failed");
     await act(async () => updateHeroDraft(""));
     await act(async () => {

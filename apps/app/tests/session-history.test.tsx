@@ -1466,12 +1466,12 @@ describe("opening a thread", () => {
     await act(async () => { retry?.click(); retry?.click(); });
     expect(view.host.querySelector("button")?.disabled).toBe(true);
     expect(view.host.querySelector('[data-thread-history-status] [role="status"]')?.textContent).toContain("Loading conversation");
-    expect(view.host.querySelector("button")?.textContent).toBe("Retrying…");
+    expect(view.host.querySelector("button")?.getAttribute("aria-label")).toBe("Reload conversation");
     expect(view.reads).toHaveLength(2);
     expect(view.reads[1].window).toEqual({ limit: 24 });
     await act(async () => view.reads[1].reject(new Error("Still unavailable")));
     await settle();
-    expect(view.host.querySelector("button")?.textContent).toBe("Retry");
+    expect(view.host.querySelector("button")?.getAttribute("aria-label")).toBe("Reload conversation");
     await act(async () => view.host.querySelector("button")?.click());
     await view.resolve(2, page(["Recovered history"], null, null));
     expect(view.host.textContent).toContain("Recovered history");
@@ -1631,7 +1631,7 @@ describe("opening a thread", () => {
     expect(view.host.querySelector('[data-thread-history-status] [role="status"]')).toBeNull();
     expect(view.host.querySelectorAll("[data-thread-history-status]")).toHaveLength(1);
     await act(async () => view.host.querySelector("button")?.click());
-    checkGeometry("Retrying…");
+    checkGeometry("Loading earlier messages…");
     await view.resolve(2, snapshot("a", "Full history", ["before", ...fullWindow, "anchor", "after"]));
     expect(scroller.scrollTop).toBe(800);
     expect(scroller.querySelector('[data-message-id="anchor"]')).toBe(anchor);
@@ -1788,7 +1788,7 @@ describe("opening a thread", () => {
     expect(view.host.querySelector('[data-thread-loading]')).toBeNull();
     expect(view.host.textContent).toContain("Composer a");
     const retry = view.host.querySelector("button");
-    expect(retry?.textContent).toBe("Retry");
+    expect(retry?.getAttribute("aria-label")).toBe("Reload conversation");
     await act(async () => retry?.click());
     await settle();
     expect(view.host.querySelector('[data-thread-loading]')).not.toBeNull();

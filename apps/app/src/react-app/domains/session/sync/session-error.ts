@@ -4,7 +4,7 @@ import { parseGatewayUsageError, gatewayUsageErrorEvidenceSchema, type GatewayUs
 import { safeStringify } from "../../../../app/utils";
 import { normalizeErrorText } from "../../../../lib/error-text";
 
-export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "provider-access-denied" | "workspace-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
+export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "provider-access-denied" | "provider-credentials" | "rate-limited" | "conversation-too-long" | "output-invalid" | "output-limit" | "attachment-unsupported" | "network-unavailable" | "workspace-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
 
 export type OpencodeSessionErrorPresentation = {
   kind: OpencodeSessionErrorKind;
@@ -84,6 +84,16 @@ function sessionErrorKind(
   if (/\bSqlError\b|\bSQLITE_(?:IOERR|CANTOPEN|CORRUPT)\b/i.test(searchable)) {
     return "database-error";
   }
+  // Explicit user cancellation wins. A timeout may contain the word "aborted"
+  // too, but it must not be presented as a deliberate Stop.
+  if (name === "MessageAbortedError") return "aborted";
+  if (name === "TimeoutError" || code === "ETIMEDOUT" || /aborted due to timeout/i.test(searchable)) return "provider-timeout";
+  if (name === "ContextOverflowError") return "conversation-too-long";
+  if (name === "StructuredOutputError") return "output-invalid";
+  if (name === "MessageOutputLengthError") return "output-limit";
+  if (/file part media type.*not supported/i.test(searchable)) return "attachment-unsupported";
+  if (name === "ProviderAuthError" || (name === "APIError" && status === 401)) return "provider-credentials";
+  if (name === "APIError" && /\bENOTFOUND\b|\bEAI_AGAIN\b|^fetch failed$/i.test([code, message].filter(Boolean).join(" "))) return "network-unavailable";
   if (
     name === "MessageAbortedError" ||
     code === "ABORT_ERR" ||
@@ -102,6 +112,7 @@ function sessionErrorKind(
   if (responseBody?.includes("FreeUsageLimitError") || message?.includes("FreeUsageLimitError")) {
     return "free-model-limit";
   }
+  if (name === "APIError" && (status === 429 || /^(?:too many requests|rate limit(?:ed| exceeded)?)[.!]?$/i.test(message ?? ""))) return "rate-limited";
   if (name === "APIError" && ((status !== null && status >= 500 && status < 600)
     || /^(?:internal server error|bad gateway|service unavailable|provider is overloaded)[.!]?$/i.test(message ?? ""))) return "provider-unavailable";
   return "generic";
@@ -116,6 +127,13 @@ function errorTitle(kind: OpencodeSessionErrorKind, fallback: string) {
   if (kind === "provider-unavailable") return "The model couldn’t respond";
   if (kind === "provider-access-denied") return "You don’t have access to this model";
   if (kind === "workspace-unavailable") return "Can’t reach this workspace";
+  if (kind === "provider-credentials") return "Check your model connection";
+  if (kind === "rate-limited") return "This model is receiving too many requests";
+  if (kind === "conversation-too-long") return "This conversation is too long for the model";
+  if (kind === "output-invalid") return "The model couldn’t finish a usable response";
+  if (kind === "output-limit") return "The response reached the model’s length limit";
+  if (kind === "attachment-unsupported") return "This model can’t read an attached file";
+  if (kind === "network-unavailable") return "Can’t reach the model service";
   if (kind === "free-model-limit") return "The free starter model is busy right now";
   if (kind === "gateway-auth-required") return GATEWAY_AUTH_REQUIRED_TITLE;
   if (kind === "gateway-selection-required") return "Choose a Gateway model group and credential set";
@@ -140,6 +158,13 @@ function errorDescription(kind: OpencodeSessionErrorKind, gatewayAuth: GatewayAu
   if (kind === "provider-unavailable") return "Try again, or choose another model.";
   if (kind === "provider-access-denied") return "Choose another model or ask your admin for access.";
   if (kind === "workspace-unavailable") return "Check the connection, then try again.";
+  if (kind === "provider-credentials") return "Update your connection in model settings.";
+  if (kind === "rate-limited") return "Wait a moment, then try again or choose another model.";
+  if (kind === "conversation-too-long") return "Start a new conversation with a shorter summary, or choose another model.";
+  if (kind === "output-invalid") return "Try again. Check any completed steps before continuing.";
+  if (kind === "output-limit") return "Ask for a shorter response or continue from the last completed section.";
+  if (kind === "attachment-unsupported") return "Remove the attachment or choose a model that supports this file.";
+  if (kind === "network-unavailable") return "Check your connection, then try again.";
   if (kind === "free-model-limit") {
     return "Too many people are using the free model at once. Wait a few minutes and try again, or connect your own model provider in Settings → AI Providers to keep working.";
   }
@@ -184,7 +209,7 @@ function detectGatewayAuthRequired(error: unknown, fields: { message: string | n
 }
 
 function errorRecoveryPrompt(kind: OpencodeSessionErrorKind) {
-  return kind === "aborted" || kind === "provider-timeout" || kind === "provider-incomplete" || kind === "provider-unavailable"
+  return kind === "aborted" || kind === "provider-timeout" || kind === "provider-incomplete" || kind === "provider-unavailable" || kind === "network-unavailable" || kind === "rate-limited" || kind === "output-invalid"
     ? interruptedTaskRecoveryPrompt
     : null;
 }

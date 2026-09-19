@@ -1813,7 +1813,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 {props.modelUnavailable ? props.onRefreshOrganizationModels ? (
                   <button
                     type="button"
-                    className="inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 rounded-full border border-red-5 bg-red-2 px-2.5 text-[11px] font-medium text-red-11 transition-colors hover:border-red-6 hover:bg-red-3 disabled:cursor-wait disabled:opacity-70 sm:max-w-80"
+                    className="inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 px-2 text-xs text-dls-secondary transition-colors hover:text-foreground disabled:cursor-wait disabled:opacity-70 sm:max-w-80"
                     onClick={() => void handleRefreshOrganizationModels()}
                     disabled={refreshingOrganizationModels}
                     title={t("models.refresh_organization_models")}
@@ -1827,7 +1827,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                     </span>
                   </button>
                 ) : (
-                  <span className="min-w-0 max-w-full truncate text-xs font-medium text-red-10">
+                  <span className="min-w-0 max-w-full truncate text-xs text-dls-secondary">
                     {props.modelUnavailableMessage ?? t("models.model_unavailable_short")}
                   </span>
                 ) : null}

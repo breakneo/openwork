@@ -3319,14 +3319,12 @@ export function SessionSurface(props: SessionSurfaceProps) {
                  shift under the reader and the saved reading anchor go stale. */}
             {findOwned ? <div aria-hidden className="h-12" /> : null}
             {queuedDrainState.phase.kind === "admission_unknown" ? (
-              <div role="alert" className="mb-4 rounded-xl border border-dls-border bg-dls-hover/60 px-4 py-3 text-sm">
-                <p className="font-medium">Message acceptance is unknown</p>
-                <p className="mt-1 text-dls-secondary">It may already be running. Sending is paused to avoid duplicates. Check acceptance or stop the run; Stop does not resend the message.</p>
-                <div className="mt-3 flex gap-3">
-                  <button type="button" className="underline" onClick={() => void checkUnknownAdmission(true)}>Check acceptance</button>
-                  <button type="button" className="underline" onClick={() => void handleAbort()}>Stop</button>
-                </div>
-              </div>
+              <TaskRecovery state="paused" title="Couldn’t confirm your message was received"
+                description="It may already be running. Check before sending again."
+                actions={<>
+                  <Button variant="ghost" size="xs" onClick={() => void checkUnknownAdmission(true)}>Check status</Button>
+                  <Button variant="ghost" size="xs" onClick={() => void handleAbort()}>Stop</Button>
+                </>} />
             ) : null}
             {revertMessageId ? (
               <RevertedMessagesBanner
@@ -3475,7 +3473,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           </Alert>
         ) : <>
         {failedDraft ? (
-          <div className="mx-3 mb-2 flex items-center gap-3 text-xs text-red-11">
+          <div className="mx-3 mb-2 flex items-center gap-3 text-xs text-dls-secondary">
             <span>Your unsent message is saved. Clear the current draft to restore it.</span>
             <button type="button" disabled={Boolean(draft || attachments.length)} className="font-medium disabled:opacity-50" onClick={() => {
               const state = useComposerStateStore.getState();

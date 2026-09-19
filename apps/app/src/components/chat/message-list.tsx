@@ -937,13 +937,13 @@ const MessageComponent = React.memo(
         <ErrorMessage
           error={getMessagesText([message]) || "Session failed"}
           description={presentation?.description}
-          showDescriptionOnResume={presentation?.kind === "provider-incomplete"}
+          showDescriptionOnResume={presentation?.kind !== "aborted" && presentation?.kind !== "provider-timeout"}
           resumePrompt={presentation?.recoveryPrompt}
           canRetry={isLastMessage && !isStreaming}
           technicalDetails={presentation?.technicalDetails}
-          gatewayConnectUrl={presentation?.kind === "gateway-auth-required" ? presentation.connectUrl ?? null : undefined}
+          gatewayConnectUrl={presentation?.kind === "gateway-auth-required" || presentation?.kind === "provider-credentials" ? presentation.connectUrl ?? null : undefined}
           gatewaySelectionRequired={presentation?.kind === "gateway-selection-required"}
-          changeModel={presentation?.kind === "provider-access-denied" || presentation?.kind === "provider-unavailable"}
+          changeModel={presentation !== null && ["provider-access-denied", "provider-unavailable", "rate-limited", "conversation-too-long", "attachment-unsupported"].includes(presentation.kind)}
         />
       )
     }

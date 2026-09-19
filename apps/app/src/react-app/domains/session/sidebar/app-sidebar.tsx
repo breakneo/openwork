@@ -84,6 +84,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { TaskRecovery } from "@/components/chat/task-recovery";
 import {
   Dialog,
   DialogClose,
@@ -636,76 +637,47 @@ function RemoteConnectionIssueCard(props: {
   onTest: () => void;
   onEdit: () => void;
 }) {
-  const isOffline = props.tone === "offline";
-
   return (
     <SidebarMenuSubItem>
       <div
-        className={cn(
-          "w-full rounded-[15px] border border-red-7/35 bg-red-1/40 px-3 py-3 text-left",
-          isOffline && "border-sidebar-border/70 bg-sidebar-accent/60",
-        )}
+        className="w-full px-3 py-3 text-left text-dls-secondary"
       >
         <div className="flex items-start gap-2.5">
-          <div
-            className={cn(
-              "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-3/60 text-red-11",
-              isOffline && "bg-amber-3/60 text-amber-11",
-            )}
-          >
-            <AlertCircle size={14} />
-          </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-medium text-dls-text">
-              {t("workspace_list.remote_worker_unavailable")}
-            </div>
-            <div className="mt-1 text-[11px] leading-5 text-gray-10">
-              {t("workspace_list.remote_worker_unavailable_hint")}
-            </div>
-            <div
-              className={cn(
-                "mt-2 rounded-lg border border-red-7/25 bg-red-1/40 px-2 py-1.5 text-[11px] leading-4 text-red-11 whitespace-pre-wrap wrap-anywhere",
-                isOffline && "border-sidebar-border/70 bg-sidebar-accent/60 text-sidebar-foreground",
-              )}
-              title={props.message}
-            >
-              {props.message}
-            </div>
+            <TaskRecovery compact title={t("workspace_list.remote_worker_unavailable")}
+              description={t("workspace_list.remote_worker_unavailable_hint")} technicalDetails={props.message} />
             <OpenWorkDenHelpLink />
             <div className="mt-2 flex flex-wrap gap-1.5">
               {props.canRecover ? (
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   className="h-7 gap-1.5 rounded-lg px-2 text-[11px]"
                   onClick={props.onRecover}
                   disabled={props.busy}
                 >
-                  <RotateCcw size={12} />
                   {t("workspace_list.recover")}
                 </Button>
               ) : null}
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
                 className="h-7 gap-1.5 rounded-lg px-2 text-[11px]"
                 onClick={props.onTest}
                 disabled={props.busy}
               >
-                <RefreshCw size={12} />
                 {t("workspace_list.test_connection")}
               </Button>
               <Button
                 type="button"
-                variant="outline"
+                variant="ghost"
                 size="sm"
                 className="h-7 gap-1.5 rounded-lg px-2 text-[11px]"
                 onClick={props.onEdit}
                 disabled={props.busy}
               >
-                <Settings size={12} />
                 {t("common.edit")}
               </Button>
             </div>

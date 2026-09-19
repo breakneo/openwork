@@ -53,6 +53,27 @@ test("the quiet retry control preserves the recovery callback and disabled state
 })
 
 describe("session error resilience", () => {
+  test.each([
+    { name: "APIError", data: { message: "Too Many Requests", statusCode: 429 }, kind: "rate-limited", title: "This model is receiving too many requests" },
+    { name: "APIError", data: { message: "invalid_api_key", statusCode: 401 }, kind: "provider-credentials", title: "Check your model connection" },
+    { name: "ContextOverflowError", data: { message: "Prompt too long" }, kind: "conversation-too-long", title: "This conversation is too long for the model" },
+    { name: "StructuredOutputError", data: { message: "Failed to parse output" }, kind: "output-invalid", title: "The model couldn’t finish a usable response" },
+    { name: "MessageOutputLengthError", data: { message: "output limit" }, kind: "output-limit", title: "The response reached the model’s length limit" },
+    { name: "TimeoutError", data: { message: "The operation was aborted due to timeout" }, kind: "provider-timeout", title: "Provider did not respond in time" },
+    { name: "APIError", data: { message: "fetch failed", code: "ENOTFOUND" }, kind: "network-unavailable", title: "Can’t reach the model service" },
+    { name: "APIError", data: { message: "file part media type application/pdf not supported", statusCode: 400 }, kind: "attachment-unsupported", title: "This model can’t read an attached file" },
+  ])("explains $kind and retains the original error in details", ({ name, data, kind, title }) => {
+    const result = presentOpencodeSessionError({ name, data })
+    expect(result.kind).toBe(kind)
+    expect(result.title).toBe(title)
+    expect(result.description).toBeTruthy()
+    expect(result.technicalDetails).toContain(data.message)
+    if (["provider-credentials", "conversation-too-long", "attachment-unsupported"].includes(kind)) expect(result.recoveryPrompt).toBeNull()
+  })
+
+  test("an explicit Stop is not mistaken for a timeout mentioned by the provider", () => {
+    expect(presentOpencodeSessionError({ name: "MessageAbortedError", data: { message: "aborted due to timeout" } }).kind).toBe("aborted")
+  })
   const freeTierFailure = {
     name: "APIError",
     data: {
@@ -336,7 +357,7 @@ describe("session error resilience", () => {
       name: "APIError",
       data: { message: "invalid_api_key", statusCode: 401 },
     })
-    expect(presentation.kind).toBe("generic")
+    expect(presentation.kind).toBe("provider-credentials")
     expect(presentation.connectUrl).toBeUndefined()
   })
 
@@ -394,7 +415,7 @@ describe("session error resilience", () => {
     })
 
     expect(html).toContain('role="alert"')
-    expect(html).toContain("Provider authentication failed")
+    expect(html).toContain("Check your model connection")
   })
 
   test("offers Resume on the error card for a provider timeout", () => {
@@ -582,7 +603,7 @@ describe("session error technical details", () => {
   test("end users see only the plain error card", () => {
     const html = renderErrorTranscript(providerFailure, false)
 
-    expect(html).toContain("Rate limit reached")
+    expect(html).toContain("This model is receiving too many requests")
     expect(html).not.toContain('data-testid="session-error-details-toggle"')
     expect(html).not.toContain("Status: 429")
     expect(html).not.toContain("req_01JZK4W9N7X2Q8M3V5T6B1C0DE")

@@ -7,6 +7,8 @@ import { createDenClient, readDenSettings } from "@/app/lib/den";
 import type { OpenworkServerClient } from "@/app/lib/openwork-server";
 import type { ComposerAttachment, McpServerEntry, McpStatusMap, ModelOption, ModelRef, SkillCard, SlashCommandOption } from "@/app/types";
 import { t } from "@/i18n";
+import { TaskRecovery } from "@/components/chat/task-recovery";
+import { presentOpencodeSessionError, type OpencodeSessionErrorPresentation } from "../sync/session-error";
 import type { ComposerSettingsSection } from "@/react-app/domains/settings/library";
 import { ReactSessionComposer } from "@/react-app/domains/session/surface/composer/composer";
 import { WorkspaceRunModeMenu } from "@/react-app/domains/session/surface/composer/workspace-run-mode-menu";
@@ -129,7 +131,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
   const submittingRef = useRef(false);
   const draftRevisionRef = useRef(0);
   const [pendingSubmission, setPendingSubmission] = useState<ComposerSessionState | null>(null);
-  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<OpencodeSessionErrorPresentation | null>(null);
   const [failedSubmission, setFailedSubmission] = useState<ComposerSessionState | null>(null);
   const draftRef = useRef(props.draft);
   const continuationHolderRef = useRef<NewTaskContinuationHolder>({
@@ -394,7 +396,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       } else {
         setFailedSubmission(submitted);
       }
-      setSubmissionError(error instanceof Error ? error.message : "Could not create the conversation. Try again.");
+      setSubmissionError(presentOpencodeSessionError(error, "Couldn’t send your message"));
       setPendingSubmission(null);
       submittingRef.current = false;
     }
@@ -408,7 +410,9 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
 
   return (
     <div>
-    {submissionError ? <div role="alert" className="mb-2 text-sm text-red-11">{submissionError}</div> : null}
+    {submissionError ? <TaskRecovery title={submissionError.kind === "generic" ? "Couldn’t send your message" : submissionError.title}
+      description={failedSubmission ? "Your unsent message is saved below." : "Your draft is still here. Try sending it again."}
+      technicalDetails={submissionError.technicalDetails} /> : null}
     {failedSubmission ? <button type="button" disabled={Boolean(props.draft || attachments.length)} className="mb-2 text-sm disabled:opacity-50" onClick={() => {
       restoreComposer(failedSubmission);
       setFailedSubmission(null);

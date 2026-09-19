@@ -10,7 +10,7 @@ const STORAGE_DESCRIPTION = "A storage limit was reported by the task runtime or
 
 // Values from the seeded payload (eval.session_error.seed): an Anthropic 429
 // with a JSON response body. None of these appear in the plain card text.
-const CARD_TEXT = "Rate limit reached for claude-sonnet-4-5";
+const CARD_TEXT = "This model is receiving too many requests";
 const DIAGNOSTIC_LINES = ["Error type: APIError", "Status: 429", "Provider: anthropic", "Code: rate_limit_error", "Retries: 3"];
 const REQUEST_ID = "req_01JZK4W9N7X2Q8M3V5T6B1C0DE";
 // Rendered with CSS uppercase, so compare case-insensitively.

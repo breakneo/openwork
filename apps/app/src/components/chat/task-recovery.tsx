@@ -14,6 +14,8 @@ export function TaskRecovery(props: {
   onRetry?: () => void;
   retryDisabled?: boolean;
   retryTestId?: string;
+  retryLabel?: string;
+  compact?: boolean;
 }) {
   const state = props.state ?? "failed";
   const [copied, setCopied] = useState(false);
@@ -26,7 +28,7 @@ export function TaskRecovery(props: {
   const hasDetails = details && details.replace(/^Message:\s*/, "") !== props.title.trim();
 
   return (
-    <Collapsible className="group/recovery not-prose mx-auto w-full max-w-3xl px-2 py-2 md:px-10" data-testid={props.testId}>
+    <Collapsible className={props.compact ? "group/recovery not-prose min-w-0 py-1" : "group/recovery not-prose mx-auto w-full max-w-3xl px-2 py-2 md:px-10"} data-testid={props.testId}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <p role={state === "failed" ? "alert" : "status"} className="min-w-0 text-sm leading-6 text-dls-secondary">{props.title}</p>
         <div className="flex shrink-0 items-center gap-1 text-foreground">
@@ -41,7 +43,7 @@ export function TaskRecovery(props: {
       </div>
       {props.description ? <p className="mt-1 max-w-prose text-xs leading-5 text-dls-secondary">{props.description}</p> : null}
       {props.onRetry ? <div className="mt-1 flex h-6 items-center text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/recovery:opacity-100 group-hover/message-group:opacity-100 group-focus-within/recovery:opacity-100 pointer-coarse:opacity-100 motion-reduce:transition-none">
-        <Button variant="ghost" size="icon-xs" aria-label="Retry task" title="Retry task"
+        <Button variant="ghost" size="icon-xs" aria-label={props.retryLabel ?? "Retry task"} title={props.retryLabel ?? "Retry task"}
           data-testid={props.retryTestId} disabled={props.retryDisabled} onClick={props.onRetry}>
           <RotateCw aria-hidden="true" />
         </Button>

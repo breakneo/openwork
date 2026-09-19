@@ -24,6 +24,7 @@ import type {
 } from "../../../../app/types";
 import type { ShareWorkspaceModalProps } from "../../workspace/types";
 import { Button } from "@/components/ui/button";
+import { TaskRecovery } from "@/components/chat/task-recovery";
 import { toast } from "@/components/ui/sonner";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -1893,44 +1894,34 @@ export function SessionPage(props: SessionPageProps) {
                     />
                   ) : showSelectedWorkspaceError ? (
                     <div className="px-6 py-16">
-                      <div className="mx-auto max-w-lg rounded-2xl border border-red-7/35 bg-red-1/40 p-5 text-left shadow-[var(--dls-card-shadow)]">
-                        <div className="text-sm font-medium text-red-11">{selectedWorkspaceErrorTitle}</div>
-                        <p className="mt-2 whitespace-pre-wrap wrap-anywhere text-sm leading-6 text-red-11/90">
-                          {selectedWorkspaceErrorMessage}
-                        </p>
-                        <div className="mt-4 flex flex-wrap gap-2">
+                      <TaskRecovery title={selectedWorkspaceErrorTitle}
+                        technicalDetails={selectedWorkspaceErrorMessage}
+                        onRetry={() => props.sidebar.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
+                        actions={<>
                           <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => props.sidebar.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
-                          >
-                            Retry
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="xs"
                             onClick={() => void Promise.resolve(props.sidebar.onTestWorkspaceConnection(props.selectedWorkspaceId))}
                           >
                             {t("workspace_list.test_connection")}
                           </Button>
                           <Button
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="xs"
                             onClick={() => props.sidebar.onEditWorkspaceConnection(props.selectedWorkspaceId)}
                           >
                             {t("workspace_list.edit_connection")}
                           </Button>
                           {props.sidebar.workspaceConnectionStateById[props.selectedWorkspaceId]?.status === "error" ? (
                             <Button
-                              variant="outline"
-                              size="sm"
+                              variant="ghost"
+                              size="xs"
                               onClick={() => void Promise.resolve(props.sidebar.onRecoverWorkspace(props.selectedWorkspaceId))}
                             >
                               {t("workspace_list.recover")}
                             </Button>
                           ) : null}
-                        </div>
-                      </div>
+                        </>} />
                     </div>
                   ) : props.selectedSessionId ? (
                     <div className="px-6 py-16 text-center text-sm text-dls-secondary">
