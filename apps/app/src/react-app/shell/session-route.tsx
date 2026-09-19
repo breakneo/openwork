@@ -2078,10 +2078,19 @@ export function SessionRoute() {
     workspaceConnectionStateById,
     workspaces,
   ]);
+  // Once revealed, background refreshes must not replace usable content. A
+  // missing model is an actionable composer state, not a startup dependency.
+  const cloudContentRevealed = useRef(false);
+  const cloudRoutePending = !selectedWorkspaceError && !routeNotFoundMessage &&
+    (effectiveLoading || !opencodeClient || !selectedWorkspaceId);
+  useEffect(() => {
+    if (!cloudRoutePending) cloudContentRevealed.current = true;
+  }, [cloudRoutePending]);
   const cloudWorkspaceMainContentDecision = mapCloudWorkspaceMainContentDecision({
     status: cloudWorkspace.viewModel.variant,
     hasWorkspaces: Boolean(surfaceProps),
     gatewayMode: cloudWorkspace.gatewayMode && cloudWorkspace.visible,
+    startupPending: !cloudContentRevealed.current && cloudRoutePending,
   });
   const cloudWorkspaceReadyForRouteErrors =
     !cloudWorkspace.gatewayMode ||

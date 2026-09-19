@@ -12,6 +12,7 @@ import { isOpenworkGatewayRuntime } from "@/app/lib/gateway-runtime";
 import { Button } from "@/components/ui/button";
 import { usePlatform } from "@/react-app/kernel/platform";
 import { OwDotTicker } from "@/react-app/shell/dot-ticker";
+import { WebStartupScreen } from "@/react-app/shell/workspace-startup-status";
 import { useDenAuth } from "./den-auth-provider";
 import {
   resolveOpenWorkWebAccessGateState,
@@ -59,6 +60,8 @@ export function OpenWorkWebAccessGateScreen(props: {
   const checking = props.state === "checking";
   const denied = props.state === "denied";
   const organizationName = props.organizationName || "this organization";
+
+  if (checking) return <WebStartupScreen message="Checking workspace access…" />;
 
   return (
     <main

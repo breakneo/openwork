@@ -55,6 +55,8 @@ import { WelcomeRoute } from "./welcome-route";
 import { readOrgSelectionPending } from "../../app/lib/den-sign-in-intent";
 import { signedInRoute } from "./den-signin-routing";
 import { StartupScreen } from "./startup-screen";
+import { WebStartupScreen } from "./workspace-startup-status";
+import { isOpenworkGatewayRuntime } from "../../app/lib/gateway-runtime";
 
 
 type DenSigninGateProps = {
@@ -190,6 +192,7 @@ function DenSigninGate({ children }: DenSigninGateProps) {
   }, [navigate]);
 
   if (requireSignin && denAuth.status === "checking") {
+    if (isOpenworkGatewayRuntime()) return <WebStartupScreen message="Checking sign-in…" />;
     return <StartupScreen message="Checking your sign-in" />;
   }
 

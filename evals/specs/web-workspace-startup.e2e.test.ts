@@ -1,0 +1,94 @@
+import { expect } from "vitest";
+import { denFetch, grantOpenWorkWebAccess } from "@openwork/behaviors";
+import { addInitScript, navigate } from "@openwork/cdp";
+import { checkedExec, defaultDaytonaExec, execInSandbox } from "@openwork/hosts";
+import { browserScript, eventually, evalIn, spec } from "@openwork/testkit";
+import type { Seed } from "@openwork/testkit";
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function cloudStartup(seed: Seed) {
+  const den = await seed.den({
+    web: false,
+    env: {
+      NODE_ENV: "test", OPENWORK_DEV_MODE: "1", DB_MODE: "mysql", DEN_ORG_MODE: "multi_org",
+      DEN_GATEWAY_KEY: "startup-fixture-gateway-key", DEN_OPENWORK_WEB_ENABLED: "true",
+      DEN_BOOTSTRAP_ADMIN_EMAILS: "startup-admin@openwork.test",
+      STRIPE_OPENWORK_WEB_PRICE_ID: "price_startup_fixture",
+      PROVISIONER_MODE: "daytona", DAYTONA_API_KEY: process.env.DAYTONA_API_KEY,
+      DAYTONA_API_URL: process.env.DAYTONA_API_URL, DAYTONA_SNAPSHOT: process.env.DAYTONA_SNAPSHOT,
+      DAYTONA_SHARED_VOLUME_NAME: `startup-fixture-${process.pid}`,
+      DAYTONA_USE_DEPRECATED_POLLING: "false", DAYTONA_HEALTHCHECK_TIMEOUT_MS: "120000",
+      WORKER_PROVISIONING_RECONCILE_INTERVAL_MS: "0", CLOUD_IDLE_LOOP_SECONDS: "0",
+    },
+    org: { name: "Startup Test", admin: { name: "Test Admin", email: "startup-admin@openwork.test" }, members: { member: { name: "Test Member" } } },
+  });
+  const member = den.members.member;
+  if (!member) throw new Error("Missing isolated test member");
+  const orgs = await denFetch(den.admin, "/v1/me/orgs", { headers: { authorization: `Bearer ${den.admin.token}` } });
+  const rows = record(orgs.body) && Array.isArray(orgs.body.orgs) ? orgs.body.orgs.filter(record) : [];
+  const orgId = rows[0]?.id;
+  if (typeof orgId !== "string") throw new Error("Missing isolated test organization");
+  await grantOpenWorkWebAccess(den.admin, orgId, "Hosted workspace startup test");
+
+  const app = await seed.appWeb({ name: "web-workspace-startup", workspacePath: seed.tmpPath("startup") });
+  const sandboxId = app.handle.sandboxId;
+  if (!sandboxId) throw new Error("This journey requires a Daytona appWeb surface");
+  await execInSandbox(defaultDaytonaExec, sandboxId,
+    `pnpm --filter @openwork/app build:web >/tmp/startup-app-build.log 2>&1 && pnpm --filter @openwork-ee/utils build >/tmp/startup-utils-build.log 2>&1 && pnpm --filter @openwork-ee/den-gateway build >/tmp/startup-gateway-build.log 2>&1 || exit 1; nohup env PORT=8789 DEN_API_BASE=${den.ref.apiUrl} DEN_GATEWAY_KEY=startup-fixture-gateway-key DEN_GATEWAY_WEB_ROOT=/workspace/apps/app/dist node /workspace/ee/apps/den-gateway/dist/server.js </dev/null >/tmp/startup-gateway.log 2>&1 &`,
+    { context: "build source web app and real Den Gateway", timeoutMs: 240_000 });
+  const preview = await checkedExec(defaultDaytonaExec, ["preview-url", sandboxId, "-p", "8789"], "startup gateway preview", { timeoutMs: 30_000 });
+  const gatewayUrl = preview.stdout.split(/\s+/).find((value) => value.startsWith("https://"));
+  if (!gatewayUrl) throw new Error("Missing gateway preview");
+  await eventually(async () => (await fetch(`${gatewayUrl}/__gw/health`, { signal: AbortSignal.timeout(10_000) })).status,
+    { within: 60_000, intervalMs: 1_000, label: "Den Gateway health", until: (status) => status === 200 });
+  await addInitScript(app.client, browserScript((input) => {
+    localStorage.setItem("openwork.den.authToken", input.token);
+    localStorage.setItem("openwork.den.activeOrgId", input.orgId);
+    // Capture observed UI transitions, not backend time estimates. No secrets,
+    // URLs or response bodies are retained in the witness.
+    const states: { state: string; ms: number }[] = [];
+    Object.assign(window, { startupWitness: states });
+    const observer = new MutationObserver(() => {
+      const status = document.querySelector('[data-testid="cloud-workspace-takeover"]');
+      const state = status?.getAttribute("data-cloud-workspace-state") ??
+        (document.querySelector('[data-testid="web-startup-screen"]')?.textContent ||
+          (document.querySelector('button[aria-label="Run task"]') ? "composer-visible" : "app-starting"));
+      if (states.at(-1)?.state !== state) states.push({ state, ms: Math.round(performance.now()) });
+    });
+    observer.observe(document, { subtree: true, childList: true, attributes: true });
+  }, [{ token: member.token, orgId }]));
+  return { app, gatewayUrl, member, orgId };
+}
+
+const test = spec.world(cloudStartup, {
+  timeout: 900_000,
+  resources: { surfaces: ["appWeb"], services: ["den"] },
+  needs: { env: ["DAYTONA_API_KEY", "DAYTONA_SNAPSHOT"] },
+});
+
+test("WEB-STARTUP-01 real Daytona cold boot keeps one workspace status until chat is usable", async ({ world, user, step, evidence }) => {
+  const startedAt = Date.now();
+  await navigate(world.app.client, world.gatewayUrl);
+  await step("a real cold workspace boot has one calm status and no inferred file progress", async () => {
+    await user.see({ text: /(?:Starting|Creating) your cloud workspace/ }, { timeoutMs: 90_000 });
+    await user.notSee({ text: "Restoring your files" });
+    await user.notSee({ text: "Reserving your computer" });
+    await user.looks([
+      "The sidebar is visible while the main pane shows a small cloud workspace startup status.",
+      "There is no three-step checklist, progress bar, or large bordered startup card.",
+    ]);
+  });
+  await step("cloud readiness hands off to the real composer", async () => {
+    await user.see("Run task", { timeoutMs: 240_000 });
+    const usableMs = Date.now() - startedAt;
+    await user.notSee({ text: "Starting your cloud workspace…" });
+    await user.notSee({ text: "Connecting to your workspace…" });
+    const witness = await evalIn(world.app, () => Reflect.get(window, "startupWitness"));
+    expect(Array.isArray(witness) && witness.some((entry) => record(entry) && entry.state === "composer-visible")).toBe(true);
+    evidence.recordAssertionEvidence("Real Daytona hosted-web startup timing", JSON.stringify({ observedAfterMs: usableMs, states: witness, snapshot: process.env.DAYTONA_SNAPSHOT, measurement: "browser performance timestamps; includes auth, access, provisioning, gateway and route hydration" }), true);
+    await user.looks(["The main pane shows the new-chat composer rather than a startup card or loading skeleton."]);
+  });
+});
