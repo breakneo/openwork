@@ -337,13 +337,14 @@ describe("session error resilience", () => {
     expect(html).not.toContain("bg-destructive/5")
   })
 
-  test("keeps the destructive card for errors that cannot be resumed", () => {
+  test("keeps a failure alert for errors that cannot be resumed", () => {
     const html = renderErrorTranscriptWithResume({
       name: "ProviderAuthError",
       data: { message: "Provider authentication failed" },
     })
 
-    expect(html).toContain("border-destructive/30")
+    expect(html).toContain('role="alert"')
+    expect(html).toContain("Provider authentication failed")
   })
 
   test("offers Resume on the error card for a provider timeout", () => {
@@ -469,6 +470,16 @@ describe("session error resilience", () => {
 
       expect(container.textContent).toContain("Account rate limit reached")
       expect(container.textContent).toContain("Review account")
+
+      await renderRetry({ type: "retry", attempt: 4, next: Date.now() + 11000, message: "Internal server error" })
+      expect(container.querySelector('[role="status"]')?.textContent).toBe("The model couldn’t respond. Retrying…")
+      expect(container.textContent).not.toContain("Internal server error")
+      expect(container.textContent).not.toContain("attempt 4")
+      const details = container.querySelector("details")
+      if (!details) throw new Error("Missing retry details")
+      await act(async () => { details.open = true; details.dispatchEvent(new Event("toggle")) })
+      expect(container.querySelector('[data-testid="session-error-details"]')?.textContent).toContain("attempt 4")
+      expect(container.querySelector('[role="status"]')?.textContent).not.toContain("attempt")
     } finally {
       await act(async () => root.unmount())
       container.remove()

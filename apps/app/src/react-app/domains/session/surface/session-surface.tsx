@@ -3,7 +3,7 @@ import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRe
 import type { UIMessage } from "ai";
 import { hashKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
-import { Check, CirclePause, Minimize2 } from "lucide-react";
+import { Check, Minimize2 } from "lucide-react";
 import { toast } from "@/components/ui/sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -89,6 +89,7 @@ import {
 } from "./session-admission-outcome";
 import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError, sessionErrorPresentationFromUIMessage, type OpencodeSessionErrorPresentation } from "@/react-app/domains/session/sync/session-error";
 import { createSessionErrorUIMessage } from "@/react-app/domains/session/sync/usechat-adapter";
+import { TaskRecovery } from "@/components/chat/task-recovery";
 import { useLocal } from "@/react-app/kernel/local-provider";
 import { useGatewayUsage, useGatewayUsageErrorHandled } from "../../cloud/use-gateway-usage";
 import { GatewayUsageApprovalNotice, GatewayUsageNotice } from "../../cloud/gateway-usage-panel";
@@ -772,26 +773,9 @@ function AssistantWaitingCard({ label = t("session.assistant_thinking") }: { lab
 // pause, not a failure, with Resume as the single emphasized action.
 function AdmissionOutcomeUnknownCard(props: { resuming: boolean; onResume: () => void }) {
   return (
-    <div
-      data-testid="admission-outcome-unknown"
-      role="status"
-      className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10"
-    >
-      <div className="flex min-w-0 items-center gap-2 py-1 text-sm text-dls-secondary">
-        <CirclePause aria-hidden="true" className="size-4 shrink-0" />
-        <span className="min-w-0">{t("session.admission_outcome_unknown")}</span>
-        <span aria-hidden="true" className="text-dls-secondary/60">·</span>
-        <button
-          type="button"
-          data-testid="admission-outcome-resume"
-          disabled={props.resuming}
-          onClick={props.onResume}
-          className="shrink-0 cursor-pointer font-medium text-dls-text underline-offset-2 transition-colors hover:underline disabled:cursor-default disabled:opacity-60"
-        >
-          {t("session.resume_interrupted")}
-        </button>
-      </div>
-    </div>
+    <TaskRecovery state="paused" testId="admission-outcome-unknown" title={t("session.admission_outcome_unknown")}
+      actions={<Button variant="outline" size="sm" data-testid="admission-outcome-resume"
+        disabled={props.resuming} onClick={props.onResume}>{t("session.resume_interrupted")}</Button>} />
   );
 }
 
@@ -893,55 +877,16 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
 }) {
   const presentation = error.presentation ?? presentOpencodeSessionError(error.message);
   return (
-    <div className="mx-auto max-w-[720px] px-3 py-3 sm:px-5" data-testid="session-error-card" role="alert">
-      <div className="rounded-2xl border border-red-6/30 bg-red-3/15 px-5 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-red-11">{developerMode ? error.message : presentation.title}</div>
-            {!developerMode && presentation.description ? (
-              <p className="mt-1 text-sm text-red-11">{presentation.description}</p>
-            ) : null}
-            {error.kind === "model-not-found" ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {error.suggestions && error.suggestions.length > 0 ? (
-                  error.suggestions.map((s) => (
-                    <button
-                      key={`${s.providerID}/${s.modelID}`}
-                      type="button"
-                      className="rounded-full border border-dls-border bg-dls-surface px-3 py-1.5 text-xs font-medium text-dls-text transition-colors hover:bg-dls-hover"
-                      onClick={() => {
-                        onChangeModel?.(s);
-                        onDismiss();
-                      }}
-                    >
-                      Use {s.providerID}/{s.modelID}
-                    </button>
-                  ))
-                ) : null}
-                <button
-                  type="button"
-                  className="rounded-full border border-dls-border bg-dls-surface px-3 py-1.5 text-xs font-medium text-dls-text transition-colors hover:bg-dls-hover"
-                  onClick={() => {
-                    onOpenModelPicker?.();
-                    onDismiss();
-                  }}
-                >
-                  Change model
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            className="shrink-0 rounded-full p-1 text-red-10 transition-colors hover:bg-red-3 hover:text-red-11"
-            onClick={onDismiss}
-            aria-label="Dismiss error"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
-          </button>
-        </div>
-      </div>
-    </div>
+    <TaskRecovery testId="session-error-card" title={presentation.title}
+      description={presentation.description} technicalDetails={developerMode ? presentation.technicalDetails : null}
+      actions={<>
+        {error.kind === "model-not-found" ? <>
+          {error.suggestions?.map((suggestion) => <Button key={`${suggestion.providerID}/${suggestion.modelID}`} variant="outline" size="sm"
+            onClick={() => { onChangeModel?.(suggestion); onDismiss(); }}>Use {suggestion.providerID}/{suggestion.modelID}</Button>)}
+          <Button variant="outline" size="sm" onClick={() => { onOpenModelPicker?.(); onDismiss(); }}>Change model</Button>
+        </> : null}
+        <Button variant="ghost" size="sm" onClick={onDismiss}>Dismiss error</Button>
+      </>} />
   );
 }
 
@@ -1969,7 +1914,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   // not an outcome — the newly appended user message satisfies it even when no
   // assistant message exists. Deriving the outcome from the transcript (last
   // user message answered by visible assistant output) also makes the recovery
-  // state survive a reload: rehydrating the same transcript recomputes it.
+  // state survive a reload. Parent message identity, not visual ordering,
+  // determines which admission an assistant result belongs to.
   const admissionOutcome = useMemo(() => resolveAdmissionOutcome({
     messages: renderedMessages,
     statusType: liveStatus.type,
@@ -3509,25 +3455,13 @@ export function SessionSurface(props: SessionSurfaceProps) {
           </button>
         ) : null}
         {props.cloudMcpSubmissionState.status === "failed" ? (
-          <div
-            className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-red-7/40 bg-red-2/40 px-3 py-2 text-xs text-red-11"
-            data-testid="cloud-mcp-submission-failure"
-          >
-            <span className="min-w-0 flex-1">
-              {[
-                props.cloudMcpSubmissionState.issue?.message ?? "Connected service tools could not be prepared.",
-                props.cloudMcpSubmissionState.issue?.recommendedAction,
-              ].filter(Boolean).join(" ")}
-            </span>
-            {props.cloudMcpSubmissionState.issue?.retryable !== false ? (
-              <button type="button" className="font-medium hover:underline" onClick={handleRetryCloudSubmission}>
-                Retry
-              </button>
-            ) : null}
-            <button type="button" className="font-medium hover:underline" onClick={props.onOpenConnect}>
-              Open Connect
-            </button>
-          </div>
+          <TaskRecovery testId="cloud-mcp-submission-failure"
+            title={props.cloudMcpSubmissionState.issue?.message ?? "Connected service tools could not be prepared."}
+            description={props.cloudMcpSubmissionState.issue?.recommendedAction}
+            actions={<>
+              {props.cloudMcpSubmissionState.issue?.retryable !== false ? <Button variant="outline" size="sm" onClick={handleRetryCloudSubmission}>Retry</Button> : null}
+              <Button variant="ghost" size="sm" onClick={props.onOpenConnect}>Open Connect</Button>
+            </>} />
         ) : null}
         {archived ? (
           <Alert data-testid="archived-session">

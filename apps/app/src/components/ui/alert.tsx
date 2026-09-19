@@ -14,9 +14,14 @@ const alertVariants = cva(
         warning:
           "bg-card text-warning *:data-[slot=alert-description]:text-warning/90 *:[svg]:text-current",
       },
+      appearance: {
+        default: "",
+        inline: "rounded-none border-0 bg-transparent px-0 py-1",
+      },
     },
     defaultVariants: {
       variant: "default",
+      appearance: "default",
     },
   }
 )
@@ -24,13 +29,14 @@ const alertVariants = cva(
 function Alert({
   className,
   variant,
+  appearance,
   ...props
 }: React.ComponentProps<"div"> & VariantProps<typeof alertVariants>) {
   return (
     <div
       data-slot="alert"
       role="alert"
-      className={cn(alertVariants({ variant }), className)}
+      className={cn(alertVariants({ variant, appearance }), className)}
       {...props}
     />
   )

@@ -4,7 +4,7 @@ import { parseGatewayUsageError, gatewayUsageErrorEvidenceSchema, type GatewayUs
 import { safeStringify } from "../../../../app/utils";
 import { normalizeErrorText } from "../../../../lib/error-text";
 
-export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
+export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
 
 export type OpencodeSessionErrorPresentation = {
   kind: OpencodeSessionErrorKind;
@@ -71,6 +71,7 @@ function sessionErrorKind(
   message: string | null,
   code: string | null,
   responseBody: string | null,
+  status: number | null,
 ): OpencodeSessionErrorKind {
   const searchable = [name, message, code, responseBody].filter(Boolean).join(" ");
   if (searchable.includes("gateway_selection_required")) return "gateway-selection-required";
@@ -94,10 +95,12 @@ function sessionErrorKind(
   ) {
     return "provider-timeout";
   }
-  if (/upstream_(?:incomplete|interrupted|malformed_stream|malformed_response|timeout)/.test(searchable)) return "provider-incomplete";
+  if (/upstream_(?:incomplete|interrupted|malformed_stream|malformed_response|timeout)|connection reset by server/i.test(searchable)) return "provider-incomplete";
   if (responseBody?.includes("FreeUsageLimitError") || message?.includes("FreeUsageLimitError")) {
     return "free-model-limit";
   }
+  if (name === "APIError" && ((status !== null && status >= 500 && status < 600)
+    || /^(?:internal server error|bad gateway|service unavailable|provider is overloaded)[.!]?$/i.test(message ?? ""))) return "provider-unavailable";
   return "generic";
 }
 
@@ -107,6 +110,7 @@ function errorTitle(kind: OpencodeSessionErrorKind, fallback: string) {
   if (kind === "aborted") return "Task interrupted";
   if (kind === "provider-timeout") return "Provider did not respond in time";
   if (kind === "provider-incomplete") return "The model response was interrupted";
+  if (kind === "provider-unavailable") return "The model couldn’t respond";
   if (kind === "free-model-limit") return "The free starter model is busy right now";
   if (kind === "gateway-auth-required") return GATEWAY_AUTH_REQUIRED_TITLE;
   if (kind === "gateway-selection-required") return "Choose a Gateway model group and credential set";
@@ -128,6 +132,7 @@ function errorDescription(kind: OpencodeSessionErrorKind, gatewayAuth: GatewayAu
     return "The provider connection timed out before a response began. Output and files already produced are kept.";
   }
   if (kind === "provider-incomplete") return "The response may contain partial text or incomplete tool calls. Review them before continuing.";
+  if (kind === "provider-unavailable") return "Try again, or choose another model.";
   if (kind === "free-model-limit") {
     return "Too many people are using the free model at once. Wait a few minutes and try again, or connect your own model provider in Settings → AI Providers to keep working.";
   }
@@ -172,7 +177,7 @@ function detectGatewayAuthRequired(error: unknown, fields: { message: string | n
 }
 
 function errorRecoveryPrompt(kind: OpencodeSessionErrorKind) {
-  return kind === "aborted" || kind === "provider-timeout" || kind === "provider-incomplete"
+  return kind === "aborted" || kind === "provider-timeout" || kind === "provider-incomplete" || kind === "provider-unavailable"
     ? interruptedTaskRecoveryPrompt
     : null;
 }
@@ -254,7 +259,7 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
   const gatewayAuth = detectGatewayAuthRequired(error, fields);
   const gatewaySelection = safeStringify(error)?.includes("gateway_selection_required") === true;
   const gatewayUsage = parseGatewayUsageError(error);
-  const kind = gatewayAuth ? "gateway-auth-required" : gatewaySelection ? "gateway-selection-required" : sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody);
+  const kind = gatewayAuth ? "gateway-auth-required" : gatewaySelection ? "gateway-selection-required" : sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody, fields.status);
   const fallbackTitle = normalizeSessionError(fields.message ?? defaultErrorMessage(fields.name, fallback));
   return {
     kind,

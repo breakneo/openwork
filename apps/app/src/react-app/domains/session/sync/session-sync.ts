@@ -1203,7 +1203,7 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
 
   if (event.type === "message.updated") {
     const props = (event.properties ?? {}) as {
-      info?: { id?: string; role?: UIMessage["role"] | string; sessionID?: string; time?: { created?: number; completed?: number } };
+      info?: { id?: string; role?: UIMessage["role"] | string; sessionID?: string; parentID?: string; time?: { created?: number; completed?: number } };
     };
     const info = props.info;
     if (!info?.id || !info.sessionID || (info.role !== "user" && info.role !== "assistant" && info.role !== "system")) {
@@ -1229,8 +1229,8 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
     const next = {
       id: info.id,
       role: info.role,
-      ...(typeof created === "number"
-        ? { metadata: { opencode: { created, ...(typeof completed === "number" ? { completed } : {}) } } }
+      ...(typeof created === "number" || typeof info.parentID === "string"
+        ? { metadata: { opencode: { ...(typeof created === "number" ? { created } : {}), ...(typeof completed === "number" ? { completed } : {}), ...(typeof info.parentID === "string" ? { parentID: info.parentID } : {}) } } }
         : {}),
       parts: [],
     } satisfies UIMessage;

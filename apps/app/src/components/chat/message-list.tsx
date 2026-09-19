@@ -33,6 +33,7 @@ import { t } from "@/i18n"
 import { useOpenTargets } from "@/lib/target-provider"
 import { openTargetFromUrl } from "@/react-app/domains/session/artifacts/open-target"
 import { presentOpencodeSessionError, sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
+import { TaskRecovery } from "./task-recovery"
 import { openModelPickerEvent } from "@/react-app/shell/new-providers-listener"
 import { ApplyPatchTool } from "@/components/tools/apply-patch"
 import { BashTool } from "@/components/tools/bash"
@@ -1047,147 +1048,30 @@ interface ErrorMessageProps {
   gatewaySelectionRequired?: boolean
 }
 
-/**
- * Details are worth a disclosure only when they say more than the card
- * already does. A bare string error yields "Message: <same text>", which
- * would open to nothing new.
- */
-function hasExtraTechnicalDetails(error: string | null, details: string | null | undefined): details is string {
-  const text = details?.trim()
-  if (!text) return false
-  if (text === error?.trim()) return false
-  return text.replace(/^Message:\s*/, "") !== error?.trim()
-}
-
-function SessionErrorTechnicalDetails({ details, tone }: { details: string; tone: "card" | "line" }) {
-  const [open, setOpen] = React.useState(false)
-  const [copied, setCopied] = React.useState(false)
-  const onCopy = React.useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(details)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 2000)
-    } catch {
-      // ignore clipboard failures
-    }
-  }, [details])
-
-  return (
-    <div className={cn("flex min-w-0 w-full flex-col", tone === "card" && "border-t border-destructive/20 pt-1.5")}>
-      <button
-        type="button"
-        data-testid="session-error-details-toggle"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        className="flex w-fit min-w-0 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight
-          aria-hidden="true"
-          className={cn("size-3 shrink-0 transition-transform duration-150", open && "rotate-90")}
-        />
-        <span className="shrink-0">Technical details</span>
-      </button>
-      {open ? (
-        <div
-          data-testid="session-error-details"
-          className="mt-1.5 flex min-w-0 flex-col gap-1.5 rounded-lg bg-muted p-2 text-xs"
-        >
-          <pre className="max-h-60 overflow-auto whitespace-pre-wrap wrap-break-word font-mono text-foreground/90">
-            {details}
-          </pre>
-          <button
-            type="button"
-            onClick={() => void onCopy()}
-            className="flex w-fit cursor-pointer items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {copied ? <Check aria-hidden="true" className="size-3" /> : <Copy aria-hidden="true" className="size-3" />}
-            {copied ? "Copied" : "Copy details"}
-          </button>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, gatewayConnectUrl, gatewaySelectionRequired }: ErrorMessageProps) {
   const { onResumeInterrupted, developerMode, dispatchAction, sessionId } = useMessageList()
   const selection = error?.includes("gateway_selection_required") ? presentOpencodeSessionError(error) : null
   const displayError = selection?.title ?? error
   const displayDescription = selection?.description ?? description
   const displayDetails = selection?.technicalDetails ?? technicalDetails
-  // Status codes, provider names, and response bodies are for developers,
-  // admins, and support — not the plain-language card end users see. They
-  // surface only with Developer mode (Settings → Advanced), like the
-  // session debug panel.
-  const details = developerMode && hasExtraTechnicalDetails(displayError, displayDetails) ? displayDetails : null
-
-  // A resumable interruption is a pause, not a failure: it renders as a
-  // quiet status line (like "Working 12s"), with Resume as the emphasis.
-  if (resumePrompt && onResumeInterrupted) {
-    return (
-      <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-1 px-2 md:px-10">
-        <div
-          data-testid="session-error-interrupted"
-          className="flex min-w-0 items-center gap-2 py-1 text-sm text-muted-foreground"
-        >
-          <CirclePause aria-hidden="true" className="size-4 shrink-0" />
-          <span className="min-w-0 truncate">{error}</span>
-          <span aria-hidden="true" className="text-muted-foreground/60">·</span>
-          <button
-            type="button"
-            data-testid="session-error-resume"
-            onClick={() => onResumeInterrupted(resumePrompt)}
-            className="shrink-0 cursor-pointer font-medium text-foreground underline-offset-2 transition-colors hover:underline"
-          >
-            {t("session.resume_interrupted")}
-          </button>
-        </div>
-        {showDescriptionOnResume && description ? (
-          <p data-testid="session-error-interruption-warning" className="text-sm text-muted-foreground whitespace-pre-wrap">
-            {description}
-          </p>
-        ) : null}
-        {details ? <SessionErrorTechnicalDetails details={details} tone="line" /> : null}
-      </Message>
-    )
-  }
-
+  const resumable = Boolean(resumePrompt && onResumeInterrupted)
   return (
-    <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 md:px-10">
-      <div className="group flex w-full flex-col items-start gap-0">
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
-          <div className="flex flex-row items-start gap-2">
-            <AlertTriangle aria-hidden="true" size={16} className="mt-0.5 shrink-0 text-destructive" />
-            <div className="flex flex-col gap-1">
-              <p className="whitespace-pre-wrap text-destructive">{displayError}</p>
-              {displayDescription && (!resumePrompt || showDescriptionOnResume) ? (
-                <p className="text-sm text-destructive/80 whitespace-pre-wrap">{displayDescription}</p>
-              ) : null}
-            </div>
-          </div>
-          {details ? <SessionErrorTechnicalDetails details={details} tone="card" /> : null}
-          {gatewaySelectionRequired || selection ? (
-            <Button variant="outline" size="sm" className="self-start" data-testid="session-error-gateway-selection"
-              onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>
-              Choose group and credential set
-            </Button>
-          ) : null}
-          {gatewayConnectUrl !== undefined ? (
-            <Button
-              variant="outline"
-              size="sm"
-              data-testid="session-error-gateway-connect"
-              className="self-start"
-              onClick={() => {
-                dispatchAction({ target: "settings", action: "open", section: "providers" })
-              }}
-            >
-              Connect
-            </Button>
-          ) : null}
-        </div>
-      </div>
-    </Message>
+    <TaskRecovery title={displayError ?? "Task failed"} state={resumable ? "paused" : "failed"}
+      testId={resumable ? "session-error-interrupted" : undefined}
+      description={showDescriptionOnResume && displayDescription
+        ? <span data-testid="session-error-interruption-warning">{displayDescription}</span>
+        : !resumePrompt ? displayDescription : null}
+      technicalDetails={developerMode ? displayDetails : null}
+      actions={resumable || gatewaySelectionRequired || selection || gatewayConnectUrl !== undefined ? <>
+        {resumable && resumePrompt ? <Button variant="outline" size="sm" data-testid="session-error-resume"
+          onClick={() => onResumeInterrupted?.(resumePrompt)}>{t("session.resume_interrupted")}</Button> : null}
+        {gatewaySelectionRequired || selection ? <Button variant="outline" size="sm" data-testid="session-error-gateway-selection"
+          onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>
+          Choose group and credential set
+        </Button> : null}
+        {gatewayConnectUrl !== undefined ? <Button variant="outline" size="sm" data-testid="session-error-gateway-connect"
+          onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}>Connect</Button> : null}
+      </> : null} />
   )
 }
 
@@ -1195,21 +1079,8 @@ interface RetryMessageProps {
   status: RetryStatus
 }
 
-function RetryActionButton(props: { label: string; onClick: () => void }) {
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      className="h-7 border-border bg-background text-xs text-foreground hover:bg-muted"
-      onClick={props.onClick}
-    >
-      {props.label}
-    </Button>
-  )
-}
-
 const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
-  const { dispatchAction } = useMessageList()
+  const { dispatchAction, developerMode } = useMessageList()
   const [seconds, setSeconds] = React.useState(() => retryDelaySeconds(status))
 
   React.useEffect(() => {
@@ -1230,43 +1101,16 @@ const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
     : `Retrying · attempt ${status.attempt}`
   const action = status.action
   const freeModelLimit = action?.reason === "free_tier_limit"
+  const presentation = presentOpencodeSessionError({ name: "APIError", data: { message: status.message } })
 
   return (
-    <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 md:px-10">
-      <div className="group flex w-full flex-col items-start gap-0">
-        <div className="text-foreground flex min-w-0 flex-1 flex-col gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2">
-          <div className="flex items-start gap-2">
-            <LoaderCircle size={16} className="mt-0.5 shrink-0 animate-spin text-amber-700" />
-            <div className="min-w-0 space-y-1">
-              <p className="whitespace-pre-wrap text-sm font-medium text-foreground">
-                {freeModelLimit ? "The free starter model is busy right now" : status.message}
-              </p>
-              <p className="text-xs text-muted-foreground">{info}</p>
-            </div>
-          </div>
-          {action ? (
-            <div className="ml-6 space-y-1 border-t border-border pt-2">
-              <p className="text-xs font-medium text-foreground">
-                {freeModelLimit ? "Free model limit reached" : action.title}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {freeModelLimit
-                  ? "OpenWork will keep retrying. To keep working now, connect your own model provider."
-                  : action.message}
-              </p>
-              {freeModelLimit ? (
-                <RetryActionButton
-                  label="Connect a model provider"
-                  onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}
-                />
-              ) : action.link ? (
-                <RetryActionButton label={action.label} onClick={openDesktopUrl.bind(null, action.link)} />
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </Message>
+    <TaskRecovery state="retrying" testId="session-retrying"
+      title={`${(freeModelLimit ? "The free starter model is busy right now" : action?.title ?? presentation.title).replace(/[.!…]+$/, "")}. Retrying…`}
+      description={freeModelLimit ? "To keep working now, connect your own model provider." : action?.message}
+      technicalDetails={[info, ...(developerMode ? [presentation.technicalDetails] : [])].join("\n")}
+      actions={freeModelLimit ? <Button variant="outline" size="sm"
+        onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}>Connect a model provider</Button>
+        : action?.link ? <Button variant="outline" size="sm" onClick={openDesktopUrl.bind(null, action.link)}>{action.label}</Button> : null} />
   )
 })
 
