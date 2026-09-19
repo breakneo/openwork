@@ -409,7 +409,7 @@ describe("engine pool", () => {
     const { pool, primary } = await createPool(fixture);
     const fingerprint = await computeEngineConfigFingerprint(fixture.template);
     const server = await startServer(fixture.config);
-    cleanups.push(() => server.stop(true));
+    cleanups.push(() => server.stop());
 
     // Provider credentials live outside the runtime config. Saving or rotating
     // a key must refresh the cached provider list even with identical config.
@@ -437,7 +437,7 @@ describe("engine pool", () => {
     const oldPort = portOf(primary.url);
     await fixture.setBusy(oldPort, ["ses_live"]);
     const server = await startServer(fixture.config);
-    cleanups.push(() => server.stop(true));
+    cleanups.push(() => server.stop());
 
     const response = await fetch(`http://127.0.0.1:${server.port}/workspace/ws_pool/engine/reload`, {
       method: "POST",
@@ -449,7 +449,9 @@ describe("engine pool", () => {
     expect(primary.isAlive()).toBe(true);
     expect(fixture.hookCalls.reloadInPlace).toBe(0);
     expect(pool.routeRequest("POST", "/session/ses_live/prompt_async")?.target.baseUrl).toBe(primary.url);
-    expect(pool.routeRequest("POST", "/session/ses_new/prompt_async")?.target.baseUrl).toBe(pool.primaryUrl());
+    const primaryUrl = pool.primaryUrl();
+    if (primaryUrl === null) throw new Error("Explicit reload left no primary engine");
+    expect(pool.routeRequest("POST", "/session/ses_new/prompt_async")?.target.baseUrl).toBe(primaryUrl);
 
     await fixture.setBusy(oldPort, []);
     expect(await waitUntil(() => !primary.isAlive(), 5_000)).toBe(true);
