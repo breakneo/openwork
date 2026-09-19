@@ -4,7 +4,7 @@ import { parseGatewayUsageError, gatewayUsageErrorEvidenceSchema, type GatewayUs
 import { safeStringify } from "../../../../app/utils";
 import { normalizeErrorText } from "../../../../lib/error-text";
 
-export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
+export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "provider-access-denied" | "workspace-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
 
 export type OpencodeSessionErrorPresentation = {
   kind: OpencodeSessionErrorKind;
@@ -75,6 +75,9 @@ function sessionErrorKind(
 ): OpencodeSessionErrorKind {
   const searchable = [name, message, code, responseBody].filter(Boolean).join(" ");
   if (searchable.includes("gateway_selection_required")) return "gateway-selection-required";
+  if (searchable.includes("openwork:desktop") && /\bECONNREFUSED\b/.test(searchable)
+    && /127\.0\.0\.1|localhost|\[::1\]/.test(searchable)) return "workspace-unavailable";
+  if (name === "APIError" && status === 403) return "provider-access-denied";
   if (/\b(?:ENOSPC|EDQUOT|SQLITE_FULL)\b|no space left on device|database or disk is full|disk quota exceeded/i.test(searchable)) {
     return "disk-full";
   }
@@ -111,6 +114,8 @@ function errorTitle(kind: OpencodeSessionErrorKind, fallback: string) {
   if (kind === "provider-timeout") return "Provider did not respond in time";
   if (kind === "provider-incomplete") return "The model response was interrupted";
   if (kind === "provider-unavailable") return "The model couldn’t respond";
+  if (kind === "provider-access-denied") return "You don’t have access to this model";
+  if (kind === "workspace-unavailable") return "Can’t reach this workspace";
   if (kind === "free-model-limit") return "The free starter model is busy right now";
   if (kind === "gateway-auth-required") return GATEWAY_AUTH_REQUIRED_TITLE;
   if (kind === "gateway-selection-required") return "Choose a Gateway model group and credential set";
@@ -133,6 +138,8 @@ function errorDescription(kind: OpencodeSessionErrorKind, gatewayAuth: GatewayAu
   }
   if (kind === "provider-incomplete") return "Some steps may have finished. Check before continuing.";
   if (kind === "provider-unavailable") return "Try again, or choose another model.";
+  if (kind === "provider-access-denied") return "Choose another model or ask your admin for access.";
+  if (kind === "workspace-unavailable") return "Check the connection, then try again.";
   if (kind === "free-model-limit") {
     return "Too many people are using the free model at once. Wait a few minutes and try again, or connect your own model provider in Settings → AI Providers to keep working.";
   }

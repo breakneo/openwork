@@ -939,9 +939,11 @@ const MessageComponent = React.memo(
           description={presentation?.description}
           showDescriptionOnResume={presentation?.kind === "provider-incomplete"}
           resumePrompt={presentation?.recoveryPrompt}
+          canRetry={isLastMessage && !isStreaming}
           technicalDetails={presentation?.technicalDetails}
           gatewayConnectUrl={presentation?.kind === "gateway-auth-required" ? presentation.connectUrl ?? null : undefined}
           gatewaySelectionRequired={presentation?.kind === "gateway-selection-required"}
+          changeModel={presentation?.kind === "provider-access-denied" || presentation?.kind === "provider-unavailable"}
         />
       )
     }
@@ -1037,6 +1039,7 @@ interface ErrorMessageProps {
   showDescriptionOnResume?: boolean
   /** Set only for interrupted runs that can resume. */
   resumePrompt?: string | null
+  canRetry?: boolean
   /** Error type, status, provider, code, response body — for bug reports and support. */
   technicalDetails?: string | null
   /**
@@ -1046,9 +1049,10 @@ interface ErrorMessageProps {
    */
   gatewayConnectUrl?: string | null
   gatewaySelectionRequired?: boolean
+  changeModel?: boolean
 }
 
-function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, gatewayConnectUrl, gatewaySelectionRequired }: ErrorMessageProps) {
+function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, canRetry = true, technicalDetails, gatewayConnectUrl, gatewaySelectionRequired, changeModel }: ErrorMessageProps) {
   const { onResumeInterrupted, developerMode, dispatchAction, sessionId } = useMessageList()
   const selection = error?.includes("gateway_selection_required") ? presentOpencodeSessionError(error) : null
   const displayError = selection?.title ?? error
@@ -1062,13 +1066,15 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
         ? <span data-testid="session-error-interruption-warning">{displayDescription}</span>
         : !resumePrompt ? displayDescription : null}
       technicalDetails={developerMode ? displayDetails : null}
-      actions={resumable || gatewaySelectionRequired || selection || gatewayConnectUrl !== undefined ? <>
-        {resumable && resumePrompt ? <Button variant="ghost" size="xs" data-testid="session-error-resume"
-          onClick={() => onResumeInterrupted?.(resumePrompt)}>{t("session.resume_interrupted")}</Button> : null}
+      onRetry={canRetry && resumable && resumePrompt ? () => onResumeInterrupted?.(resumePrompt) : undefined}
+      retryTestId="session-error-resume"
+      actions={gatewaySelectionRequired || selection || changeModel || gatewayConnectUrl !== undefined ? <>
         {gatewaySelectionRequired || selection ? <Button variant="ghost" size="xs" data-testid="session-error-gateway-selection"
           onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>
           Choose group and credential set
         </Button> : null}
+        {changeModel && !gatewaySelectionRequired && !selection ? <Button variant="ghost" size="xs"
+          onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>Change model</Button> : null}
         {gatewayConnectUrl !== undefined ? <Button variant="ghost" size="xs" data-testid="session-error-gateway-connect"
           onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}>Connect</Button> : null}
       </> : null} />

@@ -774,8 +774,7 @@ function AssistantWaitingCard({ label = t("session.assistant_thinking") }: { lab
 function AdmissionOutcomeUnknownCard(props: { resuming: boolean; onResume: () => void }) {
   return (
     <TaskRecovery state="paused" testId="admission-outcome-unknown" title={t("session.admission_outcome_unknown")}
-      actions={<Button variant="ghost" size="xs" data-testid="admission-outcome-resume"
-        disabled={props.resuming} onClick={props.onResume}>{t("session.resume_interrupted")}</Button>} />
+      onRetry={props.onResume} retryDisabled={props.resuming} retryTestId="admission-outcome-resume" />
   );
 }
 
@@ -3458,10 +3457,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
           <TaskRecovery testId="cloud-mcp-submission-failure"
             title={props.cloudMcpSubmissionState.issue?.message ?? "Connected service tools could not be prepared."}
             description={props.cloudMcpSubmissionState.issue?.recommendedAction}
-            actions={<>
-              {props.cloudMcpSubmissionState.issue?.retryable !== false ? <Button variant="ghost" size="xs" onClick={handleRetryCloudSubmission}>Retry</Button> : null}
-              <Button variant="ghost" size="xs" onClick={props.onOpenConnect}>Open Connect</Button>
-            </>} />
+            onRetry={props.cloudMcpSubmissionState.issue?.retryable !== false ? handleRetryCloudSubmission : undefined}
+            actions={<Button variant="ghost" size="xs" onClick={props.onOpenConnect}>Open Connect</Button>} />
         ) : null}
         {archived ? (
           <Alert data-testid="archived-session">

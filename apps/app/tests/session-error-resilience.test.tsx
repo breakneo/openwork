@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
 
 import { MessageList } from "../src/components/chat/message-list"
+import { TaskRecovery } from "../src/components/chat/task-recovery"
 import { MessageListProvider } from "../src/components/chat/message-list-provider"
 import { getReactQueryClient } from "../src/react-app/infra/query-client"
 import { createSessionErrorUIMessage } from "../src/react-app/domains/session/sync/usechat-adapter"
@@ -23,6 +24,32 @@ import {
 
 afterEach(() => {
   getReactQueryClient().clear()
+})
+
+test("the quiet retry control preserves the recovery callback and disabled state", async () => {
+  const registered = typeof window === "undefined"
+  if (registered) GlobalRegistrator.register({ url: "http://localhost/" })
+  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true })
+  const container = document.createElement("div")
+  document.body.append(container)
+  const root = createRoot(container)
+  const retry = mock(() => undefined)
+  try {
+    await act(async () => root.render(<TaskRecovery state="paused" title="Response interrupted" onRetry={retry} />))
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Retry task"]')
+    if (!button) throw new Error("Missing retry control")
+    expect(button.textContent).toBe("")
+    await act(async () => { button.focus(); button.click() })
+    expect(retry).toHaveBeenCalledTimes(1)
+    await act(async () => root.render(<TaskRecovery state="paused" title="Response interrupted" onRetry={retry} retryDisabled />))
+    expect(button.disabled).toBe(true)
+    await act(async () => button.click())
+    expect(retry).toHaveBeenCalledTimes(1)
+  } finally {
+    await act(async () => root.unmount())
+    container.remove()
+    if (registered) GlobalRegistrator.unregister()
+  }
 })
 
 describe("session error resilience", () => {
@@ -216,7 +243,7 @@ describe("session error resilience", () => {
     expect(html).not.toContain('data-testid="session-error-details-trigger"')
   })
 
-  const renderErrorTranscriptWithResume = (error: unknown) => {
+  const renderErrorTranscriptWithResume = (error: unknown, trailing: UIMessage[] = []) => {
     const message = createSessionErrorUIMessage(
       "assistant-turn",
       presentOpencodeSessionError(error),
@@ -239,7 +266,7 @@ describe("session error resilience", () => {
         onMcpReopenAuthorization={async () => undefined}
         onMcpRetry={() => undefined}
       >
-        <MessageList messages={[message]} status="ready" />
+        <MessageList messages={[message, ...trailing]} status="ready" />
       </MessageListProvider>,
     )
   }
@@ -313,14 +340,37 @@ describe("session error resilience", () => {
     expect(presentation.connectUrl).toBeUndefined()
   })
 
-  test("offers Resume on the error card for an engine abort", () => {
+  test("offers an accessible icon-only retry below an interrupted message", () => {
     const html = renderErrorTranscriptWithResume({
       name: "MessageAbortedError",
       data: { message: "Aborted" },
     })
 
     expect(html).toContain('data-testid="session-error-resume"')
-    expect(html).toContain("Resume")
+    expect(html).toContain('aria-label="Retry task"')
+    expect(html).not.toContain(">Resume<")
+  })
+
+  test("historical interruptions do not offer a retry for an already superseded task", () => {
+    const html = renderErrorTranscriptWithResume({ name: "MessageAbortedError", data: { message: "Aborted" } }, [
+      { id: "later-answer", role: "assistant", parts: [{ type: "text", text: "The next task is complete." }] },
+    ])
+    expect(html).toContain("Task interrupted")
+    expect(html).not.toContain('aria-label="Retry task"')
+  })
+
+  test("explains local workspace and model access errors without exposing machine details", () => {
+    const local = presentOpencodeSessionError(new Error("Error invoking remote method 'openwork:desktop': TypeError: fetch failed: connect ECONNREFUSED 127.0.0.1:12345"))
+    expect(local.title).toBe("Can’t reach this workspace")
+    expect(local.technicalDetails).toContain("ECONNREFUSED")
+    expect(local.recoveryPrompt).toBeNull()
+    const denied = { name: "APIError", data: { message: "Forbidden", statusCode: 403 } }
+    expect(presentOpencodeSessionError(denied).title).toBe("You don’t have access to this model")
+    const html = renderErrorTranscriptWithResume(denied)
+    expect(html).toContain("Change model")
+    expect(html).not.toContain('aria-label="Retry task"')
+    expect(html).not.toContain("Forbidden")
+    expect(presentOpencodeSessionError("connect ECONNREFUSED 127.0.0.1:12345").kind).toBe("generic")
   })
 
   test("renders a resumable interruption as a quiet status line, not an error card", () => {

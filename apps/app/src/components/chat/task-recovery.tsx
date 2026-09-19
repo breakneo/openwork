@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Ellipsis } from "lucide-react";
+import { Ellipsis, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
@@ -11,6 +11,9 @@ export function TaskRecovery(props: {
   actions?: ReactNode;
   technicalDetails?: string | null;
   testId?: string;
+  onRetry?: () => void;
+  retryDisabled?: boolean;
+  retryTestId?: string;
 }) {
   const state = props.state ?? "failed";
   const [copied, setCopied] = useState(false);
@@ -23,9 +26,9 @@ export function TaskRecovery(props: {
   const hasDetails = details && details.replace(/^Message:\s*/, "") !== props.title.trim();
 
   return (
-    <Collapsible className="not-prose mx-auto w-full max-w-3xl px-2 py-2 md:px-10" data-testid={props.testId}>
+    <Collapsible className="group/recovery not-prose mx-auto w-full max-w-3xl px-2 py-2 md:px-10" data-testid={props.testId}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <p role={state === "failed" ? "alert" : "status"} className="min-w-0 text-sm leading-6 text-muted-foreground">{props.title}</p>
+        <p role={state === "failed" ? "alert" : "status"} className="min-w-0 text-sm leading-6 text-dls-secondary">{props.title}</p>
         <div className="flex shrink-0 items-center gap-1 text-foreground">
           {props.actions}
           {hasDetails ? <span className="text-muted-foreground">
@@ -36,7 +39,13 @@ export function TaskRecovery(props: {
           </span> : null}
         </div>
       </div>
-      {props.description ? <p className="mt-1 max-w-prose text-xs leading-5 text-muted-foreground">{props.description}</p> : null}
+      {props.description ? <p className="mt-1 max-w-prose text-xs leading-5 text-dls-secondary">{props.description}</p> : null}
+      {props.onRetry ? <div className="mt-1 flex h-6 items-center text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/recovery:opacity-100 group-hover/message-group:opacity-100 group-focus-within/recovery:opacity-100 pointer-coarse:opacity-100 motion-reduce:transition-none">
+        <Button variant="ghost" size="icon-xs" aria-label="Retry task" title="Retry task"
+          data-testid={props.retryTestId} disabled={props.retryDisabled} onClick={props.onRetry}>
+          <RotateCw aria-hidden="true" />
+        </Button>
+      </div> : null}
       {hasDetails ? <CollapsibleContent data-testid="session-error-details"
         className="overflow-hidden data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 duration-150 motion-reduce:animate-none">
         <div className="mt-3 flex min-w-0 flex-col items-start gap-2 border-s border-border ps-3 text-muted-foreground">
