@@ -91,8 +91,9 @@ test.each([
   { name: "new thread keeps the prompt before early assistant output through late native acknowledgement and settlement", orderingRegression: "empty" },
   { name: "follow-up keeps history before the prompt and early assistant output through settlement", orderingRegression: "history" },
   { name: "multiple identical pending prompts keep submission order as native siblings settle", orderingRegression: "siblings" },
-])("$name", async ({ queueRegression, modeRegression, orderingRegression }) => {
-  const sessionId = `session-focus-continuity${orderingRegression ? `-${orderingRegression}` : ""}`;
+  { name: "created conversation owns first-send assignment and admission failures without recreating or resending", firstSendRegression: true },
+])("$name", async ({ queueRegression, modeRegression, orderingRegression, firstSendRegression }) => {
+  const sessionId = `session-focus-continuity${orderingRegression ? `-${orderingRegression}` : firstSendRegression ? "-first-send" : ""}`;
   window.localStorage.clear();
   const require = createRequire(import.meta.url);
   // Bun's isolated test loader cycles Lexical's ESM entries; use their real CJS entries before the app imports the editor.
@@ -227,6 +228,8 @@ test.each([
   const root = createRoot(container);
   const draft = "Keep this draft while the task finishes";
   let submission = Promise.withResolvers<CloudMcpSubmissionResult>();
+  let failFirstAssignment = true;
+  let firstSendAdmissions = 0;
   const sentDrafts: ComposerDraft[] = [];
   let prepareSubmission: ((text?: string) => void) | undefined;
   const revokePreview = spyOn(URL, "revokeObjectURL");
@@ -324,6 +327,17 @@ test.each([
                 onSendDraft={(value, _sessionId, onPrepared) => {
                   sentDrafts.push(value);
                   prepareSubmission = onPrepared;
+                  if (firstSendRegression) {
+                    return import("../src/react-app/domains/session/chat/pending-conversation-store").then(({ ensurePendingConversationGroup }) => ensurePendingConversationGroup("local", routeWorkspaceId, _sessionId, async (_workspaceId, nativeId, groupId) => {
+                      expect(_workspaceId).toBe(routeWorkspaceId);
+                      expect(nativeId).toBe(sessionId);
+                      expect(groupId).toBe("research");
+                      if (failFirstAssignment) throw new Error("Group assignment failed");
+                    })).then(() => {
+                      firstSendAdmissions++;
+                      return submission.promise;
+                    });
+                  }
                   return submission.promise;
                 }}
                 cloudMcpSubmissionState={IDLE_CLOUD_MCP_SUBMISSION_GATE_STATE}
@@ -358,6 +372,52 @@ test.each([
   );
   const renderSession = (activeSessionId = sessionId) => renderSurface(undefined, activeSessionId);
   try {
+    if (firstSendRegression) {
+      const { beginPendingConversation, createPendingConversation, pendingConversationAutoSendPayload, retryPendingConversation } = await import("../src/react-app/domains/session/chat/pending-conversation-store");
+      const { markComposerAutoSend, composerAutoSendScopeKey, hasComposerAutoSend } = await import("../src/react-app/domains/session/surface/composer-auto-send");
+      const { seedCreatedSessionSnapshot } = await import("../src/react-app/domains/session/sync/session-sync");
+      fetchedSnapshot = createSnapshot({ type: "idle" }, 2, sessionId);
+      fetchedSnapshot.messages = [];
+      const file = new File(["report"], "report.txt", { type: "text/plain" });
+      const entry = beginPendingConversation({ scope: "local", destination: { workspaceId: routeWorkspaceId, groupId: "research" }, submitted: {
+        draft: "First message[attachment report]", attachments: [{ id: "report", name: file.name, kind: "file", file, mimeType: file.type, size: file.size }],
+        mentions: {}, pasteParts: [], revertMessageId: null,
+      } });
+      let creates = 0;
+      const scopeKey = composerAutoSendScopeKey({ draftScope: "local", opencodeBaseUrl: "http://127.0.0.1:1/opencode", workspaceId, sessionId });
+      await act(async () => {
+        queryClient.setQueryData(transcriptKey(workspaceId, sessionId), []);
+        await createPendingConversation(entry.id, async () => { creates++; return { session: fetchedSnapshot.session }; }, ({ session }) => {
+          seedCreatedSessionSnapshot(workspaceId, session);
+          markComposerAutoSend(session.id, pendingConversationAutoSendPayload(entry, { workspaceId, opencodeBaseUrl: "http://127.0.0.1:1/opencode" }, session.id));
+        });
+        renderSession();
+      });
+      await waitFor(() => container.querySelector('[data-testid="session-error-card"]') !== null, "normal session assignment recovery");
+      expect(container.querySelector('[data-testid="session-error-card"]')?.textContent).toContain("Couldn’t assign this conversation to its group");
+      expect(container.querySelector("[data-pending-conversation]")).toBeNull();
+      expect(container.textContent).not.toContain("What do you need done?");
+      expect(sentDrafts).toHaveLength(1);
+      expect(firstSendAdmissions).toBe(0);
+      expect(useComposerStateStore.getState().sessions[sessionId]?.attachments[0]?.file).toBe(file);
+      expect(hasComposerAutoSend(sessionId, scopeKey)).toBe(false);
+      failFirstAssignment = false;
+      await act(async () => {
+        const send = container.querySelector<HTMLButtonElement>('[data-composer-actions] button');
+        expect(send?.disabled).toBe(false);
+        send?.click();
+      });
+      await waitFor(() => firstSendAdmissions === 1, "first admission after group retry");
+      await act(async () => submission.reject(new Error("Message admission failed")));
+      expect(container.querySelector('[data-testid="session-error-card"]')).not.toBeNull();
+      expect(useComposerStateStore.getState().sessions[sessionId]?.attachments[0]?.file).toBe(file);
+      expect(useComposerStateStore.getState().sessions[sessionId]?.draft).toBe(entry.submitted.draft);
+      await retryPendingConversation(entry.id);
+      expect(creates).toBe(1);
+      expect(sentDrafts).toHaveLength(2);
+      expect(firstSendAdmissions).toBe(1);
+      return;
+    }
     if (orderingRegression) {
       const { __applySessionSyncEventForTest, __createWorkspaceSessionSyncForTest, trackWorkspaceSessionSync } = await import("../src/react-app/domains/session/sync/session-sync");
       const { createV2EventTranslationState, translateV2Event } = await import("../src/app/lib/opencode-v2-adapter");

@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { openNewSessionDraft } from "@/react-app/domains/session/chat/new-session-destination";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate, useParams } from "react-router";
 import { toast } from "@/components/ui/sonner";
@@ -46,7 +47,6 @@ import { useModelPicker } from "@/react-app/domains/session/modals/use-model-pic
 import {
   type RouteWorkspace,
   type RouteSession,
-  createRouteSession,
   describeRouteError,
   downloadWorkspaceJson,
   getSessionStatus,
@@ -1202,18 +1202,11 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
     () => buildCommandPaletteSessions(workspaces, sessionsByWorkspaceId, selectedWorkspaceId),
     [sessionsByWorkspaceId, selectedWorkspaceId, workspaces],
   );
-  const handleCreatePaletteSession = useCallback(async () => {
-    if (!selectedWorkspaceEndpoint?.token || !selectedWorkspaceId) {
-      navigate(selectedWorkspaceId ? workspaceSessionRoute(selectedWorkspaceId) : "/session");
-      return;
-    }
-    try {
-      const session = await createRouteSession(selectedWorkspaceEndpoint, selectedWorkspaceRoot || undefined);
-      navigate(workspaceSessionRoute(selectedWorkspaceId, session.id));
-    } catch (error) {
-      toast.error(describeRouteError(error));
-    }
-  }, [navigate, selectedWorkspaceEndpoint, selectedWorkspaceId, selectedWorkspaceRoot]);
+  const handleCreatePaletteSession = useCallback(() => {
+    const workspaceId = readActiveWorkspaceId() || selectedWorkspaceId;
+    if (!workspaceId) { navigate("/session"); return; }
+    openNewSessionDraft({ workspaceId }, navigate);
+  }, [navigate, selectedWorkspaceId]);
   // Settings refreshes provider auth whenever the picker opens (the session
   // route does not need this; its provider state is kept fresh elsewhere).
   useEffect(() => {

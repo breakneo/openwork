@@ -125,6 +125,7 @@ type ComposerProps = {
   flush?: boolean;
   topAccessory?: ReactNode;
   runModeControl?: ReactNode;
+  contextControl?: ReactNode;
 };
 
 const FLUSH_PROMPT_EVENT = "openwork:flushPromptDraft";
@@ -1831,6 +1832,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                     {props.modelUnavailableMessage ?? t("models.model_unavailable_short")}
                   </span>
                 ) : null}
+                {props.contextControl}
                 </div>
 
               </div>

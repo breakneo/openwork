@@ -4,6 +4,7 @@ import { ArrowRight, X, Zap } from "lucide-react";
 
 import { DEFAULT_MODEL } from "@/app/constants";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { Button } from "@/components/ui/button";
 import type { ComposerAttachment } from "@/app/types";
 import { resolveOrganizationPromptCardContent } from "@/components/chat/task-suggestions";
 import { useCheckDesktopRestriction, useOrgRestrictions } from "@/react-app/domains/cloud/desktop-config-provider";
@@ -16,7 +17,7 @@ import {
   useOpenWorkModelsPromoEligibility,
 } from "@/react-app/domains/cloud/openwork-models-promo";
 import { usePlatform } from "@/react-app/kernel/platform";
-import { persistableComposerDraftText } from "@/react-app/domains/session/surface/composer-state-store";
+import { persistableComposerDraftText, useComposerStateStore } from "@/react-app/domains/session/surface/composer-state-store";
 import { useNewTaskDraftState } from "@/react-app/domains/session/sync/draft-store";
 import {
   NewTaskComposer,
@@ -82,8 +83,10 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
   // opening another session (or restarting) does not lose it; the sidebar
   // offers a Draft row for the same slot. The parent keys this component by
   // draft owner, so the initial read is the only hydration needed.
-  const persistedDraft = useNewTaskDraftState(props.composer?.draftScope, props.composer?.workspaceId);
-  const [prompt, setPromptState] = useState(() => persistedDraft.snapshot?.text ?? "");
+  const persistedDraft = useNewTaskDraftState(props.composer?.draftScope, props.composer?.workspaceId, props.composer?.draftSessionId);
+  const [prompt, setPromptState] = useState(() => (
+    props.composer?.draftOwnerKey ? useComposerStateStore.getState().sessions[props.composer.draftOwnerKey]?.draft : undefined
+  ) ?? persistedDraft.snapshot?.text ?? "");
   const promptRef = useRef(prompt);
   // Once a send is in flight the composer has cleared the slot, and anything
   // typed until its route lands is carried into the created session as the
@@ -178,8 +181,12 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
     if ((!trimmedPrompt && !attachments.length) || props.busy) return;
     sendInFlightRef.current = true;
     setSendInFlight(true);
+    // Legacy callers may not establish a pending conversation. Clear only after
+    // their submit starts; the synchronous consume callback owns the new pipeline.
     try {
-      await props.onRunTask(trimmedPrompt, attachments, handoff);
+      const work = props.onRunTask(trimmedPrompt, attachments, handoff);
+      persistedDraft.clear();
+      await work;
     } catch (error) {
       // The composer stays on this route, so whatever it holds now is once
       // again the unsent new-task prompt and must stay reachable.
@@ -196,12 +203,11 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
   };
 
   return (
-    <div data-chat-empty-hero className="mx-auto w-full max-w-[640px] space-y-6 px-4 max-lg:flex max-lg:h-full max-lg:min-h-0 max-lg:flex-col max-lg:space-y-0 max-lg:gap-4 max-lg:overflow-y-auto max-lg:px-3 max-lg:pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
-      <div data-empty-greeting hidden={hideIntroduction} className="space-y-1.5 text-center max-lg:pt-6">
-        <h2 className="text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-foreground">
+    <div data-chat-empty-hero className="mx-auto flex w-full max-w-[640px] flex-col gap-6 px-4 max-lg:h-full max-lg:min-h-0 max-lg:gap-4 max-lg:overflow-y-auto max-lg:px-3 max-lg:pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
+      <div data-empty-greeting hidden={hideIntroduction} className="text-center max-lg:pt-6">
+        <h2 className="text-lg font-medium tracking-tight text-foreground">
           What do you need done?
         </h2>
-        <p className="text-[13px] text-muted-foreground">Describe it in plain language</p>
       </div>
 
       <div ref={composerDockRef} onFocusCapture={() => setComposing(true)} data-empty-composer-dock className="max-lg:sticky max-lg:bottom-0 max-lg:order-last max-lg:mt-auto max-lg:shrink-0 max-lg:bg-dls-surface">
@@ -255,19 +261,18 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
         </button>
       ) : null}
 
-      <div data-empty-suggestions hidden={hideIntroduction} className={hideIntroduction ? "hidden" : "grid gap-2 sm:grid-cols-2"}>
+      <div data-empty-suggestions hidden={hideIntroduction} className={hideIntroduction ? "hidden" : "grid gap-2 text-muted-foreground sm:grid-cols-2"}>
         {suggestions.map((suggestion) => (
-          <button
+          <Button
             key={suggestion.title}
-            type="button"
-            className="rounded-xl border border-border bg-background p-3.5 text-left transition-colors hover:bg-accent"
+            variant="ghost"
+            size="sm"
+            className="min-w-0 justify-start"
+            title={suggestion.description}
             onClick={() => fillPrompt(suggestion.prompt)}
           >
-            <div className="truncate text-[13px] font-medium text-foreground">{suggestion.title}</div>
-            <div className="mt-0.5 line-clamp-2 text-[12px] leading-[17px] text-muted-foreground">
-              {suggestion.description}
-            </div>
-          </button>
+            <span className="truncate">{suggestion.title}</span>
+          </Button>
         ))}
       </div>
     </div>

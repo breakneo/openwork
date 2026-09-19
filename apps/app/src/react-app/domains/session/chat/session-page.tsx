@@ -1,4 +1,7 @@
 /** @jsxImportSource react */
+import { newSessionDraftOwnerKey } from "./new-session-destination";
+import { usePendingConversationStore } from "./pending-conversation-store";
+import { PendingConversationView } from "./pending-conversation";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { usePanelRef } from "react-resizable-panels";
@@ -278,7 +281,7 @@ export type SessionPageProps = {
   extensionsActive?: boolean;
   onOpenProviderAuth?: () => void;
   /** Chat-first: create a default workspace and start a task from the empty-state composer. */
-  onChatFirstTask?: (prompt: string, attachments?: ComposerAttachment[]) => Promise<void>;
+  onChatFirstTask?: (prompt: string, attachments?: ComposerAttachment[], handoff?: NewTaskComposerHandoff) => Promise<void>;
   chatFirstBusy?: boolean;
   /** Workspace-scoped wiring for the empty-state hero's full composer. */
   newTaskComposer?: NewTaskComposerContext | null;
@@ -335,7 +338,7 @@ function WorkbenchPaneHeader(props: {
         {props.showWorkspace ? <span className="truncate text-muted-foreground">{props.workspaceTitle}</span> : null}
       </button>
       {props.pane === "secondary" ? <>
-        <Button variant="ghost" size="icon-xs" aria-label={t("session_management.expand_side_chat")} title={t("session_management.expand_side_chat")} onClick={props.onExpand}>
+        <Button variant="ghost" size="icon-xs" disabled={!props.onExpand} aria-label={t("session_management.expand_side_chat")} title={t("session_management.expand_side_chat")} onClick={props.onExpand}>
           <Maximize2 />
         </Button>
         <Button variant="ghost" size="icon-xs" aria-label={t("session_management.close_split_view")} title={t("session_management.close_split_view")} onClick={props.onClose}>
@@ -525,6 +528,8 @@ export function SessionPage(props: SessionPageProps) {
     secondary: splitSession,
     focusedPane: focusedWorkbenchPane,
   } = useRouteWorkbench(workbenchInput);
+  const pendingConversations = usePendingConversationStore((state) => state.conversations);
+  const pendingSideConversation = splitSession?.pendingConversationId ? pendingConversations[splitSession.pendingConversationId] : undefined;
   const [narrowPane, setNarrowPane] = useState<NarrowSessionPane>("chat");
   const narrowPaneNavigationRef = useRef<HTMLElement>(null);
   const activeWorkbenchPane = isMobile
@@ -994,7 +999,7 @@ export function SessionPage(props: SessionPageProps) {
     return () => window.clearTimeout(id);
   }, [pendingConversationHistoryNavigation]);
   useEffect(() => {
-    props.onSessionTabsChange?.(sessionTabs);
+    props.onSessionTabsChange?.(sessionTabs.filter((tab) => !tab.draftDestination));
   }, [sessionTabs, props.onSessionTabsChange]);
   const sessionActionTitle = useMemo(
     () => sessionTitleForId(props.sidebar.workspaceSessionGroups, sessionActionId),
@@ -1167,7 +1172,7 @@ export function SessionPage(props: SessionPageProps) {
   }, [setWorkbenchSplit]);
 
   const closePrimaryWorkbenchPane = useCallback(() => {
-    if (!splitSession) return;
+    if (!splitSession || splitSession.draftDestination) return;
     setWorkbenchSplit(null);
     openSessionTab(splitSession.workspaceId, splitSession.sessionId);
   }, [openSessionTab, setWorkbenchSplit, splitSession]);
@@ -1385,6 +1390,7 @@ export function SessionPage(props: SessionPageProps) {
           onOpenSession={openSessionTab}
           onPrefetchSession={props.sidebar.onPrefetchSession}
           onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
+          draftScope={props.newTaskComposer?.draftScope}
           onCreateSplitTaskInWorkspace={props.sidebar.onCreateSplitTaskInWorkspace}
           onOpenRenameSession={props.onRenameSession ? openRenameModal : undefined}
           onOpenDeleteSession={props.onDeleteSession ? (sessionId) => {
@@ -1823,9 +1829,26 @@ export function SessionPage(props: SessionPageProps) {
                               focused={activeWorkbenchPane === "secondary"}
                               onFocus={() => focusWorkbenchPane("secondary")}
                               onClose={closeSecondaryWorkbenchPane}
-                              onExpand={closePrimaryWorkbenchPane}
+                              onExpand={splitSession.draftDestination ? undefined : closePrimaryWorkbenchPane}
                             />
-                            {splitPaneRuntime.status === "ready" ? (
+                            {pendingSideConversation && pendingSideConversation.scope === props.newTaskComposer?.draftScope ? (
+                              <PendingConversationView conversation={pendingSideConversation} />
+                            ) : splitSession.draftDestination && props.newTaskComposer ? (
+                              <div className="min-h-0 flex-1 overflow-y-auto py-6">
+                                <SessionEmptyHero
+                                  key={splitSession.sessionId}
+                                  providerCount={providerCount}
+                                  onRunTask={(prompt, attachments, handoff) => props.sidebar.onCreateTaskWithPrompt?.(splitSession.workspaceId, prompt, attachments, handoff)}
+                                  onOpenProviderAuth={props.onOpenProviderAuth}
+                                  composer={{
+                                    ...props.newTaskComposer,
+                                    draftOwnerKey: newSessionDraftOwnerKey(props.newTaskComposer.draftScope, splitSession.draftDestination),
+                                    draftSessionId: splitSession.sessionId,
+                                    destination: splitSession.draftDestination,
+                                  }}
+                                />
+                              </div>
+                            ) : splitPaneRuntime.status === "ready" ? (
                               <div className="min-h-0 flex-1">
                                 <SplitSessionSurface
                                   {...splitPaneRuntime.surface}
@@ -1888,7 +1911,7 @@ export function SessionPage(props: SessionPageProps) {
                     <SessionEmptyHero
                       providerCount={providerCount}
                       busy={props.chatFirstBusy}
-                      onRunTask={(prompt, attachments) => props.onChatFirstTask?.(prompt, attachments)}
+                      onRunTask={(prompt, attachments, handoff) => props.onChatFirstTask?.(prompt, attachments, handoff)}
                       onOpenProviderAuth={props.onOpenProviderAuth}
                       composer={props.newTaskComposer}
                     />
@@ -1896,7 +1919,7 @@ export function SessionPage(props: SessionPageProps) {
                     <div className="px-6 py-16">
                       <TaskRecovery title={selectedWorkspaceErrorTitle}
                         technicalDetails={selectedWorkspaceErrorMessage}
-                        onRetry={() => props.sidebar.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
+                        onRetry={() => void Promise.resolve(props.sidebar.onTestWorkspaceConnection(props.selectedWorkspaceId))}
                         actions={<>
                           <Button
                             variant="ghost"
