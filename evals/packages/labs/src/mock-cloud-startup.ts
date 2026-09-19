@@ -14,8 +14,8 @@ export function installCloudStartupFaults() {
       }
       // Keep the real instance ready while its workspace response is delayed.
       // This tests the distinct connection phase without falsifying boot time.
-      if (mode === "connecting" && url.pathname === "/workspaces") {
-        await new Promise((resolve) => setTimeout(resolve, 70_000));
+      if (mode === "connecting" && ["/workspaces", "/workspace/", "/w/", "/opencode/"].some((prefix) => url.pathname.startsWith(prefix))) {
+        await new Promise((resolve) => setTimeout(resolve, 20_000));
       }
     }
     return originalFetch(input, init);
