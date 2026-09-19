@@ -431,7 +431,7 @@ export function ModelSelect({
             <span className="truncate">
               {hideValue || (!denAuth.isSignedIn && isCloudManagedProviderKey(value.providerID))
                 ? "Select model"
-                : (selectedOption?.title ?? value.modelID ?? "Select model")}
+                : (selectedOption?.title || "Select model")}
             </span>
             {showBehavior ? (
               <span className="shrink-0 text-gray-9">· {triggerBehaviorLabel}</span>
