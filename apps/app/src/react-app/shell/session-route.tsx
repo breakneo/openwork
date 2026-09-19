@@ -2084,8 +2084,10 @@ export function SessionRoute() {
   const cloudRoutePending = !selectedWorkspaceError && !routeNotFoundMessage &&
     (effectiveLoading || !opencodeClient || !selectedWorkspaceId);
   useEffect(() => {
-    if (!cloudRoutePending) cloudContentRevealed.current = true;
-  }, [cloudRoutePending]);
+    if (!cloudRoutePending && opencodeClient && selectedWorkspaceId && !selectedWorkspaceError && !routeNotFoundMessage) {
+      cloudContentRevealed.current = true;
+    }
+  }, [cloudRoutePending, opencodeClient, selectedWorkspaceId, selectedWorkspaceError, routeNotFoundMessage]);
   const cloudWorkspaceMainContentDecision = mapCloudWorkspaceMainContentDecision({
     status: cloudWorkspace.viewModel.variant,
     hasWorkspaces: Boolean(surfaceProps),
@@ -2097,7 +2099,10 @@ export function SessionRoute() {
     !cloudWorkspace.visible ||
     cloudWorkspaceStatusHasReadyContent(cloudWorkspace.viewModel.variant);
   const cloudWorkspaceMainContentTakeover = cloudWorkspaceMainContentDecision === "takeover" ? (
-    <CloudWorkspaceBootTakeover decision={cloudWorkspaceMainContentDecision} />
+    <CloudWorkspaceBootTakeover
+      decision={cloudWorkspaceMainContentDecision}
+      onReconnect={() => void refreshRouteState({ supersede: true })}
+    />
   ) : null;
   const gatedRouteNotFoundMessage = cloudWorkspaceReadyForRouteErrors ? routeNotFoundMessage : null;
 

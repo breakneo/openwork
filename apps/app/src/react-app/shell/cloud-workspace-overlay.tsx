@@ -45,10 +45,7 @@ type CloudWorkspaceStatusContextValue = {
   retry: () => Promise<void>;
   signOut: () => void;
   updateNow: () => void;
-  /**
-   * The takeover and the pill share one `layoutId`, so only one of them may own
-   * the indicator at a time or the handoff animates against itself.
-   */
+  /** Only one region owns the workspace wait indicator at a time. */
   takeoverActive: boolean;
   setTakeoverActive: (active: boolean) => void;
   startupStartedAt?: number;
@@ -225,6 +222,7 @@ export function CloudWorkspaceStatusProvider(props: { children: ReactNode }) {
     }
 
     setRetrying(true);
+    setStartupStartedAt(Date.now());
     const operation = (async () => {
       try {
         const next = await denClient.retryCloudInstance(orgId);
@@ -251,6 +249,13 @@ export function CloudWorkspaceStatusProvider(props: { children: ReactNode }) {
     () => mapCloudWorkspaceState({ instance, updating, accessRequired, requestFailed, updateDeferred }),
     [accessRequired, instance, requestFailed, updateDeferred, updating],
   );
+  const previousVariant = useRef(viewModel.variant);
+  useEffect(() => {
+    const wasReady = previousVariant.current === "ready" || previousVariant.current === "stale";
+    const booting = viewModel.variant === "waking" || viewModel.variant === "provisioning" || viewModel.variant === "updating";
+    if (wasReady && booting) setStartupStartedAt(Date.now());
+    previousVariant.current = viewModel.variant;
+  }, [viewModel.variant]);
 
   useEffect(() => {
     if (!gatewayMode || !visible) return;
@@ -368,14 +373,10 @@ export function CloudWorkspaceStatusProvider(props: { children: ReactNode }) {
   );
 }
 
-/**
- * Owned by the takeover while it is on screen and by the corner pill afterwards,
- * so the indicator travels into the pill instead of one element disappearing and
- * an unrelated one appearing.
- */
+/** The corner pill only appears when the main-pane status is absent. */
 const gatewayIndicatorLayoutId = "gateway-workspace-indicator";
 
-export function CloudWorkspaceBootTakeover(props: { decision: CloudWorkspaceMainContentDecision }) {
+export function CloudWorkspaceBootTakeover(props: { decision: CloudWorkspaceMainContentDecision; onReconnect?: () => void }) {
   const cloudWorkspace = useCloudWorkspaceStatus();
   const platform = usePlatform();
   const { setTakeoverActive } = cloudWorkspace;
@@ -404,11 +405,12 @@ export function CloudWorkspaceBootTakeover(props: { decision: CloudWorkspaceMain
   const unavailable = viewModel.variant === "unavailable";
   const attention = failed || accessRequired || unavailable;
   const slow = !attention && cloudWorkspaceBootIsSlow(elapsedMs);
+  const connecting = viewModel.variant === "ready" || viewModel.variant === "stale";
   const copy = cloudWorkspaceTakeoverCopy({
     variant: viewModel.variant,
     slow,
     checking: !cloudWorkspace.instance,
-    connecting: viewModel.variant === "ready" || viewModel.variant === "stale",
+    connecting,
   });
 
   return (
@@ -445,7 +447,10 @@ export function CloudWorkspaceBootTakeover(props: { decision: CloudWorkspaceMain
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => void (failed ? cloudWorkspace.retry() : cloudWorkspace.refresh())}
+                  onClick={() => {
+                    void (failed ? cloudWorkspace.retry() : cloudWorkspace.refresh());
+                    if (connecting) props.onReconnect?.();
+                  }}
                   disabled={failed && cloudWorkspace.retrying}
                 >
                   {failed ? cloudWorkspace.retrying ? "Retrying…" : "Retry" : slow ? "Check again" : "Try again"}

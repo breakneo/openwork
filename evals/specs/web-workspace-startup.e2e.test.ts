@@ -2,6 +2,7 @@ import { expect } from "vitest";
 import { denFetch, grantOpenWorkWebAccess } from "@openwork/behaviors";
 import { addInitScript, navigate } from "@openwork/cdp";
 import { checkedExec, defaultDaytonaExec, execInSandbox } from "@openwork/hosts";
+import { installCloudStartupFaults } from "@openwork/labs";
 import { browserScript, eventually, evalIn, spec } from "@openwork/testkit";
 import type { Seed } from "@openwork/testkit";
 
@@ -59,6 +60,7 @@ async function cloudStartup(seed: Seed) {
     });
     observer.observe(document, { subtree: true, childList: true, attributes: true });
   }, [{ token: member.token, orgId }]));
+  await addInitScript(app.client, browserScript(installCloudStartupFaults, []));
   return { app, gatewayUrl, member, orgId };
 }
 
@@ -89,5 +91,39 @@ test("WEB-STARTUP-01 real Daytona cold boot keeps one workspace status until cha
     expect(Array.isArray(witness) && witness.some((entry) => record(entry) && entry.state === "composer-visible")).toBe(true);
     evidence.recordAssertionEvidence("Real Daytona hosted-web startup timing", JSON.stringify({ observedAfterMs: usableMs, states: witness, snapshot: process.env.DAYTONA_SNAPSHOT, measurement: "browser performance timestamps; includes auth, access, provisioning, gateway and route hydration" }), true);
     await user.looks(["The main pane shows the new-chat composer rather than a startup card or loading skeleton."]);
+  });
+
+  // Explicit fault-injection checks are separate from the real measurement.
+  await step("a delayed web access check shares the quiet startup presentation", async () => {
+    await evalIn(world.app, () => sessionStorage.setItem("eval.cloud-startup-fault", "access"));
+    await user.reload();
+    await user.see({ text: "Checking workspace access…" });
+    await user.looks(["A small Checking workspace access status is visible without a large access card or a Reload action."]);
+    await user.see("Run task", { timeoutMs: 120_000 });
+  });
+  await step("a ready instance with delayed workspace data keeps the connection status", async () => {
+    await evalIn(world.app, () => sessionStorage.setItem("eval.cloud-startup-fault", "connecting"));
+    await user.reload();
+    await user.see({ text: "Connecting to your workspace…" }, { timeoutMs: 30_000 });
+    await user.looks(["The sidebar remains visible with Connecting to your workspace and elapsed time in the main pane, without chat skeleton cards."]);
+  });
+  await step("a prolonged wake offers a status check without restarting or signing out", async () => {
+    await evalIn(world.app, () => sessionStorage.setItem("eval.cloud-startup-fault", "waking"));
+    await user.reload();
+    await user.see({ text: "Your cloud workspace is taking longer than usual" }, { timeoutMs: 65_000 });
+    await user.see({ role: "button", label: "Check again" });
+    await user.notSee({ role: "button", label: "Sign out" });
+    await user.looks(["The workspace wait has elapsed time and a Check again action, without a checklist or progress bar."]);
+  });
+  await step("a confirmed failure has recovery actions in the same workspace pane", async () => {
+    await evalIn(world.app, () => sessionStorage.setItem("eval.cloud-startup-fault", "failed"));
+    await user.reload();
+    await user.see({ text: "Workspace needs attention" });
+    await user.see({ role: "button", label: "Retry" });
+    await user.notSee({ text: "Restoring your files" });
+    await user.looks(["Workspace needs attention appears in the main pane with Retry and Sign out actions; the sidebar remains visible."]);
+    await evalIn(world.app, () => sessionStorage.removeItem("eval.cloud-startup-fault"));
+    await user.reload();
+    await user.see("Run task", { timeoutMs: 120_000 });
   });
 });
