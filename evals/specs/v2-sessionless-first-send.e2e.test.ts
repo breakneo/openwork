@@ -179,7 +179,10 @@ mobileTest("MOBILE-CHAT-01 keyboard geometry and new turns keep a stable chat la
       until: (value) => Boolean(value.shell?.height === 844 && value.latestUser && value.thread && Math.abs(value.latestUser.top - value.thread.top) <= 8),
     });
     expect(dismissed.pageScroll).toBe(0);
-    expect(dismissed.latestUser?.top).toBeGreaterThanOrEqual(dismissed.navigation?.bottom ?? Infinity);
+    // Scroll anchoring can place a message on a half CSS pixel; the transcript
+    // itself must still start strictly below the in-flow navigation target.
+    expect(dismissed.thread?.top).toBeGreaterThanOrEqual(dismissed.navigation?.bottom ?? Infinity);
+    expect((dismissed.latestUser?.top ?? -Infinity) + 1).toBeGreaterThanOrEqual(dismissed.navigation?.bottom ?? Infinity);
     expect(dismissed.editor?.top).toBeGreaterThanOrEqual(dismissed.navigation?.bottom ?? Infinity);
     await user.notSee({ role: "button", label: "Jump to latest" });
     evidence.recordJsonArtifact("New turn before and after simulated keyboard dismissal", { anchored, dismissed });
