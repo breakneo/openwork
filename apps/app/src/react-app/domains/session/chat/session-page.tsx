@@ -1680,7 +1680,7 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
               {hasMainContentTakeover ? props.mainContentTakeover : null}
               {showStartupSkeleton ? (
-                <div className="px-6 py-14" role="status" aria-live="polite">
+                <div className="px-6 py-14" role="status" aria-live="polite" data-testid="session-startup-skeleton">
                   <div className="mx-auto max-w-2xl space-y-6">
                     <div className="space-y-2">
                       <div className="h-4 w-32 animate-pulse rounded-full bg-dls-hover/80" />

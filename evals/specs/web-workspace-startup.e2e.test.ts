@@ -55,7 +55,8 @@ async function cloudStartup(seed: Seed) {
       const status = document.querySelector('[data-testid="cloud-workspace-takeover"]');
       const state = status?.getAttribute("data-cloud-workspace-state") ??
         (document.querySelector('[data-testid="web-startup-screen"]')?.textContent ||
-          (document.querySelector('button[aria-label="Run task"]') ? "composer-visible" : "app-starting"));
+          (document.querySelector('button[aria-label="Run task"]') ? "composer-visible" :
+            document.querySelector('[data-testid="session-startup-skeleton"]') ? "chat-skeleton" : "app-starting"));
       if (states.at(-1)?.state !== state) states.push({ state, ms: Math.round(performance.now()) });
     });
     observer.observe(document, { subtree: true, childList: true, attributes: true });
@@ -89,6 +90,7 @@ test("WEB-STARTUP-01 real Daytona cold boot keeps one workspace status until cha
     await user.notSee({ text: "Connecting to your workspace…" });
     const witness = await evalIn(world.app, () => Reflect.get(window, "startupWitness"));
     expect(Array.isArray(witness) && witness.some((entry) => record(entry) && entry.state === "composer-visible")).toBe(true);
+    expect(Array.isArray(witness) && witness.some((entry) => record(entry) && entry.state === "chat-skeleton")).toBe(false);
     evidence.recordAssertionEvidence("Real Daytona hosted-web startup timing", JSON.stringify({ observedAfterMs: usableMs, states: witness, snapshot: process.env.DAYTONA_SNAPSHOT, measurement: "browser performance timestamps; includes auth, access, provisioning, gateway and route hydration" }), true);
     await user.looks(["The main pane shows the new-chat composer rather than a startup card or loading skeleton."]);
   });

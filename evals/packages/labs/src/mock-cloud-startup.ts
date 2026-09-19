@@ -7,7 +7,7 @@ export function installCloudStartupFaults() {
     const url = new URL(input instanceof Request ? input.url : String(input), location.href);
     if (mode && url.origin === location.origin) {
       if (mode === "access" && url.pathname.endsWith("/v1/billing/web")) {
-        await new Promise((resolve) => setTimeout(resolve, 15_000));
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
       if (url.pathname.endsWith("/v1/cloud/instance") && (mode === "waking" || mode === "failed")) {
         return Response.json({ status: mode, url: null });
