@@ -259,7 +259,7 @@ describe("session error resilience", () => {
     expect(presentation.recoveryPrompt).toContain("do not repeat side effects")
     const html = renderErrorTranscriptWithResume(error)
     expect(html).toContain('data-testid="session-error-interruption-warning"')
-    expect(html).toContain("The response may contain partial text or incomplete tool calls. Review them before continuing.")
+    expect(html).toContain("Some steps may have finished. Check before continuing.")
     expect(html).toContain('data-testid="session-error-resume"')
     expect(html).not.toContain('data-testid="session-error-details-toggle"')
     expect(html).not.toContain(code)
@@ -277,7 +277,7 @@ describe("session error resilience", () => {
     })
 
     expect(presentation.kind).toBe("gateway-auth-required")
-    expect(presentation.title).toBe("Sign in to this OpenWork Gateway provider to keep using it")
+    expect(presentation.title).toBe("Sign in to keep using this model")
     expect(presentation.description).toBe("Sign in to Member Vertex to continue.")
     expect(presentation.connectUrl).toBeNull()
     expect(presentation.recoveryPrompt).toBeNull()
@@ -475,9 +475,13 @@ describe("session error resilience", () => {
       expect(container.querySelector('[role="status"]')?.textContent).toBe("The model couldn’t respond. Retrying…")
       expect(container.textContent).not.toContain("Internal server error")
       expect(container.textContent).not.toContain("attempt 4")
-      const details = container.querySelector("details")
+      const details = container.querySelector<HTMLButtonElement>('[data-testid="session-error-details-toggle"]')
       if (!details) throw new Error("Missing retry details")
-      await act(async () => { details.open = true; details.dispatchEvent(new Event("toggle")) })
+      expect(details.textContent).toBe("")
+      expect(details.getAttribute("aria-label")).toBe("Technical details")
+      expect(container.querySelector('[data-testid="session-retrying"] .lucide-triangle-alert')).toBeNull()
+      expect(container.querySelector('[data-testid="session-retrying"] .animate-spin')).toBeNull()
+      await act(async () => details.click())
       expect(container.querySelector('[data-testid="session-error-details"]')?.textContent).toContain("attempt 4")
       expect(container.querySelector('[role="status"]')?.textContent).not.toContain("attempt")
     } finally {
@@ -549,7 +553,7 @@ describe("session error technical details", () => {
       name: "APIError",
       data: { message: "upstream_incomplete: Connection closed before completion" },
     }, false)
-    expect(html).toContain("The response may contain partial text or incomplete tool calls. Review them before continuing.")
+    expect(html).toContain("Some steps may have finished. Check before continuing.")
     expect(html).not.toContain('data-testid="session-error-resume"')
     expect(html).not.toContain('data-testid="session-error-details-toggle"')
     expect(html).not.toContain("upstream_incomplete")

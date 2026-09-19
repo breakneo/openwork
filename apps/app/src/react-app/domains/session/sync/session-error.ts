@@ -24,7 +24,7 @@ export type OpencodeSessionErrorPresentation = {
 
 /** Error code the OpenWork inference gateway returns when the member's own sign-in is missing or revoked. */
 export const GATEWAY_AUTH_REQUIRED_ERROR_CODE = "openwork_auth_required";
-export const GATEWAY_AUTH_REQUIRED_TITLE = "Sign in to this OpenWork Gateway provider to keep using it";
+export const GATEWAY_AUTH_REQUIRED_TITLE = "Sign in to keep using this model";
 
 export const interruptedTaskRecoveryPrompt = [
   "Continue the interrupted task from the current state.",
@@ -131,7 +131,7 @@ function errorDescription(kind: OpencodeSessionErrorKind, gatewayAuth: GatewayAu
   if (kind === "provider-timeout") {
     return "The provider connection timed out before a response began. Output and files already produced are kept.";
   }
-  if (kind === "provider-incomplete") return "The response may contain partial text or incomplete tool calls. Review them before continuing.";
+  if (kind === "provider-incomplete") return "Some steps may have finished. Check before continuing.";
   if (kind === "provider-unavailable") return "Try again, or choose another model.";
   if (kind === "free-model-limit") {
     return "Too many people are using the free model at once. Wait a few minutes and try again, or connect your own model provider in Settings → AI Providers to keep working.";

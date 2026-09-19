@@ -1063,13 +1063,13 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
         : !resumePrompt ? displayDescription : null}
       technicalDetails={developerMode ? displayDetails : null}
       actions={resumable || gatewaySelectionRequired || selection || gatewayConnectUrl !== undefined ? <>
-        {resumable && resumePrompt ? <Button variant="outline" size="sm" data-testid="session-error-resume"
+        {resumable && resumePrompt ? <Button variant="ghost" size="xs" data-testid="session-error-resume"
           onClick={() => onResumeInterrupted?.(resumePrompt)}>{t("session.resume_interrupted")}</Button> : null}
-        {gatewaySelectionRequired || selection ? <Button variant="outline" size="sm" data-testid="session-error-gateway-selection"
+        {gatewaySelectionRequired || selection ? <Button variant="ghost" size="xs" data-testid="session-error-gateway-selection"
           onClick={() => window.dispatchEvent(new CustomEvent(openModelPickerEvent, { detail: { sessionId, initialTab: "available" } }))}>
           Choose group and credential set
         </Button> : null}
-        {gatewayConnectUrl !== undefined ? <Button variant="outline" size="sm" data-testid="session-error-gateway-connect"
+        {gatewayConnectUrl !== undefined ? <Button variant="ghost" size="xs" data-testid="session-error-gateway-connect"
           onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}>Connect</Button> : null}
       </> : null} />
   )
@@ -1108,9 +1108,9 @@ const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
       title={`${(freeModelLimit ? "The free starter model is busy right now" : action?.title ?? presentation.title).replace(/[.!…]+$/, "")}. Retrying…`}
       description={freeModelLimit ? "To keep working now, connect your own model provider." : action?.message}
       technicalDetails={[info, ...(developerMode ? [presentation.technicalDetails] : [])].join("\n")}
-      actions={freeModelLimit ? <Button variant="outline" size="sm"
+      actions={freeModelLimit ? <Button variant="ghost" size="xs"
         onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}>Connect a model provider</Button>
-        : action?.link ? <Button variant="outline" size="sm" onClick={openDesktopUrl.bind(null, action.link)}>{action.label}</Button> : null} />
+        : action?.link ? <Button variant="ghost" size="xs" onClick={openDesktopUrl.bind(null, action.link)}>{action.label}</Button> : null} />
   )
 })
 

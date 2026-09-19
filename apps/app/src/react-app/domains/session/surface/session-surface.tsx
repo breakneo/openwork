@@ -774,7 +774,7 @@ function AssistantWaitingCard({ label = t("session.assistant_thinking") }: { lab
 function AdmissionOutcomeUnknownCard(props: { resuming: boolean; onResume: () => void }) {
   return (
     <TaskRecovery state="paused" testId="admission-outcome-unknown" title={t("session.admission_outcome_unknown")}
-      actions={<Button variant="outline" size="sm" data-testid="admission-outcome-resume"
+      actions={<Button variant="ghost" size="xs" data-testid="admission-outcome-resume"
         disabled={props.resuming} onClick={props.onResume}>{t("session.resume_interrupted")}</Button>} />
   );
 }
@@ -881,11 +881,11 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
       description={presentation.description} technicalDetails={developerMode ? presentation.technicalDetails : null}
       actions={<>
         {error.kind === "model-not-found" ? <>
-          {error.suggestions?.map((suggestion) => <Button key={`${suggestion.providerID}/${suggestion.modelID}`} variant="outline" size="sm"
+          {error.suggestions?.map((suggestion) => <Button key={`${suggestion.providerID}/${suggestion.modelID}`} variant="ghost" size="xs"
             onClick={() => { onChangeModel?.(suggestion); onDismiss(); }}>Use {suggestion.providerID}/{suggestion.modelID}</Button>)}
-          <Button variant="outline" size="sm" onClick={() => { onOpenModelPicker?.(); onDismiss(); }}>Change model</Button>
+          <Button variant="ghost" size="xs" onClick={() => { onOpenModelPicker?.(); onDismiss(); }}>Change model</Button>
         </> : null}
-        <Button variant="ghost" size="sm" onClick={onDismiss}>Dismiss error</Button>
+        <Button variant="ghost" size="xs" aria-label="Dismiss error" onClick={onDismiss}>Dismiss</Button>
       </>} />
   );
 }
@@ -3459,8 +3459,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
             title={props.cloudMcpSubmissionState.issue?.message ?? "Connected service tools could not be prepared."}
             description={props.cloudMcpSubmissionState.issue?.recommendedAction}
             actions={<>
-              {props.cloudMcpSubmissionState.issue?.retryable !== false ? <Button variant="outline" size="sm" onClick={handleRetryCloudSubmission}>Retry</Button> : null}
-              <Button variant="ghost" size="sm" onClick={props.onOpenConnect}>Open Connect</Button>
+              {props.cloudMcpSubmissionState.issue?.retryable !== false ? <Button variant="ghost" size="xs" onClick={handleRetryCloudSubmission}>Retry</Button> : null}
+              <Button variant="ghost" size="xs" onClick={props.onOpenConnect}>Open Connect</Button>
             </>} />
         ) : null}
         {archived ? (

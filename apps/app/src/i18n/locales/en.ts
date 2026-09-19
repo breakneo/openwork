@@ -1269,7 +1269,7 @@ export default {
   "session.diagnostics_exported": "Diagnostics exported",
   "session.diagnostics_failed": "Could not prepare diagnostics",
   "session.resume_interrupted": "Resume",
-  "session.admission_outcome_unknown": "The task was accepted, but no result arrived",
+  "session.admission_outcome_unknown": "Couldn’t confirm whether this finished",
   "session.stop_failed": "Could not stop the run — the engine reported no active run was aborted. Try again.",
   "session.revert_failed": "Could not revert the conversation. Try again once the current run finishes.",
   "session.branch_failed": "Could not branch this conversation. Try again.",

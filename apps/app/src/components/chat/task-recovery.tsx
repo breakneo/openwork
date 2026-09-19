@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { AlertTriangle, ChevronRight, CirclePause, LoaderCircle } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Ellipsis } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
 /** One presentation for task failures, interruptions and engine-owned retries. */
 export function TaskRecovery(props: {
@@ -13,8 +13,6 @@ export function TaskRecovery(props: {
   testId?: string;
 }) {
   const state = props.state ?? "failed";
-  const Icon = state === "retrying" ? LoaderCircle : state === "paused" ? CirclePause : AlertTriangle;
-  const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -25,31 +23,29 @@ export function TaskRecovery(props: {
   const hasDetails = details && details.replace(/^Message:\s*/, "") !== props.title.trim();
 
   return (
-    <div className="not-prose mx-auto w-full max-w-3xl px-2 md:px-10" data-testid={props.testId}>
-      <Alert appearance="inline" variant={state === "failed" ? "destructive" : "default"} role="group">
-        <Icon aria-hidden="true" className={state === "retrying" ? "animate-spin motion-reduce:animate-none" : undefined} />
-        <AlertTitle role={state === "failed" ? "alert" : "status"}>
-          {props.title}
-        </AlertTitle>
-        <AlertDescription className="col-start-2 flex min-w-0 flex-col gap-2">
-          {props.description ? <p>{props.description}</p> : null}
-          {props.actions ? <div className="flex flex-wrap items-center gap-2">{props.actions}</div> : null}
-          {hasDetails ? (
-            <details onToggle={(event) => setOpen(event.currentTarget.open)}>
-              <summary data-testid="session-error-details-toggle" aria-expanded={open} className="flex w-fit cursor-pointer list-none items-center gap-1 text-xs">
-                <ChevronRight aria-hidden="true" className={open ? "size-3 rotate-90" : "size-3"} />
-                Technical details
-              </summary>
-              {open ? <div data-testid="session-error-details" className="mt-2 flex min-w-0 flex-col items-start gap-2">
-                <pre className="max-h-60 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs">{details}</pre>
-                <Button size="xs" variant="ghost" onClick={() => {
-                  void navigator.clipboard.writeText(details).then(() => setCopied(true)).catch(() => {});
-                }}>{copied ? "Copied" : "Copy details"}</Button>
-              </div> : null}
-            </details>
-          ) : null}
-        </AlertDescription>
-      </Alert>
-    </div>
+    <Collapsible className="not-prose mx-auto w-full max-w-3xl px-2 py-2 md:px-10" data-testid={props.testId}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <p role={state === "failed" ? "alert" : "status"} className="min-w-0 text-sm leading-6 text-muted-foreground">{props.title}</p>
+        <div className="flex shrink-0 items-center gap-1 text-foreground">
+          {props.actions}
+          {hasDetails ? <span className="text-muted-foreground">
+            <CollapsibleTrigger data-testid="session-error-details-toggle"
+              render={<Button variant="ghost" size="icon-xs" aria-label="Technical details" title="Technical details" />}>
+              <Ellipsis aria-hidden="true" />
+            </CollapsibleTrigger>
+          </span> : null}
+        </div>
+      </div>
+      {props.description ? <p className="mt-1 max-w-prose text-xs leading-5 text-muted-foreground">{props.description}</p> : null}
+      {hasDetails ? <CollapsibleContent data-testid="session-error-details"
+        className="overflow-hidden data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 duration-150 motion-reduce:animate-none">
+        <div className="mt-3 flex min-w-0 flex-col items-start gap-2 border-s border-border ps-3 text-muted-foreground">
+          <pre className="max-h-60 max-w-full overflow-auto whitespace-pre-wrap break-words text-xs leading-5">{details}</pre>
+          <Button size="xs" variant="ghost" onClick={() => {
+            void navigator.clipboard.writeText(details).then(() => setCopied(true)).catch(() => {});
+          }}>{copied ? "Copied" : "Copy details"}</Button>
+        </div>
+      </CollapsibleContent> : null}
+    </Collapsible>
   );
 }
