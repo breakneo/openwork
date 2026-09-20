@@ -3,7 +3,7 @@ import { spec } from "@openwork/testkit";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Expected object");
-  return value;
+  return Object.fromEntries(Object.entries(value));
 }
 function text(value: unknown): string {
   if (typeof value !== "string") throw new Error("Expected string");
@@ -18,7 +18,7 @@ function expression(match: Record<string, unknown> | undefined): string {
 }
 
 const test = spec.world(async (seed) => {
-  const den = await seed.den({ web: true, org: { name: "Code Mode journey", members: {
+  const den = await seed.den({ web: true, env: { OPENWORK_EVAL_MYSQL8: "1" }, org: { name: "Code Mode journey", members: {
     teammate: { name: "Teammate" }, outsider: { name: "Other member" },
   } } });
   const org = record((await seed.api(den.admin, "/v1/org")).body);
@@ -72,7 +72,7 @@ test("an owner opts into Code Mode and shares a saved Workflow only with the sel
   expect(await advertisedModelTools()).toContain("search_capabilities");
   await user.see({ role: "switch", label: "Enable Code Mode" });
   await user.click({ text: "Connection behavior" });
-  await user.see({ text: "Current OpenWork engines are not yet supported" });
+  await user.see({ text: /Current OpenWork engines are not yet supported/ });
   await user.screenshot();
   await user.click({ role: "switch", label: "Enable Code Mode" });
   await user.click({ role: "button", label: "Save settings" });

@@ -72,6 +72,21 @@ every other MCP client filters visibility correctly.
   synthetic local MCP/model endpoint. It characterizes the blocker; a passing
   result is **not** a passing direct-tool/app-only isolation acceptance test.
 
+Follow-up inspection on September 20, 2026: stable v1 `v1.18.31`
+(`a97622c801f4ca571530ddc51076af659a9c32cd`) does not change the session
+MCP projection or plugin hook files from the pinned v1. The latest published v2
+beta `0.0.0-beta-19271` also passes the leakage characterization above when
+substituted temporarily using its registry integrity. Neither observation
+establishes a supported boundary. The production pins remain unchanged.
+
+The Code Mode journey explicitly sets `OPENWORK_EVAL_MYSQL8=1` for its owned
+Daytona Den. The default server snapshot supplies MariaDB 11.8.6, which rejects
+MySQL `FOR SHARE` queries during invitation acceptance (`ER_PARSE_ERROR`). The
+opt-in boot path installs checksum-pinned MySQL 8.4.11 into a fresh disposable
+directory, binds it to loopback, and leaves production locking and shared
+snapshots unchanged. Sandbox teardown owns the database's lifetime. This path
+is x86_64-only and refuses to reuse an existing fixture directory.
+
 Required before release: an engine version/API that preserves app-only
 filtering while exposing Den tools directly, with unrelated MCPs remaining in
 their existing Code Mode path. Then wire that supported boundary in OpenWork,
