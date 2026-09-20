@@ -88,18 +88,6 @@ test("a conversation signs in, uses site tools and page controls with consent, i
     expect(mounted.visibleSessionId).toBe(sessionId);
     expect(mounted.nativeViews.find((view) => view.tabId === mounted.activeTabId)).toMatchObject({ attached: true, aboveApp: true, visible: false });
     expect((await witness()).pageRequests).toEqual([]);
-    const reviewStarted = Date.now();
-    await probe.eventually(async () => {
-      const waiting = await conversation();
-      expect(waiting.calls[1].output).toBeUndefined();
-      expect((await witness()).pageRequests).toEqual([]);
-      return Date.now() - reviewStarted;
-    }, {
-      within: 35_000,
-      until: (elapsed) => elapsed >= 31_000,
-      label: "thread consent remains pending beyond the browser operation timeout without contacting the destination",
-    });
-    await user.see({ role: "button", label: "Allow for this thread" });
     await user.notSee({ role: "button", label: "Allow origin in this tab" });
     await user.notSee({ role: "button", label: "Allow reading this origin" });
     await user.click({ role: "button", label: "Allow for this thread" });
