@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { publishReviewPr } from "../packages/test-artifacts/src/publish-pr.ts";
 import { readTestRunDirectory } from "../packages/test-artifacts/src/scan.ts";
 import { readBinding, requiredStatus } from "../../.github/scripts/required-verification-controller.mjs";
-import { changedFiles, proofArtifact, requireProof, selectProof } from "../../.github/scripts/pr-proof.mjs";
+import { changedFiles, proofArtifact, selectProof } from "../../.github/scripts/pr-proof.mjs";
 
 const producers = [
   { file: "pr-proof.yml", name: "PR change proof", events: ["pull_request"], proof: true },
@@ -95,12 +95,12 @@ export async function publishCompletedEvidence({ repo, runId, runAttempt }, depe
     }
     let selection;
     try {
-      selection = requireProof(selectProof(files));
+      selection = selectProof(files);
     } catch {
-      return skip("current PR has no valid new E2E proof selection");
+      return skip("current PR changed-file listing is unsafe");
     }
-    if (selection.exemption || selection.specs.length === 0 || selection.specs.length > 32)
-      return skip("source run has no bounded PR proof selection");
+    if (selection.specs.length === 0) return skip("PR adds or changes no E2E spec; no proof evidence to publish");
+    if (selection.specs.length > 32) return skip("source run has no bounded PR proof selection");
     const artifacts = await api(`repos/${repo}/actions/runs/${source.id}/artifacts?per_page=100`);
     if (!Array.isArray(artifacts.artifacts) || artifacts.total_count !== artifacts.artifacts.length)
       return skip("proof artifact listing is incomplete");

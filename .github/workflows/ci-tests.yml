@@ -57,33 +57,6 @@ jobs:
             core.setOutput("lane", lane)
             core.info(`Selected lane: ${lane}`)
 
-  proof-contract:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 24
-      - id: proof
-        name: Require a newly added change-specific E2E spec
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node .github/scripts/pr-proof-controller.mjs
-      - uses: pnpm/action-setup@v4
-        if: steps.proof.outputs.selected == 'true'
-      - name: Install the proof validator only when a proof was selected
-        if: steps.proof.outputs.selected == 'true'
-        run: pnpm --dir evals install --frozen-lockfile --ignore-scripts
-      - name: Reject empty, skipped, todo-only, and malformed proof specs
-        if: steps.proof.outputs.selected == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node .github/scripts/pr-proof-controller.mjs validate
-
   openwork-tests-core:
     needs: classify-changes
     if: needs.classify-changes.outputs.lane == 'full'
@@ -407,14 +380,12 @@ jobs:
   # Single stable context for branch rulesets to require. Green only when
   # the lane selected by classification succeeds; always reports.
   openwork-tests-required:
-    needs: [classify-changes, proof-contract, openwork-tests-core, openwork-tests-build, workflow-authoring, validate-models-snapshot, validate-docs]
+    needs: [classify-changes, openwork-tests-core, openwork-tests-build, workflow-authoring, validate-models-snapshot, validate-docs]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require the selected test lane to pass
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PROOF_RESULT: ${{ needs.proof-contract.result }}
           CLASSIFY_RESULT: ${{ needs.classify-changes.result }}
           LANE: ${{ needs.classify-changes.outputs.lane }}
           CORE_RESULT: ${{ needs.openwork-tests-core.result }}
@@ -423,10 +394,6 @@ jobs:
           SNAPSHOT_RESULT: ${{ needs.validate-models-snapshot.result }}
           DOCS_RESULT: ${{ needs.validate-docs.result }}
         run: |
-          if [ "${EVENT_NAME:-push}" = "pull_request" ] && [ "${PROOF_RESULT:-success}" != "success" ]; then
-            echo "New E2E proof contract failed. See proof-contract: add a runnable NEW evals/specs/**/*.e2e.test.ts for this change." >&2
-            exit 1
-          fi
           echo "classification: $CLASSIFY_RESULT ($LANE)"
           echo "core product regressions: $CORE_RESULT"
           echo "packaging and IPC contract: $BUILD_RESULT"

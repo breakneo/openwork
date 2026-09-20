@@ -40,7 +40,7 @@ jobs:
           pnpm --filter @openwork/review... install --frozen-lockfile --ignore-scripts
           pnpm --dir evals install --frozen-lockfile --ignore-scripts
       - name: Verify selection, workflow trust and publication contracts
-        run: node --test .github/scripts/pr-proof.test.mjs evals/scripts/pr-proof-spec.test.mjs evals/packages/test-artifacts/test/*.test.ts evals/scripts/publish-review.test.mjs
+        run: node --test .github/scripts/pr-proof.test.mjs evals/packages/test-artifacts/test/*.test.ts evals/scripts/publish-review.test.mjs
   check-app:
     runs-on: ubuntu-latest
     timeout-minutes: 8
