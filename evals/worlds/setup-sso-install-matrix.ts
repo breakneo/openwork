@@ -692,10 +692,13 @@ async function bootColumn(
   };
 }
 
-export async function bootSetupSsoInstallMatrix(stack: AsyncDisposableStack): Promise<SetupSsoMatrixManifest> {
-  const hostWeb = process.env.OPENWORK_SETUP_SSO_HOST_WEB === "1";
+export async function bootSetupSsoInstallMatrix(
+  stack: AsyncDisposableStack,
+  options: { hostWeb?: boolean; columns?: readonly string[] } = {},
+): Promise<SetupSsoMatrixManifest> {
+  const hostWeb = options.hostWeb ?? process.env.OPENWORK_SETUP_SSO_HOST_WEB === "1";
   const requested = new Set(
-    (process.env.OPENWORK_SETUP_SSO_MATRIX_COLUMNS?.split(",") ?? ["0.18.43", "0.18.48", "dev", "pending"])
+    (options.columns ?? process.env.OPENWORK_SETUP_SSO_MATRIX_COLUMNS?.split(",") ?? ["0.18.43", "0.18.48", "dev", "pending"])
       .map((value) => value.trim())
       .filter(Boolean),
   );
@@ -718,7 +721,7 @@ export async function bootSetupSsoInstallMatrix(stack: AsyncDisposableStack): Pr
       hostWeb
         ? { id: "dev", apiVersion: HOST_API_VERSION, apiImage: HOST_API_IMAGE, webImage: HOST_CONTAINER_WEB_IMAGE }
         : { id: "dev", apiVersion: "a51297520", apiImage: DEV_API_IMAGE, webImage: DEV_WEB_IMAGE },
-      "never",
+      hostWeb ? "always" : "never",
       "configured",
       hostWeb ? { fingerprint } : undefined,
     ));
@@ -729,7 +732,7 @@ export async function bootSetupSsoInstallMatrix(stack: AsyncDisposableStack): Pr
       hostWeb
         ? { id: "pending", apiVersion: HOST_API_VERSION, apiImage: HOST_API_IMAGE, webImage: HOST_CONTAINER_WEB_IMAGE }
         : { id: "pending", apiVersion: "a51297520", apiImage: DEV_API_IMAGE, webImage: DEV_WEB_IMAGE },
-      "never",
+      hostWeb ? "always" : "never",
       "pending",
       hostWeb ? { fingerprint } : undefined,
     );

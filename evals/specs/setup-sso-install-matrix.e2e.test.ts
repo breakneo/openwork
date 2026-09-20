@@ -1,25 +1,62 @@
-import { describe, expect } from "vitest";
+import { afterAll, describe, expect } from "vitest";
 import { chrome } from "@openwork/hosts";
 import { spec } from "@openwork/testkit";
 import type { TestNeeds } from "@openwork/testkit";
 import {
+  bootSetupSsoInstallMatrix,
   readSetupSsoManifest,
   runSetupSsoSql,
   SETUP_SSO_PRODUCT_SOURCE_FILES,
   setupSsoCurrentCommit,
+  setupSsoInstallMatrixManifestPath,
   setupSsoProductSourceFingerprint,
 } from "../worlds/setup-sso-install-matrix";
 
+const providedManifestPath = process.env.OPENWORK_SETUP_SSO_MATRIX_MANIFEST?.trim();
+const requestedColumns = new Set(
+  (process.env.OPENWORK_SETUP_SSO_MATRIX_COLUMNS?.split(",") ?? (providedManifestPath ? ["0.18.43", "0.18.48", "dev", "pending"] : ["dev", "pending"]))
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
 const requirements: TestNeeds = {
   optIn: ["OPENWORK_EVAL_E2E_TESTS"],
-  env: ["OPENWORK_SETUP_SSO_MATRIX_MANIFEST"],
   commands: ["docker"],
   placement: "local",
 };
-const test = spec.world(async () => ({}), {
+let ownedMatrixStack: AsyncDisposableStack | undefined;
+let ownedManifestReady: Promise<void> | undefined;
+
+async function ensureMatrixManifest(): Promise<void> {
+  if (providedManifestPath) return;
+  ownedManifestReady ??= (async () => {
+    const stack = new AsyncDisposableStack();
+    try {
+      await bootSetupSsoInstallMatrix(stack, { hostWeb: true, columns: [...requestedColumns] });
+      ownedMatrixStack = stack;
+      process.env.OPENWORK_SETUP_SSO_MATRIX_MANIFEST = setupSsoInstallMatrixManifestPath();
+    } catch (error) {
+      await stack.disposeAsync();
+      throw error;
+    }
+  })();
+  await ownedManifestReady;
+}
+
+afterAll(async () => {
+  try {
+    await ownedMatrixStack?.disposeAsync();
+  } finally {
+    if (!providedManifestPath) delete process.env.OPENWORK_SETUP_SSO_MATRIX_MANIFEST;
+  }
+});
+
+const test = spec.world(async () => {
+  await ensureMatrixManifest();
+  return {};
+}, {
   needs: requirements,
   resources: { surfaces: ["web"], services: ["den"] },
-  timeout: 180_000,
+  timeout: 900_000,
 });
 
 interface MatrixContext {
@@ -266,7 +303,6 @@ const enforcementCases: Array<{ label: string; slug: string; requireSso: boolean
   { label: "enforcement OFF + password disabled", slug: "off", requireSso: false },
   { label: "enforcement ON + password disabled", slug: "on", requireSso: true },
 ];
-const requestedColumns = new Set((process.env.OPENWORK_SETUP_SSO_MATRIX_COLUMNS?.split(",") ?? ["0.18.43", "0.18.48", "dev", "pending"]).map((value) => value.trim()).filter(Boolean));
 const requestedReleaseColumns = ["0.18.43", "0.18.48"].filter((id) => requestedColumns.has(id));
 
 if (requestedReleaseColumns.length > 0) describe.sequential("setup SSO install route matrix", () => {
