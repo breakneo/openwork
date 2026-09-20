@@ -241,6 +241,8 @@ export async function publishReviewPr(
     dryRun?: boolean;
     preserveCurrentReport?: boolean;
     automatic?: boolean;
+    /** Replace older automatic evidence selections, while still preserving a human-selected report. */
+    replaceAutomatic?: boolean;
   },
   dependencies: PublishDependencies = {},
 ): Promise<PublishPrResult> {
@@ -296,9 +298,9 @@ export async function publishReviewPr(
       for (const existing of payload.comments) {
         if (!isRecord(existing) || typeof existing.body !== "string" || !existing.body.includes(MARKER)
           || !existing.body.includes(`Commit \`${report.gitSha}\``) || !existing.body.includes("[Open review report](")) continue;
-        const automatic = /<!-- test-evidence-selection:auto-v1:([a-f0-9]{64}(?:,[a-f0-9]{64})*) -->/.exec(existing.body);
-        if (!options.automatic || !automatic || existing.body.includes("<!-- test-evidence-selection:manual-v1 -->")
-          || automatic[1].split(",").some((fingerprint) => !fingerprints.includes(fingerprint))) return existing.body;
+         const automatic = /<!-- test-evidence-selection:auto-v1:([a-f0-9]{64}(?:,[a-f0-9]{64})*) -->/.exec(existing.body);
+         if (!options.automatic || !automatic || existing.body.includes("<!-- test-evidence-selection:manual-v1 -->")) return existing.body;
+         if (!options.replaceAutomatic && automatic[1].split(",").some((fingerprint) => !fingerprints.includes(fingerprint))) return existing.body;
       }
     }
   };

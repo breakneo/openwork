@@ -20,6 +20,8 @@ type EditorStubProps = {
   onDraftChange: (value: string) => void;
   onSend: () => void;
   submissionPreparing: boolean;
+  submissionPreparingLabel?: string;
+  flush?: boolean;
   attachments: ComposerAttachment[];
   onAttachFiles: (files: File[]) => void;
   onRemoveAttachment: (id: string) => void;
@@ -46,6 +48,55 @@ function ReactSessionComposer(props: EditorStubProps) {
   );
 }
 mock.module("../src/react-app/domains/session/surface/composer/composer", () => ({ ReactSessionComposer }));
+
+test("first send keeps its message and dock through creation, inline failure, retry and publication", async () => {
+  const { PendingConversationView } = await import("../src/react-app/domains/session/chat/pending-conversation");
+  const { beginPendingConversation, createPendingConversation, usePendingConversationStore } = await import("../src/react-app/domains/session/chat/pending-conversation-store");
+  const entry = beginPendingConversation({ scope: "local", destination: { workspaceId: "pending-ui", groupId: "research" },
+    submitted: { draft: "Review the report", attachments: [], mentions: {}, pasteParts: [], revertMessageId: null } });
+  function Probe() {
+    const conversation = usePendingConversationStore((state) => state.conversations[entry.id]);
+    return conversation ? <PendingConversationView conversation={conversation} composer={null} /> : null;
+  }
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const creation = Promise.withResolvers<{ session: Session }>();
+  let attempts = 0;
+  let published = 0;
+  try {
+    await act(async () => root.render(<Probe />));
+    const message = container.querySelector('[data-message-role="user"]');
+    const dock = container.querySelector('[data-testid="composer"]');
+    expect(message?.textContent).toBe("Review the report");
+    expect(dock).not.toBeNull();
+    expect(latestEditor?.flush).toBe(false);
+    expect(latestEditor?.submissionPreparingLabel).toBe("Send");
+    expect(container.textContent).not.toMatch(/Creating|Preparing|Opening|Retry sending/);
+    await act(async () => createPendingConversation(entry.id, () => {
+      attempts++;
+      return attempts === 1 ? Promise.reject(new Error("Offline")) : creation.promise;
+    }, () => { published++; }));
+    expect(container.querySelector('[data-message-role="user"]')).toBe(message);
+    expect(container.querySelector('[data-testid="composer"]')).toBe(dock);
+    expect(container.textContent).toContain("Couldn’t send your message");
+    const retry = container.querySelector<HTMLButtonElement>('[aria-label="Retry sending"]');
+    expect(retry).not.toBeNull();
+    await act(async () => retry?.click());
+    expect(container.textContent).not.toMatch(/Creating|Preparing|Opening|Retry sending/);
+    expect(container.querySelector('[data-message-role="user"]')).toBe(message);
+    await act(async () => { creation.resolve({ session: { id: "ses_pending_ui", slug: "pending-ui", title: "Review the report", directory: "/workspace", projectID: "project", version: "1", time: { created: 1, updated: 1 } } }); });
+    expect(published).toBe(1);
+    expect(attempts).toBe(2);
+    expect(container.querySelectorAll('[data-message-role="user"]')).toHaveLength(1);
+    expect(container.querySelector('[data-message-role="user"]')).toBe(message);
+    expect(container.querySelector('[data-testid="composer"]')).toBe(dock);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    usePendingConversationStore.setState({ conversations: {} });
+  }
+});
 
 beforeAll(() => {
   if (registeredDom) GlobalRegistrator.register({ url: "http://localhost/" });
@@ -304,7 +355,7 @@ test("consumed first send leaves the editor for pending recovery and cannot resu
     openNewDraft = () => setId(null);
     const entries = usePendingConversationStore((state) => state.conversations);
     const entry = id ? entries[id] : undefined;
-    return entry ? entry.sessionId ? <div data-real-session={entry.sessionId} /> : <PendingConversationView conversation={entry} /> : <Editor onSubmitted={setId} />;
+    return entry ? entry.sessionId ? <div data-real-session={entry.sessionId} /> : <PendingConversationView conversation={entry} composer={context} /> : <Editor onSubmitted={setId} />;
   }
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -317,21 +368,21 @@ test("consumed first send leaves the editor for pending recovery and cannot resu
     const staleFlush = latestEditor?.onDraftChange;
     await act(async () => { latestSend(); latestSend(); });
     expect(creates).toBe(1);
-    expect(container.querySelector("textarea")).toBeNull();
+    expect(container.querySelector("textarea")).not.toBeNull();
     expect(container.querySelector("[data-pending-conversation]")).not.toBeNull();
     expect(container.textContent).toContain("Original message");
     expect(container.textContent).toContain("report.txt");
-    expect(container.textContent).toContain("Message not sent");
+    expect(container.textContent).not.toMatch(/Creating|Preparing|Message not sent/);
     expect(useComposerStateStore.getState().sessions[ownerKey]).toBeUndefined();
     expect(getSessionDraft("local", workspaceId, NEW_TASK_DRAFT_SESSION_ID)).toBeNull();
     await act(async () => staleFlush?.("stale unmount flush"));
     expect(useComposerStateStore.getState().sessions[ownerKey]).toBeUndefined();
     expect(getSessionDraft("local", workspaceId, NEW_TASK_DRAFT_SESSION_ID)).toBeNull();
     await act(async () => { creation.reject(new Error("Engine unavailable")); await creationTask; });
-    expect(container.querySelector("textarea")).toBeNull();
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn’t create conversation");
+    expect(container.querySelector("textarea")).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn’t send your message");
     creation = Promise.withResolvers<{ session: Session }>();
-    const retry = container.querySelector<HTMLButtonElement>('[aria-label="Retry creating conversation"]');
+    const retry = container.querySelector<HTMLButtonElement>('[aria-label="Retry sending"]');
     if (!retry) throw new Error("Expected pending-conversation retry");
     await act(async () => { retry.click(); retry.click(); });
     expect(creates).toBe(2);
