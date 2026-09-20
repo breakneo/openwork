@@ -54,7 +54,7 @@ jobs:
           pnpm --filter @openwork/email build
           pnpm dev:den:mysql
       - name: Build the local review world when selected
-        if: matrix.spec == 'evals/specs/pr-proof-review.e2e.test.ts'
+        if: startsWith(matrix.spec, 'evals/specs/pr-proof-')
         run: pnpm --filter @openwork/review-app build
       - name: Run only the selected new spec
         timeout-minutes: 8
