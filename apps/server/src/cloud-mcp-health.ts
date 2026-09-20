@@ -1582,7 +1582,7 @@ async function readProviderProjection(input: {
   opencode: WorkspaceOpencodeClient;
   directory: string | null;
   providerModel: CloudMcpProviderModelContext;
-  /** Kept for call-site compatibility; experimental MCP omissions always fall back. */
+  /** Kept for call-site compatibility; standard-mode MCP omissions fall back. */
   experimentalToolIdsIncludeMcpTools: boolean | null;
   codeMode: boolean;
 }): Promise<ProviderProjectionSnapshot> {
@@ -2084,7 +2084,7 @@ function experimentalProviderToolsFromProjection(projection: ProviderProjectionS
     checked: true,
     ...(projection.provider ? { provider: projection.provider } : {}),
     ...(projection.model ? { model: projection.model } : {}),
-    expected: expectedTools(projection.present),
+    expected: expectedTools([...projection.present, ...projection.missing]),
     present: projection.present,
     missing: projection.missing,
     includesMcpTools,

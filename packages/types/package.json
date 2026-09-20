@@ -7,7 +7,9 @@
     "./den/cloud-mcp-tools": {
       "types": "./src/den/cloud-mcp-tools.ts",
       "development": "./src/den/cloud-mcp-tools.ts",
-      "default": "./src/den/cloud-mcp-tools.ts"
+      "bun": "./src/den/cloud-mcp-tools.ts",
+      "browser": "./src/den/cloud-mcp-tools.ts",
+      "default": "./dist/den/cloud-mcp-tools.js"
     },
     "./cloud-model-fast": {
       "types": "./src/cloud-model-fast.ts",
