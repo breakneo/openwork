@@ -46,11 +46,11 @@ function harness(options = {}) {
     logs, downloads, publications, current,
     dependencies: {
       api, log: message => logs.push(message),
-      download: async (id, directory, name) => {
+      download: async (id, directory, name, recordSpec = options.recordSpec ?? spec) => {
         downloads.push({ id, name });
         await mkdir(directory, { recursive: true });
         await writeFile(join(directory, "test-run.json"), JSON.stringify({
-          name: "Change-specific behavior", specFile: options.recordSpec ?? spec, dir: directory,
+          name: "Change-specific behavior", specFile: recordSpec, dir: directory,
           createdAt: "2026-07-02T00:00:00Z", closedAt: "2026-07-02T00:01:00Z", gitSha: options.recordSha ?? sha,
           engine: "v1", branch: "test", artifacts: [{ caption: "Observed outcome", fileName: "", hash: "", route: "",
             at: "2026-07-02T00:00:30Z", description: "The requested behavior was observed.", model: "", ok: true,
@@ -79,7 +79,7 @@ test("association accepts only the recognized same-repository PR proof run", () 
   }
 });
 
-test("publishes only records bound to the live newly added proof spec", async () => {
+test("publishes only records bound to the live added or changed proof specs", async () => {
   const fixture = harness();
   const result = await publishCompletedEvidence({ repo, runId: 30, runAttempt: "1" }, fixture.dependencies);
   assert.equal(result.posted, true);
@@ -90,10 +90,25 @@ test("publishes only records bound to the live newly added proof spec", async ()
   assert.match(fixture.publications[0].title, /PR #7 change proof/);
 });
 
-test("never substitutes smoke, modified specs, foreign records, or missing proof artifacts", async () => {
+test("a changed existing spec is a proof too, and multiple specs aggregate into one report", async () => {
+  const other = "evals/specs/other-change.e2e.test.ts";
+  const fixture = harness({
+    files: [{ filename: spec, status: "modified" }, { filename: other, status: "added" }],
+    artifacts: { total_count: 2, artifacts: [{ name: proofArtifact(spec, 1), expired: false }, { name: proofArtifact(other, 1), expired: false }] },
+  });
+  fixture.dependencies.download = (() => {
+    const original = fixture.dependencies.download;
+    return (id, directory, name) => original(id, directory, name, name === proofArtifact(other, 1) ? other : spec);
+  })();
+  const result = await publishCompletedEvidence({ repo, runId: 30 }, fixture.dependencies);
+  assert.equal(result.posted, true);
+  assert.equal(fixture.downloads.length, 2);
+  assert.equal(fixture.publications[0].testRunDirs.length, 2);
+});
+
+test("never substitutes smoke, unrelated records, or missing proof artifacts", async () => {
   for (const fixture of [
     harness({ files: [{ filename: "apps/app/src/change.ts", status: "modified" }] }),
-    harness({ files: [{ filename: spec, status: "modified" }] }),
     harness({ recordSpec: "evals/specs/other.e2e.test.ts" }),
     harness({ recordSha: "2".repeat(40) }),
     harness({ artifacts: { total_count: 1, artifacts: [{ name: "packaged-desktop-smoke-1", expired: false }] } }),
@@ -118,7 +133,7 @@ const jobEnv = { GITHUB_REPOSITORY: repo, REVIEW_RUN_ID: "30", OPENWORK_REVIEW_U
 test("publication job distinguishes published, skipped, unavailable and failed without leaking errors", async () => {
   for (const [value, state, code] of [
     [{ posted: true, urls: { report: `https://review.example.test/r/${"a".repeat(32)}` } }, "published", 0],
-    [{ skipped: "no valid new E2E proof selection" }, "skipped", 0],
+    [{ skipped: "PR adds or changes no E2E spec; no proof evidence to publish" }, "skipped", 0],
   ]) {
     const summaries = [];
     const result = await publicationJob(jobEnv, { publish: async () => value, summary: async text => summaries.push(text) });

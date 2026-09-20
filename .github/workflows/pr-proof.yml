@@ -35,7 +35,9 @@ jobs:
   proof:
     needs: select
     if: needs.select.outputs.selected == 'true'
-    runs-on: ubuntu-latest
+    # Same runner as the nightly local journey lane; hosted ubuntu-latest lacks
+    # the setup Electron needs and every desktop proof died before CDP.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -47,20 +49,28 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-tests
-      - name: Prepare local Den dependencies for proofs that need them
+      - name: Prepare a virtual display, local Den dependencies and the review app
         run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb x11-utils libgtk-3-0 libnss3 libasound2t64 libgbm1
           pnpm --filter @openwork/types build
           pnpm --filter @openwork-ee/den-db build
           pnpm --filter @openwork/email build
+          pnpm --filter @openwork/review-app build
           pnpm dev:den:mysql
-      - name: Build the local review world when selected
-        if: matrix.spec == 'evals/specs/pr-proof-review.e2e.test.ts'
-        run: pnpm --filter @openwork/review-app build
-      - name: Run only the selected new spec
-        timeout-minutes: 8
+      - name: Run the selected changed spec on the PR head
+        timeout-minutes: 20
         env:
           PROOF_SPEC: ${{ matrix.spec }}
-        run: node evals/bin/evals.mjs "${PROOF_SPEC#evals/}" --local
+          # CI runners cannot use Chromium's SUID sandbox (the pnpm-store helper
+          # is not root-owned). The testkit's container mode launches Electron
+          # with --no-sandbox, as it already does on Daytona.
+          OPENWORK_EVAL_CONTAINER_ELECTRON: "1"
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          xvfb-run -a node evals/bin/evals.mjs "${PROOF_SPEC#evals/}" --local
       - name: Save selected native testkit and Vitest records
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
