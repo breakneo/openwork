@@ -107,15 +107,15 @@ describe("allowControlSettings settings gate", () => {
     }
   });
 
-  test("keeps only the Cloud tabs when the organization blocks settings control", () => {
+  test("keeps all settings reachable even when the organization policy blocks them", () => {
     const allowed = SETTINGS_TAB_VALUES.filter((tab) =>
       isSettingsTabAllowed({ tab, checkRestriction: restrictedChecker }),
     );
-    expect(allowed).toEqual(["cloud-account"]);
+    expect(allowed).toEqual(SETTINGS_TAB_VALUES);
     expect(allowed).toContain(SETTINGS_TAB_WITHOUT_CONTROL);
-    expect(isSettingsTabAllowed({ tab: "general", checkRestriction: restrictedChecker })).toBe(false);
-    expect(isSettingsTabAllowed({ tab: "extensions", checkRestriction: restrictedChecker })).toBe(false);
-    expect(isSettingsTabAllowed({ tab: "ai", checkRestriction: restrictedChecker })).toBe(false);
+    expect(isSettingsTabAllowed({ tab: "general", checkRestriction: restrictedChecker })).toBe(true);
+    expect(isSettingsTabAllowed({ tab: "extensions", checkRestriction: restrictedChecker })).toBe(true);
+    expect(isSettingsTabAllowed({ tab: "ai", checkRestriction: restrictedChecker })).toBe(true);
   });
 
   test("explains blocked capabilities with the catalog notice", () => {

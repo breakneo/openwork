@@ -37,6 +37,23 @@ import {
   workspaceSyncStreamKey,
 } from "../src/react-app/domains/session/sync/session-sync";
 import { getReactQueryClient } from "../src/react-app/infra/query-client";
+import { snapshotToUIMessages } from "../src/react-app/domains/session/sync/usechat-adapter";
+
+test("snapshot and live assistant projections preserve the reply parent", () => {
+  const message = createActiveHistory("text").messages[0];
+  expect(snapshotToUIMessages({ messages: [message] })[0]?.metadata).toMatchObject({
+    opencode: { parentID: "persisted-user", created: 1_000 },
+  });
+  const { input, cleanup, releaseSession } = createTestSync();
+  try {
+    __applySessionSyncEventForTest(input, { type: "message.updated", properties: { info: message.info } });
+    const transcript = getReactQueryClient().getQueryData<Array<{ metadata?: unknown }>>(transcriptKey(workspaceId, sessionId));
+    expect(transcript?.find((entry) => entry.metadata)?.metadata).toMatchObject({ opencode: { parentID: "persisted-user", created: 1_000 } });
+  } finally {
+    releaseSession();
+    cleanup();
+  }
+});
 
 type SyncInput = {
   workspaceId: string;

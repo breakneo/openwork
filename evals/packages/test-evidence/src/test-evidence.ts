@@ -570,7 +570,7 @@ export async function judgeTestRun(testRunDir: string, opts: JudgeTestRunOptions
 export function createTestEvidence(meta: { name: string; outDir?: string }): TestEvidenceRecorder {
   const { name } = meta;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const dir = meta.outDir ?? join(REPO_ROOT, "evals", "results", "test-runs", `${stamp}-${slug(name)}`);
+  const dir = meta.outDir ?? join(REPO_ROOT, "evals", "results", "test-runs", `${stamp}-${process.pid}-${slug(name)}`);
   const artifacts: StoredTestArtifact[] = [];
   const jsonArtifacts: StoredJsonArtifact[] = [];
   const trace: TraceEntry[] = [];

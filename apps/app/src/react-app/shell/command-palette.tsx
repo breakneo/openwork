@@ -32,10 +32,6 @@ import type { ModelOption, ModelRef } from "@/app/types";
 import { useCheckDesktopRestriction } from "../domains/cloud/desktop-config-provider";
 import { usePlatform } from "../kernel/platform";
 import {
-  resolveSessionNumberShortcutOs,
-  sessionNumberShortcutHelp,
-} from "./session-number-shortcuts";
-import {
   buildCommandPaletteBehaviorItems,
   buildCommandPaletteModelItems,
   commandPaletteBackMode,
@@ -122,7 +118,7 @@ export type CommandPaletteProps = {
   accessibleTargets?: AccessibleTargetOption[];
   onOpenAccessibleTarget?: (target: AccessibleTargetOption) => void;
   onHideAccessibleTarget?: (target: AccessibleTargetOption) => void;
-  /** Optional: sessions for the second mode. */
+  /** Sessions available to the split-view picker. */
   sessions: SessionOption[];
   sessionGroups?: SessionGroupOption[];
   currentSessionForGroupMove?: { title: string } | null;
@@ -138,8 +134,7 @@ export type CommandPaletteProps = {
 /**
  * React command palette (Cmd/Ctrl+K).
  *
- * - Root mode: "New session", "Open settings", and a link into the Sessions submode.
- * - Sessions submode: fuzzy list of every session across workspaces.
+ * Root mode searches actions and settings, not conversations.
  */
 export function CommandPalette(props: CommandPaletteProps) {
   const platform = usePlatform();
@@ -198,14 +193,6 @@ export function CommandPalette(props: CommandPaletteProps) {
   const accessibleTargetCount = props.accessibleTargets?.length ?? 0;
   const sessionGroupCount = props.sessionGroups?.length ?? 0;
   const canMoveCurrentSessionToGroup = Boolean(props.currentSessionForGroupMove && props.onMoveCurrentSessionToGroup);
-  const sessionNumberOs = resolveSessionNumberShortcutOs(
-    platform.os,
-    typeof navigator === "undefined" ? "" : navigator.platform,
-  );
-  const sessionNumberHelp = useMemo(
-    () => sessionNumberShortcutHelp(sessionNumberOs),
-    [sessionNumberOs],
-  );
   const hasNestedModelPicker = props.modelOptions !== undefined && props.onSelectModel !== undefined;
   // Organization policy (`allowControlSettings`) can hide desktop settings;
   // the settings palette entries follow the same allow-list as the settings nav.
@@ -222,19 +209,6 @@ export function CommandPalette(props: CommandPaletteProps) {
       action: () => {
         props.onClose();
         props.onCreateNewSession();
-      },
-    },
-    {
-      id: "sessions",
-      title: t("session.cmd_sessions_title"),
-      detail: t("session.cmd_sessions_detail", undefined, {
-        count: props.sessions.length.toLocaleString(),
-      }),
-      meta: t("session.cmd_sessions_meta"),
-      keywords: ["tasks", "chats", "conversations", "history", "switch"],
-      group: ACTIONS_GROUP,
-      action: () => {
-        setMode("sessions");
       },
     },
     ...(props.onOpenSessionInSplit && props.currentSession
@@ -263,15 +237,6 @@ export function CommandPalette(props: CommandPaletteProps) {
           },
         }]
       : []),
-    {
-      id: "session-number-shortcuts",
-      ...sessionNumberHelp,
-      keywords: ["keyboard", "shortcut", "switch session", "number"],
-      group: ACTIONS_GROUP,
-      action: () => {
-        setMode("sessions");
-      },
-    },
     ...(hasNestedModelPicker || props.onOpenModelPicker
       ? [{
           id: "models",
@@ -356,27 +321,7 @@ export function CommandPalette(props: CommandPaletteProps) {
         openUrl("https://openwork.dev/feedback");
       },
     },
-  ], [accessibleTargetCount, canMoveCurrentSessionToGroup, hasNestedModelPicker, props, sessionGroupCount, sessionNumberHelp]);
-
-  const sessionItems = useMemo<PaletteItem[]>(
-    () =>
-      props.sessions.map((item) => ({
-        id: `session:${item.workspaceId}:${item.sessionId}`,
-        title: item.title,
-        detail: item.workspaceTitle,
-        meta: item.isActive
-          ? t("session.cmd_current_workspace")
-          : t("session.cmd_switch"),
-        searchText: item.searchText,
-        keywords: ["session", "task", "conversation", "workspace"],
-        group: "sessions",
-        action: () => {
-          props.onClose();
-          props.onOpenSession(item.workspaceId, item.sessionId);
-        },
-      })),
-    [props],
-  );
+  ], [accessibleTargetCount, canMoveCurrentSessionToGroup, hasNestedModelPicker, props, sessionGroupCount]);
 
   const settingsItems = useMemo(
     () => buildCommandPaletteSettingsItems({
@@ -469,9 +414,8 @@ export function CommandPalette(props: CommandPaletteProps) {
       ...coreActionItems,
       ...settingsItems,
       ...(props.extraItems ?? []),
-      ...sessionItems,
     ],
-    [coreActionItems, props.extraItems, rootItems, sessionItems, settingsItems],
+    [coreActionItems, props.extraItems, rootItems, settingsItems],
   );
 
   const rootGroups = useMemo(
@@ -640,9 +584,7 @@ export function CommandPalette(props: CommandPaletteProps) {
     }
   };
 
-  const submodeItems = mode === "sessions"
-    ? sessionItems
-    : mode === "split-sessions"
+  const submodeItems = mode === "split-sessions"
       ? splitSessionItems
     : mode === "accessible-items"
       ? accessibleItems
@@ -693,9 +635,7 @@ export function CommandPalette(props: CommandPaletteProps) {
     <CommandDialog open={props.open} onOpenChange={handleOpenChange}>
       <CommandDialogPopup onKeyDownCapture={handleEscape}>
         <CommandDialogTitle>
-          {mode === "sessions"
-            ? t("session.palette_title_sessions")
-            : mode === "split-sessions"
+          {mode === "split-sessions"
               ? t("session_management.open_in_split_view")
             : mode === "accessible-items"
               ? "Accessible items"
@@ -730,9 +670,7 @@ export function CommandPalette(props: CommandPaletteProps) {
               className="w-full"
               placeholder={
                 mode === "root"
-                  ? "Search actions, settings, and sessions…"
-                  : mode === "sessions"
-                  ? t("session.palette_placeholder_sessions")
+                  ? "Search actions and settings…"
                   : mode === "split-sessions"
                     ? "Search sessions and workspaces..."
                   : mode === "accessible-items"

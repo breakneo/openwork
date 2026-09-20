@@ -3,7 +3,7 @@ import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRe
 import type { UIMessage } from "ai";
 import { hashKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
-import { Check, CirclePause, Minimize2 } from "lucide-react";
+import { Check, Minimize2 } from "lucide-react";
 import { toast } from "@/components/ui/sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { createClientV2, isOpencodeV2BaseUrl, v2PromptText } from "@/app/lib/ope
 import * as opencodeSessionNative from "@/app/lib/opencode-session-native";
 import type { NativeSessionSnapshotTarget } from "@/app/lib/opencode-session-native";
 import { isDesktopRuntime } from "@/app/lib/runtime-env";
+import { cn } from "@/lib/utils";
 import { setThemeMode } from "@/app/theme";
 import { t } from "@/i18n";
 import type { ComposerSettingsSection } from "@/react-app/domains/settings/library";
@@ -87,9 +88,13 @@ import {
   messageHasVisibleAssistantOutput,
   resolveAdmissionOutcome,
 } from "./session-admission-outcome";
-import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError } from "@/react-app/domains/session/sync/session-error";
+import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError, sessionErrorPresentationFromUIMessage, type OpencodeSessionErrorPresentation } from "@/react-app/domains/session/sync/session-error";
 import { createSessionErrorUIMessage } from "@/react-app/domains/session/sync/usechat-adapter";
+import { TaskRecovery } from "@/components/chat/task-recovery";
 import { useLocal } from "@/react-app/kernel/local-provider";
+import { useGatewayUsage, useGatewayUsageErrorHandled } from "../../cloud/use-gateway-usage";
+import { GatewayUsageApprovalNotice, GatewayUsageNotice } from "../../cloud/gateway-usage-panel";
+import { gatewayUsageNoticeState, gatewayUsageRefreshKey, isGatewayUsageModel } from "../../cloud/gateway-usage-state";
 import { resolveAttachmentFileMetadata } from "@/react-app/domains/session/sync/attachment-file-part";
 import { deriveSessionRenderModel } from "@/react-app/domains/session/sync/transition-controller";
 import { setQueuedSendContext } from "@/react-app/domains/session/sync/queued-send-context";
@@ -226,6 +231,7 @@ as $5 and $10 stay plain text.`,
 
 type SessionError = {
   message: string;
+  presentation?: OpencodeSessionErrorPresentation;
   kind?: "model-not-found" | "generic";
   /** For model-not-found: the model that failed. */
   failedModel?: { providerID: string; modelID: string };
@@ -594,8 +600,6 @@ export type SessionSurfaceProps = {
   modelLabel: string;
   onModelClick: (sessionId?: string) => void;
   modelPickerOpen: boolean;
-  rendererWorkspaceId?: string;
-  engineModelSelection?: (sessionId: string) => import("./session-model-store").SessionModelSelection | null;
   modelUnavailable?: boolean;
   modelUnavailableMessage?: string | null;
   /**
@@ -609,6 +613,8 @@ export type SessionSurfaceProps = {
   selectedModel: ModelRef;
   /** providerID → modelID → provider model, for per-session variant options. */
   providerCatalog?: ProviderCatalog;
+  gatewayProviderIds?: ReadonlySet<string>;
+  gatewayUsageProviderScope?: number | null;
   /** Den/import includes OpenWork Models for this org member (not just local sync). */
   openWorkModelsEntitled?: boolean;
   /** The server is waiting to reload this workspace with OpenWork Models. */
@@ -772,26 +778,8 @@ function AssistantWaitingCard({ label = t("session.assistant_thinking") }: { lab
 // pause, not a failure, with Resume as the single emphasized action.
 function AdmissionOutcomeUnknownCard(props: { resuming: boolean; onResume: () => void }) {
   return (
-    <div
-      data-testid="admission-outcome-unknown"
-      role="status"
-      className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10"
-    >
-      <div className="flex min-w-0 items-center gap-2 py-1 text-sm text-dls-secondary">
-        <CirclePause aria-hidden="true" className="size-4 shrink-0" />
-        <span className="min-w-0">{t("session.admission_outcome_unknown")}</span>
-        <span aria-hidden="true" className="text-dls-secondary/60">·</span>
-        <button
-          type="button"
-          data-testid="admission-outcome-resume"
-          disabled={props.resuming}
-          onClick={props.onResume}
-          className="shrink-0 cursor-pointer font-medium text-dls-text underline-offset-2 transition-colors hover:underline disabled:cursor-default disabled:opacity-60"
-        >
-          {t("session.resume_interrupted")}
-        </button>
-      </div>
-    </div>
+    <TaskRecovery state="paused" testId="admission-outcome-unknown" title={t("session.admission_outcome_unknown")}
+      onRetry={props.onResume} retryDisabled={props.resuming} retryTestId="admission-outcome-resume" />
   );
 }
 
@@ -879,7 +867,9 @@ function parseSessionError(thrown: unknown): SessionError {
   if (/ProviderModelNotFoundError/i.test(raw) || /model.*not found/i.test(raw)) {
     return { message: raw, kind: "model-not-found" };
   }
-  return { message: raw || "Failed to send prompt." };
+  let structured: unknown = thrown;
+  try { structured = JSON.parse(raw); } catch { structured = thrown; }
+  return { message: raw || "Failed to send prompt.", presentation: presentOpencodeSessionError(structured) };
 }
 
 function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOpenModelPicker }: {
@@ -889,64 +879,25 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
   onChangeModel?: (model: { providerID: string; modelID: string }) => void;
   onOpenModelPicker?: () => void;
 }) {
-  const presentation = presentOpencodeSessionError(error.message);
+  const presentation = error.presentation ?? presentOpencodeSessionError(error.message);
   return (
-    <div className="mx-auto max-w-[720px] px-3 py-3 sm:px-5" data-testid="session-error-card" role="alert">
-      <div className="rounded-2xl border border-red-6/30 bg-red-3/15 px-5 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-red-11">{developerMode ? error.message : presentation.title}</div>
-            {!developerMode && presentation.description ? (
-              <p className="mt-1 text-sm text-red-11">{presentation.description}</p>
-            ) : null}
-            {error.kind === "model-not-found" ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {error.suggestions && error.suggestions.length > 0 ? (
-                  error.suggestions.map((s) => (
-                    <button
-                      key={`${s.providerID}/${s.modelID}`}
-                      type="button"
-                      className="rounded-full border border-dls-border bg-dls-surface px-3 py-1.5 text-xs font-medium text-dls-text transition-colors hover:bg-dls-hover"
-                      onClick={() => {
-                        onChangeModel?.(s);
-                        onDismiss();
-                      }}
-                    >
-                      Use {s.providerID}/{s.modelID}
-                    </button>
-                  ))
-                ) : null}
-                <button
-                  type="button"
-                  className="rounded-full border border-dls-border bg-dls-surface px-3 py-1.5 text-xs font-medium text-dls-text transition-colors hover:bg-dls-hover"
-                  onClick={() => {
-                    onOpenModelPicker?.();
-                    onDismiss();
-                  }}
-                >
-                  Change model
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            className="shrink-0 rounded-full p-1 text-red-10 transition-colors hover:bg-red-3 hover:text-red-11"
-            onClick={onDismiss}
-            aria-label="Dismiss error"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
-          </button>
-        </div>
-      </div>
-    </div>
+    <TaskRecovery testId="session-error-card" title={presentation.title}
+      description={presentation.description} technicalDetails={developerMode ? presentation.technicalDetails : null}
+      actions={<>
+        {error.kind === "model-not-found" ? <>
+          {error.suggestions?.map((suggestion) => <Button key={`${suggestion.providerID}/${suggestion.modelID}`} variant="ghost" size="xs"
+            onClick={() => { onChangeModel?.(suggestion); onDismiss(); }}>Use {suggestion.providerID}/{suggestion.modelID}</Button>)}
+          <Button variant="ghost" size="xs" onClick={() => { onOpenModelPicker?.(); onDismiss(); }}>Change model</Button>
+        </> : null}
+        <Button variant="ghost" size="xs" aria-label="Dismiss error" onClick={onDismiss}>Dismiss</Button>
+      </>} />
   );
 }
 
 function RevertedMessagesBanner(props: { hiddenCount: number; restoring: boolean; onRestore: () => void }) {
   return (
     <div
-      className="mb-3 flex items-center gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/30 px-4 py-3 text-sm text-amber-11"
+      className="mb-3 flex items-center gap-3 rounded-2xl border border-dls-border bg-dls-hover px-4 py-3 text-sm text-dls-text"
       data-testid="reverted-messages-banner"
       role="status"
     >
@@ -1119,7 +1070,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (queuedItems.length === 0) return;
     setQueuedSendContext(props.sessionId, {
       workspaceId: props.workspaceId,
-      rendererWorkspaceId: props.rendererWorkspaceId,
       workspaceRoot: props.workspaceRoot,
       opencodeBaseUrl: props.opencodeBaseUrl,
       openworkToken: props.openworkToken,
@@ -1140,7 +1090,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
     props.sessionId,
     props.workspaceId,
     props.workspaceRoot,
-    props.rendererWorkspaceId,
     queuedItems.length,
   ]);
   const appendQueuedDraft = useComposerStateStore((state) => state.appendQueuedDraft);
@@ -1153,7 +1102,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
   // state, so split panes never control each other's model picker.
   const sessionModel = useSessionModelSelection({
     sessionId: props.sessionId,
-    engineSelection: props.engineModelSelection?.(props.sessionId),
     fallbackModel: props.selectedModel,
     fallbackModelLabel: props.modelLabel,
     fallbackVariant: props.modelVariant,
@@ -1169,16 +1117,13 @@ export function SessionSurface(props: SessionSurfaceProps) {
     props.onModelPickerOpenChange(open);
   }, [props.onModelPickerOpenChange]);
   const handleModelChange = useCallback((nextModel: ModelRef, variant?: string | null) => {
-    if (props.resolveModelAvailability ? props.resolveModelAvailability(sessionModel.selectedModel).status === "unavailable" : props.modelUnavailable) {
-      props.onModelClick(props.sessionId);
-      setModelPickerOpen(false);
-      return;
-    }
     sessionModel.setModel(nextModel, variant);
+    props.onModelChange(nextModel, variant);
     setModelPickerOpen(false);
-  }, [props.resolveModelAvailability, props.modelUnavailable, props.onModelClick, props.sessionId, sessionModel]);
+  }, [props.onModelChange, sessionModel]);
   const handleModelVariantChange = useCallback((value: string | null) => {
     sessionModel.setVariant(value);
+    props.onModelVariantChange(value);
   }, [props.onModelVariantChange, sessionModel]);
   const handleOpenModelPicker = useCallback(() => {
     props.onModelClick(props.sessionId);
@@ -1603,6 +1548,27 @@ export function SessionSurface(props: SessionSurfaceProps) {
     autoSendComposer: autoSendPayload?.composer,
     composer: { draft, attachments, pasteParts },
   });
+  const gatewaySelected = isGatewayUsageModel(sessionModel.selectedModel.providerID, props.gatewayProviderIds);
+  const latestUsageMessage = renderedMessages.at(-1);
+  const latestUsageEvidence = useMemo(() => latestUsageMessage ? sessionErrorPresentationFromUIMessage(latestUsageMessage)?.gatewayUsage ?? null : null, [latestUsageMessage]);
+  const gatewayUsage = useGatewayUsage(gatewaySelected, false, gatewayUsageRefreshKey({
+    sessionOwner,
+    providerId: sessionModel.selectedModel.providerID,
+    modelId: sessionModel.selectedModel.modelID,
+    runState: liveStatus.type,
+    latestMessageId: latestUsageMessage?.id,
+    errorKey: JSON.stringify([error?.message ?? null, error?.presentation?.gatewayUsage ?? null, latestUsageEvidence]),
+  }), liveStatus.type === "idle", props.gatewayUsageProviderScope ?? null);
+  const gatewayNotice = gatewayUsageNoticeState({ gatewaySelected: gatewayUsage.active, status: gatewayUsage.data });
+  const hideGatewayError = useGatewayUsageErrorHandled({
+    scopeKey: gatewayUsage.scopeKey, sessionOwner, gatewaySelected: gatewayUsage.active, status: gatewayUsage.data,
+    errorKey: latestUsageMessage?.id ?? null, evidence: latestUsageEvidence,
+  });
+  const hideDirectGatewayError = useGatewayUsageErrorHandled({
+    scopeKey: gatewayUsage.scopeKey, sessionOwner, gatewaySelected: gatewayUsage.active, status: gatewayUsage.data,
+    errorKey: error?.message ?? null, evidence: error?.presentation?.gatewayUsage ?? null,
+  });
+  const visibleMessages = hideGatewayError ? renderedMessages.filter((message) => message !== latestUsageMessage) : renderedMessages;
   const renderedMessagesRef = useRef(renderedMessages);
   useEffect(() => {
     renderedMessagesRef.current = renderedMessages;
@@ -1939,7 +1905,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   // not an outcome — the newly appended user message satisfies it even when no
   // assistant message exists. Deriving the outcome from the transcript (last
   // user message answered by visible assistant output) also makes the recovery
-  // state survive a reload: rehydrating the same transcript recomputes it.
+  // state survive a reload. Parent message identity, not visual ordering,
+  // determines which admission an assistant result belongs to.
   const admissionOutcome = useMemo(() => resolveAdmissionOutcome({
     messages: renderedMessages,
     statusType: liveStatus.type,
@@ -2218,6 +2185,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const sourceAttachments = submittedComposer?.attachments ?? attachments;
     const text = originalDraft.trim();
     if (!text && sourceAttachments.length === 0) return;
+    const focusedComposer = document.activeElement;
     const savedComposer = snapshotComposerSessionState(submittedComposer ?? {
       draft: originalDraft, attachments: sourceAttachments, mentions, pasteParts, revertMessageId: null,
     });
@@ -2286,6 +2254,14 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (sentAttachments.length) setAttachmentsUploading(true);
     try {
       const result = await sendDraft(nextDraft, nextDraft.messageId, markPrepared);
+      if ((result.outcome === "sent" || result.outcome === "accepted")
+        && !isDesktopRuntime() && window.matchMedia("(max-width: 1023px)").matches
+        && focusedComposer instanceof HTMLElement
+        && focusedComposer.isContentEditable
+        && composerShellRef.current?.contains(focusedComposer)
+        && document.activeElement === focusedComposer) {
+        focusedComposer.blur();
+      }
       if (result.outcome === "blocked" || result.outcome === "cancelled") {
         restore();
         return;
@@ -2430,21 +2406,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         props.workspaceRoot.trim() || undefined, {
           admissionUnknown: phase.kind === "admission_unknown",
           admissionMessageID: phase.kind === "admission_unknown" ? phase.messageID : undefined,
-          onStopped: (admission) => {
-            const exact = admission && phase.kind === "admission_unknown" && admission.messageID === phase.messageID
-              ? { ...admission, itemId: phase.itemId } : undefined;
-            if (exact && exact.state !== "accepted") {
-              // Restore only this certified unsent prompt; never touch a newer
-              // pending message that acquired the conversation in the meantime.
-              const state = useComposerStateStore.getState();
-              const pending = (state.pendingMessages[sessionOwner] ?? []).find((item) => item.draft.messageId === exact.messageID);
-              if (pending) useComposerStateStore.setState({
-                pendingMessages: { ...state.pendingMessages, [sessionOwner]: (state.pendingMessages[sessionOwner] ?? []).filter((item) => item !== pending) },
-                failedDrafts: { ...state.failedDrafts, [sessionOwner]: [...(state.failedDrafts[sessionOwner] ?? []), pending.composer] },
-              });
-            }
-            dispatchQueuedDrain(props.sessionId, { type: "stop_confirmed", admission: exact });
-          },
+          onStopped: () => dispatchQueuedDrain(props.sessionId, { type: "stop_confirmed" }),
         });
       captureAnalyticsEvent("task_run_stopped", {});
       // The surface survives navigation; refresh the stopped conversation, not
@@ -3350,7 +3312,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
             sessionScroll.markScrollGesture(event.currentTarget);
           }}
           onScroll={sessionScroll.handleScroll}
-          className="absolute inset-0 overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y px-3 pb-4 pt-4 sm:px-5"
+          className={cn("absolute inset-0 overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y px-3 pb-4 pt-4 sm:px-5",
+            !isDesktopRuntime() && "max-lg:[mask-image:linear-gradient(to_bottom,transparent,black_1rem)]")}
         >
           {/* Chat column: tighter than the composer (800px) so messages
                keep a comfortable reading width and don't feel "too big". */}
@@ -3362,14 +3325,12 @@ export function SessionSurface(props: SessionSurfaceProps) {
                  shift under the reader and the saved reading anchor go stale. */}
             {findOwned ? <div aria-hidden className="h-12" /> : null}
             {queuedDrainState.phase.kind === "admission_unknown" ? (
-              <div role="alert" className="mb-4 rounded-xl border border-dls-border bg-dls-hover/60 px-4 py-3 text-sm">
-                <p className="font-medium">Message acceptance is unknown</p>
-                <p className="mt-1 text-dls-secondary">It may already be running. Sending is paused to avoid duplicates. Check acceptance or stop the run; Stop does not resend the message.</p>
-                <div className="mt-3 flex gap-3">
-                  <button type="button" className="underline" onClick={() => void checkUnknownAdmission(true)}>Check acceptance</button>
-                  <button type="button" className="underline" onClick={() => void handleAbort()}>Stop</button>
-                </div>
-              </div>
+              <TaskRecovery state="paused" title="Couldn’t confirm your message was received"
+                description="It may already be running. Check before sending again."
+                actions={<>
+                  <Button variant="ghost" size="xs" onClick={() => void checkUnknownAdmission(true)}>Check status</Button>
+                  <Button variant="ghost" size="xs" onClick={() => void handleAbort()}>Stop</Button>
+                </>} />
             ) : null}
             {revertMessageId ? (
               <RevertedMessagesBanner
@@ -3378,7 +3339,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                 onRestore={handleRestoreRevertedSession}
               />
             ) : null}
-            {error && snapshot && snapshot.messages.length > 0 ? (
+            {error && !hideDirectGatewayError && snapshot && snapshot.messages.length > 0 ? (
               <SessionErrorCard
                 developerMode={props.developerMode}
                 error={error}
@@ -3393,7 +3354,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
               <div className="px-6 py-12">
                 <AssistantWaitingCard label={getSessionActivityStatusLabel(effectiveActivityStatus)} />
               </div>
-            ) : renderedMessages.length === 0 && snapshot && snapshot.messages.length === 0 && error ? (
+            ) : renderedMessages.length === 0 && snapshot && snapshot.messages.length === 0 && error && !hideDirectGatewayError ? (
               <SessionErrorCard
                 developerMode={props.developerMode}
                 error={error}
@@ -3448,7 +3409,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                       <MessageList
                         messageIdReplacements={pendingReconciliation.messageIdReplacements}
                         viewport={messageViewport}
-                        messages={renderedMessages}
+                        messages={visibleMessages}
                         status={status}
                         activityStatus={effectiveActivityStatus}
                         retryStatus={liveStatus.type === "retry" ? liveStatus : null}
@@ -3473,6 +3434,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           owner={sessionOwner}
           isStreaming={chatStreaming}
           onJumpToLatest={sessionScroll.jumpToLatest}
+          mobileTurnFullyVisible={sessionScroll.mobileTurnFullyVisible}
           onJumpToStartOfMessage={sessionScroll.jumpToStartOfMessage}
         />
         <SessionFindBar
@@ -3484,37 +3446,25 @@ export function SessionSurface(props: SessionSurfaceProps) {
         />
       </div>
 
-      <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2">
+      <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2 max-lg:pb-0">
+        <GatewayUsageApprovalNotice />
+        {gatewayNotice && gatewayUsage.data ? <GatewayUsageNotice key={`${gatewayUsage.scopeKey}:${sessionOwner}`} state={gatewayNotice} status={gatewayUsage.data} stale={gatewayUsage.query.isError} /> : null}
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button
             type="button"
-            className="mx-3 mb-2 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-left text-xs text-amber-11 transition-colors hover:bg-amber-3/40"
+            className="mx-3 mb-2 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-dls-border bg-dls-hover px-3 py-2 text-left text-xs text-dls-text transition-colors hover:bg-dls-active"
             onClick={() => props.onOpenSettingsSection?.("providers")}
           >
             <span className="font-medium">No AI model connected.</span>
-            <span className="text-amber-11/70">Add a provider to run tasks.</span>
+            <span className="text-dls-secondary">Add a provider to run tasks.</span>
           </button>
         ) : null}
         {props.cloudMcpSubmissionState.status === "failed" ? (
-          <div
-            className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-red-7/40 bg-red-2/40 px-3 py-2 text-xs text-red-11"
-            data-testid="cloud-mcp-submission-failure"
-          >
-            <span className="min-w-0 flex-1">
-              {[
-                props.cloudMcpSubmissionState.issue?.message ?? "Connected service tools could not be prepared.",
-                props.cloudMcpSubmissionState.issue?.recommendedAction,
-              ].filter(Boolean).join(" ")}
-            </span>
-            {props.cloudMcpSubmissionState.issue?.retryable !== false ? (
-              <button type="button" className="font-medium hover:underline" onClick={handleRetryCloudSubmission}>
-                Retry
-              </button>
-            ) : null}
-            <button type="button" className="font-medium hover:underline" onClick={props.onOpenConnect}>
-              Open Connect
-            </button>
-          </div>
+          <TaskRecovery testId="cloud-mcp-submission-failure"
+            title={props.cloudMcpSubmissionState.issue?.message ?? "Connected service tools could not be prepared."}
+            description={props.cloudMcpSubmissionState.issue?.recommendedAction}
+            onRetry={props.cloudMcpSubmissionState.issue?.retryable !== false ? handleRetryCloudSubmission : undefined}
+            actions={<Button variant="ghost" size="xs" onClick={props.onOpenConnect}>Open Connect</Button>} />
         ) : null}
         {archived ? (
           <Alert data-testid="archived-session">
@@ -3531,7 +3481,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           </Alert>
         ) : <>
         {failedDraft ? (
-          <div className="mx-3 mb-2 flex items-center gap-3 text-xs text-red-11">
+          <div className="mx-3 mb-2 flex items-center gap-3 text-xs text-dls-secondary">
             <span>Your unsent message is saved. Clear the current draft to restore it.</span>
             <button type="button" disabled={Boolean(draft || attachments.length)} className="font-medium disabled:opacity-50" onClick={() => {
               const state = useComposerStateStore.getState();

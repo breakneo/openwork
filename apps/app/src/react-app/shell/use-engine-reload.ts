@@ -4,7 +4,6 @@
 // from session-route.tsx; reload events are now typed (OpenworkReloadEvent)
 // instead of `any`.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isOpenworkModelRemovalNotification } from "@openwork/types/openwork-affordance";
 
 import { engineInfo } from "@/app/lib/desktop";
 import type { EngineInfo } from "@/app/lib/desktop-types";
@@ -155,7 +154,6 @@ export function useEngineReload(input: UseEngineReloadInput) {
         // agent while the session page is open.
         if (currentCursor === undefined || currentCursor === null) return;
         for (const event of response.items ?? []) {
-          if (isOpenworkModelRemovalNotification(event)) continue;
           reloadCoordinator.markReloadRequired(event.reason, event.trigger);
         }
       } catch {

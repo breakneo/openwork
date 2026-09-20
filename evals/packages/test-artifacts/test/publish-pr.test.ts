@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { publishPr, publishReviewPr } from "../src/publish-pr.ts";
-import { assembleReview } from "../src/review.ts";
+import { assembleReview, renderReviewComment } from "../src/review.ts";
 import { reviewSchema, summarizeReview } from "@openwork/review";
 import { uploadReview } from "@openwork/review/storage";
 import { readFile, readdir } from "node:fs/promises";
@@ -289,6 +289,14 @@ test("review composition preserves sources, deduplicates images, and validates e
       1,
     );
     assert.equal(summarizeReview(report).verdict, "Passed");
+    assert.match(renderReviewComment(report), /Selected evidence: \*\*Passed\*\*/);
+    const waiting = await assembleReview({
+      testRunDirs: [first, second],
+      gaps: ["Required verification: waiting. Missing session-history-status-paged.e2e.test.ts."],
+    });
+    assert.equal(summarizeReview(waiting.report).verdict, "Incomplete");
+    assert.match(renderReviewComment(waiting.report), /Required verification: waiting/);
+    assert.equal(waiting.report.sources.length, 2);
     const document = await assembleReview({
       testRunDirs: [],
       docShots: [shot],

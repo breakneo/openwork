@@ -85,6 +85,15 @@ const transactionDb = {
       if (table === ConfigObjectTable) return result.map((configObject) => ({ configObject, plugin: rows(PluginTable)[0], marketplace: null }))
       if (table === ConfigObjectAccessGrantTable) return result.map((row) => ({ ...row, resourceId: row.configObjectId }))
       if (table === WorkflowRunTable && projection?.receipt) return result.map((receipt) => ({ receipt, automationTrigger: null }))
+      if (projection && (table === ConfigObjectVersionTable || table === ArtifactViewRevisionTable) && isRecord(table)) {
+        const columns = Object.entries(table)
+        const fields = Object.entries(projection).map(([alias, column]) => {
+          const entry = columns.find(([, candidate]) => candidate === column)
+          if (!entry) throw new Error(`Unsupported test database projection: ${alias}`)
+          return { alias, key: entry[0] }
+        })
+        return result.map((row) => Object.fromEntries(fields.map(({ alias, key }) => [alias, row[key]])))
+      }
       return result
     }
     const query = {
@@ -210,6 +219,17 @@ function savedResponse(value: unknown) {
     configObjectVersionId: normalizeDenTypeId("configObjectVersion", String(result.configObjectVersionId)),
   }
 }
+
+test("database projections retain aliases without returning unselected workflow source", async () => {
+  const saved = seed()
+  const selected = await database.select({ payload: ConfigObjectVersionTable.normalizedPayloadJson })
+    .from(ConfigObjectVersionTable)
+  expect(selected).toEqual([{ payload: rows(ConfigObjectVersionTable)[0]?.normalizedPayloadJson }])
+  expect(selected[0]).not.toHaveProperty("rawSourceText")
+  expect(selected[0]).not.toHaveProperty("normalizedPayloadJson")
+  await expect(workflows.getWorkflowAccess({ context, configObjectId: saved.configObjectId }))
+    .resolves.toMatchObject({ configObjectId: saved.configObjectId, canManage: true })
+})
 
 test("live authoring -> receipt-only save -> exact saved live run -> validated snapshot -> artifact build", async () => {
   const timeZone = "America/Los_Angeles"

@@ -89,15 +89,17 @@ test("card props and narrowed metadata cannot override the tool trust boundary",
   }
 })
 
-test("renders compact MCP attribution in a failed chat tool row", () => {
+test("keeps raw MCP diagnostics behind a quiet control in a failed tool row", () => {
   const toolPart: DynamicToolUIPart = {
     type: "dynamic-tool", toolName: "openwork-cloud_execute_capability", toolCallId: "call-1", state: "output-error", input: {},
     errorText: JSON.stringify({ error: "connection_failed", diagnostic: { code: "MCP_HTTP_504", httpStatus: 504 } }),
   }
   const html = renderToStaticMarkup(<Tool toolPart={toolPart} />)
-  expect(html).toContain("Remote MCP · HTTP 504")
-  expect(html).toContain("Error attribution: Remote MCP · HTTP 504. Confirmed.")
-  expect(html).not.toContain(">failed<")
+
+  expect(html).toContain("The service didn’t respond in time")
+  expect(html).toContain('aria-label="Technical details"')
+  expect(html).not.toContain("MCP_HTTP_504")
+  expect(html).not.toContain("text-destructive")
 })
 
 test("renders a copy action inside the expanded tool result", () => {

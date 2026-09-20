@@ -438,6 +438,17 @@ export async function abandonedQuestion(seed: Seed) {
   return { ...base, engine, ask, followup, session };
 }
 
+/** Real provider errors and automatic recovery, without synthetic UI events. */
+export async function sessionProviderErrorRecovery(seed: Seed) {
+  const prompt = "Prepare a short reliability summary.";
+  const reply = "The reliability summary is ready.";
+  const base = await splitPaneQuestions(seed, "session-provider-error-recovery", [{
+    promptMarker: prompt, latestUserTurn: true, serverErrorAttempts: 2, finalReply: reply, steps: [],
+  }]);
+  const session = await seedSessionRetry(seed, base.app, { title: "Response recovery" });
+  return { ...base, session, prompt, reply };
+}
+
 /** Real native permissions and a provider retry, without synthetic UI events. */
 export async function permissionStopRecovery(seed: Seed) {
   const engine = resolveEvalEngine();

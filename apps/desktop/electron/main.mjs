@@ -1,4 +1,5 @@
 import { processBlankSlateProfile, resolveBlankSlateLaunch } from "./blank-slate-profile.mjs";
+import { DESKTOP_POLICY_ENFORCEMENT_ENABLED } from "@openwork/types/den/desktop-policies-runtime";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
@@ -1113,6 +1114,7 @@ browserPanel = createBrowserPanel({
   getWindow: () => mainWindow,
   onDeepLink: (urls) => queueDeepLinks(urls),
   checkPolicy: async (input) => {
+    if (!DESKTOP_POLICY_ENFORCEMENT_ENABLED) return;
     let code = "policy_unavailable";
     try {
       const server = await runtimeManager.openworkServerInfo();

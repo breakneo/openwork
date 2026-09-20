@@ -104,6 +104,7 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
   let messages = new Map(data.flatMap((group) => group.messages.map((message) => [message.id, message] as const)))
   let top = 0
   let width = options.viewportWidth ?? 600
+  let viewportHidden = false
   let sticky = false
   let unmounted = false
   let initializedSession: string | undefined
@@ -123,6 +124,7 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
   }
   const hidden = (node: Element) => node.hasAttribute("data-thread-group") && !node.hasChildNodes()
   const height = (node: Element): number => {
+    if (viewportHidden) return 0
     if (fixedGeometry) return node === container ? data.length * 248 : 240
     if (node instanceof HTMLElement && (node.hasAttribute("data-thread-placeholder") || node.hasAttribute("data-thread-loading") || node.hasAttribute("data-thread-test-header"))) return Number.parseFloat(node.style.height) || 0
     if (node.hasAttribute("data-message-id")) return messageHeight(node)
@@ -142,6 +144,7 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
     return offset
   }
   spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (viewportHidden && container.contains(this)) return new DOMRect()
     if (this === container) return new DOMRect(0, 40, width, viewportHeight)
     if (container.contains(this) && hidden(this)) return new DOMRect()
     if (fixedGeometry && container.contains(this)) return new DOMRect(0, 40, width, 240)
@@ -157,18 +160,20 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
     })
   }
   Object.defineProperties(container, {
-    offsetWidth: { get: () => width },
-    offsetHeight: { get: () => viewportHeight },
+    offsetWidth: { get: () => viewportHidden ? 0 : width },
+    offsetHeight: { get: () => viewportHidden ? 0 : viewportHeight },
     scrollTo: { value: (options: ScrollToOptions) => { container.scrollTop = options.top ?? container.scrollTop } },
-    clientWidth: { get: () => width },
-    clientHeight: { get: () => viewportHeight },
+    clientWidth: { get: () => viewportHidden ? 0 : width },
+    clientHeight: { get: () => viewportHidden ? 0 : viewportHeight },
     scrollHeight: { get: () => height(container) },
     scrollTop: { get: () => {
+      if (viewportHidden) return 0
       const clamped = Math.max(0, Math.min(top, height(container) - viewportHeight))
       if (clamped !== top) { top = clamped; notifyScroll() }
       return top
     }, set: (value: number) => {
       writes.push(value)
+      if (viewportHidden) return
       const next = Math.max(0, Math.min(value, height(container) - viewportHeight))
       if (next !== top) { top = next; notifyScroll() }
     } },
@@ -255,7 +260,8 @@ function fixture(initial = groups(), options: Partial<MessageListViewport> = {},
     },
     scroll(value: number) { top = value; container.dispatchEvent(new Event("scroll")) },
     setSticky(value: boolean) { sticky = value },
-    resize(nextWidth = width) { width = nextWidth; for (const emit of observers) emit() },
+    setHidden(value: boolean) { viewportHidden = value; for (const emit of [...observers]) emit() },
+    resize(nextWidth = width, nextHeight = viewportHeight) { width = nextWidth; viewportHeight = nextHeight; for (const emit of observers) emit() },
     resizeItemsFirst(nextWidth: number) { width = nextWidth; for (const emit of [...observers]) emit((target) => target.hasAttribute("data-thread-group")) },
     resizeViewport() { for (const emit of [...observers]) emit((target) => target === container) },
   }
@@ -360,6 +366,52 @@ describe("progressive whole-group rendering", () => {
       expect(view.mounted.length).toBeLessThanOrEqual(8)
       expect(frames.size).toBe(0)
     }
+  })
+
+  test.each(["stickyBottom", "manual"])("restores a thread after its viewport becomes measurable without a scroll gesture (%s)", async (mode) => {
+    const sessionKey = `revealed-${++sessionId}`
+    const anchor = { messageId: "m40", offset: -75 }
+    if (mode === "manual") useSessionScrollStore.getState().setManualScroll(sessionKey, 125, null, anchor)
+    const view = fixture(groups(), { sessionKey, ...(mode === "manual" ? { anchorMessageId: anchor.messageId, scrollTop: 125 } : {}) }, false, false, 0, 16, "immediate")
+    await view.render()
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    expect(frames.size).toBe(0)
+    await act(async () => view.resize(600, 612))
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    if (mode === "manual") expect(view.position("m40")).toBe(-75)
+    else expect(view.message("m79").getBoundingClientRect().bottom).toBe(view.container.getBoundingClientRect().bottom)
+    const bounds = view.container.getBoundingClientRect()
+    expect(view.placeholders.some((node) => {
+      const rect = node.getBoundingClientRect()
+      return rect.bottom > bounds.top && rect.top < bounds.bottom
+    })).toBe(false)
+    expect(getSessionScrollState(useSessionScrollStore.getState().sessions, sessionKey).mode).toBe(mode)
+    expect(view.mounted.length).toBeLessThanOrEqual(10)
+    expect(frames.size).toBe(0)
+  })
+
+  test.each(["stickyBottom", "manual"])("retains measurements across a hidden thread reveal without a scroll gesture (%s)", async (mode) => {
+    const sessionKey = `hidden-${++sessionId}`
+    const anchor = { messageId: "m40", offset: -75 }
+    if (mode === "manual") useSessionScrollStore.getState().setManualScroll(sessionKey, 125, null, anchor)
+    const view = fixture(groups(), { sessionKey, ...(mode === "manual" ? { anchorMessageId: anchor.messageId, scrollTop: 125 } : {}) }, false, false, 612, 16, "immediate", { scrollOptions: {} })
+    await view.render()
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    await act(async () => view.setHidden(true))
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    expect(frames.size).toBe(0)
+    await act(async () => view.setHidden(false))
+    for (let index = 0; index < 12 && frames.size; index++) await batch()
+    if (mode === "manual") expect(view.position("m40")).toBe(-75)
+    else expect(view.message("m79").getBoundingClientRect().bottom).toBe(view.container.getBoundingClientRect().bottom)
+    const bounds = view.container.getBoundingClientRect()
+    expect(view.placeholders.some((node) => {
+      const rect = node.getBoundingClientRect()
+      return rect.bottom > bounds.top && rect.top < bounds.bottom
+    })).toBe(false)
+    expect(getSessionScrollState(useSessionScrollStore.getState().sessions, sessionKey).mode).toBe(mode)
+    expect(view.mounted.length).toBeLessThanOrEqual(10)
+    expect(frames.size).toBe(0)
   })
 
   test("item resize callbacks cannot cache new-width heights in the previous width scope", async () => {

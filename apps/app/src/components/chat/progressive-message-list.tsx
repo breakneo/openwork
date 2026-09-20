@@ -83,12 +83,12 @@ function VirtualGroups<T>(props: ProgressiveMessageListProps<T>) {
     const element = instance.scrollElement
     let active = true
     const sync = () => {
-      if (active && element && element.scrollTop !== instance.scrollOffset) callback(element.scrollTop, false)
+      if (active && element && element.clientHeight > 0 && element.clientWidth > 0 && element.scrollTop !== instance.scrollOffset) callback(element.scrollTop, false)
     }
     syncOffset.current = sync
     sync()
     const unsubscribe = observeElementOffset(instance, (offset, isScrolling) => {
-      if (active) callback(element?.scrollTop ?? offset, isScrolling)
+      if (active && element && element.clientHeight > 0 && element.clientWidth > 0) callback(element.scrollTop ?? offset, isScrolling)
     })
     return () => {
       active = false
@@ -96,12 +96,20 @@ function VirtualGroups<T>(props: ProgressiveMessageListProps<T>) {
       if (syncOffset.current === sync) syncOffset.current = null
     }
   }, [])
-  const observeViewport = React.useCallback((instance: ThreadVirtualizer, callback: (rect: Rect) => void) =>
-    observeElementRect(instance, (rect) => {
+  const observeViewport = React.useCallback((instance: ThreadVirtualizer, callback: (rect: Rect) => void) => {
+    let previous: Rect | undefined
+    return observeElementRect(instance, (rect) => {
       const width = instance.scrollElement?.clientWidth ?? rect.width
-      if (width > 0) setWidth(width)
+      const changed = previous?.width !== width || previous?.height !== rect.height
+      previous = { width, height: rect.height }
+      // A transient zero-size layout is not an empty transcript. Keep the last
+      // window and refresh its origin/offset on reveal, even at the same width.
+      if (width <= 0 || rect.height <= 0) return
+      setWidth(width)
       callback(rect)
-    }), [])
+      if (changed) refresh()
+    })
+  }, [])
   const cacheKey = JSON.stringify([viewport?.sessionKey, width])
   const estimates = React.useMemo(() => {
     const cached = heightCache.get(cacheKey)
@@ -143,7 +151,11 @@ function VirtualGroups<T>(props: ProgressiveMessageListProps<T>) {
     if (anchorIndex >= 0 && (!bridge.current || bridge.current.waitingForAnchor)) indexes.add(anchorIndex)
     return [...indexes].sort((a, b) => a - b)
   }, [identityKeys, priorityIndex, anchorIndex, viewport?.revealAll, Boolean(viewport), revision])
-  const measureElement = React.useCallback((node: HTMLDivElement, entry: ResizeObserverEntry | undefined) => {
+  const measureElement = React.useCallback((node: HTMLDivElement, entry: ResizeObserverEntry | undefined, instance: ThreadVirtualizer) => {
+    const index = instance.indexFromElement(node)
+    if (!viewport?.scrollRef.current?.clientHeight || !viewport.scrollRef.current.clientWidth) {
+      return instance.measurementsCache[index]?.size ?? estimateSize(index)
+    }
     const height = entry?.borderBoxSize[0]?.blockSize ?? node.getBoundingClientRect().height
     const key = node.dataset.threadGroup
     const measuredWidth = viewport?.scrollRef.current?.clientWidth ?? 0
@@ -158,7 +170,7 @@ function VirtualGroups<T>(props: ProgressiveMessageListProps<T>) {
       if (heightCache.size > MAX_CACHED_VIEWPORTS) heightCache.delete(heightCache.keys().next().value!)
     }
     return height
-  }, [viewport?.sessionKey, viewport?.scrollRef])
+  }, [viewport?.sessionKey, viewport?.scrollRef, estimateSize])
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: currentKeys.length,
     getScrollElement,
@@ -233,7 +245,7 @@ class MeasuredGroups<T> extends React.Component<MeasuredGroupsProps<T>> {
 
   contentOffset() {
     const list = this.list.current
-    if (!list || !this.container) return undefined
+    if (!list || !this.container?.clientHeight || !this.container.clientWidth) return undefined
     const style = window.getComputedStyle(list)
     let top = list.getBoundingClientRect().top + (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.paddingTop) || 0)
     if (this.props.header) {
@@ -332,6 +344,7 @@ class MeasuredGroups<T> extends React.Component<MeasuredGroupsProps<T>> {
       this.frame = null
       if (!this.active) return
       this.connectViewport()
+      if (this.container && (!this.container.clientHeight || !this.container.clientWidth)) return
       this.pendingInteraction.clear()
       if (this.props.anchorIndex >= 0 || this.props.viewport?.historyComplete) this.waitingForAnchor = false
       this.props.refresh()

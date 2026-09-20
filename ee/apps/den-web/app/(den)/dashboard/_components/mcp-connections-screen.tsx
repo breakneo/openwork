@@ -915,8 +915,8 @@ export function McpConnectionsScreen({ view = "catalog", connectorId }: { view?:
         />
       )}
       {showStagingBanner ? (
-        <div data-testid="mcp-connections-staging-banner" className="mb-6 rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-[14px] leading-6 text-amber-800">
-          <p className="font-semibold text-amber-900">OpenWork Connect (beta) is staged for this org.</p>
+        <div data-testid="mcp-connections-staging-banner" className="mb-6 rounded-[24px] border border-[var(--dls-border)] bg-[var(--dls-hover)] px-5 py-4 text-[14px] leading-6 text-[var(--dls-text-primary)]">
+          <p className="font-semibold">OpenWork Connect (beta) is staged for this org.</p>
           <p className="mt-1">
             Connectors and collection capabilities you set up here stay staged and invisible to members until a platform admin enables OpenWork Connect (beta) for this org. Admin management remains fully usable.
           </p>
@@ -1054,7 +1054,7 @@ export function McpConnectionsScreen({ view = "catalog", connectorId }: { view?:
               ) : null}
             </div>
             {smartBarBlockers.length > 0 ? (
-              <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800">
+              <div className="mt-3 rounded-xl border border-[var(--dls-border)] bg-[var(--dls-hover)] px-3 py-2.5 text-[12px] text-[var(--dls-text-primary)]">
                 Needs a little more setup: {smartBarBlockers.join(" · ")}{" "}
                 <button
                   type="button"
@@ -2017,7 +2017,7 @@ function IssuerReviewDialog({
                 ))}
               </div>
             </fieldset>
-            <div className={`rounded-2xl px-4 py-3 text-[12px] leading-5 ${issuerWillChange ? "bg-amber-50 text-amber-800" : "bg-blue-50 text-blue-800"}`}>
+            <div className={`rounded-2xl px-4 py-3 text-[12px] leading-5 ${issuerWillChange ? "border border-[var(--dls-border)] bg-[var(--dls-hover)] text-[var(--dls-text-primary)]" : "bg-blue-50 text-blue-800"}`}>
               {issuerWillChange
                 ? "Confirming a different issuer clears the old OAuth client and credentials. Everyone will reconnect against the newly approved provider."
                 : "Confirming the same issuer clears the stale discovery cache without signing anyone out."}
@@ -2708,7 +2708,7 @@ function EditConnectionDialog({
         </div>
 
         {identityChanged && !marketplaceManaged ? (
-          <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-[12px] leading-5 text-amber-900" data-testid="mcp-identity-change-warning">
+          <div className="mt-5 rounded-2xl border border-[var(--dls-border)] bg-[var(--dls-hover)] p-4 text-[12px] leading-5 text-[var(--dls-text-primary)]" data-testid="mcp-identity-change-warning">
             <p className="font-semibold">This changes the connection identity.</p>
             <p className="mt-1">OpenWork will clear shared and individual sessions, API keys, pending OAuth state, OAuth client registration, scopes, and connected timestamps before the new server can be used.</p>
             {authType === "oauth" ? <p className="mt-1 font-medium">The connection must be authorized again after saving.</p> : null}
@@ -3130,7 +3130,7 @@ function AddConnectionDialog({
                   </p>
                 ) : null}
                 {smartBlockers.length > 0 ? (
-                  <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2.5 text-[12px] leading-5 text-amber-800">
+                  <div className="mt-3 rounded-xl border border-[var(--dls-border)] bg-[var(--dls-hover)] px-3 py-2.5 text-[12px] leading-5 text-[var(--dls-text-primary)]">
                     Needs a little more setup: {smartBlockers.join(" · ")}
                   </div>
                 ) : null}

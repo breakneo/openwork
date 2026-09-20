@@ -40,6 +40,8 @@ export interface MockAgentToolStep {
 export interface MockAgentWorkload {
   /** Chat Completions: return this many 429s with Retry-After before serving the workload. */
   rateLimitAttempts?: number;
+  /** Chat Completions: return this many HTTP 500s before serving the workload. */
+  serverErrorAttempts?: number;
   /** Chat Completions: match the latest user message and count only its tool rounds. */
   latestUserTurn?: boolean;
   promptMarker: string;

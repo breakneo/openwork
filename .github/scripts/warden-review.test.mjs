@@ -539,6 +539,16 @@ test("clearance workflow isolates the untrusted receipt from the trusted checkou
     /node \.github\/scripts\/warden-review\.mjs publish --receipt warden-summary\.json/);
 });
 
+test("clearance workflow treats publication status as data rather than shell source", () => {
+  const evaluate = clearanceWorkflow.slice(
+    clearanceWorkflow.indexOf("- name: Evaluate verdict"),
+    clearanceWorkflow.indexOf("- name: Mint clearance token"),
+  );
+  assert.match(evaluate, /PUBLISH_STATUS: \$\{\{ steps\.publish\.outputs\.status \}\}/);
+  assert.match(evaluate, /if \[ "\$PUBLISH_STATUS" != "published" \]; then/);
+  assert.doesNotMatch(evaluate.slice(evaluate.indexOf("run: |")), /\$\{\{ steps\.publish\.outputs\.status \}\}/);
+});
+
 test("clearance workflow fails closed before guard matching and revokes every app approval", () => {
   const guardStart = clearanceWorkflow.indexOf("changed_files=\"");
   const guardMatch = clearanceWorkflow.indexOf("guarded=\"");

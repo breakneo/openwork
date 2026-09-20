@@ -24,9 +24,7 @@
     "./openwork-affordance": {
       "types": "./src/openwork-affordance.ts",
       "development": "./src/openwork-affordance.ts",
-      "bun": "./src/openwork-affordance.ts",
-      "browser": "./src/openwork-affordance.ts",
-      "default": "./dist/openwork-affordance.js"
+      "default": "./src/openwork-affordance.ts"
     },
     "./openwork-context": {
       "types": "./src/openwork-context.ts",
@@ -99,6 +97,12 @@
       "types": "./src/den/gateway.ts",
       "development": "./src/den/gateway.ts",
       "default": "./dist/den/gateway.js"
+    },
+    "./den/gateway-usage-limits": {
+      "types": "./src/den/gateway-usage-limits.ts",
+      "development": "./src/den/gateway-usage-limits.ts",
+      "bun": "./src/den/gateway-usage-limits.ts",
+      "default": "./dist/den/gateway-usage-limits.js"
     },
     "./den/gateway-usage": {
       "types": "./src/den/gateway-usage.ts",

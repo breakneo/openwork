@@ -61,11 +61,8 @@ export type OpenworkControlResult =
   | { ok: true; actionId: string; result?: unknown }
   | { ok: false; actionId: string; error: string; code?: OpenworkAffordanceFailureCode; hint?: string };
 
-export type OpenworkControlCommandMetadata = { createdAt: number };
-
 export type OpenworkControlHelpers = {
   setNarration: (text: string) => void;
-  requestCreatedAt?: number;
   /** The conversation whose agent issued the request, when it came through the agent bridge. */
   origin?: OpenworkAffordanceOrigin;
   /**
@@ -134,7 +131,7 @@ export type OpenworkControlAPI = {
   execute: (actionId: string, args?: unknown) => Promise<OpenworkControlResult>;
   context: () => OpenworkContextSnapshot;
   query: (request: OpenworkAffordanceRequest) => Promise<OpenworkAffordanceResult>;
-  command: (request: OpenworkAffordanceRequest, metadata?: OpenworkControlCommandMetadata) => Promise<OpenworkAffordanceResult>;
+  command: (request: OpenworkAffordanceRequest) => Promise<OpenworkAffordanceResult>;
   setEnabled: (enabled: boolean) => void;
   subscribe: (listener: (snapshot: OpenworkControlSnapshot) => void) => () => void;
 };
@@ -418,7 +415,6 @@ export function OpenworkControlProvider({ children }: { children: ReactNode }) {
     args?: unknown,
     origin?: OpenworkAffordanceOrigin,
     bridged = false,
-    requestCreatedAt?: number,
   ): Promise<OpenworkControlResult> => {
     const registered = actionsRef.current.get(actionId);
     const action = registered?.ref.current;
@@ -446,7 +442,7 @@ export function OpenworkControlProvider({ children }: { children: ReactNode }) {
       await playTargetChoreography(action, runId);
       setNarration(`Running ${action.label}…`);
       const effectiveArgs = args === undefined ? action.previewArgs : args;
-      const result = await action.execute(effectiveArgs, { setNarration, origin, bridged, requestCreatedAt });
+      const result = await action.execute(effectiveArgs, { setNarration, origin, bridged });
       const resultError = returnedActionError(result);
       if (resultError) {
         setNarration(`Could not ${action.label}: ${resultError.error}`);
@@ -532,7 +528,6 @@ export function OpenworkControlProvider({ children }: { children: ReactNode }) {
 
   const executeCommand = useCallback(async (
     request: OpenworkAffordanceRequest,
-    metadata?: OpenworkControlCommandMetadata,
   ): Promise<OpenworkAffordanceResult> => {
     const action = actionsRef.current.get(request.id)?.ref.current;
     const revision = contextRevisionRef.current;
@@ -565,9 +560,7 @@ export function OpenworkControlProvider({ children }: { children: ReactNode }) {
       };
     }
     busyActorRef.current = request.actor ?? null;
-    const requestCreatedAt = metadata === undefined ? undefined
-      : Number.isSafeInteger(metadata.createdAt) && metadata.createdAt > 0 && metadata.createdAt <= Date.now() ? metadata.createdAt : NaN;
-    const result = await executeAction(request.id, request.args, request.origin, true, requestCreatedAt);
+    const result = await executeAction(request.id, request.args, request.origin, true);
     if (!busyActionIdRef.current) busyActorRef.current = null;
     if (!result.ok) {
       return {

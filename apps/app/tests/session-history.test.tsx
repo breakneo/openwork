@@ -468,12 +468,12 @@ describe("independent opening regression audit", () => {
 });
 
 describe("bounded opening recovery", () => {
-  for (const kind of ["network", "http", "size", "deleted-session"]) test(`${kind} opening errors remain bounded and do not block another thread`, async () => {
+  for (const kind of ["network", "http", "forbidden", "size", "deleted-session"]) test(`${kind} opening errors remain bounded and do not block another thread`, async () => {
     const view = fixture();
     class HistorySizeError extends Error { code = "history_too_large"; }
     const error = kind === "size" ? new HistorySizeError("History response exceeds the size limit.")
       : Object.assign(new Error(kind === "network" ? "Failed to fetch" : "History request failed"),
-        kind === "deleted-session" ? { status: 404, code: "session_not_found" } : kind === "http" ? { status: 503 } : {});
+        kind === "deleted-session" ? { status: 404, code: "session_not_found" } : kind === "http" ? { status: 503 } : kind === "forbidden" ? { status: 403 } : {});
     if (kind === "network" || kind === "deleted-session") {
       useSessionScrollStore.getState().setManualScroll("a", 500, null, { messageId: "saved", offset: 0 });
     }
@@ -534,15 +534,70 @@ describe("bounded opening recovery", () => {
     expect(view.reads).toHaveLength(2);
   });
 
-  test("a cancelled selected opening shows recovery instead of an idle spinner", async () => {
+  test("a slow opening keeps waiting without a deadline or automatic reread", async () => {
+    const view = fixture();
+    await view.render();
+    await act(async () => { jest.advanceTimersByTime(60_000); });
+    expect(view.openingError).toBeNull();
+    expect(view.host.querySelector('[role="alert"]')).toBeNull();
+    expect(view.host.querySelector("[data-thread-loading]")).not.toBeNull();
+    expect(view.reads).toHaveLength(1);
+    await view.resolve(0, page(["eventually-ready"], null, null));
+    expect(visibleIds(view)).toEqual(["eventually-ready"]);
+  });
+
+  test("runtime authority restoration resumes the still-mounted pane without reading for a revoked owner", async () => {
+    const view = fixture();
+    const selected = { ...view.input(), ...sessionHistoryIdentity({ draftScope: "principal",
+      opencodeBaseUrl: "https://history.example/opencode", runtimeWorkspaceId: "workspace", sessionId: "a" }) };
+    const owners = [{ owner: selected.runtimeOwner }];
+    await view.renderRuntimeOwners(owners, [selected]);
+    await view.renderRuntimeOwners([], [selected]);
+    await settle();
+    expect(view.reads[0].signal.aborted).toBe(true);
+    expect(view.reads).toHaveLength(1);
+    expect(view.openingError).toBeNull();
+    await view.renderRuntimeOwners(owners, [selected]);
+    await settle();
+    expect(view.reads).toHaveLength(2);
+    expect(view.openingError).toBeNull();
+    await view.resolve(0, page(["revoked"], null, null));
+    expect(visibleIds(view)).toEqual([]);
+    await view.resolve(1, page(["restored"], null, null));
+    expect(visibleIds(view)).toEqual(["restored"]);
+    await act(async () => { onlineManager.setOnline(false); onlineManager.setOnline(true); });
+    await settle();
+    expect(view.reads).toHaveLength(2);
+  });
+
+  test("a second cancellation exposes Retry without an automatic restart loop", async () => {
+    const view = fixture();
+    await view.render();
+    const filters = { queryKey: openingSessionHistoryOptions(view.input()).queryKey, exact: true };
+    await act(async () => { await view.client.cancelQueries(filters); });
+    await settle();
+    expect(view.reads).toHaveLength(2);
+    await act(async () => { await view.client.cancelQueries(filters); });
+    await settle();
+    await act(async () => { jest.advanceTimersByTime(60_000); });
+    expect(view.reads).toHaveLength(2);
+    expect(view.host.querySelector('[role="alert"]')).not.toBeNull();
+    await act(async () => view.host.querySelector("button")?.click());
+    expect(view.reads).toHaveLength(3);
+    await view.resolve(2, page(["manual-recovery"], null, null));
+    expect(visibleIds(view)).toEqual(["manual-recovery"]);
+  });
+
+  test("a cancelled selected opening resumes once without navigation or Retry", async () => {
     const view = fixture();
     await view.render();
     await act(async () => { await view.client.cancelQueries({ queryKey: openingSessionHistoryOptions(view.input()).queryKey, exact: true }); });
     await settle();
     expect(view.reads[0].signal.aborted).toBe(true);
-    expect(view.host.querySelector('[role="alert"]')).not.toBeNull();
-    expect(view.host.querySelector("[data-thread-loading]")).toBeNull();
-    await act(async () => view.host.querySelector("button")?.click());
+    expect(view.openingError).toBeNull();
+    expect(view.host.querySelector('[role="alert"]')).toBeNull();
+    expect(view.host.querySelector("[data-thread-loading]")).not.toBeNull();
+    expect(view.reads).toHaveLength(2);
     expect(view.reads[1].window).toEqual({ limit: 24 });
     await view.resolve(0, page(["cancelled"], null, null));
     expect(visibleIds(view)).toEqual([]);
@@ -1411,12 +1466,12 @@ describe("opening a thread", () => {
     await act(async () => { retry?.click(); retry?.click(); });
     expect(view.host.querySelector("button")?.disabled).toBe(true);
     expect(view.host.querySelector('[data-thread-history-status] [role="status"]')?.textContent).toContain("Loading conversation");
-    expect(view.host.querySelector("button")?.textContent).toBe("Retrying…");
+    expect(view.host.querySelector("button")?.getAttribute("aria-label")).toBe("Reload conversation");
     expect(view.reads).toHaveLength(2);
     expect(view.reads[1].window).toEqual({ limit: 24 });
     await act(async () => view.reads[1].reject(new Error("Still unavailable")));
     await settle();
-    expect(view.host.querySelector("button")?.textContent).toBe("Retry");
+    expect(view.host.querySelector("button")?.getAttribute("aria-label")).toBe("Reload conversation");
     await act(async () => view.host.querySelector("button")?.click());
     await view.resolve(2, page(["Recovered history"], null, null));
     expect(view.host.textContent).toContain("Recovered history");
@@ -1576,7 +1631,7 @@ describe("opening a thread", () => {
     expect(view.host.querySelector('[data-thread-history-status] [role="status"]')).toBeNull();
     expect(view.host.querySelectorAll("[data-thread-history-status]")).toHaveLength(1);
     await act(async () => view.host.querySelector("button")?.click());
-    checkGeometry("Retrying…");
+    checkGeometry("Loading earlier messages…");
     await view.resolve(2, snapshot("a", "Full history", ["before", ...fullWindow, "anchor", "after"]));
     expect(scroller.scrollTop).toBe(800);
     expect(scroller.querySelector('[data-message-id="anchor"]')).toBe(anchor);
@@ -1733,7 +1788,7 @@ describe("opening a thread", () => {
     expect(view.host.querySelector('[data-thread-loading]')).toBeNull();
     expect(view.host.textContent).toContain("Composer a");
     const retry = view.host.querySelector("button");
-    expect(retry?.textContent).toBe("Retry");
+    expect(retry?.getAttribute("aria-label")).toBe("Reload conversation");
     await act(async () => retry?.click());
     await settle();
     expect(view.host.querySelector('[data-thread-loading]')).not.toBeNull();
@@ -1781,6 +1836,33 @@ describe("opening a thread", () => {
     expect((await view.readSendHistory()).map(({ info }) => info.id)).toEqual(["1", "2", "3"]);
     expect(view.latestReads).toHaveLength(2);
     expect(view.reads.filter((read) => read.window === undefined)).toHaveLength(0);
+  });
+
+  test("a bounded first-send read retries once after StrictMode restores the same owner", async () => {
+    const view = fixture();
+    let send: Promise<OpenworkSessionHistory["messages"] | string> | undefined;
+    await view.renderInput(view.input(), { strict: true, onMount: () => {
+      send ??= view.readSendHistory().catch((error: unknown) => String(error));
+    } });
+    expect(view.latestReads).toHaveLength(1);
+    expect(view.latestReads[0].signal.aborted).toBe(true);
+    await view.resolveLatest(0, snapshot("a", "Cancelled read", ["stale"]));
+    expect(view.latestReads).toHaveLength(2);
+    expect(view.latestReads[1].signal.aborted).toBe(false);
+    await view.resolveLatest(1, snapshot("a", "Current turn", ["current"]));
+    expect(await send).toEqual(snapshot("a", "Current turn", ["current"]).messages);
+    expect(view.latestReads).toHaveLength(2);
+  });
+
+  test.each(["session", "credentials"])("a cancelled send-history read does not retry after changing %s", async (change) => {
+    const view = fixture();
+    await view.render("a", "first");
+    const send = view.readSendHistory().then(() => "sent", () => "cancelled");
+    await view.render(change === "session" ? "b" : "a", change === "credentials" ? "second" : "first");
+    expect(view.latestReads[0].signal.aborted).toBe(true);
+    await view.resolveLatest(0, snapshot("a", "Old turn", ["stale"]));
+    expect(await send).toBe("cancelled");
+    expect(view.latestReads).toHaveLength(1);
   });
 
   test("a send started from a mount effect survives StrictMode dropping and re-adding the reader mid-read", async () => {

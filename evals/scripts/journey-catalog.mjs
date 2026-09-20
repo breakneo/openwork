@@ -12,6 +12,7 @@ import { readdir, readFile } from 'node:fs/promises';
 // journey-ci.test.mjs checks these against what each spec and world guards.
 const PACKAGED_BINARY = { env: ['OPENWORK_EVAL_ELECTRON_BINARY'] };
 const definitions = {
+  'gateway-usage-policy.e2e.test.ts': { name: 'Request and approve a Gateway usage extension', placement: 'local' },
   'composer-model-picker-no-subscribe-promo.e2e.test.ts': {
     cases: [{ id: 'MODEL-01', engines: ['v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v2' } }],
   },
@@ -51,7 +52,13 @@ const definitions = {
   // Drives the real error boundary and web error monitor in a standalone Chrome; needs no Den or Electron.
   'crash-recovery.e2e.test.ts': { name: 'Recover from a render crash without leaking secrets' },
   // Serves the model mock from the spec process's 127.0.0.1; only the local lane can reach it.
-  'v2-sessionless-first-send.e2e.test.ts': { name: 'Send the first prompt from the New task route', placement: 'local' },
+  'v2-sessionless-first-send.e2e.test.ts': {
+    name: 'Send the first prompt from the New task route', placement: 'local',
+    cases: [
+      { id: 'DEN-LOCAL-SEND', engines: ['v1'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v1' } },
+      { id: 'MOBILE-CHAT-01', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--daytona', engine: 'v1' } },
+    ],
+  },
   'streamed-markdown-answer.e2e.test.ts': {
     cases: [{ id: 'CONT-01', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v2' } }],
   },

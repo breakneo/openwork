@@ -555,7 +555,7 @@ function run(options) {
   else childEnv.OPENWORK_EVAL_VISION = "defer";
   const outputDir = join(evalsDir, "results/.testkit");
   mkdirSync(outputDir, { recursive: true });
-  const outputFile = join(outputDir, `cli-run-${Date.now()}.json`);
+  const outputFile = join(outputDir, `cli-run-${Date.now()}-${process.pid}.json`);
   const vitestArgs = [
     "exec", "vitest", "run",
     "--config", "vitest.config.ts",

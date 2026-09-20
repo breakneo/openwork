@@ -23,8 +23,6 @@ import {
   type RolloverReason,
 } from "./engine-pool.js";
 import { withEngineDirectoryFence } from "./engine-directory-fence.js";
-import { PromptAdmissionLedger, type PromptAdmissionScope } from "./prompt-admission.js";
-
 import {
   clearEngineInstanceReaperForConfig,
   EngineInstanceReaper,
@@ -175,15 +173,6 @@ let desktopCloudSyncQueue: Promise<void> = Promise.resolve();
 const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, number>>();
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
-const promptAdmissions = new WeakMap<ServerConfig, PromptAdmissionLedger>();
-function promptAdmissionLedger(config: ServerConfig) {
-  let ledger = promptAdmissions.get(config);
-  if (!ledger) {
-    ledger = new PromptAdmissionLedger();
-    promptAdmissions.set(config, ledger);
-  }
-  return ledger;
-}
 const AGENT_DIAGNOSTICS_RATE_LIMIT_CAPACITY = 1_000;
 const AGENT_DIAGNOSTICS_MAX_IN_FLIGHT_PER_SERVER = 16;
 const AGENT_DIAGNOSTICS_MAX_REQUEST_BYTES = 256 * 1024;
@@ -682,22 +671,17 @@ async function assertWorkspaceOwnsProxiedSessionRead(
  * upstream response is released only after the proof passes; a failed proof
  * rejects immediately and discards whatever the engine eventually returns.
  */
-export async function sendWithOwnershipProof(proof: Promise<void>, send: () => Promise<Response>): Promise<Response> {
-  type SendResult = { ok: true; response: Response } | { ok: false; error: unknown };
-  // Observe failures immediately, even while the ownership proof is pending.
-  const sending = send().then<SendResult, SendResult>(
-    (response) => ({ ok: true, response }),
-    (error: unknown) => ({ ok: false, error }),
-  );
+async function sendWithOwnershipProof(proof: Promise<void>, send: () => Promise<Response>): Promise<Response> {
+  const sending = send();
+  // Observe rejection while ownership is pending; return the original promise below.
+  void sending.catch(() => undefined);
   try {
     await proof;
   } catch (error) {
-    void sending.then((result) => result.ok ? result.response.body?.cancel().catch(() => undefined) : undefined);
+    void sending.then((response) => response.body?.cancel().catch(() => undefined), () => undefined);
     throw error;
   }
-  const result = await sending;
-  if (!result.ok) throw result.error;
-  return result.response;
+  return sending;
 }
 
 export function assertOpencodeProxyAllowed(actor: Actor, method: string, proxyPath: string) {
@@ -764,14 +748,14 @@ function admitSessionCommand(
   return "accepted";
 }
 
-function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
-  return method === "POST" && /^\/session\/[^/]+\/prompt_async$/.test(normalizeOpencodeProxyPath(proxyPath));
-}
-
-export async function startServer(config: ServerConfig): Promise<ServeResult> {
-  promptAdmissions.get(config)?.close();
-  const admissionLedger = new PromptAdmissionLedger();
-  promptAdmissions.set(config, admissionLedger);
+export async function startServer(
+  config: ServerConfig,
+  // Callers that spawn a managed engine after binding must complete startup
+  // once its primary is registered; ordinary attached servers stay ready.
+  options: { deferManagedEngineStartup?: boolean } = {},
+): Promise<ServeResult & { completeManagedEngineStartup: () => Promise<void> }> {
+  let managedEngineReady = options.deferManagedEngineStartup !== true;
+  let stopped = false;
   let taskRecovery: Awaited<ReturnType<typeof createTaskRecovery>> | undefined;
   const approvals = new ApprovalService(config.approval);
   const uiControl = new UiControlMailbox();
@@ -813,9 +797,6 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const cloudProviderSync = new CloudProviderSync({
     config,
     env,
-    onModelsRemoved: (impact) => {
-      reloadEvents.record(impact.workspaceId, "config", { type: "config", action: "removed", name: "models", modelRemoval: impact });
-    },
     reloadEngine: () => reloadOpencodeEngine(
       config,
       resolveEngineRuntimeWorkspace(config),
@@ -846,6 +827,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     logger,
     cloudProviderSync,
     engineV2Preview,
+    () => managedEngineReady,
   );
 
   const serverOptions: {
@@ -896,53 +878,34 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
         return wrapped;
       };
 
+      const finalizeProxyResponse = (response: Response) => {
+        // A read can be cancelled while asynchronous ownership checks finish.
+        // Do not rewrap its cancelled body in withCors, or turn it into a 500.
+        // Writes retain their existing admission/completion semantics.
+        if (request.method === "GET" || request.method === "HEAD") {
+          request.signal.throwIfAborted();
+        }
+        return finalize(response);
+      };
+
       const proxyWorkspaceOpencodeMount = async (mount: { workspaceId: string; restPath: string }) => {
         authMode = "client";
-        let admissionScope: PromptAdmissionScope | undefined;
         try {
           const actor = await requireClient(request, config, tokens);
-          // Never share a fallback credential namespace. requireClient supplies
-          // the verified bearer hash; a missing hash cannot authorize a ticket.
-          if (!actor.tokenHash) throw new ApiError(401, "unauthorized", "Invalid bearer token");
-          const admissionPath = normalizeOpencodeProxyPath(mount.restPath);
-          const requestedWorkspace = mount.workspaceId.trim();
-          const admissionWorkspace = config.workspaces.find((entry) => entry.id === requestedWorkspace)
-            ?? (requestedWorkspace.startsWith("rem_") ? config.workspaces.find((entry) => entry.id === requestedWorkspace.slice(4)) : undefined);
-          admissionScope = { credential: actor.tokenHash, workspace: admissionWorkspace?.id ?? requestedWorkspace,
-            session: decodeURIComponent(admissionPath.match(/^\/session\/([^/]+)/)?.[1] ?? "") };
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
+          await validateEngineRequestBody(request);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
-          const admissionRoute = admissionPath.match(/^\/session\/[^/]+\/prompt-admission(?:\/([^/]+))?$/);
-          if (admissionRoute) {
-            if (request.method !== "GET") ensureWritable(config);
-            const ledger = promptAdmissionLedger(config);
-            if (request.method === "POST" && !admissionRoute[1]) {
-              return finalize(ledger.prepare(admissionScope, await request.text()));
-            }
-            if ((request.method === "GET" || request.method === "DELETE") && admissionRoute[1]) {
-              return finalize(ledger.inspect(admissionScope, decodeURIComponent(admissionRoute[1]), request.method === "DELETE"));
-            }
-            return finalize(jsonResponse({ message: "Method not allowed" }, 405));
-          }
           const ownership = assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, mount.restPath, false,
             request.method === "GET" ? request.signal : undefined);
           proxyService = "opencode";
           proxyBaseUrl = workspace.baseUrl?.trim() || undefined;
           const send = () => proxyOpencodeRequest({ config, request, url, workspace, proxyPath: mount.restPath,
-            admissionScope,
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined });
           const response = await sendWithOwnershipProof(ownership,
             () => taskRecovery ? taskRecovery.forward(workspace, "v1", mount.restPath, request, send) : send());
-          return finalize(response);
+          return finalizeProxyResponse(response);
         } catch (error) {
-          const ticket = request.headers.get("x-openwork-prompt-ticket");
-          if (admissionScope && ticket && isPromptAsyncProxyRequest(request.method, mount.restPath)
-            && error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) {
-            try {
-              promptAdmissionLedger(config).rejectQueued(admissionScope, ticket, await request.clone().text());
-            } catch { /* A consumed body is already owned by native forwarding. */ }
-          }
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
             captureServerException(error, { method: request.method, route: "/workspace/:id/opencode/*", requestSignal: request.signal });
@@ -962,6 +925,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
         try {
           const actor = await requireClient(request, config, tokens);
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
+          await validateEngineRequestBody(request);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
           const connection = engineV2Preview.connection();
@@ -991,7 +955,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined,
           });
           const response = taskRecovery ? await taskRecovery.forward(workspace, "v2", mount.restPath, request, send) : await send();
-          return finalize(response);
+          return finalizeProxyResponse(response);
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
@@ -1049,6 +1013,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
         try {
           const actor = await requireClient(request, config, tokens);
           assertOpencodeProxyAllowed(actor, request.method, url.pathname);
+          await validateEngineRequestBody(request);
           await managedDesktopPolicy(config).assertRequest(request, url.pathname, true);
           proxyService = "opencode";
           const workspace = config.workspaces[0];
@@ -1059,7 +1024,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           const send = () => proxyOpencodeRequest({ config, request, url, workspace });
           const response = await sendWithOwnershipProof(ownership,
             () => taskRecovery && workspace ? taskRecovery.forward(workspace, "v1", url.pathname, request, send) : send());
-          return finalize(response);
+          return finalizeProxyResponse(response);
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
@@ -1152,7 +1117,6 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
   } catch (error) {
     await taskRecovery?.stop().catch(() => undefined);
-    admissionLedger.close();
     captureServerException(error, { method: "START", route: "startServer" });
     cloudProviderSync.stop();
     await engineV2Preview.stop().catch(() => undefined);
@@ -1185,20 +1149,41 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   // arrived; the sync coordinator lands that reload without interrupting a
   // live session.
   resetManagedProviderAuthCache();
-  void syncManagedProviderAuth({ config, env, logger: toManagedProviderAuthLogger(logger) })
-    .then((result) => {
-      if (result.delivered.length > 0 || result.removed.length > 0) {
-        cloudProviderSync.markReloadPending();
-      }
-    })
-    .catch(() => undefined);
+  if (!options.deferManagedEngineStartup) {
+    void syncManagedProviderAuth({ config, env, logger: toManagedProviderAuthLogger(logger) })
+      .then((result) => {
+        if (result.delivered.length > 0 || result.removed.length > 0) {
+          cloudProviderSync.markReloadPending();
+        }
+      })
+      .catch(() => undefined);
+  }
 
   engineInstanceReaper.start();
 
   return {
     ...server,
+    completeManagedEngineStartup: async () => {
+      if (managedEngineReady) return;
+      const pool = enginePoolForConfig(config);
+      const primary = pool?.connections().find((connection) => connection.role === "primary");
+      if (stopped || !pool || !primary || !pool.primaryProcess()?.isAlive()) {
+        throw new Error("Managed engine startup requires a live registered primary");
+      }
+      // Seed the fresh primary before readiness, so there are no serving SDK
+      // clients to invalidate and no startup-only rollover to schedule.
+      const result = await syncManagedProviderAuth({ config, env, logger: toManagedProviderAuthLogger(logger) });
+      if (result.failed.length > 0) {
+        throw new Error("Managed provider auth delivery failed during startup");
+      }
+      if (stopped || enginePoolForConfig(config) !== pool || !pool.primaryProcess()?.isAlive()
+        || pool.connections().find((connection) => connection.role === "primary")?.generationId !== primary.generationId) {
+        throw new Error("Managed engine primary changed during startup");
+      }
+      managedEngineReady = true;
+    },
     stop: async () => {
-      admissionLedger.close();
+      stopped = true;
       let recoveryError: unknown;
       try { await taskRecovery?.stop(); } catch (error) { recoveryError = error; }
       managedDesktopPolicy(config).onChange = undefined;
@@ -1616,6 +1601,14 @@ export function unwrapOpencodeResult<T, E>(result: OpencodeClientResult<T, E>, p
   });
 }
 
+async function validateEngineRequestBody(request: Request): Promise<void> {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method) || !request.body) return;
+  const text = await request.clone().text();
+  if (!text.trim()) return;
+  try { JSON.parse(text); }
+  catch { throw new ApiError(400, "invalid_request", "Expected a JSON request body."); }
+}
+
 export async function proxyOpencodeRequest(input: {
   config: ServerConfig;
   request: Request;
@@ -1623,7 +1616,6 @@ export async function proxyOpencodeRequest(input: {
   workspace?: WorkspaceInfo;
   proxyPath?: string;
   recoverySignal?: AbortSignal;
-  admissionScope?: PromptAdmissionScope;
 }) {
   const workspace = input.workspace;
   const proxyPath = input.proxyPath ?? input.url.pathname;
@@ -1650,7 +1642,6 @@ export async function proxyOpencodeRequest(input: {
   headers.delete("authorization");
   headers.delete("x-openwork-host-token");
   headers.delete("x-openwork-client-id");
-  headers.delete("x-openwork-prompt-ticket");
   headers.delete("host");
   headers.delete("origin");
 
@@ -1783,17 +1774,6 @@ export async function proxyOpencodeRequest(input: {
     return sanitizeProxyResponse(response);
   };
 
-  if (isPromptAsyncProxyRequest(method, proxyPath)) {
-    const schedule = (operation: () => Promise<Response>) => workspace && workspace.workspaceType !== "remote"
-      ? withEngineDirectoryFence(input.config, workspace, operation) : operation();
-    const ticket = input.request.headers.get("x-openwork-prompt-ticket");
-    if (ticket) {
-      if (!input.admissionScope) return jsonResponse({ protocol: "openwork-prompt-admission-v1", state: "unknown" }, 409);
-      return promptAdmissionLedger(input.config).dispatch(input.admissionScope, ticket,
-        body ? new TextDecoder().decode(body) : "", schedule, forward);
-    }
-    return schedule(forward);
-  }
   return forward();
 }
 
@@ -2122,7 +2102,7 @@ function withCors(response: Response, request: Request, config: ServerConfig) {
   headers.set("Access-Control-Allow-Origin", allowOrigin);
   headers.set(
     "Access-Control-Allow-Headers",
-    "Authorization, Content-Type, X-OpenWork-Host-Token, X-OpenWork-Client-Id, X-OpenWork-Prompt-Ticket, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
+    "Authorization, Content-Type, X-OpenWork-Host-Token, X-OpenWork-Client-Id, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
   );
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   const exposed = headers.get("Access-Control-Expose-Headers");
@@ -2440,6 +2420,7 @@ function createRoutes(
   logger: ServerLogger,
   cloudProviderSync: CloudProviderSync,
   engineV2Preview: EngineV2Preview,
+  isReady: () => boolean,
 ): Route[] {
   const routes: Route[] = [];
   // A rollover-capable pool can apply this immediately without disposing
@@ -2474,6 +2455,7 @@ function createRoutes(
     managedProviderAuthLogger: toManagedProviderAuthLogger(logger),
     serverVersion: SERVER_VERSION,
     opencodeVersion: OPENCODE_VERSION,
+    isReady,
     jsonResponse,
     readJsonBody,
     readOptionalJsonBody,
@@ -3440,7 +3422,9 @@ function createRoutes(
     requireClientScope,
     resolveWorkspace,
     reloadOpencodeEngine: async (routeConfig, workspace) => {
-      await reloadOpencodeEngine(routeConfig, workspace, engineMcpServerState, { reason: "operation_route" });
+      // Explicit reloads also follow provider credential writes, which are not
+      // part of the runtime-config fingerprint used by background syncs.
+      await reloadOpencodeEngine(routeConfig, workspace, engineMcpServerState, { reason: "operation_route", manual: true });
     },
   });
 
@@ -4754,10 +4738,11 @@ export async function describeRuntimeActivity(config: ServerConfig): Promise<{
 async function engineHasActiveSessions(config: ServerConfig, workspace: WorkspaceInfo): Promise<boolean> {
   try {
     const opencode = createWorkspaceOpencodeClient(config, workspace);
-    const statuses = unwrapOpencodeResult(await opencode.session.status(), "/session/status");
-    return Object.values(statuses).some((status) => status.type !== "idle");
+    const statuses: unknown = unwrapOpencodeResult(await opencode.session.status(), "/session/status");
+    if (!isRecord(statuses)) return true;
+    return Object.values(statuses).some((status) => !isRecord(status) || status.type !== "idle");
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -4849,7 +4834,7 @@ async function reloadOpencodeEngine(
   config: ServerConfig,
   workspace: WorkspaceInfo,
   serverState?: EngineMcpServerState,
-  options?: { awaitPostRefreshSync?: boolean; forceStandby?: boolean; reason?: RolloverReason },
+  options?: { awaitPostRefreshSync?: boolean; forceStandby?: boolean; reason?: RolloverReason; manual?: boolean },
 ): Promise<RolloverOutcome> {
   const pool = enginePoolForConfig(config);
   if (pool) {
@@ -4858,6 +4843,7 @@ async function reloadOpencodeEngine(
     return pool.requestRollover({
       reason: options?.reason ?? "engine_reload",
       workspace,
+      manual: options?.manual,
       awaitPostRefreshSync: options?.awaitPostRefreshSync,
       forceStandby: options?.forceStandby,
     });
@@ -5190,8 +5176,8 @@ async function withEngineMcpRegistrationLock<Result>(
   }
 }
 
-// Reuse verified clients and fence necessary replacements against local prompt
-// admission. A health observation alone is not proof of config delivery.
+// Reuse verified clients and defer replacements while tasks are observed busy.
+// A health observation alone is not proof of config delivery.
 async function registerRuntimeMcpEntry(
   config: ServerConfig,
   workspace: WorkspaceInfo,
@@ -5223,8 +5209,8 @@ async function registerRuntimeMcpEntry(
       const sessions: unknown = JSON.parse(await readBoundedEngineMcpRegistrationResponse(activity));
       if (!isRecord(sessions)) throw new Error("Invalid session activity response");
       if (Object.values(sessions).some((session) => !isRecord(session) || session.type !== "idle")) {
-        // The directory fence also covers prompt admission, so a task cannot
-        // start between this activity check and replacing its client's tools.
+        // Prompt admission does not take the maintenance fence: this activity
+        // check is not atomic with replacement, and a new task can start after it.
         return {
           name, status: "failed", source: "transport_failure", errorSummary: null,
           failure: { name, status: 503, deferredForActivity: true, message: "MCP replacement deferred until active tasks finish" },
