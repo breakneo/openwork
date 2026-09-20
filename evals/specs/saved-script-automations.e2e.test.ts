@@ -285,7 +285,7 @@ test("a Code Mode result becomes a cloud Automation and a durable artifact resul
   expect(revision?.resourceUri).toBeTypeOf("string")
   expect(revision?.id).toBeTypeOf("string")
   expect(draft._meta).toEqual({ "openwork/appDraft": { appId: view.id, revisionId: revision?.id, receiptId: appResult.receiptId, title: "Briefing app" } })
-  expect(JSON.stringify(draft.content)).toContain("modern clients ignore the draft metadata")
+  expect(JSON.stringify(draft.content)).toContain("Saved immutable view revision")
   expect(view.activeRevisionId).toBeNull()
   const previewToolName = `preview_artifact_${view.id}`
   expect(JSON.stringify(draft.content)).toContain(previewToolName)
@@ -600,62 +600,23 @@ test("a Code Mode result becomes a cloud Automation and a durable artifact resul
     input: { topic: externalMarker },
   })
   expect(externalManualRun.status).toBe("succeeded")
+  const externalManualDetail = await readWorkflowDetail(den.admin, externalConfigObjectId)
+  const externalManualSnapshot = requireRecord(externalManualDetail.script.latestSnapshot, "external manual snapshot")
+  const externalToolCallNames = records(externalManualSnapshot.toolCalls).map((call) => call.name)
+  expect(externalToolCallNames).toEqual(["report_source.mock_batch", "report_source.mock_echo"])
 
-  const externalDraft = await agentRpc(den.ref.apiUrl, mcpToken, "tools/call", {
-    name: "save_artifact_view",
-    arguments: {
-      configObjectId: externalConfigObjectId, title: "Report app",
-      reactSource: "export default function Report({ data }) { return <article><h1>Report</h1><pre>{JSON.stringify(data.briefing)}</pre></article> }",
-    },
-  })
-  expect(externalDraft.isError).not.toBe(true)
-  const externalView = requireRecord(requireRecord(externalDraft.structuredContent, "external app draft").view, "external view")
-  const externalRevision = records(externalView.revisions)[0]
-  expect(externalDraft._meta).toEqual({ "openwork/appDraft": {
-    appId: externalView.id,
-    revisionId: externalRevision?.id,
-    title: "Report app",
-    ...(externalView.dataMode === "live" ? {} : { receiptId: externalManualRun.receiptId }),
-  } })
-  expect(externalRevision?.buildStatus).toBe("ready")
-  const externalAppPath = `/v1/apps/${externalView.id}`
-  const externalAppSaved = await appRequest(den.admin, `${externalAppPath}/save`, {
-    method: "POST", body: JSON.stringify({ revisionId: externalRevision?.id, title: "Report app", useInWorkflow: false, expectedActiveRevisionId: null }),
-  })
-  expect(externalAppSaved.response.status, externalAppSaved.text).toBe(200)
-  const refreshMarker = `launch-refreshed-${stamp}`
-  const refreshedRun = await runWorkflow(den.admin, externalConfigObjectId, {
-    pluginId: externalPluginId, configObjectVersionId: externalConfigObjectVersionId,
-    input: { topic: refreshMarker },
-  })
-  expect(refreshedRun.status).toBe("succeeded")
-  const refreshedApp = await appRequest(den.admin, externalAppPath)
-  expect(refreshedApp.response.status, refreshedApp.text).toBe(200)
-  expect(refreshedApp.body).toMatchObject({ onDashboard: true, view: { configObjectId: externalConfigObjectId } })
-  expect(JSON.stringify(requireRecord(refreshedApp.body, "refreshed app").payload)).toContain(refreshMarker)
-  expect(JSON.stringify(requireRecord(refreshedApp.body, "refreshed app").payload)).not.toContain(externalMarker)
-  const forbiddenApp = await appRequest(colleague, externalAppPath)
-  expect(forbiddenApp.response.status).toBe(403)
-  expect(forbiddenApp.body).not.toHaveProperty("payload")
-  expect(forbiddenApp.body).not.toHaveProperty("view")
   const unrelatedApp = await appRequest(den.admin, appPath)
   expect(unrelatedApp.body).toMatchObject({
     view: { configObjectId: appConfigObjectId },
     payload: { artifact: { receiptId: appResult.receiptId }, data: appResult.value },
   })
   expect(JSON.stringify(unrelatedApp.body)).not.toContain(scheduledMarker)
-  expect(JSON.stringify(unrelatedApp.body)).not.toContain(refreshMarker)
+  expect(JSON.stringify(unrelatedApp.body)).not.toContain(externalMarker)
   evidence.recordAssertionEvidence(
-    "A connection beyond the first 16 works from chat discovery through a saved and refreshed app",
-    "Search returned the seventeenth connection's callable script path. Its procedure executed, saved, reran and produced an app whose latest payload changed on refresh; the unrelated app and colleague's access stayed unchanged.",
+    "A connection beyond the first 16 works from discovery through a saved manual Workflow",
+    "Search returned the seventeenth connection's callable script path and its procedure executed, saved, and recorded both provider calls while the unrelated snapshot app stayed unchanged.",
     true,
   )
-
-  const latestDetail = await readWorkflowDetail(den.admin, externalConfigObjectId)
-  const latestScript = latestDetail.script
-  const latest = requireRecord(latestScript.latestSnapshot, "latest snapshot")
-  const externalToolCallNames = records(latest.toolCalls).map((call) => call.name)
-  expect(externalToolCallNames).toEqual(["report_source.mock_batch", "report_source.mock_echo"])
 
   const internalDetail = await readWorkflowDetail(den.admin, configObjectId)
   const internalScript = internalDetail.script

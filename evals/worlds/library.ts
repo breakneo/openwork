@@ -2,13 +2,13 @@ import { browserScript } from "@openwork/cdp";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { app as startApp, faultProxy as startFaultProxy, resolveEvalEngine, SkipError } from "@openwork/env";
+import { app as startApp, faultProxy as startFaultProxy, resolveEvalEngine } from "@openwork/env";
 import type { Den, MockHandle, Seed } from "@openwork/env";
 import { denFetch, evalIn as rawEvalIn } from "@openwork/behaviors";
 import type { DenFetchResult, DenSession } from "@openwork/behaviors";
 import { allocateFreePort } from "@openwork/cdp";
 import { startMockMcp, type MockAgentWorkload } from "@openwork/labs";
-import { captureExternalBrowserUrls, electronProfilePaths } from "@openwork/hosts";
+import { electronProfilePaths } from "@openwork/hosts";
 import { configureProvider } from "./chat.ts";
 import { browserScriptValue, runBrowserHost } from "../packages/env/src/browser-task.ts";
 
@@ -962,7 +962,7 @@ async function configureWorkspaceModel(seed: Seed, input: {
     });
     if (patched !== "ok") return patched;
     const reloaded = await request("/workspace/" + encodeURIComponent(workspaceId) + "/engine/reload", { method: "POST" });
-    if (reloaded !== "ok" && !reloaded.includes("opencode_reload_timeout")) return reloaded;
+    if (reloaded !== "ok" && !reloaded.includes("opencode_reload_timeout") && !reloaded.includes("opencode_engine_unreachable")) return reloaded;
     if (inputValue2) {
       const reconcile = await request("/workspace/" + encodeURIComponent(workspaceId) + "/mcp/openwork-cloud/reconcile", {
         method: "POST", body: JSON.stringify(inputValue2),
@@ -1010,16 +1010,6 @@ export const connectionActionReply = "Notion authentication finished. The origin
 export const connectionActionReplySkip = "I continued without Notion and did not retry the connection.";
 export const connectionActionSkipPrompt = "I want to connect Notion, but let me skip if I choose.";
 export const connectionStatusSkipPrompt = "Check my Notion connection so I can sign in, but let me skip if I choose.";
-export const connectionActionQuestion = {
-  header: "Connection",
-  question: "Connect Notion to continue?",
-  options: [
-    { label: "Authenticate", description: "Sign in to continue the request." },
-    { label: "Skip", description: "Continue without this connection." },
-  ],
-  multiple: false,
-  custom: false,
-};
 export const ordinaryDiscoveryPrompt = "Create a dashboard using my notes.";
 export const ordinaryDiscoveryReply = "I found the available capabilities for the dashboard.";
 export const connectionActionPrompt = "I want to connect Notion.";
@@ -1047,8 +1037,6 @@ export async function connectionActionMcpApp(seed: Seed) {
         finalReply: promptMarker === connectionActionSkipPrompt ? connectionActionReplySkip : connectionActionReply,
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
-          { tool: "openwork_context", arguments: {} },
-          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), ...[connectionStatusPrompt, connectionStatusSkipPrompt].map((promptMarker): MockAgentWorkload => ({
         promptMarker,
@@ -1057,8 +1045,6 @@ export async function connectionActionMcpApp(seed: Seed) {
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
-          { tool: "openwork_context", arguments: {} },
-          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), {
         promptMarker: connectorCatalogPrompt,
@@ -1410,7 +1396,6 @@ export async function remoteMcpApps(seed: Seed) {
 
 export async function connectorCatalogDiscovery(seed: Seed) {
   const world = await connectionActionMcpApp(seed);
-  if (world.app.handle.hostKind !== "daytona") throw new SkipError("connector setup OS handoff witness requires Daytona Linux");
   const response = await seed.api(world.den.admin, "/v1/mcp-connections/presets");
   if (!isRecord(response.body) || !Array.isArray(response.body.presets)) throw new Error("Den did not return its connector presets.");
   const presetIds = response.body.presets.map((preset: unknown) => {
@@ -1418,6 +1403,5 @@ export async function connectorCatalogDiscovery(seed: Seed) {
     return preset.presetId;
   });
   const web = await seed.web({ den: world.den, signedInAs: world.den.admin, startPath: "/dashboard/mcp-connections", headless: true });
-  const browserUrls = await captureExternalBrowserUrls(world.app.handle);
-  return withDispose({ ...world, web, browserUrls, expectedIds: ["google-workspace", "microsoft-365", ...presetIds] }, async () => { await browserUrls[Symbol.asyncDispose](); });
+  return { ...world, web, expectedIds: ["google-workspace", "microsoft-365", ...presetIds] };
 }

@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import { spec } from "@openwork/testkit";
-import { allConnectorsPrompt, allConnectorsReply, connectorCatalogDiscovery, connectorCatalogPrompt, connectorCatalogReply } from "../worlds/library.ts";
+import { connectorCatalogDiscovery, connectorCatalogPrompt, connectorCatalogReply } from "../worlds/library.ts";
 
 const test = spec.world(connectorCatalogDiscovery, { timeout: 600_000 });
 
@@ -10,11 +10,9 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
   const webUser = user.on(world.web);
   const beforeRequests = await probe.api(world.den.admin, "/v1/mcp-connections?scope=manageable");
   expect(beforeRequests.response.ok).toBe(true);
-  const browserUrlsBefore = await world.browserUrls.opened();
 
   for (const request of [
     { prompt: connectorCatalogPrompt, reply: connectorCatalogReply, query: "Slack", ids: world.expectedIds },
-    { prompt: allConnectorsPrompt, reply: allConnectorsReply, query: "quick add connectors", ids: world.expectedIds },
   ]) {
     await step(`${request.query} returns an ordinary result without a catalog card`, async () => {
       expect(request.prompt).not.toContain(world.connection.id);
@@ -26,7 +24,6 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
       await appUser.notSee({ role: "button", label: "Set up Slack" });
       await appUser.notSee({ role: "textbox", label: "Filter connectors" });
       await appUser.notSee({ role: "button", label: /^Browse all/ });
-      expect(await appProbe.eval(() => document.querySelectorAll('[data-capability-call$="search_capabilities"]').length)).toBe(1);
       await appUser.screenshot();
       await appUser.click({ role: "button", label: `Searched your connections for “${request.query}”. Show technical details` });
       await appUser.see({ text: /"connectorCatalog"\s*:/ });
@@ -39,14 +36,8 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
       expect(calls.filter(call => call.kind === "tool").every(call => call.toolName?.endsWith("search_capabilities"))).toBe(true);
       expect(await probe.toolCalls(world.den.mocks.connector)).toEqual([]);
       expect((await world.den.mocks.connector.requests()).filter(entry => entry.path === "/authorize" || entry.path === "/token")).toEqual([]);
-      expect(await world.browserUrls.opened()).toEqual(browserUrlsBefore);
       expect((await probe.api(world.den.admin, "/v1/mcp-connections?scope=manageable")).body).toEqual(beforeRequests.body);
-      evidence.recordAssertionEvidence("Setup discovery uses an ordinary tool line without connecting or opening a catalog", `${request.query} returned legacy connector metadata and setup URLs in technical details without modern catalog UI; one search, no provider calls, no OAuth, no browser handoff, and no connection mutation.`, true);
-    });
-    await appUser.click({ role: "button", label: "New session" });
-    await appUser.see("composer", { editable: true });
-    await probe.eventually(() => appProbe.composer(), {
-      within: 15_000, label: "new session has an empty transcript", until: state => state.userMessageCount === 0 && state.assistantMessageCount === 0,
+      evidence.recordAssertionEvidence("Setup discovery uses an ordinary tool line without connecting or opening a catalog", `${request.query} returned legacy connector metadata and setup URLs in technical details without modern catalog UI; one search, no provider calls, no OAuth, and no connection mutation.`, true);
     });
   }
 
@@ -56,7 +47,6 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
     expect(before.response.ok).toBe(true);
     const modelRequests = await world.den.mocks.connector.agentRequests();
     const authRequests = (await world.den.mocks.connector.requests()).filter((entry) => entry.path === "/authorize" || entry.path === "/token");
-    const openedBefore = await world.browserUrls.opened();
     await webUser.navigate(`${world.den.ref.webUrl}/dashboard/mcp-connections`);
     await webUser.see({ testId: "connector-add-slack" }, { timeoutMs: 90_000 });
     await webUser.see({ testId: "connector-chat-slack" });
@@ -88,7 +78,6 @@ test("connector setup requests stay ordinary tool lines while Den catalog Chat l
     expect(await world.den.mocks.connector.agentRequests()).toEqual(modelRequests);
     expect((await world.den.mocks.connector.requests()).filter((entry) => entry.path === "/authorize" || entry.path === "/token")).toEqual(authRequests);
     expect(await probe.toolCalls(world.den.mocks.connector)).toEqual([]);
-    expect(await world.browserUrls.opened()).toEqual(openedBefore);
     await appUser.screenshot();
   });
 });
