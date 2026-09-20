@@ -87,15 +87,54 @@ the comment's identity. Include all claimed runs in that selection.
 publication remains available when the review app is not configured.
 Visual judging is explicit: `pnpm --dir evals evidence:judge -- --test-run <run>`.
 
-For automatic publication, configure repository variable `OPENWORK_REVIEW_URL`
-and secret `OPENWORK_REVIEW_BLOB_TOKEN`. The separate **Evidence review** workflow
-consumes existing uploaded artifacts after checks finish. It runs trusted
-default-branch code, ignores stale runs, and only publishes when GitHub supplies
-an associated PR and matching source commit. It never runs downloaded code.
-An existing review of that commit takes precedence, preserving the author's
-selected evidence. Explicit publication can update that selection.
-**Do not require Evidence review in branch protection.** Failures remain visible
-in its optional workflow; existing test checks retain their verdicts.
+## PR change proofs
+
+A non-exempt PR must add at least one new runnable
+`evals/specs/**/*.e2e.test.ts`. Modified, renamed, deleted, or pre-existing specs
+do not satisfy the contract. The narrow existing docs-only and generated model
+snapshot lanes are exempt and keep their own required validation.
+
+`Build and core checks / proof-contract` validates the live changed-file list and
+each new spec's Git blob. Empty, malformed, skip-only, and todo-only files fail.
+Its result feeds the existing `openwork-tests-required` aggregate. This is the
+blocking **proof supplied** contract; it does not claim the change is correct.
+
+The separate non-required **PR change proof** workflow runs only the newly added
+specs against the exact PR head. Each spec gets its own bounded local job and
+artifact. Failed, skipped, unsupported, setup-failed, and cancelled proofs remain
+honest non-passing executions; they do not fall back to packaged smoke or another
+regression. Native/platform requirements not available in this first local lane
+will therefore remain visible rather than being substituted.
+
+The credentialed **Evidence review** workflow runs trusted default-branch code.
+It re-reads the current PR file list, derives the same new-spec selection, and
+accepts exactly one artifact per selected spec and run attempt. Every test record
+must name that spec and the current PR SHA. Downloaded PR artifacts are data and
+are never imported or executed. Unrelated smoke, an unexpected proof artifact,
+stale evidence, and missing/duplicate records are refused.
+
+Candidate publisher and review-app checks live in the PR-only
+`Evidence review candidate checks` workflow. It has no publishing secret or
+write permission, avoiding a workflow that combines manual privileged dispatch
+with PR-head execution.
+
+For automatic publication, keep repository variable `OPENWORK_REVIEW_URL`, secret
+`OPENWORK_REVIEW_BLOB_TOKEN`, and the existing Vercel Preview/private Blob
+configuration. No new environment variable is required. Do not require Evidence
+review or PR change proof in branch protection; only the proof-supplied contract
+is part of the existing required aggregate. Human approval remains in GitHub.
+
+To replay publication without rerunning a proof (default branch only):
+
+```sh
+gh workflow run evidence-review.yml --ref dev -f run_id=<pr-change-proof-run-id>
+```
+
+The publish job summary says **published**, **skipped**, **unavailable**, or
+**failed**. Only **published** confirms delivery. A compact sticky PR comment
+links to the private report; no raw trace or public screenshots are used as a
+fallback. Signed-in project members should verify the report commit and sources.
+Anonymous report, JSON, and image requests must redirect to Vercel Authentication.
 
 ## Contract
 
