@@ -5,6 +5,7 @@ import { buildOpenWorkV2Instructions } from "../opencode-v2-instructions.js";
 import { OpenWorkCapabilitiesKnowledge } from "./openwork-capabilities-knowledge.js";
 import { OpenWorkExtensionsPreview } from "./openwork-extensions-preview.js";
 import {
+  OPENWORK_CLOUD_CONNECTION_INSTRUCTION,
   OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION,
   OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION,
   OPENWORK_GOOGLE_CONNECTION_INSTRUCTION,

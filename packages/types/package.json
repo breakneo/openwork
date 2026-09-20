@@ -58,11 +58,6 @@
       "browser": "./src/connection-action-app.ts",
       "default": "./dist/connection-action-app.js"
     },
-    "./plugin-flow-app": {
-      "types": "./src/plugin-flow-app.ts",
-      "development": "./src/plugin-flow-app.ts",
-      "default": "./src/plugin-flow-app.ts"
-    },
     "./den/desktop-app-restrictions": {
       "types": "./src/den/desktop-app-restrictions.ts",
       "development": "./src/den/desktop-app-restrictions.ts",

@@ -515,11 +515,12 @@ test("structured search output remains compatible with marketplace match kinds a
   expect(result.success).toBe(true)
 })
 
-test("agent steering separates legacy compatibility from modern presentation and plain sharing results", () => {
+test("agent steering describes skill and sharing results as plain text without confirmation Apps", () => {
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("explicitly call the standard preview tool")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("original skill-created MCP App binding")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("Modern OpenWork clients ignore that metadata and do not auto-open")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("legacy plugin-flow confirmation metadata for released clients")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("return the ordinary operation response; report the verified outcome in text")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("confirmation card")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("skill-created MCP App")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("No new setup card is introduced")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("chooses Save")
   for (const capability of [BUILTIN_CREATE_SKILL_CAPABILITY, BUILTIN_SHARE_PLUGIN_CAPABILITY, BUILTIN_ADD_TO_MARKETPLACE_CAPABILITY, BUILTIN_ADD_USER_TO_MARKETPLACE_CAPABILITY]) {

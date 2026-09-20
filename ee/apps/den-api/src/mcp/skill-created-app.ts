@@ -1,16 +1,11 @@
 import type { CallToolResult, McpServer } from "@modelcontextprotocol/server"
-import { legacyConfirmationAppHtml } from "@openwork/mcp-apps/legacy-confirmation"
 import {
   skillCreatedPayloadSchema,
   type SkillCreatedPayload,
 } from "@openwork/types/skill-created-app"
 import { z } from "zod"
-import { RESOURCE_MIME_TYPE, registerAppResource, registerAppTool } from "./mcp-app-v2.js"
 
 export { skillCreatedPayloadSchema } from "@openwork/types/skill-created-app"
-
-export const SKILL_CREATED_APP_RESOURCE_URI = "ui://openwork/skill-created/v1/view.html"
-export const SKILL_CREATED_APP_HTML = legacyConfirmationAppHtml
 
 export const CREATE_SKILL_TOOL_NAME = "create_skill"
 export const UPDATE_SKILL_TOOL_NAME = "update_skill"
@@ -47,22 +42,12 @@ function skillSavedToolResult(result: CreateSkillResult): CallToolResult {
   }
 }
 
-export function registerAgentSkillCreatedResource(server: McpServer) {
-  const meta = { ui: { csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, prefersBorder: true } }
-  registerAppResource(server, "OpenWork Skill Created", SKILL_CREATED_APP_RESOURCE_URI, {
-    description: "Read-only legacy skill creation and update result renderer.",
-    _meta: meta,
-  }, async () => ({ contents: [{ uri: SKILL_CREATED_APP_RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: SKILL_CREATED_APP_HTML, _meta: meta }] }))
-}
-
 export function registerAgentSkillTools(input: {
   server: McpServer
   create: (request: { pluginName: string; skillMarkdown: string }) => Promise<CreateSkillResult>
   update?: (request: { skillId: string; skillMarkdown: string; reason?: string }) => Promise<CreateSkillResult>
 }) {
-  registerAgentSkillCreatedResource(input.server)
-  registerAppTool(
-    input.server,
+  input.server.registerTool(
     CREATE_SKILL_TOOL_NAME,
     {
       title: "Create skill",
@@ -83,14 +68,12 @@ export function registerAgentSkillTools(input: {
         skillMarkdown: z.string().trim().min(1).max(1_048_576).describe("Complete SKILL.md source, including frontmatter and instructions."),
       }),
       outputSchema: skillCreatedPayloadSchema,
-      _meta: { ui: { resourceUri: SKILL_CREATED_APP_RESOURCE_URI, visibility: ["model", "app"] } },
     },
     async ({ pluginName, skillMarkdown }) => skillSavedToolResult(await input.create({ pluginName, skillMarkdown })),
   )
   if (!input.update) return
   const update = input.update
-  registerAppTool(
-    input.server,
+  input.server.registerTool(
     UPDATE_SKILL_TOOL_NAME,
     {
       title: "Update skill",
@@ -111,7 +94,6 @@ export function registerAgentSkillTools(input: {
         reason: z.string().trim().min(1).max(255).optional().describe("Optional short reason recorded on the new version."),
       }),
       outputSchema: skillCreatedPayloadSchema,
-      _meta: { ui: { resourceUri: SKILL_CREATED_APP_RESOURCE_URI, visibility: ["model", "app"] } },
     },
     async ({ skillId, skillMarkdown, reason }) => skillSavedToolResult(await update({ skillId, skillMarkdown, reason })),
   )

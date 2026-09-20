@@ -22,4 +22,3 @@ button:disabled { opacity: 0.5; cursor: default; }
 button:focus-visible { outline: 2px solid var(--color-ring-primary, Highlight); outline-offset: 2px; }
 .status { margin-top: 8px; color: var(--app-muted); }
 .placeholder { min-height: 40px; background: var(--color-background-secondary, ButtonFace); border-radius: var(--app-radius); }
-.confirmation { white-space: pre-wrap; }

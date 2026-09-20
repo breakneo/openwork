@@ -3,50 +3,39 @@ import assert from "node:assert/strict"
 import { renderToStaticMarkup } from "react-dom/server"
 import { App } from "@modelcontextprotocol/ext-apps"
 import { ConnectionView, connectionResultSchema, requestConnectionAction } from "../src/connection-view"
-import { LegacyConfirmationView, legacyConfirmationSchema } from "../src/legacy-confirmation-view"
 import { callTool, openLink, parseToolResult, toolResultHandlers } from "../src/shared/result"
 
-const skill = {
-  schemaVersion: "1", name: "Fixture", pluginId: "plg_fixture", skillId: "cob_fixture",
-  description: "<img src=x onerror=alert(1)>", libraryUrl: null,
-}
-const sharing = {
-  schemaVersion: "1", mode: "plugin_access_granted", pluginId: "plg_fixture", marketplaceId: null,
-  recipient: { kind: "member", id: "om_fixture", role: "viewer" },
-}
 const connection = {
   schemaVersion: "1", connectionId: "emc_fixture", connectionName: "Fixture", state: "needs_connection",
   actor: "member", message: "Sign in to use this connection.",
   action: { type: "connect", label: "Connect Fixture", surface: "openwork_your_connections", url: "https://example.com/connections/emc_fixture" },
 }
+const hostContext = { experimental: { "openwork/connection-actions": true } }
 
-test("shared result handlers render validated legacy payloads and clear errors and cancellation", () => {
+test("shared result handlers render validated payloads, escape untrusted text, and clear errors and cancellation", () => {
+  const app = new App({ name: "test", version: "1" }, {}, { autoResize: false })
   let rendered = ""
-  const handlers = toolResultHandlers(legacyConfirmationSchema,
-    payload => { rendered = renderToStaticMarkup(<LegacyConfirmationView payload={payload} />) },
+  const handlers = toolResultHandlers(connectionResultSchema,
+    payload => { rendered = renderToStaticMarkup(<ConnectionView payload={payload} app={app} hostContext={hostContext} />) },
     message => { rendered = message },
   )
-  handlers.ontoolresult({ structuredContent: skill })
-  assert.match(rendered, /Skill created: Fixture/)
+  handlers.ontoolresult({ structuredContent: connection })
+  assert.match(rendered, /Connect Fixture for account access/)
+  handlers.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ ...connection, connectionName: "<img src=x onerror=alert(1)>" }) }] })
   assert.match(rendered, /&lt;img/)
   assert.doesNotMatch(rendered, /<img/)
-  handlers.ontoolresult({ content: [{ type: "text", text: JSON.stringify({ ...skill, mode: "updated" }) }] })
-  assert.match(rendered, /Skill updated: Fixture/)
-  handlers.ontoolresult({ structuredContent: sharing })
-  assert.match(rendered, /Plugin access granted/)
-  assert.match(rendered, /om_fixture/)
-  for (const invalid of [{ ...skill, schemaVersion: "2" }, { ...skill, name: "" }, { ...skill, libraryUrl: "invalid" }, { ...sharing, recipient: {} }]) {
+  for (const invalid of [{ ...connection, schemaVersion: "2" }, { ...connection, connectionName: "" }, { ...connection, action: {} }]) {
     handlers.ontoolresult({ structuredContent: invalid })
     assert.match(rendered, /No valid result/)
-    assert.doesNotMatch(rendered, /Fixture|granted/)
+    assert.doesNotMatch(rendered, /Fixture/)
   }
-  handlers.ontoolresult({ isError: true, structuredContent: skill })
+  handlers.ontoolresult({ isError: true, structuredContent: { ...connection, state: "connected", action: null } })
   assert.match(rendered, /tool failed/)
-  handlers.ontoolresult({ structuredContent: sharing })
+  handlers.ontoolresult({ structuredContent: connection })
   handlers.ontoolcancelled()
   assert.equal(rendered, "Cancelled")
-  handlers.ontoolresult({ structuredContent: skill })
-  assert.match(rendered, /Skill created: Fixture/)
+  handlers.ontoolresult({ structuredContent: connection })
+  assert.match(rendered, /Connect Fixture for account access/)
 })
 
 test("initial search wrapper and valid error remediation render through the same parser", () => {

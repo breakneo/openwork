@@ -1,12 +1,8 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client"
 import { McpServer } from "@modelcontextprotocol/server"
 import { expect, test } from "bun:test"
-import { legacyConfirmationAppHtml } from "@openwork/mcp-apps/legacy-confirmation"
-import { registerAgentPluginFlowResource, PLUGIN_FLOW_APP_RESOURCE_URI } from "../src/mcp/plugin-flow-app.js"
 import {
   CREATE_SKILL_TOOL_NAME,
-  SKILL_CREATED_APP_RESOURCE_URI,
-  SKILL_CREATED_APP_HTML,
   registerAgentSkillTools,
   skillCreatedPayloadSchema,
   UPDATE_SKILL_TOOL_NAME,
@@ -48,7 +44,6 @@ async function withClient<T>(
   )
   registerAgentSkillTools({ server, create, update })
   registerAgentWorkflowArtifactResource(server)
-  registerAgentPluginFlowResource(server)
   const client = new Client(
     { name: "skill-created-host-test", version: "1.0.0" },
     {
@@ -72,25 +67,25 @@ async function withClient<T>(
   }
 }
 
-test("lists only existing skill CRUD tools with legacy bindings and exact historical resources", async () => {
+test("lists only the skill CRUD tools as plain tools without a confirmation App", async () => {
   await withClient(async (client) => {
     const tools = await client.listTools()
     expect(tools.tools.map(tool => tool.name).sort()).toEqual([CREATE_SKILL_TOOL_NAME, UPDATE_SKILL_TOOL_NAME])
     for (const tool of tools.tools) {
-      expect(tool._meta).toEqual({ ui: { resourceUri: SKILL_CREATED_APP_RESOURCE_URI, visibility: ["model", "app"] }, "ui/resourceUri": SKILL_CREATED_APP_RESOURCE_URI })
+      expect(tool._meta).toBeUndefined()
       expect(tool.outputSchema).toBeDefined()
-      expect(tool.annotations?.readOnlyHint).toBe(false)
+      expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false })
     }
     const resources = await client.listResources()
-    expect(resources.resources.map(resource => resource.uri)).toEqual([SKILL_CREATED_APP_RESOURCE_URI, WORKFLOW_ARTIFACT_APP_RESOURCE_URI, PLUGIN_FLOW_APP_RESOURCE_URI])
+    expect(resources.resources.map(resource => resource.uri)).toEqual([WORKFLOW_ARTIFACT_APP_RESOURCE_URI])
     const workflow = await client.readResource({ uri: WORKFLOW_ARTIFACT_APP_RESOURCE_URI })
     expect(workflow.contents[0]).toMatchObject({ mimeType: "text/html;profile=mcp-app", text: WORKFLOW_ARTIFACT_APP_HTML })
-    expect((await client.readResource({ uri: SKILL_CREATED_APP_RESOURCE_URI })).contents[0]).toMatchObject({ uri: SKILL_CREATED_APP_RESOURCE_URI, mimeType: "text/html;profile=mcp-app", text: SKILL_CREATED_APP_HTML, _meta: { ui: { csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] } } } })
-    expect((await client.readResource({ uri: PLUGIN_FLOW_APP_RESOURCE_URI })).contents[0]).toMatchObject({ uri: PLUGIN_FLOW_APP_RESOURCE_URI, mimeType: "text/html;profile=mcp-app" })
+    await expect(client.readResource({ uri: "ui://openwork/skill-created/v1/view.html" })).rejects.toThrow()
+    await expect(client.readResource({ uri: "ui://openwork/plugin-flow/v1/view.html" })).rejects.toThrow()
   })
 })
 
-test("create_skill preserves structured content, text, and released-client metadata", async () => {
+test("create_skill returns structured content, text, and skill identifiers", async () => {
   const requests: Array<{ pluginName: string; skillMarkdown: string }> = []
   await withClient(async (client) => {
     const result = await client.callTool({
@@ -109,23 +104,12 @@ test("create_skill preserves structured content, text, and released-client metad
     expect(fallback).toContain("Skill ID: configObject_tomatoes")
     expect(fallback).not.toContain("🍅")
     expect(result._meta).toEqual({ schemaVersion: "1", pluginId: payload.pluginId, skillId: payload.skillId })
-    expect((await client.readResource({ uri: SKILL_CREATED_APP_RESOURCE_URI })).contents[0]).toMatchObject({ text: SKILL_CREATED_APP_HTML })
   }, async (request): Promise<CreateSkillResult> => {
     requests.push(request)
     return { ok: true, payload }
   })
   expect(requests).toHaveLength(1)
   expect(requests[0]?.pluginName).toBe("Beautiful Tomatoes")
-})
-
-test("update_skill preserves write annotations and the original resource binding", async () => {
-  await withClient(async (client) => {
-    const tools = await client.listTools()
-    const tool = tools.tools.find((candidate) => candidate.name === UPDATE_SKILL_TOOL_NAME)
-    expect(tool).toBeDefined()
-    expect(tool?._meta).toEqual({ ui: { resourceUri: SKILL_CREATED_APP_RESOURCE_URI, visibility: ["model", "app"] }, "ui/resourceUri": SKILL_CREATED_APP_RESOURCE_URI })
-    expect(tool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false })
-  })
 })
 
 test("update_skill returns updated-mode structured content and text fallback", async () => {
@@ -142,7 +126,6 @@ test("update_skill returns updated-mode structured content and text fallback", a
     expect(result.isError).not.toBe(true)
     expect(skillCreatedPayloadSchema.parse(result.structuredContent)).toEqual(updatedPayload)
     expect(result._meta).toEqual({ schemaVersion: "1", pluginId: payload.pluginId, skillId: payload.skillId })
-    expect((await client.readResource({ uri: SKILL_CREATED_APP_RESOURCE_URI })).contents[0]).toMatchObject({ text: SKILL_CREATED_APP_HTML })
     const first = result.content[0]
     const fallback = first?.type === "text" ? first.text : ""
     expect(fallback).toContain("# Skill updated: beautiful-tomatoes")
@@ -153,15 +136,6 @@ test("update_skill returns updated-mode structured content and text fallback", a
   })
   expect(requests).toHaveLength(1)
   expect(requests[0]?.reason).toBe("Add cherry tomatoes")
-})
-
-test("historical skill and sharing resources use the same compiled renderer", async () => {
-  await withClient(async client => {
-    for (const uri of [SKILL_CREATED_APP_RESOURCE_URI, PLUGIN_FLOW_APP_RESOURCE_URI]) {
-      const resource = await client.readResource({ uri })
-      expect(resource.contents[0]).toMatchObject({ uri, mimeType: "text/html;profile=mcp-app", text: legacyConfirmationAppHtml })
-    }
-  })
 })
 
 test("keeps creation failures useful to clients without MCP Apps", async () => {

@@ -7,13 +7,11 @@
     "./connection-action": {
       "types": "./dist/connection-action.d.ts",
       "default": "./dist/connection-action.js"
-    },
-    "./legacy-confirmation": {
-      "types": "./dist/legacy-confirmation.d.ts",
-      "default": "./dist/legacy-confirmation.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "node scripts/build-apps.mjs",
     "typecheck": "tsc --noEmit"

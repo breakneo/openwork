@@ -133,7 +133,6 @@ import {
   getComposerRevertMessageId,
   getComposerSessionDraftScope,
   persistableComposerDraftText,
-  revokeUnownedAttachmentPreviews,
   snapshotComposerSessionState,
   type ComposerSessionState,
   useComposerStateStore,
@@ -919,6 +918,19 @@ function RevertedMessagesBanner(props: { hiddenCount: number; restoring: boolean
 function revokeAttachmentPreview(attachment: { previewUrl?: string | undefined }) {
   if (!attachment.previewUrl) return;
   URL.revokeObjectURL(attachment.previewUrl);
+}
+
+function revokeUnownedAttachmentPreviews(attachments: ComposerAttachment[]) {
+  const state = useComposerStateStore.getState();
+  const retained = [
+    ...Object.values(state.sessions),
+    ...Object.values(state.failedDrafts).flat(),
+    ...Object.values(state.queuedDrafts).flat().map((item) => item.draft),
+    ...Object.values(state.pendingMessages).flat().map((item) => item.draft),
+  ].flatMap((item) => item.attachments);
+  for (const attachment of attachments) {
+    if (!retained.some((item) => item.previewUrl === attachment.previewUrl)) revokeAttachmentPreview(attachment);
+  }
 }
 
 function draftWithEditedText(draft: ComposerDraft, text: string): ComposerDraft {
@@ -2364,12 +2376,12 @@ export function SessionSurface(props: SessionSurfaceProps) {
       if (result.outcome === "blocked" || result.outcome === "cancelled" || result.outcome === "unknown") {
         return;
       }
-      revokeUnownedAttachmentPreviews(target.attachments);
+      target.attachments.forEach(revokeAttachmentPreview);
     } catch {
       // sendDraft owns the error and halts admission. Keep the row for an
       // explicit retry without touching any newer composer input.
     } finally {
-      if (getQueuedSendGeneration(props.sessionId) !== generation) revokeUnownedAttachmentPreviews(target.attachments);
+      if (getQueuedSendGeneration(props.sessionId) !== generation) target.attachments.forEach(revokeAttachmentPreview);
     }
   }, [
     archived,
@@ -2432,10 +2444,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
     try {
       const admission = await readPromptAdmission(opencodeClient, props.sessionId, phase.messageID);
       if (admission === "accepted") {
-        const accepted = getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId)
-          .find((item) => item.id === phase.itemId);
+        getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId)
+          .find((item) => item.id === phase.itemId)?.draft.attachments.forEach(revokeAttachmentPreview);
         useComposerStateStore.getState().removeQueuedDraft(props.sessionId, phase.itemId);
-        if (accepted) revokeUnownedAttachmentPreviews(accepted.draft.attachments);
         dispatchQueuedDrain(props.sessionId, {
           type: "admission_observed", itemId: phase.itemId, messageID: phase.messageID, at: Date.now(),
         });
@@ -2569,18 +2580,18 @@ export function SessionSurface(props: SessionSurfaceProps) {
       try {
         const result = await sendDraft(nextDraft, nextItem.id, undefined, { consumeQueuedItem: true });
         if (getQueuedSendGeneration(props.sessionId) !== generation) {
-          revokeUnownedAttachmentPreviews(nextDraft.attachments);
+          nextDraft.attachments.forEach(revokeAttachmentPreview);
           return;
         }
         if (result.outcome === "blocked") {
           cloudQueueBlockedRef.current = true;
         } else if (result.outcome !== "cancelled" && result.outcome !== "unknown") {
-          revokeUnownedAttachmentPreviews(nextDraft.attachments);
+          nextDraft.attachments.forEach(revokeAttachmentPreview);
         }
       } catch {
         // sendDraft halts admission; the unaccepted row remains recoverable.
       } finally {
-        if (getQueuedSendGeneration(props.sessionId) !== generation) revokeUnownedAttachmentPreviews(nextDraft.attachments);
+        if (getQueuedSendGeneration(props.sessionId) !== generation) nextDraft.attachments.forEach(revokeAttachmentPreview);
         drainingQueueRef.current = false;
       }
     })();
