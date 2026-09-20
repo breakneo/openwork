@@ -15,6 +15,7 @@ import { createClientV2, isOpencodeV2BaseUrl, v2PromptText } from "@/app/lib/ope
 import * as opencodeSessionNative from "@/app/lib/opencode-session-native";
 import type { NativeSessionSnapshotTarget } from "@/app/lib/opencode-session-native";
 import { isDesktopRuntime } from "@/app/lib/runtime-env";
+import { cn } from "@/lib/utils";
 import { setThemeMode } from "@/app/theme";
 import { t } from "@/i18n";
 import type { ComposerSettingsSection } from "@/react-app/domains/settings/library";
@@ -2193,6 +2194,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const sourceAttachments = submittedComposer?.attachments ?? attachments;
     const text = originalDraft.trim();
     if (!text && sourceAttachments.length === 0) return;
+    const focusedComposer = document.activeElement;
     const savedComposer = snapshotComposerSessionState(submittedComposer ?? {
       draft: originalDraft, attachments: sourceAttachments, mentions, pasteParts, revertMessageId: null,
     });
@@ -2261,6 +2263,14 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (sentAttachments.length) setAttachmentsUploading(true);
     try {
       const result = await sendDraft(nextDraft, nextDraft.messageId, markPrepared);
+      if ((result.outcome === "sent" || result.outcome === "accepted")
+        && !isDesktopRuntime() && window.matchMedia("(max-width: 1023px)").matches
+        && focusedComposer instanceof HTMLElement
+        && focusedComposer.isContentEditable
+        && composerShellRef.current?.contains(focusedComposer)
+        && document.activeElement === focusedComposer) {
+        focusedComposer.blur();
+      }
       if (result.outcome === "blocked" || result.outcome === "cancelled") {
         restore();
         return;
@@ -3307,7 +3317,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
             sessionScroll.markScrollGesture(event.currentTarget);
           }}
           onScroll={sessionScroll.handleScroll}
-          className="absolute inset-0 overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y px-3 pb-4 pt-4 sm:px-5"
+          className={cn("absolute inset-0 overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y px-3 pb-4 pt-4 sm:px-5",
+            !isDesktopRuntime() && "max-lg:[mask-image:linear-gradient(to_bottom,transparent,black_1rem)]")}
         >
           {/* Chat column: tighter than the composer (800px) so messages
                keep a comfortable reading width and don't feel "too big". */}
@@ -3427,6 +3438,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           owner={sessionOwner}
           isStreaming={chatStreaming}
           onJumpToLatest={sessionScroll.jumpToLatest}
+          mobileTurnFullyVisible={sessionScroll.mobileTurnFullyVisible}
           onJumpToStartOfMessage={sessionScroll.jumpToStartOfMessage}
         />
         <SessionFindBar
@@ -3438,7 +3450,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         />
       </div>
 
-      <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2">
+      <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2 max-lg:pb-0">
         <GatewayUsageApprovalNotice />
         {gatewayNotice && gatewayUsage.data ? <GatewayUsageNotice key={`${gatewayUsage.scopeKey}:${sessionOwner}`} state={gatewayNotice} status={gatewayUsage.data} stale={gatewayUsage.query.isError} /> : null}
         {(props.providerConnectedCount ?? 0) === 0 ? (

@@ -55,7 +55,7 @@ test("the quiet retry control preserves the recovery callback and disabled state
 describe("session error resilience", () => {
   test.each([
     { name: "APIError", data: { message: "Too Many Requests", statusCode: 429 }, kind: "rate-limited", title: "This model is receiving too many requests" },
-    { name: "APIError", data: { message: "invalid_api_key", statusCode: 401 }, kind: "provider-credentials", title: "Check your model connection" },
+    { name: "APIError", data: { message: "invalid_api_key", statusCode: 401 }, kind: "provider-credentials", title: "Your API key wasn’t accepted" },
     { name: "ContextOverflowError", data: { message: "Prompt too long" }, kind: "conversation-too-long", title: "This conversation is too long for the model" },
     { name: "StructuredOutputError", data: { message: "Failed to parse output" }, kind: "output-invalid", title: "The model couldn’t finish a usable response" },
     { name: "MessageOutputLengthError", data: { message: "output limit" }, kind: "output-limit", title: "The response reached the model’s length limit" },
@@ -291,6 +291,60 @@ describe("session error resilience", () => {
       </MessageListProvider>,
     )
   }
+
+  test.each([
+    { message: "API key expired", title: "Your API key has expired", description: "Replace your API key in model settings." },
+    { responseBody: '{"error":{"message":"API key expired"}}', title: "Your API key has expired", description: "Replace your API key in model settings." },
+    { responseBody: '{"error_description":"API key expired"}', title: "Your API key has expired", description: "Replace your API key in model settings." },
+    { responseBody: '{"error":{"code":"invalid_api_key"}}', title: "Your API key wasn’t accepted", description: "Check or replace your API key in model settings." },
+    { message: "Invalid API key", title: "Your API key wasn’t accepted", description: "Check or replace your API key in model settings." },
+    { message: "Token refresh failed: 401", title: "Your provider sign-in couldn’t be renewed", description: "Sign in to your provider again in model settings." },
+    { responseBody: '{"error":{"error_description":"OAuth token refresh failed"}}', title: "Your provider sign-in couldn’t be renewed", description: "Sign in to your provider again in model settings." },
+  ])("uses fixed credential copy for $title", ({ message, responseBody, title, description }) => {
+    for (const name of ["APIError", "ProviderAuthError"]) {
+      const error = { name, data: { message, responseBody, statusCode: 401, isRetryable: true } }
+      const presentation = presentOpencodeSessionError(error)
+      expect(presentation).toMatchObject({ kind: "provider-credentials", title, description, recoveryPrompt: null })
+      expect(sessionErrorPresentationFromUIMessage(createSessionErrorUIMessage("turn", presentation))).toEqual(presentation)
+      const html = renderErrorTranscriptWithResume(error)
+      expect(html).toContain(title)
+      expect(html).not.toContain('aria-label="Retry task"')
+      expect(html).not.toContain('data-testid="session-error-resume"')
+      expect(html).toContain('data-testid="session-error-gateway-connect"')
+      expect(presentation.connectUrl).toBeUndefined()
+      expect(html).not.toContain("Status: 401")
+    }
+  })
+
+  test.each([
+    {},
+    { message: "Unauthorized" },
+    { message: "OAuth token expired" },
+    { message: "invalid_grant" },
+    { message: "Unrelated text: API key expired; diagnostic-marker" },
+    { responseBody: '{"debug":{"message":"API key expired"}}' },
+    { responseBody: '{"error":{"message":"API key expired; diagnostic-marker"}}' },
+    { responseBody: "API key expired" },
+    { responseBody: '{"error_description":"API key expired"' },
+    { responseBody: JSON.stringify({ error_description: "API key expired", padding: "x".repeat(16_384) }) },
+  ])("keeps ambiguous or unsupported credential evidence generic: %j", (data) => {
+    const error = { name: "APIError", data: { ...data, statusCode: 401 } }
+    expect(presentOpencodeSessionError(error)).toMatchObject({
+      kind: "provider-credentials", title: "Check your model connection", description: "Update your connection in model settings.", recoveryPrompt: null,
+    })
+    expect(renderErrorTranscriptWithResume(error)).not.toContain("diagnostic-marker")
+  })
+
+  test.each([
+    { name: "APIError", data: { statusCode: 401, code: "openwork_auth_required" }, kind: "gateway-auth-required", title: "Sign in to keep using this model" },
+    { name: "APIError", data: { statusCode: 403 }, kind: "provider-access-denied", title: "You don’t have access to this model" },
+    { name: "APIError", data: { code: "ENOTFOUND" }, kind: "network-unavailable", title: "Can’t reach the model service" },
+    { name: "TimeoutError", data: { statusCode: 401 }, kind: "provider-timeout", title: "Provider did not respond in time" },
+  ])("preserves $kind precedence over credential copy", ({ name, data, kind, title }) => {
+    const result = presentOpencodeSessionError({ name, data: { ...data, message: "API key expired" } })
+    expect(result).toMatchObject({ kind, title })
+    expect(result.recoveryPrompt === null).toBe(["gateway-auth-required", "provider-access-denied"].includes(kind))
+  })
 
   test.each(["upstream_incomplete", "upstream_interrupted", "upstream_malformed_stream", "upstream_malformed_response", "upstream_timeout"])("renders the %s safety warning with Resume without exposing diagnostics", (code) => {
     const error = {

@@ -189,16 +189,23 @@ export async function sessionWorld(seed: Seed) {
  * sessionless New task route and the first Run task must create the session
  * and deliver the prompt through whichever engine (v1 or v2) is selected.
  */
-export async function sessionlessFirstSendWorld(seed: Seed) {
+export async function sessionlessFirstSendWorld(seed: Seed, options: { mobileLayout?: boolean } = {}) {
   const engine = resolveEvalEngine();
   const providerId = "first-send-mock";
   const modelId = "first-send-model";
   const nonce = `${Date.now().toString(36)}-${process.pid}`;
   const prompt = `Summarize this workspace in one sentence. FIRST-SEND-${nonce}`;
-  const reply = `Workspace summary finished ${nonce}.`;
+  const reply = options.mobileLayout
+    ? Array.from({ length: 18 }, (_, index) => `Paragraph ${index + 1}: This is a deterministic response for checking conversation layout and reading position.`).join("\n\n")
+    : `Workspace summary finished ${nonce}.`;
+  const followupPrompt = `Give me a short follow-up. MOBILE-FOLLOWUP-${nonce}`;
+  const followupReply = `Follow-up complete ${nonce}.`;
   const mockBoot = seed.mock({
     isolatedProcessEnv: true,
-    agentWorkloads: [{ promptMarker: prompt, latestUserTurn: true, finalReply: reply, steps: [] }],
+    agentWorkloads: [
+      { promptMarker: prompt, latestUserTurn: true, finalReply: reply, steps: [] },
+      { promptMarker: followupPrompt, latestUserTurn: true, finalReply: followupReply, steps: [] },
+    ],
   });
   const workspacePath = seed.tmpPath("sessionless-first-send");
   const app = await seed.appWeb({ name: "sessionless-first-send", workspacePath, headless: true, mocks: { agent: mockBoot } });
@@ -228,6 +235,8 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
     engine,
     prompt,
     reply,
+    followupPrompt,
+    followupReply,
     transition: (evidenceDirectory: string) => sessionlessTransition(seed, app, workspace.workspaceId, engine, evidenceDirectory),
     route: () => seed.evalIn(app, () => location.hash || `#${location.pathname}`),
     recovery: () => seed.evalIn(app, () => {
@@ -257,6 +266,10 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
     sessionsPath: engine === "v2" ? `${mount}/opencode2/api/session` : `${mount}/opencode/session?limit=100`,
     openNewTask: () => go(app, `/workspace/${workspace.workspaceId}/session`),
   };
+}
+
+export async function mobileChatInteractionWorld(seed: Seed) {
+  return sessionlessFirstSendWorld(seed, { mobileLayout: true });
 }
 
 export async function parentChildPermissionWorld(seed: Seed) {

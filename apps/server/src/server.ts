@@ -878,6 +878,16 @@ export async function startServer(
         return wrapped;
       };
 
+      const finalizeProxyResponse = (response: Response) => {
+        // A read can be cancelled while asynchronous ownership checks finish.
+        // Do not rewrap its cancelled body in withCors, or turn it into a 500.
+        // Writes retain their existing admission/completion semantics.
+        if (request.method === "GET" || request.method === "HEAD") {
+          request.signal.throwIfAborted();
+        }
+        return finalize(response);
+      };
+
       const proxyWorkspaceOpencodeMount = async (mount: { workspaceId: string; restPath: string }) => {
         authMode = "client";
         try {
@@ -894,7 +904,7 @@ export async function startServer(
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined });
           const response = await sendWithOwnershipProof(ownership,
             () => taskRecovery ? taskRecovery.forward(workspace, "v1", mount.restPath, request, send) : send());
-          return finalize(response);
+          return finalizeProxyResponse(response);
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
@@ -945,7 +955,7 @@ export async function startServer(
             recoverySignal: taskRecovery?.owns(request) ? request.signal : undefined,
           });
           const response = taskRecovery ? await taskRecovery.forward(workspace, "v2", mount.restPath, request, send) : await send();
-          return finalize(response);
+          return finalizeProxyResponse(response);
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
@@ -1014,7 +1024,7 @@ export async function startServer(
           const send = () => proxyOpencodeRequest({ config, request, url, workspace });
           const response = await sendWithOwnershipProof(ownership,
             () => taskRecovery && workspace ? taskRecovery.forward(workspace, "v1", url.pathname, request, send) : send());
-          return finalize(response);
+          return finalizeProxyResponse(response);
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {

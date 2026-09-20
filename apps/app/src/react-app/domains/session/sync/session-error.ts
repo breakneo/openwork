@@ -4,7 +4,7 @@ import { parseGatewayUsageError, gatewayUsageErrorEvidenceSchema, type GatewayUs
 import { safeStringify } from "../../../../app/utils";
 import { normalizeErrorText } from "../../../../lib/error-text";
 
-export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "provider-access-denied" | "provider-credentials" | "rate-limited" | "conversation-too-long" | "output-invalid" | "output-limit" | "attachment-unsupported" | "network-unavailable" | "workspace-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "generic";
+export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "provider-unavailable" | "provider-access-denied" | "provider-credentials" | "rate-limited" | "conversation-too-long" | "output-invalid" | "output-limit" | "attachment-unsupported" | "network-unavailable" | "workspace-unavailable" | "free-model-limit" | "disk-full" | "database-error" | "gateway-auth-required" | "gateway-selection-required" | "session-group-assignment" | "generic";
 
 export type OpencodeSessionErrorPresentation = {
   kind: OpencodeSessionErrorKind;
@@ -73,6 +73,7 @@ function sessionErrorKind(
   responseBody: string | null,
   status: number | null,
 ): OpencodeSessionErrorKind {
+  if (name === "SessionGroupAssignmentError") return "session-group-assignment";
   const searchable = [name, message, code, responseBody].filter(Boolean).join(" ");
   if (searchable.includes("gateway_selection_required")) return "gateway-selection-required";
   if (searchable.includes("openwork:desktop") && /\bECONNREFUSED\b/.test(searchable)
@@ -119,6 +120,7 @@ function sessionErrorKind(
 }
 
 function errorTitle(kind: OpencodeSessionErrorKind, fallback: string) {
+  if (kind === "session-group-assignment") return "Couldn’t assign this conversation to its group";
   if (kind === "disk-full") return "Storage error reported";
   if (kind === "database-error") return "OpenWork couldn’t access its saved data";
   if (kind === "aborted") return "Task interrupted";
@@ -141,6 +143,7 @@ function errorTitle(kind: OpencodeSessionErrorKind, fallback: string) {
 }
 
 function errorDescription(kind: OpencodeSessionErrorKind, gatewayAuth: GatewayAuthRequired | null) {
+  if (kind === "session-group-assignment") return "Message not sent. Retry sending to finish assigning the group.";
   if (kind === "gateway-selection-required") return "More than one access rule can apply. Open the model picker and select the model with the group and credential set you want, then retry. No credential is selected automatically.";
   if (kind === "disk-full") {
     return "A storage limit was reported by the task runtime or a connected service. This does not necessarily mean your computer is full. Check the affected service or workspace before freeing local disk space.";
@@ -267,6 +270,35 @@ function sessionErrorFields(error: unknown, fallback: string) {
   };
 }
 
+function providerCredentialCopy(fields: ReturnType<typeof sessionErrorFields>) {
+  const evidence: unknown[] = [fields.message, fields.code];
+  // Inspect only known fields in a bounded JSON body, never arbitrary nested text.
+  if (fields.responseBody && fields.responseBody.length <= 16_384) {
+    try {
+      const body: unknown = JSON.parse(fields.responseBody);
+      for (const record of [body, recordValue(body, "error")]) {
+        for (const key of ["message", "error_description", "code"]) {
+          evidence.push(recordValue(record, key));
+        }
+      }
+    } catch {
+      // Malformed or non-JSON responses provide no credential-specific evidence.
+    }
+  }
+  const signals = evidence.filter((value): value is string => typeof value === "string" && value.length <= 256)
+    .map((value) => value.trim().toLowerCase().replace(/[.!]$/, ""));
+  if (signals.some((value) => ["token refresh failed: 401", "oauth token refresh failed", "oauth refresh failed"].includes(value))) {
+    return { title: "Your provider sign-in couldn’t be renewed", description: "Sign in to your provider again in model settings." };
+  }
+  if (signals.some((value) => ["api key expired", "api key has expired", "api_key_expired", "expired_api_key"].includes(value))) {
+    return { title: "Your API key has expired", description: "Replace your API key in model settings." };
+  }
+  if (signals.some((value) => ["invalid api key", "invalid_api_key", "api key is invalid"].includes(value))) {
+    return { title: "Your API key wasn’t accepted", description: "Check or replace your API key in model settings." };
+  }
+  return null;
+}
+
 function technicalErrorDetails(error: unknown, fallback: string, fields: ReturnType<typeof sessionErrorFields>) {
   const lines: string[] = [];
   if (fields.name) lines.push(`Error type: ${fields.name}`);
@@ -293,10 +325,11 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
   const gatewayUsage = parseGatewayUsageError(error);
   const kind = gatewayAuth ? "gateway-auth-required" : gatewaySelection ? "gateway-selection-required" : sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody, fields.status);
   const fallbackTitle = normalizeSessionError(fields.message ?? defaultErrorMessage(fields.name, fallback));
+  const credentialCopy = kind === "provider-credentials" ? providerCredentialCopy(fields) : null;
   return {
     kind,
-    title: errorTitle(kind, fallbackTitle),
-    description: errorDescription(kind, gatewayAuth),
+    title: credentialCopy?.title ?? errorTitle(kind, fallbackTitle),
+    description: credentialCopy?.description ?? errorDescription(kind, gatewayAuth),
     technicalDetails: kind === "gateway-selection-required" ? "Error code: gateway_selection_required\nStatus: 409" : gatewayAuth ? "Error code: openwork_auth_required\nStatus: 401" : technicalErrorDetails(error, fallback, fields),
     recoveryPrompt: errorRecoveryPrompt(kind),
     ...(gatewayAuth ? { connectUrl: gatewayAuth.connectUrl } : {}),

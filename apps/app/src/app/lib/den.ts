@@ -855,8 +855,8 @@ export function resolveDenBaseUrls(input: { baseUrl?: string | null; apiBaseUrl?
   const seedUrl = stripDenApiBasePath(normalizedBaseUrl ?? normalizedApiBaseUrl) ?? DEFAULT_DEN_BASE_URL;
   const baseUrl = stripDenApiBasePath(seedUrl) ?? DEFAULT_DEN_BASE_URL;
 
-  // Build-time API pin (headless/dev web): route API calls through the
-  // configured proxy regardless of which web base the caller resolved.
+  // Build-time API pin (headless/dev web): use the configured API base exactly,
+  // whether it names a direct API origin or a same-origin /api/den proxy.
   const buildDenApiBaseUrl = normalizedApiBaseUrl ? null : normalizeDenBaseUrl(readBuildDenApiBaseUrl());
   const deterministicApiBaseUrl = denApiOriginForDenBaseUrl(baseUrl);
 
@@ -865,7 +865,7 @@ export function resolveDenBaseUrls(input: { baseUrl?: string | null; apiBaseUrl?
     apiBaseUrl: normalizedApiBaseUrl
       ? normalizedApiBaseUrl
       : buildDenApiBaseUrl
-        ? ensureDenApiBasePath(buildDenApiBaseUrl) ?? buildDenApiBaseUrl
+        ? buildDenApiBaseUrl
         : deterministicApiBaseUrl ?? ensureDenApiBasePath(baseUrl) ?? baseUrl,
   };
 }

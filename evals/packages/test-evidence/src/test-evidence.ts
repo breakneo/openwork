@@ -84,6 +84,8 @@ export type StepRecordInput = Omit<StepRecord, "seq">;
 
 export interface TestRunRecord {
   name: string;
+  /** Repository-relative spec that produced this record. */
+  specFile?: string;
   dir: string;
   createdAt: string;
   closedAt: string;
@@ -434,6 +436,7 @@ function parseTestRun(value: unknown): TestRunRecord | null {
     if (!parsed) return null;
     artifacts.push(parsed);
   }
+  const specFile = typeof value.specFile === "string" ? value.specFile : undefined;
   const gitSha = typeof value.gitSha === "string" ? value.gitSha : undefined;
   const sandboxRef = typeof value.sandboxRef === "string" ? value.sandboxRef : undefined;
   const engine: EvalEngine | null = value.engine === undefined || value.engine === "v1"
@@ -470,6 +473,7 @@ function parseTestRun(value: unknown): TestRunRecord | null {
   if (parsedArtifacts.length === 0 && outcome === "passed") summary.ok = true;
   return {
     name: value.name,
+    specFile,
     dir: value.dir,
     createdAt: value.createdAt,
     closedAt: value.closedAt,
@@ -567,8 +571,8 @@ export async function judgeTestRun(testRunDir: string, opts: JudgeTestRunOptions
   };
 }
 
-export function createTestEvidence(meta: { name: string; outDir?: string }): TestEvidenceRecorder {
-  const { name } = meta;
+export function createTestEvidence(meta: { name: string; specFile?: string; outDir?: string }): TestEvidenceRecorder {
+  const { name, specFile } = meta;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dir = meta.outDir ?? join(REPO_ROOT, "evals", "results", "test-runs", `${stamp}-${process.pid}-${slug(name)}`);
   const artifacts: StoredTestArtifact[] = [];
@@ -609,6 +613,7 @@ export function createTestEvidence(meta: { name: string; outDir?: string }): Tes
       if (orderedArtifacts.length === 0 && outcome === "passed") summary.ok = true;
       const record: TestRunRecord = {
         name,
+        specFile,
         dir,
         createdAt,
         closedAt: new Date().toISOString(),

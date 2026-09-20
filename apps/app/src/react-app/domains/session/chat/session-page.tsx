@@ -1,4 +1,7 @@
 /** @jsxImportSource react */
+import { newSessionDraftOwnerKey } from "./new-session-destination";
+import { usePendingConversationStore } from "./pending-conversation-store";
+import { PendingConversationView } from "./pending-conversation";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { usePanelRef } from "react-resizable-panels";
@@ -53,6 +56,7 @@ import { WorkbenchPanelGroup, PRIMARY_PANEL_ID, SECONDARY_PANEL_ID } from "./wor
 import ProviderAuthModal, { type ProviderAuthModalProps } from "../../connections/provider-auth/provider-auth-modal";
 import { RenameSessionModal } from "../modals/rename-session-modal";
 import { AppSidebar } from "../sidebar/app-sidebar";
+import { MobileChatActions, MobileChatNavigation } from "./mobile-chat-navigation";
 import { useSessionManagementStore } from "../sidebar/session-management-store";
 import { SessionSurface, type SessionSurfaceProps } from "../surface/session-surface";
 import { useSessionFindStore } from "../surface/find-store";
@@ -278,7 +282,7 @@ export type SessionPageProps = {
   extensionsActive?: boolean;
   onOpenProviderAuth?: () => void;
   /** Chat-first: create a default workspace and start a task from the empty-state composer. */
-  onChatFirstTask?: (prompt: string, attachments?: ComposerAttachment[]) => Promise<void>;
+  onChatFirstTask?: (prompt: string, attachments?: ComposerAttachment[], handoff?: NewTaskComposerHandoff) => Promise<void>;
   chatFirstBusy?: boolean;
   /** Workspace-scoped wiring for the empty-state hero's full composer. */
   newTaskComposer?: NewTaskComposerContext | null;
@@ -335,7 +339,7 @@ function WorkbenchPaneHeader(props: {
         {props.showWorkspace ? <span className="truncate text-muted-foreground">{props.workspaceTitle}</span> : null}
       </button>
       {props.pane === "secondary" ? <>
-        <Button variant="ghost" size="icon-xs" aria-label={t("session_management.expand_side_chat")} title={t("session_management.expand_side_chat")} onClick={props.onExpand}>
+        <Button variant="ghost" size="icon-xs" disabled={!props.onExpand} aria-label={t("session_management.expand_side_chat")} title={t("session_management.expand_side_chat")} onClick={props.onExpand}>
           <Maximize2 />
         </Button>
         <Button variant="ghost" size="icon-xs" aria-label={t("session_management.close_split_view")} title={t("session_management.close_split_view")} onClick={props.onClose}>
@@ -525,6 +529,8 @@ export function SessionPage(props: SessionPageProps) {
     secondary: splitSession,
     focusedPane: focusedWorkbenchPane,
   } = useRouteWorkbench(workbenchInput);
+  const pendingConversations = usePendingConversationStore((state) => state.conversations);
+  const pendingSideConversation = splitSession?.pendingConversationId ? pendingConversations[splitSession.pendingConversationId] : undefined;
   const [narrowPane, setNarrowPane] = useState<NarrowSessionPane>("chat");
   const narrowPaneNavigationRef = useRef<HTMLElement>(null);
   const activeWorkbenchPane = isMobile
@@ -994,7 +1000,7 @@ export function SessionPage(props: SessionPageProps) {
     return () => window.clearTimeout(id);
   }, [pendingConversationHistoryNavigation]);
   useEffect(() => {
-    props.onSessionTabsChange?.(sessionTabs);
+    props.onSessionTabsChange?.(sessionTabs.filter((tab) => !tab.draftDestination));
   }, [sessionTabs, props.onSessionTabsChange]);
   const sessionActionTitle = useMemo(
     () => sessionTitleForId(props.sidebar.workspaceSessionGroups, sessionActionId),
@@ -1003,6 +1009,7 @@ export function SessionPage(props: SessionPageProps) {
   const providerCount = props.hasUsableModel ? 1 : props.providerConnectedIds.length;
   const messageCountVisible = props.selectedSessionId ? 1 : 0;
   const hasMainContentTakeover = Boolean(props.mainContentTakeover);
+  const sidebarOnlyChrome = isMobile && shellConfig.sidebar && !props.primarySlot && !hasMainContentTakeover && !props.mainContentHeaderActionsRef && !props.primaryTitle && !props.mainContentTitle;
   const showWorkspaceSetupEmptyState = props.workspaces.length === 0 && !props.selectedSessionId;
   const showStartupSkeleton =
     !bootOverlayVisible &&
@@ -1167,7 +1174,7 @@ export function SessionPage(props: SessionPageProps) {
   }, [setWorkbenchSplit]);
 
   const closePrimaryWorkbenchPane = useCallback(() => {
-    if (!splitSession) return;
+    if (!splitSession || splitSession.draftDestination) return;
     setWorkbenchSplit(null);
     openSessionTab(splitSession.workspaceId, splitSession.sessionId);
   }, [openSessionTab, setWorkbenchSplit, splitSession]);
@@ -1356,7 +1363,7 @@ export function SessionPage(props: SessionPageProps) {
       isReferenceCurrent={props.isSessionReferenceCurrent}
       onOpenReference={handleOpenSessionReference}
     >
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(74,111,255,0.12),transparent_42%),var(--app-bg,#0b1020)] text-dls-text max-lg:pt-[env(safe-area-inset-top)] mac:bg-transparent">
+    <div data-chat-viewport className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(74,111,255,0.12),transparent_42%),var(--app-bg,#0b1020)] text-dls-text max-lg:fixed max-lg:inset-x-0 max-lg:top-[var(--chat-viewport-top,0px)] max-lg:h-[var(--chat-viewport-height,100dvh)] max-lg:overflow-hidden max-lg:pt-[env(safe-area-inset-top)] mac:bg-transparent">
       <SidebarProvider
         open={sidebarOpen}
         onOpenChange={setSidebarOpen}
@@ -1385,6 +1392,7 @@ export function SessionPage(props: SessionPageProps) {
           onOpenSession={openSessionTab}
           onPrefetchSession={props.sidebar.onPrefetchSession}
           onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
+          draftScope={props.newTaskComposer?.draftScope}
           onCreateSplitTaskInWorkspace={props.sidebar.onCreateSplitTaskInWorkspace}
           onOpenRenameSession={props.onRenameSession ? openRenameModal : undefined}
           onOpenDeleteSession={props.onDeleteSession ? (sessionId) => {
@@ -1423,6 +1431,15 @@ export function SessionPage(props: SessionPageProps) {
           onStartResize={startLeftSidebarResize}
           onOpenAccountSettings={props.onOpenSettings}
           onOpenExtensions={props.onOpenExtensions}
+          mobileChatActions={sidebarOnlyChrome ? (
+            <MobileChatActions
+              onFind={findButtonSessionId ? () => useSessionFindStore.getState().openFind({ sessionId: findButtonSessionId }) : undefined}
+              onFiles={openArtifactRailPane}
+              fileCount={artifactTargetCount}
+              onSignIn={showCloudSignIn ? openCloudSignIn : undefined}
+              onParent={parentSessionLink ? () => openSessionTab(parentSessionLink.workspaceId, parentSessionLink.sessionId) : undefined}
+            />
+          ) : undefined}
           extensionsActive={props.extensionsActive}
           status={{
             clientConnected: props.clientConnected,
@@ -1463,7 +1480,7 @@ export function SessionPage(props: SessionPageProps) {
               below) is invisible — nothing scrolls beneath either — but each
               one forces an extra full-pane blur pass every frame the transcript
               repaints. Keep the pane as the only backdrop surface. */}
-          <header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
+          {sidebarOnlyChrome ? <MobileChatNavigation /> : <header data-session-header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
             <div className="flex min-w-0 items-center gap-3">
               {shellConfig.sidebar ? <SidebarTrigger className="mac:hidden" /> : null}
               {parentSessionLink && !props.primarySlot && !hasMainContentTakeover ? (
@@ -1488,7 +1505,7 @@ export function SessionPage(props: SessionPageProps) {
                   <TooltipContent>Back to parent chat</TooltipContent>
                 </Tooltip>
               ) : null}
-              <h1 className={cn("truncate font-medium text-dls-text", props.mainContentHeaderActionsRef ? "text-base leading-6" : "text-[13px]")}>
+              <h1 data-session-header-title className={cn("truncate font-medium text-dls-text", !props.primaryTitle && !props.mainContentTitle && "max-lg:hidden", props.mainContentHeaderActionsRef ? "text-base leading-6" : "text-[13px]")}>
                 {props.primaryTitle
                   ? props.primaryTitle
                   : props.mainContentTitle
@@ -1501,7 +1518,7 @@ export function SessionPage(props: SessionPageProps) {
                 // Pinned and archived sessions are listed across workspaces, so
                 // the header names the workspace the open session belongs to.
                 <span
-                  className="flex min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-dls-secondary"
+                  className="hidden min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-dls-secondary lg:flex"
                   data-session-header-workspace={workspaceName}
                 >
                   <span aria-hidden="true">·</span>
@@ -1632,7 +1649,7 @@ export function SessionPage(props: SessionPageProps) {
                 </Button>
               ) : null}
             </div>}
-          </header>
+          </header>}
 
           {showNarrowPaneSwitcher ? (
             <NarrowPaneSwitcher
@@ -1823,9 +1840,26 @@ export function SessionPage(props: SessionPageProps) {
                               focused={activeWorkbenchPane === "secondary"}
                               onFocus={() => focusWorkbenchPane("secondary")}
                               onClose={closeSecondaryWorkbenchPane}
-                              onExpand={closePrimaryWorkbenchPane}
+                              onExpand={splitSession.draftDestination ? undefined : closePrimaryWorkbenchPane}
                             />
-                            {splitPaneRuntime.status === "ready" ? (
+                            {pendingSideConversation && pendingSideConversation.scope === props.newTaskComposer?.draftScope ? (
+                              <PendingConversationView conversation={pendingSideConversation} composer={props.newTaskComposer ?? null} />
+                            ) : splitSession.draftDestination && props.newTaskComposer ? (
+                              <div className="min-h-0 flex-1 overflow-y-auto py-6">
+                                <SessionEmptyHero
+                                  key={splitSession.sessionId}
+                                  providerCount={providerCount}
+                                  onRunTask={(prompt, attachments, handoff) => props.sidebar.onCreateTaskWithPrompt?.(splitSession.workspaceId, prompt, attachments, handoff)}
+                                  onOpenProviderAuth={props.onOpenProviderAuth}
+                                  composer={{
+                                    ...props.newTaskComposer,
+                                    draftOwnerKey: newSessionDraftOwnerKey(props.newTaskComposer.draftScope, splitSession.draftDestination),
+                                    draftSessionId: splitSession.sessionId,
+                                    destination: splitSession.draftDestination,
+                                  }}
+                                />
+                              </div>
+                            ) : splitPaneRuntime.status === "ready" ? (
                               <div className="min-h-0 flex-1">
                                 <SplitSessionSurface
                                   {...splitPaneRuntime.surface}
@@ -1874,7 +1908,7 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
 
               {!props.primarySlot && !hasMainContentTakeover && !showDelayedSessionLoadingState && !canRenderReactSurface && !showStartupSkeleton ? (
-                <div className={`mx-auto max-w-[800px] px-6 ${showWorkspaceSetupEmptyState ? "pt-20" : "pt-10"}`}>
+                <div className={`mx-auto max-w-[800px] px-6 max-lg:h-full max-lg:min-h-0 max-lg:w-full max-lg:px-0 max-lg:pt-0 ${showWorkspaceSetupEmptyState ? "pt-20" : "pt-10"}`}>
                   {props.notFoundMessage ? (
                     <div className="px-6 py-16 text-center">
                       <div className="mx-auto max-w-md rounded-2xl border border-dls-border bg-dls-card px-5 py-6 shadow-[var(--dls-card-shadow)]">
@@ -1888,7 +1922,7 @@ export function SessionPage(props: SessionPageProps) {
                     <SessionEmptyHero
                       providerCount={providerCount}
                       busy={props.chatFirstBusy}
-                      onRunTask={(prompt, attachments) => props.onChatFirstTask?.(prompt, attachments)}
+                      onRunTask={(prompt, attachments, handoff) => props.onChatFirstTask?.(prompt, attachments, handoff)}
                       onOpenProviderAuth={props.onOpenProviderAuth}
                       composer={props.newTaskComposer}
                     />
@@ -1896,7 +1930,7 @@ export function SessionPage(props: SessionPageProps) {
                     <div className="px-6 py-16">
                       <TaskRecovery title={selectedWorkspaceErrorTitle}
                         technicalDetails={selectedWorkspaceErrorMessage}
-                        onRetry={() => props.sidebar.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
+                        onRetry={() => void Promise.resolve(props.sidebar.onTestWorkspaceConnection(props.selectedWorkspaceId))}
                         actions={<>
                           <Button
                             variant="ghost"
@@ -1928,7 +1962,7 @@ export function SessionPage(props: SessionPageProps) {
                       {t("session.loading_detail")}
                     </div>
                   ) : (
-                    <div className="flex flex-1 items-center justify-center py-16">
+                    <div className="flex flex-1 items-center justify-center py-16 max-lg:h-full max-lg:min-h-0 max-lg:py-0">
                       <SessionEmptyHero
                         // Remount per draft owner so the hero reads that
                         // workspace's persisted new-task draft instead of
@@ -2020,7 +2054,7 @@ export function SessionPage(props: SessionPageProps) {
           </aside>
           </div>
         </SidebarInset>
-        {shellConfig.sidebar ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
+        {shellConfig.sidebar && !sidebarOnlyChrome ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
       </SidebarProvider>
 
       {props.providerAuthModal ? <ProviderAuthModal {...props.providerAuthModal} /> : null}
