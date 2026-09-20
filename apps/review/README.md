@@ -97,6 +97,56 @@ selected evidence. Explicit publication can update that selection.
 **Do not require Evidence review in branch protection.** Failures remain visible
 in its optional workflow; existing test checks retain their verdicts.
 
+## Verify publication changes on a PR
+
+The `Evidence review` PR jobs exercise the candidate implementation without Blob
+or GitHub write credentials:
+
+- `check-publisher`: publisher contracts plus an integration test through real
+  report assembly and local storage, with synthetic GitHub responses. Download
+  `publisher-contracts` for individual test results.
+- `check-app`: builds the production review app and runs
+  `evals/specs/evidence-review.test.ts`. Download `review-app-evidence` for its
+  assertion record. Its report inputs and documentation image are synthetic
+  fixtures, not demonstrations of the features named in those fixtures.
+
+These checks prove candidate behavior locally/in CI, **not** a hosted Blob upload
+or Vercel sign-in. The credentialed publisher deliberately uses the default
+branch, so a PR changing it cannot claim that the deployed publisher exercised
+its candidate code. No new environment variables are needed.
+
+After merge, use an open same-repository PR whose **Build and core checks** run
+has completed with `packaged-desktop-smoke-*` evidence on its current head. Its
+completion triggers trusted publication. Alternatively, replay that completed
+run without rerunning tests (dispatch from the default branch only):
+
+```sh
+gh workflow run evidence-review.yml --ref dev -f run_id=<completed-run-id>
+```
+
+Open the resulting `Evidence review` run's `publish` job summary:
+
+- **published**: contains the private report link; verify the report commit and
+  source records and that the PR has one compact link comment, not a raw trace.
+- **unchanged**: an existing selection was preserved; no new report was published.
+- **skipped**: the reason is explicit (for example, stale head, closed PR, missing
+  PR association, or no current-head records). No publication success is claimed.
+- **unavailable / failed**: nonzero publisher exit; check configuration and source
+  run before replaying. No raw evidence is posted as a fallback.
+
+Direct PR reports describe selected evidence, independently of the separate
+required-journey check. Authenticated chained Product journeys retain their
+required-plan gap reporting. Neither path grants human approval or changes the
+required check verdict. Push-only completion no longer starts an automatic
+publication that would usually lack an open-PR association.
+
+Verify hosted access separately: signed-in project members can open the report,
+original JSON, and image links; anonymous requests to all three must receive
+Vercel authentication, not evidence bytes. A green deploy alone is not this check.
+Keep repository `OPENWORK_REVIEW_URL`, `OPENWORK_REVIEW_BLOB_TOKEN`, and the existing
+Vercel Preview/private Blob configuration in place. Replay uses the same identity
+checks and refuses foreign, stale, unsupported, or unbound runs.
+
 ## Contract
 
 `packages/review/src/schema.ts` is the runtime schema and TypeScript source of
