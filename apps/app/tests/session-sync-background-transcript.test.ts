@@ -103,6 +103,34 @@ describe("background session transcript", () => {
     }
   });
 
+  test("an old endpoint cannot release the replacement endpoint's conversation", () => {
+    const replacement = { ...syncInput, baseUrl: "http://127.0.0.1:1235" };
+    const cleanupOld = __createWorkspaceSessionSyncForTest(syncInput);
+    const cleanupNew = __createWorkspaceSessionSyncForTest(replacement);
+    const releaseOld = trackWorkspaceSessionSync(syncInput, "session-a");
+    const releaseNew = trackWorkspaceSessionSync(replacement, "session-a");
+    try {
+      __applySessionSyncEventForTest(syncInput, {
+        type: "message.updated",
+        properties: { info: { id: "msg-a", role: "assistant", sessionID: "session-a", time: { created: 1 } } },
+      });
+      __applySessionSyncEventForTest(syncInput, { type: "message.part.updated", properties: { part: textPart("Done") } });
+      const current = transcript();
+      releaseOld();
+      __applySessionSyncEventForTest(syncInput, { type: "session.idle", properties: { sessionID: "session-a" } });
+      jest.advanceTimersByTime(10_001);
+      expect(transcript()).toBe(current);
+
+      releaseNew();
+      __applySessionSyncEventForTest(replacement, { type: "session.idle", properties: { sessionID: "session-a" } });
+      jest.advanceTimersByTime(10_001);
+      expect(hasTranscriptQuery()).toBe(false);
+    } finally {
+      cleanupOld();
+      cleanupNew();
+    }
+  });
+
   test("tracked-session lifecycle owns transcript cleanup once the run is idle", () => {
     const cleanup = __createWorkspaceSessionSyncForTest(syncInput);
     const release = trackWorkspaceSessionSync(syncInput, "session-a");
