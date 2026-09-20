@@ -423,7 +423,7 @@ jobs:
           SNAPSHOT_RESULT: ${{ needs.validate-models-snapshot.result }}
           DOCS_RESULT: ${{ needs.validate-docs.result }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$PROOF_RESULT" != "success" ]; then
+          if [ "${EVENT_NAME:-push}" = "pull_request" ] && [ "${PROOF_RESULT:-success}" != "success" ]; then
             echo "New E2E proof contract failed. See proof-contract: add a runnable NEW evals/specs/**/*.e2e.test.ts for this change." >&2
             exit 1
           fi
