@@ -87,65 +87,54 @@ the comment's identity. Include all claimed runs in that selection.
 publication remains available when the review app is not configured.
 Visual judging is explicit: `pnpm --dir evals evidence:judge -- --test-run <run>`.
 
-For automatic publication, configure repository variable `OPENWORK_REVIEW_URL`
-and secret `OPENWORK_REVIEW_BLOB_TOKEN`. The separate **Evidence review** workflow
-consumes existing uploaded artifacts after checks finish. It runs trusted
-default-branch code, ignores stale runs, and only publishes when GitHub supplies
-an associated PR and matching source commit. It never runs downloaded code.
-An existing review of that commit takes precedence, preserving the author's
-selected evidence. Explicit publication can update that selection.
-**Do not require Evidence review in branch protection.** Failures remain visible
-in its optional workflow; existing test checks retain their verdicts.
+## PR change proofs
 
-## Verify publication changes on a PR
+A non-exempt PR must add at least one new runnable
+`evals/specs/**/*.e2e.test.ts`. Modified, renamed, deleted, or pre-existing specs
+do not satisfy the contract. The narrow existing docs-only and generated model
+snapshot lanes are exempt and keep their own required validation.
 
-The `Evidence review` PR jobs exercise the candidate implementation without Blob
-or GitHub write credentials:
+`Build and core checks / proof-contract` validates the live changed-file list and
+each new spec's Git blob. Empty, malformed, skip-only, and todo-only files fail.
+Its result feeds the existing `openwork-tests-required` aggregate. This is the
+blocking **proof supplied** contract; it does not claim the change is correct.
 
-- `check-publisher`: publisher contracts plus an integration test through real
-  report assembly and local storage, with synthetic GitHub responses. Download
-  `publisher-contracts` for individual test results.
-- `check-app`: builds the production review app and runs
-  `evals/specs/evidence-review.test.ts`. Download `review-app-evidence` for its
-  assertion record. Its report inputs and documentation image are synthetic
-  fixtures, not demonstrations of the features named in those fixtures.
+The separate non-required **PR change proof** workflow runs only the newly added
+specs against the exact PR head. Each spec gets its own bounded local job and
+artifact. Failed, skipped, unsupported, setup-failed, and cancelled proofs remain
+honest non-passing executions; they do not fall back to packaged smoke or another
+regression. Native/platform requirements not available in this first local lane
+will therefore remain visible rather than being substituted.
 
-These checks prove candidate behavior locally/in CI, **not** a hosted Blob upload
-or Vercel sign-in. The credentialed publisher deliberately uses the default
-branch, so a PR changing it cannot claim that the deployed publisher exercised
-its candidate code. No new environment variables are needed.
+The credentialed **Evidence review** workflow runs trusted default-branch code.
+It re-reads the current PR file list, derives the same new-spec selection, and
+accepts exactly one artifact per selected spec and run attempt. Every test record
+must name that spec and the current PR SHA. Downloaded PR artifacts are data and
+are never imported or executed. Unrelated smoke, an unexpected proof artifact,
+stale evidence, and missing/duplicate records are refused.
 
-After merge, use an open same-repository PR whose **Build and core checks** run
-has completed with `packaged-desktop-smoke-*` evidence on its current head. Its
-completion triggers trusted publication. Alternatively, replay that completed
-run without rerunning tests (dispatch from the default branch only):
+Candidate publisher and review-app checks live in the PR-only
+`Evidence review candidate checks` workflow. It has no publishing secret or
+write permission, avoiding a workflow that combines manual privileged dispatch
+with PR-head execution.
+
+For automatic publication, keep repository variable `OPENWORK_REVIEW_URL`, secret
+`OPENWORK_REVIEW_BLOB_TOKEN`, and the existing Vercel Preview/private Blob
+configuration. No new environment variable is required. Do not require Evidence
+review or PR change proof in branch protection; only the proof-supplied contract
+is part of the existing required aggregate. Human approval remains in GitHub.
+
+To replay publication without rerunning a proof (default branch only):
 
 ```sh
-gh workflow run evidence-review.yml --ref dev -f run_id=<completed-run-id>
+gh workflow run evidence-review.yml --ref dev -f run_id=<pr-change-proof-run-id>
 ```
 
-Open the resulting `Evidence review` run's `publish` job summary:
-
-- **published**: contains the private report link; verify the report commit and
-  source records and that the PR has one compact link comment, not a raw trace.
-- **unchanged**: an existing selection was preserved; no new report was published.
-- **skipped**: the reason is explicit (for example, stale head, closed PR, missing
-  PR association, or no current-head records). No publication success is claimed.
-- **unavailable / failed**: nonzero publisher exit; check configuration and source
-  run before replaying. No raw evidence is posted as a fallback.
-
-Direct PR reports describe selected evidence, independently of the separate
-required-journey check. Authenticated chained Product journeys retain their
-required-plan gap reporting. Neither path grants human approval or changes the
-required check verdict. Push-only completion no longer starts an automatic
-publication that would usually lack an open-PR association.
-
-Verify hosted access separately: signed-in project members can open the report,
-original JSON, and image links; anonymous requests to all three must receive
-Vercel authentication, not evidence bytes. A green deploy alone is not this check.
-Keep repository `OPENWORK_REVIEW_URL`, `OPENWORK_REVIEW_BLOB_TOKEN`, and the existing
-Vercel Preview/private Blob configuration in place. Replay uses the same identity
-checks and refuses foreign, stale, unsupported, or unbound runs.
+The publish job summary says **published**, **skipped**, **unavailable**, or
+**failed**. Only **published** confirms delivery. A compact sticky PR comment
+links to the private report; no raw trace or public screenshots are used as a
+fallback. Signed-in project members should verify the report commit and sources.
+Anonymous report, JSON, and image requests must redirect to Vercel Authentication.
 
 ## Contract
 

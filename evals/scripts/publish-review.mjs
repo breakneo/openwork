@@ -6,9 +6,10 @@ import { pathToFileURL } from "node:url";
 import { publishReviewPr } from "../packages/test-artifacts/src/publish-pr.ts";
 import { readTestRunDirectory } from "../packages/test-artifacts/src/scan.ts";
 import { readBinding, requiredStatus } from "../../.github/scripts/required-verification-controller.mjs";
+import { changedFiles, proofArtifact, requireProof, selectProof } from "../../.github/scripts/pr-proof.mjs";
 
 const producers = [
-  { file: "ci-tests.yml", name: "Build and core checks", events: ["pull_request", "push"] },
+  { file: "pr-proof.yml", name: "PR change proof", events: ["pull_request"], proof: true },
   { file: "daytona-e2e.yml", name: "Product journeys", events: ["workflow_run"] },
 ];
 const validSha = (sha) => typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha);
@@ -49,7 +50,7 @@ function gh(args) {
 
 export async function publishCompletedEvidence({ repo, runId, runAttempt }, dependencies = {}) {
   const api = dependencies.api ?? ((path) => JSON.parse(gh(["api", path])));
-  const download = dependencies.download ?? ((id, directory) => gh(["run", "download", String(id), "--repo", repo, "--dir", directory]));
+  const download = dependencies.download ?? ((id, directory, name) => gh(["run", "download", String(id), "--repo", repo, ...(name ? ["--name", name] : []), "--dir", directory]));
   const publish = dependencies.publish ?? publishReviewPr;
   const log = dependencies.log ?? console.log;
   const binding = dependencies.binding ?? readBinding;
@@ -83,6 +84,60 @@ export async function publishCompletedEvidence({ repo, runId, runAttempt }, depe
     return skip("current PR repository identity mismatch or closed PR");
   if (current.head.sha !== identity.sha) return skip("source PR SHA is stale");
   if (!Number.isFinite(Date.parse(current.created_at))) return skip("missing PR creation date");
+
+  const sourceWorkflow = workflows.find(workflow => workflow.id === source.workflow_id);
+  if (sourceWorkflow?.proof) {
+    let files;
+    try {
+      files = await changedFiles(api, repo, identity.pr, current.changed_files);
+    } catch {
+      return skip("current PR changed-file listing is incomplete");
+    }
+    let selection;
+    try {
+      selection = requireProof(selectProof(files));
+    } catch {
+      return skip("current PR has no valid new E2E proof selection");
+    }
+    if (selection.exemption || selection.specs.length === 0 || selection.specs.length > 32)
+      return skip("source run has no bounded PR proof selection");
+    const artifacts = await api(`repos/${repo}/actions/runs/${source.id}/artifacts?per_page=100`);
+    if (!Array.isArray(artifacts.artifacts) || artifacts.total_count !== artifacts.artifacts.length)
+      return skip("proof artifact listing is incomplete");
+    const expected = new Map(selection.specs.map(spec => [proofArtifact(spec, source.run_attempt), spec]));
+    if (artifacts.artifacts.some(artifact => artifact.expired)) return skip("proof artifacts expired");
+    if (artifacts.artifacts.some(artifact => artifact.name?.startsWith("pr-proof-") && !expected.has(artifact.name)))
+      return skip("unexpected proof artifact is present");
+    for (const name of expected.keys())
+      if (artifacts.artifacts.filter(artifact => artifact.name === name).length !== 1)
+        return skip("required proof artifact is missing or duplicated");
+    const directory = await mkdtemp(join(tmpdir(), "openwork-pr-proof-"));
+    try {
+      const testRunDirs = [];
+      for (const [name, spec] of expected) {
+        const destination = join(directory, name);
+        await download(source.id, destination, name);
+        const entries = await readdir(destination, { withFileTypes: true, recursive: true });
+        const records = entries.filter(entry => entry.isFile() && entry.name === "test-run.json");
+        if (records.length === 0) return skip(`proof ${spec} produced no test records`);
+        for (const entry of records) {
+          const recordDir = entry.parentPath;
+          const stored = await readTestRunDirectory(recordDir);
+          if (!stored || stored.testRun.gitSha !== identity.sha || stored.testRun.specFile !== spec)
+            return skip("proof record source or commit does not match the live PR selection");
+          testRunDirs.push(recordDir);
+        }
+      }
+      if ((await api(`repos/${repo}/pulls/${identity.pr}`)).head.sha !== identity.sha)
+        return skip("PR identity changed before proof publication");
+      const result = await publish({ pr: identity.pr, testRunDirs, gaps: [], automatic: true, replaceAutomatic: true,
+        title: `PR #${identity.pr} change proof` });
+      log(result.posted ? result.urls.report : "PR proof review unchanged.");
+      return result;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
 
   const runs = new Map([[source.id, source]]);
   for (const workflow of workflows) {
