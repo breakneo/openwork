@@ -3657,7 +3657,7 @@ export function SessionRoute() {
         />
       }
       primaryTitle={appsRouteActive ? "Dashboard" : automationsRouteActive ? "Automations" : dashboardRouteActive ? "Dashboard" : undefined}
-      primarySlot={pendingConversation ? <PendingConversationView conversation={pendingConversation} /> : appsRouteActive ? (
+      primarySlot={pendingConversation ? <PendingConversationView conversation={pendingConversation} composer={newTaskComposerContext} /> : appsRouteActive ? (
         <WorkspaceProvider
           client={opencodeClient}
           opencodeBaseUrl={opencodeBaseUrl}
@@ -3763,7 +3763,7 @@ export function SessionRoute() {
           handoff?.consume?.();
           if (destination.parent) {
             const workbench = useWorkbenchStore.getState();
-            const tab = { workspaceId, sessionId: newSessionDraftSlot(destination), title: "Pending conversation", draftDestination: destination, pendingConversationId: pending.id };
+            const tab = { workspaceId, sessionId: newSessionDraftSlot(destination), title: prompt.trim() || "New session", draftDestination: destination, pendingConversationId: pending.id };
             workbench.openTab(tab);
             workbench.setSideChat(destination.parent, tab);
           } else {

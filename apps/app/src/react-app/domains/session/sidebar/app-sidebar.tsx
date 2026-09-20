@@ -742,7 +742,7 @@ function SessionSideChatControl({ workspaceId, sessionId, title }: {
             attentionSource={ctx.sessionAttentionSourceById?.[sideChat.sessionId]}
           />
         : <Columns2 className="size-3" />}
-      <span>{sideChat.pendingConversationId ? "Pending" : sideChat.draftDestination ? "Draft" : t("session_management.split_view")}</span>
+      <span>{sideChat.draftDestination && !sideChat.pendingConversationId ? "Draft" : t("session_management.split_view")}</span>
     </button>
   );
 }
@@ -1587,13 +1587,13 @@ function DraftSessionRow({ workspaceId, groupId, title, pending }: { workspaceId
     && location.pathname.endsWith("/session")
     && (new URLSearchParams(location.search).get("pendingConversation") || undefined) === pending?.id
     && (new URLSearchParams(location.search).get("draftGroup") || undefined) === groupId;
-  const metadata = pending ? pending.phase === "creation-failed" ? "Not created" : "Pending" : "Draft";
+  const metadata = pending ? pending.phase === "creation-failed" ? "Not sent" : "" : "Draft";
   return <SidebarMenuSubItem className="flex items-center" data-sidebar-draft-workspace-id={workspaceId} data-sidebar-draft-group-id={groupId ?? ""} data-sidebar-pending-conversation={pending?.id}>
     <div className="relative min-w-0 flex-1 select-none">
       <SidebarMenuSubButton
         render={<button type="button" />}
         isActive={selected}
-        aria-label={`${title}, ${metadata}`}
+        aria-label={metadata ? `${title}, ${metadata}` : title}
         className={cn(SESSION_ROW_BUTTON_CLASS, "w-full text-start")}
         style={{ paddingInlineStart: sidebarRowPaddingInlineStart(0) }}
         onClick={() => {

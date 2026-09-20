@@ -1843,7 +1843,7 @@ export function SessionPage(props: SessionPageProps) {
                               onExpand={splitSession.draftDestination ? undefined : closePrimaryWorkbenchPane}
                             />
                             {pendingSideConversation && pendingSideConversation.scope === props.newTaskComposer?.draftScope ? (
-                              <PendingConversationView conversation={pendingSideConversation} />
+                              <PendingConversationView conversation={pendingSideConversation} composer={props.newTaskComposer ?? null} />
                             ) : splitSession.draftDestination && props.newTaskComposer ? (
                               <div className="min-h-0 flex-1 overflow-y-auto py-6">
                                 <SessionEmptyHero
