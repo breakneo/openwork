@@ -68,7 +68,7 @@ describe("Automation proposal card", () => {
                 workspaceId: "origin-workspace", sessionId: "origin-session", showThinking: false, developerMode: false,
                 displaySuggestions: false, providerConnectedCount: 1, dispatchAction: noop, setPrompt: noop,
                 onRevertToUserMessage: noop, onForkAtMessage: noop, onEditUserMessage: noop,
-                onMcpReconnect: async () => "connected", onMcpReopenAuthorization: async () => {}, onMcpRetry: noop,
+                onMcpReconnect: async () => "connected", onMcpReopenAuthorization: async () => {},
                 children: createElement(MessageList, { messages: [{ id: "proposal-message", role: "assistant", parts: [part] }], status: "ready" }),
               }),
             }),

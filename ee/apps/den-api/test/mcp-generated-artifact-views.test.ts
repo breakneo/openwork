@@ -120,6 +120,9 @@ test("advertises exact immutable active and preview URIs in tool definitions", a
     expect(render?._meta).toMatchObject({ ui: { resourceUri: artifactViewResourceUri(viewId, activeRevisionId) } })
     expect(preview?._meta).toMatchObject({ ui: { resourceUri: artifactViewResourceUri(viewId, draftRevisionId) } })
     expect(save?._meta).toBeUndefined()
+    expect(save?.description).toContain("OpenWork offers Open preview")
+    expect(save?.description).toContain("choose Save in OpenWork")
+    expect(save?.description).not.toContain("automatically")
 
     const resources = await client.listResources()
     expect(resources.resources.map((resource) => resource.uri)).toEqual(expect.arrayContaining([
@@ -276,8 +279,8 @@ test.each(draftDataModes)("%s draft metadata preserves compatible desktop previe
     expect(saved.isError).not.toBe(true)
     const text = JSON.stringify(saved.content)
     expect(text).toContain(`preview_artifact_${viewId}`)
-    expect(text).toContain("Released OpenWork clients may open the legacy preview automatically")
-    expect(text).toContain("modern clients ignore the draft metadata")
+    expect(text).toContain("Choose Open preview in OpenWork, then Save")
+    expect(text).not.toContain("automatically")
     if (dataMode === "live") {
       expect(text).toContain(`run_artifact_${viewId}`)
       expect(text).toContain("optional timeZone")
@@ -290,7 +293,7 @@ test.each(draftDataModes)("%s draft metadata preserves compatible desktop previe
         .toMatchObject({ ui: { resourceUri: artifactViewResourceUri(viewId, activeRevisionId) } })
     } else {
       expect(text).not.toContain(`run_artifact_${viewId}`)
-      expect(saved.content).toEqual([{ type: "text", text: `Saved immutable view revision ${draftRevisionId} at ${artifactViewResourceUri(viewId, draftRevisionId)}. Released OpenWork clients may open the legacy preview automatically; modern clients ignore the draft metadata. Call preview_artifact_${viewId} to display that revision. Saving does not activate the draft.` }])
+      expect(saved.content).toEqual([{ type: "text", text: `Saved immutable view revision ${draftRevisionId} at ${artifactViewResourceUri(viewId, draftRevisionId)}. Choose Open preview in OpenWork, then Save to keep the app on your dashboard. In other MCP clients: Call preview_artifact_${viewId} to display that revision.` }])
     }
     expect(saved.structuredContent).toMatchObject({ view: { activeRevisionId } })
     expect(saved._meta?.["openwork/appDraft"]).toEqual({
@@ -306,7 +309,7 @@ test.each(draftDataModes)("%s draft metadata preserves compatible desktop previe
   })
 })
 
-test.each(draftDataModes)("%s new drafts preserve legacy metadata without activation", async (dataMode) => {
+test.each(draftDataModes)("%s new drafts preserve explicit preview metadata without activation", async (dataMode) => {
   let loads = 0
   const draftView = { ...view, dataMode, activeRevisionId: null }
   await withClient(async (client) => {
@@ -327,7 +330,8 @@ test.each(draftDataModes)("%s new drafts preserve legacy metadata without activa
       .toMatchObject({ ui: { resourceUri: artifactViewResourceUri(viewId, draftRevisionId) } })
     const preview = await client.callTool({ name: `preview_artifact_${viewId}`, arguments: {} })
     expect(preview.structuredContent).toEqual(payload)
-    expect(preview._meta?.["openwork/appDraft"]).toBeUndefined()
+    expect(preview._meta?.["openwork/appDraft"]).toEqual(dataMode === "live"
+      ? { appId: viewId, revisionId: draftRevisionId, title: view.title } : undefined)
     expect(loads).toBe(2)
   }, {
     views: [],
@@ -345,7 +349,11 @@ test.each([null, activeRevisionId])("live preview recovery preserves the draft w
     revisions: [revision(savedRevisionId, "2026-08-12T13:00:00.000Z"), ...view.revisions],
   }
   const connectionStatus = { connectionName: "Test connection", action: "Connect your account" }
-  const connectionCard = { state: "needs_connection", message: "Connect your account" }
+  const connectionCard = {
+    schemaVersion: "1", connectionId: "emc_fixture", connectionName: "Test connection",
+    state: "needs_connection", actor: "member", message: "Connect your account",
+    action: { type: "connect", label: "Connect", surface: "openwork_your_connections" },
+  }
   const requests: Array<Parameters<Parameters<typeof registerAgentGeneratedArtifactViews>[0]["loadData"]>[0]> = []
   let saves = 0
   let activations = 0
@@ -358,6 +366,10 @@ test.each([null, activeRevisionId])("live preview recovery preserves the draft w
     })
     expect(failed.isError).toBe(true)
     expect(failed._meta?.["openwork/appDraft"]).toBeUndefined()
+    expect(failed.structuredContent).toEqual(connectionCard)
+    expect(failed._meta?.["openwork/mcpApp"]).toEqual({
+      toolName: "connection_action", resourceUri: "ui://openwork/connection-action/v2/view.html", arguments: { connectionId: "emc_fixture" },
+    })
     expect(JSON.stringify(failed)).not.toContain(payload.artifact.receiptId)
     const content = failed.content?.[0]
     expect(JSON.stringify(content)).toContain("artifact_view_preview_unavailable")
@@ -390,6 +402,8 @@ test.each([null, activeRevisionId])("live preview recovery preserves the draft w
     const recovered = await client.callTool({ name: `preview_artifact_${viewId}`, arguments: { timeZone: "Asia/Tokyo" } })
     expect(recovered.isError).not.toBe(true)
     expect(recovered.structuredContent).toEqual(payload)
+    expect(recovered._meta?.["openwork/appDraft"]).toEqual({ appId: viewId, revisionId: savedRevisionId, title: view.title })
+    expect(recovered._meta?.["openwork/mcpApp"]).toBeUndefined()
     expect(requests).toEqual([
       { configObjectId, expectedOutputSchemaDigest: digest, dataMode: "live" },
       { configObjectId, expectedOutputSchemaDigest: digest, dataMode: "live", timeZone: "Asia/Tokyo" },
@@ -471,6 +485,8 @@ test.each(draftDataModes)("%s render results preserve published desktop routing"
       expect(result.isError).not.toBe(true)
       expect(result.structuredContent).toEqual(payload)
       expect(result._meta).toMatchObject({ resourceDigest: digest, resultDigest: payload.artifact.resultDigest })
+      expect(result._meta?.["openwork/appDraft"]).toEqual(dataMode === "live" && prefix === "preview"
+        ? { appId: viewId, revisionId, title: view.title } : undefined)
       if (dataMode === "live") {
         expect(result._meta?.artifactViewId).toBeUndefined()
         expect(result._meta?.viewRevisionId).toBeUndefined()
@@ -483,16 +499,42 @@ test.each(draftDataModes)("%s render results preserve published desktop routing"
   }, { views: [{ ...view, dataMode }] })
 })
 
-test("live connection failures preserve structured cards and never return retained data", async () => {
-  const connectionCard = { state: "needs_connection", message: "Connect your account" }
+test.each(["run", "render", "preview"])("live %s connection failures launch the shared connection App without retained data", async prefix => {
+  const connectionCard = {
+    schemaVersion: "1", connectionId: "emc_fixture", connectionName: "Test connection",
+    state: "needs_connection", actor: "member", message: "Connect your account",
+    action: { type: "connect", label: "Connect", surface: "openwork_your_connections" },
+  }
   await withClient(async (client) => {
-    const result = await client.callTool({ name: `run_artifact_${view.id}`, arguments: {} })
+    const result = await client.callTool({ name: `${prefix}_artifact_${view.id}`, arguments: {} })
     expect(result.isError).toBe(true)
     expect(result.structuredContent).toEqual(connectionCard)
+    expect(result._meta?.["openwork/mcpApp"]).toEqual({
+      toolName: "connection_action", resourceUri: "ui://openwork/connection-action/v2/view.html", arguments: { connectionId: "emc_fixture" },
+    })
     expect(JSON.stringify(result)).not.toContain(payload.artifact.receiptId)
   }, {
     views: [{ ...view, dataMode: "live" }],
     loadData: async () => ({ ok: false, error: "capability_unavailable", message: "Connect your account", connectionCard }),
+  })
+})
+
+test.each([undefined, { state: "needs_connection", message: "Connect your account" }])("does not invent a connection App for missing or incomplete connection data (%j)", async connectionCard => {
+  await withClient(async client => {
+    for (const name of [`run_artifact_${viewId}`, "save_artifact_view"]) {
+      const result = await client.callTool({
+        name,
+        arguments: name === "save_artifact_view"
+          ? { configObjectId, title: view.title, reactSource: "export default function View() { return <div /> }" } : {},
+      })
+      expect(result.isError).toBe(true)
+      expect(result._meta?.["openwork/mcpApp"]).toBeUndefined()
+      expect(JSON.stringify(result.content)).toContain("capability_unavailable")
+    }
+  }, {
+    views: [{ ...view, dataMode: "live" }],
+    save: async () => ({ ...view, dataMode: "live" }),
+    loadData: async () => ({ ok: false, error: "capability_unavailable", message: "Data unavailable", connectionCard }),
   })
 })
 

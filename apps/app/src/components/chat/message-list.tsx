@@ -185,7 +185,7 @@ class ToolMessage extends React.Component<ToolMessageProps, { failed: boolean }>
 }
 
 const ToolMessageInner = ({ part }: ToolMessageProps) => {
-  const { connectorIdentities, onMcpReconnect, onMcpReopenAuthorization, onMcpRetry, connectionQuestionToolCallId } = useMessageList()
+  const { connectorIdentities, onMcpReconnect, onMcpReopenAuthorization, connectionQuestionToolCallId } = useMessageList()
   const parentActive = React.useContext(ParentRunActiveContext)
   const resolveLifecycle = useCurrentToolLifecycleResolver()
   const lifecycle = resolveLifecycle(part.toolCallId, isToolPartInFlight(part))
@@ -291,7 +291,6 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
         connector={resolveConnectorToolIdentity(part, connectorIdentities)}
         onReconnect={hasPreservedMcpAppResult(part) ? undefined : onMcpReconnect}
         onReopenAuthorization={onMcpReopenAuthorization}
-        onRetry={onMcpRetry}
       />
     )
   }
@@ -301,7 +300,6 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
       toolPart={part}
       onReconnect={onMcpReconnect}
       onReopenAuthorization={onMcpReopenAuthorization}
-      onRetry={onMcpRetry}
     />
   )
 }

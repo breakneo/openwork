@@ -66,7 +66,6 @@ function renderList(messages: UIMessage[], readOnly = false) {
       onEditUserMessage={() => {}}
       onMcpReconnect={() => Promise.reject(new Error("unused"))}
       onMcpReopenAuthorization={() => Promise.resolve()}
-      onMcpRetry={() => {}}
     >
       <MessageList messages={messages} status="ready" activityStatus="idle" />
     </MessageListProvider>

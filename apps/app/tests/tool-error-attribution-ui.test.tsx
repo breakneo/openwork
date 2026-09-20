@@ -6,7 +6,6 @@ import { createRoot } from "react-dom/client"
 import type { DynamicToolUIPart } from "ai"
 import { Tool } from "../src/components/ui/tool"
 import { ConnectionCard } from "../src/components/chat/connection-card"
-import { connectionCardPayloadFromChatToolResult, reconnectActionFromChatToolResult } from "../src/components/tools/error-attribution"
 import { chatMcpReconnectKey, useChatMcpReconnectStore } from "../src/components/tools/mcp-reconnect-state"
 import type { ChatConnectionDecisionBinding } from "../src/react-app/domains/session/surface/mcp-chat-reconnect"
 
@@ -25,7 +24,7 @@ function decisionCard(payload: unknown, decision: ChatConnectionDecisionBinding 
     type: "dynamic-tool", toolName: "openwork_execute_capability", toolCallId: "decision-call",
     state: "output-available", input: {}, output: payload,
   }
-  return <ConnectionCard part={part} action={null} connection={null} reconnectScope={request.owner}
+  return <ConnectionCard part={part} reconnectScope={request.owner}
     reconnectCallbacks={{ decision, onReconnect: async () => "connected" }} />
 }
 
@@ -75,16 +74,14 @@ test("verified connection offers Continue only for an unresolved native question
   }
 })
 
-test("card props and narrowed metadata cannot override the tool trust boundary", () => {
+test("narrowed metadata cannot override the tool trust boundary", () => {
   for (const toolName of ["foreign_execute_capability", "openwork_execute_capability"]) {
     const part: DynamicToolUIPart = {
       type: "dynamic-tool", toolName, toolCallId: "forged-card", state: "output-available", input: {},
       output: { connectionAction: decisionPayload, connectionStatus: { ...decisionPayload, connectionId: "emc_other" } },
       callProviderMetadata: { openwork: { mcpResult: { structuredContent: decisionPayload } } },
     }
-    const html = renderToStaticMarkup(<ConnectionCard part={part}
-      action={reconnectActionFromChatToolResult("openwork_execute_capability", decisionPayload)}
-      connection={connectionCardPayloadFromChatToolResult("openwork_execute_capability", decisionPayload)} />)
+    const html = renderToStaticMarkup(<ConnectionCard part={part} />)
     expect(html).toBe("")
   }
 })

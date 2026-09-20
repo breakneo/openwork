@@ -8,6 +8,10 @@ import type { createMcpAppActions } from "./mcp-app-origin"
 
 const resourceUri = "ui://openwork/connection-action/v2/view.html"
 const claimedDecisions = new Set<string>()
+const authenticatedDecisions = new Map<string, {
+  request: string | null
+  onReconnect: ChatToolReconnectCallbacks["onReconnect"]
+}>()
 
 export function hasHostConnectionActions(app: OpenworkMcpAppResource): boolean {
   return app.resourceUri === resourceUri && app.toolName === "connection_action"
@@ -105,35 +109,50 @@ export function createConnectionActionController(source: ConnectionActionHost) {
           && (latest ? requestIdentity(latest) : null) === (decision ? requestIdentity(decision) : null)
       } catch { return false }
     }
-    let questionAnswered = false
-    if (intent.action === "authenticate") {
-      const connection = parsed.data
-      if (!onReconnect || connection.actor !== "member" || connection.action?.surface !== "openwork_your_connections"
-        || !((connection.state === "needs_connection" && connection.action.type === "connect")
-          || (connection.state === "reauth_required" && connection.action.type === "reconnect"))) {
-        throw new Error("This connection requires setup in Settings > Library.")
+    try {
+      const authenticated = authenticatedDecisions.get(key)
+      const request = decision ? requestIdentity(decision) : null
+      if (authenticated && (authenticated.request !== request || authenticated.onReconnect !== onReconnect)) {
+        throw new Error("The connection action is no longer current.")
       }
-      const outcome = await onReconnect({ connectionId: connection.connectionId, connectionName: connection.connectionName,
-        label: connection.action.label }, () => {}, isCurrent).catch(() => {
-        throw new Error("Sign-in could not be completed. Check the connection in Settings > Library.")
-      })
-      if (!isCurrent() || outcome !== "connected") throw new Error("The connection action is no longer current.")
-      if (decision) questionAnswered = await respondChatConnectionDecision(key, decision, {
-        outcome: "connected", continuation: "review_remaining_work", repeatCompletedWrites: false,
-      }).catch(() => { throw new Error("Connected, but the original question could not be answered.") })
-    } else if (decision) {
-      if (!isCurrent()) throw new Error("The connection action is no longer current.")
-      questionAnswered = await respondChatConnectionDecision(key, decision, {
-        outcome: "skipped", continuation: "without_connection", alternativeAuthorization: false,
-      }).catch(() => { throw new Error("The original question could not be answered.") })
+      let questionAnswered = false
+      if (intent.action === "authenticate") {
+        if (!authenticated) {
+          const connection = parsed.data
+          if (!onReconnect || connection.actor !== "member" || connection.action?.surface !== "openwork_your_connections"
+            || !((connection.state === "needs_connection" && connection.action.type === "connect")
+              || (connection.state === "reauth_required" && connection.action.type === "reconnect"))) {
+            throw new Error("This connection requires setup in Settings > Library.")
+          }
+          const outcome = await onReconnect({ connectionId: connection.connectionId, connectionName: connection.connectionName,
+            label: connection.action.label }, () => {}, isCurrent).catch(() => {
+            throw new Error("Sign-in could not be completed. Check the connection in Settings > Library.")
+          })
+          if (!isCurrent() || outcome !== "connected") throw new Error("The connection action is no longer current.")
+          authenticatedDecisions.set(key, { request, onReconnect })
+        }
+        if (!isCurrent()) throw new Error("The connection action is no longer current.")
+        if (decision) questionAnswered = await respondChatConnectionDecision(key, decision, {
+          outcome: "connected", continuation: "review_remaining_work", repeatCompletedWrites: false,
+        }).catch(() => { throw new Error("Connected, but the original question could not be answered.") })
+      } else if (decision) {
+        if (!isCurrent()) throw new Error("The connection action is no longer current.")
+        questionAnswered = await respondChatConnectionDecision(key, decision, {
+          outcome: "skipped", continuation: "without_connection", alternativeAuthorization: false,
+        }).catch(() => { throw new Error("The original question could not be answered.") })
+      }
+      authenticatedDecisions.delete(key)
+      return standardMcpToolResult({ content: [], structuredContent: {
+        schemaVersion: "1", kind: "connection_action_intent", action: intent.action,
+        connection: { ...parsed.data, action: parsed.data.action ? {
+          type: parsed.data.action.type, label: parsed.data.action.label, surface: parsed.data.action.surface,
+        } : null },
+        outcome: intent.action === "authenticate" ? "connected" : "skipped", questionAnswered,
+      } })
+    } catch (error) {
+      claimedDecisions.delete(key)
+      throw error
     }
-    return standardMcpToolResult({ content: [], structuredContent: {
-      schemaVersion: "1", kind: "connection_action_intent", action: intent.action,
-      connection: { ...parsed.data, action: parsed.data.action ? {
-        type: parsed.data.action.type, label: parsed.data.action.label, surface: parsed.data.action.surface,
-      } : null },
-      outcome: intent.action === "authenticate" ? "connected" : "skipped", questionAnswered,
-    } })
   }
   return { callTool, observeBinding }
 }

@@ -40,9 +40,10 @@ function fixture() {
   restores.push(() => server.mockRestore())
   const origin = { client, workspaceId: "workspace", sessionId: "session", readOnly: false }
   const actions = createMcpAppActions(origin, app)
-  const controller = createConnectionActionController({ scope, sessionId: "session", toolCallId: "tool", connectionId: "connection",
+  const createController = () => createConnectionActionController({ scope, sessionId: "session", toolCallId: "tool", connectionId: "connection",
     current: () => ({ scope: currentScope, blocked, decision, onReconnect: reconnect }) })
-  return { app, actions, controller, events, server, intent, origin,
+  const controller = createController()
+  return { app, actions, controller, createController, events, server, intent, origin,
     call: (action = "authenticate", click = true) => controller.callTool(actions, app, "connection_action_intent", { connectionId: "connection", action }, click),
     setResponse: (value: typeof response) => { response = value },
     setDecision: (value: ChatConnectionDecisionBinding | null) => { decision = value },
@@ -112,6 +113,102 @@ test("skip and authentication race produces one host decision", async () => {
   finish?.()
   await authentication
   expect(f.events.filter(event => event === "connected" || event === "skipped")).toEqual(["connected"])
+})
+
+test.each([
+  ["cancelled", "authenticate"], ["cancelled", "skip"],
+  ["timed out", "authenticate"], ["timed out", "skip"],
+])("OAuth %s leaves the pending question retryable via %s", async (failure, action) => {
+  const f = fixture()
+  let attempts = 0
+  f.setReconnect(async () => {
+    f.events.push("oauth")
+    if (++attempts === 1) throw new Error(failure)
+    return "connected"
+  })
+  await expect(f.call()).rejects.toThrow("Sign-in could not be completed.")
+  expect(f.getDecision()?.isPending()).toBe(true)
+  f.setResponse({ content: [], hostAction: f.intent(action) })
+  const outcome = action === "authenticate" ? "connected" : "skipped"
+  expect((await f.call(action)).structuredContent).toMatchObject({ outcome, questionAnswered: true })
+  expect(f.events).toEqual(["server", "oauth", "server", ...(action === "authenticate" ? ["oauth"] : []), outcome])
+})
+
+test("unsupported authentication does not prevent skipping the pending question", async () => {
+  const f = fixture()
+  f.setResponse({ content: [], hostAction: { ...f.intent(), connection: { ...f.intent().connection, actor: "organization_admin" } } })
+  await expect(f.call()).rejects.toThrow("This connection requires setup in Settings > Library.")
+  f.setResponse({ content: [], hostAction: f.intent("skip") })
+  expect((await f.call("skip")).structuredContent).toMatchObject({ outcome: "skipped", questionAnswered: true })
+  expect(f.events).toEqual(["server", "server", "skipped"])
+})
+
+test.each(["authenticate", "skip"])("%s reply failure can retry across controllers without replaying OAuth", async action => {
+  const f = fixture()
+  const decision = f.getDecision()
+  if (!decision) throw new Error("Missing fixture")
+  let attempts = 0
+  f.setDecision({ ...decision, respond: async value => {
+    f.events.push("reply")
+    if (++attempts === 1) throw new Error("Reply failed")
+    await decision.respond(value)
+  } })
+  f.setResponse({ content: [], hostAction: f.intent(action) })
+  await expect(f.call(action)).rejects.toThrow("original question could not be answered.")
+  expect(decision.isPending()).toBe(true)
+  if (action === "authenticate") {
+    f.setResponse({ content: [], hostAction: { ...f.intent(), connection: { ...f.intent().connection, state: "connected", action: null } } })
+  }
+  const result = await f.createController().callTool(f.actions, f.app, "connection_action_intent", { connectionId: "connection", action }, true)
+  expect(result.structuredContent).toMatchObject({ outcome: action === "authenticate" ? "connected" : "skipped", questionAnswered: true })
+  expect(attempts).toBe(2)
+  expect(f.events.filter(event => event === "oauth")).toHaveLength(action === "authenticate" ? 1 : 0)
+  await expect(f.call(action)).rejects.toThrow()
+  expect(attempts).toBe(2)
+})
+
+test.each(["authenticate", "skip"])("pending %s reply still blocks competing decisions", async action => {
+  const f = fixture()
+  const decision = f.getDecision()
+  if (!decision) throw new Error("Missing fixture")
+  let finish: (() => void) | undefined
+  let started: (() => void) | undefined
+  const wait = new Promise<void>(resolve => { finish = resolve })
+  const replying = new Promise<void>(resolve => { started = resolve })
+  f.setDecision({ ...decision, respond: async value => {
+    started?.()
+    await wait
+    await decision.respond(value)
+  } })
+  f.setResponse({ content: [], hostAction: f.intent(action) })
+  const submission = f.call(action)
+  await replying
+  for (const competing of ["authenticate", "skip"]) {
+    f.setResponse({ content: [], hostAction: f.intent(competing) })
+    await expect(f.createController().callTool(f.actions, f.app, "connection_action_intent", { connectionId: "connection", action: competing }, true)).rejects.toThrow("A decision has already been made")
+  }
+  finish?.()
+  await submission
+  expect(f.events.filter(event => event === "connected" || event === "skipped")).toEqual([action === "authenticate" ? "connected" : "skipped"])
+})
+
+test.each(["question", "scope", "readonly", "closed", "callback"])("OAuth reply retry after %s change cannot reuse authentication", async mode => {
+  const f = fixture()
+  const decision = f.getDecision()
+  if (!decision) throw new Error("Missing fixture")
+  let replies = 0
+  f.setDecision({ ...decision, respond: async () => { replies++; throw new Error("Reply failed") } })
+  await expect(f.call()).rejects.toThrow("Connected, but the original question could not be answered.")
+  if (mode === "question") f.setDecision({ ...decision, request: { ...decision.request, requestId: "new-question" } })
+  if (mode === "scope") f.changeScope()
+  if (mode === "readonly") f.block()
+  if (mode === "closed") f.actions.dispose()
+  if (mode === "callback") f.setReconnect(async () => { f.events.push("replacement-oauth"); return "connected" })
+  await expect(f.call()).rejects.toThrow()
+  await expect(f.createController().callTool(f.actions, f.app, "connection_action_intent", { connectionId: "connection", action: "authenticate" }, true)).rejects.toThrow()
+  expect(replies).toBe(1)
+  expect(f.events.filter(event => event !== "server")).toEqual(["oauth"])
+  expect(decision.isPending()).toBe(true)
 })
 
 test.each(["authenticate", "skip"])("%s without pending binding never claims a question was answered", async action => {

@@ -516,13 +516,12 @@ test("structured search output remains compatible with marketplace match kinds a
 })
 
 test("agent steering describes skill and sharing results as plain text without confirmation Apps", () => {
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("explicitly call the standard preview tool")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("Modern OpenWork clients ignore that metadata and do not auto-open")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("the user previews the draft and chooses Save")
+  expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("Modern OpenWork clients ignore that metadata")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("return the ordinary operation response; report the verified outcome in text")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("confirmation card")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("skill-created MCP App")
   expect(agentModule.AGENT_MCP_INSTRUCTIONS).toContain("No new setup card is introduced")
-  expect(agentModule.AGENT_MCP_INSTRUCTIONS).not.toContain("chooses Save")
   for (const capability of [BUILTIN_CREATE_SKILL_CAPABILITY, BUILTIN_SHARE_PLUGIN_CAPABILITY, BUILTIN_ADD_TO_MARKETPLACE_CAPABILITY, BUILTIN_ADD_USER_TO_MARKETPLACE_CAPABILITY]) {
     const source = executeBuiltinSkillCapability(capability)?.content
     expect(source).toBeDefined()

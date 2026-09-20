@@ -25,7 +25,7 @@ beforeEach(() => useChatMcpReconnectStore.getState().reset())
 
 test("transcript card is flat, has one line and does not authenticate on render", () => {
   let authentications = 0
-  const html = renderToStaticMarkup(<ConnectionCard part={part} action={null} connection={null} reconnectScope={request.owner}
+  const html = renderToStaticMarkup(<ConnectionCard part={part} reconnectScope={request.owner}
     reconnectCallbacks={{ decision: { request, isPending: () => true, respond: async () => {} }, onReconnect: async () => { authentications += 1; return "connected" } }} />)
   expect(html).toContain("Connect Research Vault")
   expect(html).toContain(">Skip</button>")
@@ -36,7 +36,7 @@ test("transcript card is flat, has one line and does not authenticate on render"
 })
 
 test("admin setup names owner and action without OAuth", () => {
-  const html = renderToStaticMarkup(<ConnectionCard part={{ ...part, output: { ...payload, actor: "provider_admin", action: { type: "fix_provider", surface: "provider_admin_console", label: "Enable the integration" } } }} action={null} connection={null} />)
+  const html = renderToStaticMarkup(<ConnectionCard part={{ ...part, output: { ...payload, actor: "provider_admin", action: { type: "fix_provider", surface: "provider_admin_console", label: "Enable the integration" } } }} />)
   expect(html).toContain("The provider admin must restore provider access for Research Vault")
   expect(html).toContain(">Dismiss</button>")
   expect(html).not.toContain(">Authenticate</button>")
@@ -49,7 +49,7 @@ test("read-only history has no actions", () => {
     onRevertToUserMessage={() => {}} onForkAtMessage={() => {}} onEditUserMessage={() => {}}
     onMcpReconnect={async () => "connected"} onMcpReopenAuthorization={async () => {}}
     dispatchAction={() => {}} setPrompt={() => {}}>
-    <ConnectionCard part={part} action={null} connection={null} />
+    <ConnectionCard part={part} />
   </MessageListProvider>)
   expect(html).not.toContain("<button")
 })

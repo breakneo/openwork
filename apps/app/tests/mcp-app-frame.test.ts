@@ -1090,7 +1090,6 @@ describe("MCP App resolution", () => {
     const releaseSpy = spyOn(client, "releaseMcpApp").mockResolvedValue({ released: true })
     const sandboxSpy = spyOn(client, "mcpAppSandbox").mockReturnValue({ url: "about:blank", expectedOrigin: "https://sandbox.example", sandbox: "allow-scripts allow-same-origin" })
     const errorSpy = spyOn(console, "error").mockImplementation(() => {})
-    const providerRetry = jest.fn()
     const part: DynamicToolUIPart = {
       type: "dynamic-tool", toolName: "fixture_render", toolCallId: "launch", state: "output-available",
       input: {}, output: "Provider fallback", callProviderMetadata: { openwork: { mcpResult: {
@@ -1106,11 +1105,11 @@ describe("MCP App resolution", () => {
       dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {},
       onForkAtMessage: () => {}, onEditUserMessage: () => {},
       onMcpReconnect: async () => { throw new Error("Unexpected reconnect") },
-      onMcpReopenAuthorization: async () => {}, onMcpRetry: providerRetry,
+      onMcpReopenAuthorization: async () => {},
       children: createElement(McpAppFrame, { part: nextPart }),
     }))) }
     return {
-      part, container, resolveSpy, callSpy, releaseSpy, errorSpy, providerRetry, render,
+      part, container, resolveSpy, callSpy, releaseSpy, errorSpy, render,
       async unmountFrame() { await act(async () => root.render(null)) },
       async dispose() {
         try { await act(async () => root.unmount()) } finally {
@@ -1158,7 +1157,6 @@ describe("MCP App resolution", () => {
       await act(async () => retry.click())
       expect(host.resolveSpy).toHaveBeenCalledTimes(2)
       expect(host.callSpy).not.toHaveBeenCalled()
-      expect(host.providerRetry).not.toHaveBeenCalled()
     } finally {
       await host.dispose()
       timerSpy.mockRestore()
@@ -1191,7 +1189,6 @@ describe("MCP App resolution", () => {
       expect(host.container.querySelector('[role="status"]')).toBeNull()
       expect(host.container.querySelector("iframe")).not.toBeNull()
       expect(host.callSpy).not.toHaveBeenCalled()
-      expect(host.providerRetry).not.toHaveBeenCalled()
     } finally { await host.dispose() }
   })
 
@@ -1209,7 +1206,6 @@ describe("MCP App resolution", () => {
       expect(host.container.querySelector("iframe")).toBeNull()
       expect(host.errorSpy).not.toHaveBeenCalled()
       expect(host.callSpy).not.toHaveBeenCalled()
-      expect(host.providerRetry).not.toHaveBeenCalled()
     } finally { await host.dispose() }
   })
 
@@ -1236,7 +1232,7 @@ describe("MCP App resolution", () => {
     } finally { await host.dispose() }
   })
 
-  test.each(["draft", "snapshot", "preview", "both"])("resolves %s metadata inline without opening or redirecting the side panel", async mode => {
+  test.each(["draft", "snapshot", "preview", "both"].flatMap(mode => [false, true].map(active => ({ mode, active }))))("opens $mode in the existing preview only after a click (active: $active)", async ({ mode, active }) => {
     const host = resolutionFixture(true)
     const resourceUri = "ui://openwork/artifacts/arv_fixture/views/avr_fixture/index.html"
     const toolName = mode === "snapshot" ? "openwork-cloud_render_artifact_fixture"
@@ -1249,24 +1245,33 @@ describe("MCP App resolution", () => {
         structuredContent: { artifact: { title: "Fixture preview", receiptId: "receipt_fixture" } },
         _meta: {
           "openwork/mcpApp": launch,
-          ...(mode !== "snapshot" ? { "openwork/appDraft": { appId: "arv_fixture", revisionId: "avr_fixture", title: "Fixture preview", receiptId: "receipt_fixture" } } : {}),
+          ...(mode === "draft" || mode === "both" ? { "openwork/appDraft": { appId: "arv_fixture", revisionId: "avr_fixture", title: "Fixture preview", receiptId: "receipt_fixture" } } : {}),
           ...(mode !== "draft" ? { artifactViewId: "arv_fixture", viewRevisionId: "avr_fixture", appTitle: "Fixture preview" } : {}),
         },
       } } },
     }
     const openTab = spyOn(usePanelTabStore.getState(), "openTab").mockImplementation(() => {})
     const openPanel = spyOn(useUiStateStore.getState(), "setSidePanelState").mockImplementation(() => {})
-    const activity = spyOn(useSessionActivityStore.getState(), "getStatus").mockReturnValue("responding")
+    const activity = spyOn(useSessionActivityStore.getState(), "getStatus").mockReturnValue(active ? "responding" : "idle")
     host.resolveSpy.mockResolvedValue({ app: fixture({ resourceUri }) })
     try {
       expect(hasPreservedMcpAppResult(part)).toBe(true)
       await host.render(part)
-      expect(host.resolveSpy).toHaveBeenCalledWith("fixture", toolName, launch, expect.objectContaining({ sessionId: "session_fixture" }))
-      expect(host.container.querySelector("iframe")).not.toBeNull()
-      expect(host.container.querySelector("[data-mcp-app-resource]")?.getAttribute("data-mcp-app-resource")).toBe(resourceUri)
-      expect(host.container.textContent).not.toContain("Open preview")
+      if (mode === "draft" || mode === "both") expect(host.resolveSpy).not.toHaveBeenCalled()
+      else expect(host.resolveSpy).toHaveBeenCalledWith("fixture", toolName, launch, expect.objectContaining({ sessionId: "session_fixture" }))
+      expect(host.container.querySelector("iframe")).toBeNull()
+      expect(host.container.textContent).toContain("then choose Save")
+      const preview = Array.from(host.container.querySelectorAll("button")).find(button => button.textContent === "Open preview")
+      if (!preview) throw new Error("Missing Open preview")
       expect(openTab).not.toHaveBeenCalled()
       expect(openPanel).not.toHaveBeenCalled()
+      await act(async () => preview.click())
+      expect(openTab).toHaveBeenCalledTimes(1)
+      expect(openTab).toHaveBeenCalledWith("session_fixture", {
+        type: "app", id: "app:arv_fixture:avr_fixture:receipt_fixture", label: "Fixture preview",
+        appId: "arv_fixture", revisionId: "avr_fixture", receiptId: "receipt_fixture",
+      })
+      expect(openPanel).toHaveBeenCalledWith("session_fixture", "panel")
       expect(host.callSpy).not.toHaveBeenCalled()
       expect(host.errorSpy).not.toHaveBeenCalled()
     } finally {
@@ -1277,20 +1282,33 @@ describe("MCP App resolution", () => {
     }
   })
 
-  test.each(["mcpResult", "mcpApp"])("keeps draft-only %s metadata on the ordinary resolution path", async alias => {
+  test.each(["mcpResult", "mcpApp"].flatMap(alias => ["save_artifact_view", "preview_artifact_fixture"].map(toolName => ({ alias, toolName }))))("offers $toolName $alias live drafts without pinning a receipt or running the app", async ({ alias, toolName }) => {
     const host = resolutionFixture(false)
+    const openTab = spyOn(usePanelTabStore.getState(), "openTab").mockImplementation(() => {})
+    const openPanel = spyOn(useUiStateStore.getState(), "setSidePanelState").mockImplementation(() => {})
     try {
       await host.render({
-        ...host.part, toolName: "openwork-cloud_save_artifact_view",
+        ...host.part, toolName: `openwork-cloud_${toolName}`,
         callProviderMetadata: { openwork: { [alias]: {
-          content: [], _meta: { "openwork/appDraft": { appId: "arv_fixture", revisionId: "avr_fixture", title: "Draft" } },
+          content: [], structuredContent: { artifact: { receiptId: "live-receipt" } },
+          _meta: { "openwork/appDraft": { appId: "arv_fixture", revisionId: "avr_fixture", title: "Draft" } },
         } } },
       })
-      expect(host.resolveSpy).toHaveBeenCalledTimes(1)
-      expect(host.container.textContent).toBe("")
+      expect(host.resolveSpy).not.toHaveBeenCalled()
+      expect(host.container.textContent).toContain("Open preview")
       expect(host.container.querySelector("iframe")).toBeNull()
+      expect(openTab).not.toHaveBeenCalled()
+      expect(openPanel).not.toHaveBeenCalled()
+      const preview = host.container.querySelector("button")
+      if (!preview) throw new Error("Missing Open preview")
+      await act(async () => preview.click())
+      expect(openTab).toHaveBeenCalledWith("session_fixture", {
+        type: "app", id: "app:arv_fixture:avr_fixture:latest", label: "Draft",
+        appId: "arv_fixture", revisionId: "avr_fixture", receiptId: undefined,
+      })
+      expect(openPanel).toHaveBeenCalledWith("session_fixture", "panel")
       expect(host.callSpy).not.toHaveBeenCalled()
-    } finally { await host.dispose() }
+    } finally { await host.dispose(); openTab.mockRestore(); openPanel.mockRestore() }
   })
 
   test.each(["skill-created", "plugin-flow"].flatMap(resource =>
@@ -1428,7 +1446,7 @@ describe("MCP App resolution", () => {
   })
 })
 
-test("connection v2 uses the real AppBridge with late host binding and no native card or remount", async () => {
+test.each(["execute_capability", "run_artifact_fixture", "preview_artifact_fixture", "save_artifact_view"])("%s connection v2 uses the real AppBridge with late host binding and no native card or remount", async toolName => {
   const previousAct = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT")
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true)
   const container = document.body.appendChild(document.createElement("div"))
@@ -1442,9 +1460,9 @@ test("connection v2 uses the real AppBridge with late host binding and no native
   const connection = { schemaVersion: "1", connectionId: "connection", connectionName: "Fixture", state: "needs_connection",
     actor: "member", message: "Connect Fixture", action: { type: "connect", label: "Authenticate", surface: "openwork_your_connections" } }
   const launch = { toolName: "connection_action", resourceUri: app.resourceUri, arguments: { connectionId: "connection" } }
-  const part: DynamicToolUIPart = { type: "dynamic-tool", toolName: "openwork-cloud_execute_capability", toolCallId: "connection-bridge",
+  const part: DynamicToolUIPart = { type: "dynamic-tool", toolName: `openwork-cloud_${toolName}`, toolCallId: `connection-bridge-${toolName}`,
     state: "output-available", input: {}, output: connection,
-    callProviderMetadata: { openwork: { mcpResult: { content: [], structuredContent: connection, _meta: { "openwork/mcpApp": launch } } } } }
+    callProviderMetadata: { openwork: { mcpResult: { content: [], isError: true, structuredContent: connection, _meta: { "openwork/mcpApp": launch } } } } }
   let binding: ChatConnectionDecisionBinding | null = null
   let pending = true
   const getConnectionDecision = () => binding
@@ -1464,7 +1482,7 @@ test("connection v2 uses the real AppBridge with late host binding and no native
     client, workspaceId: "fixture", sessionId: "session", uiStateOwner: "bridge-scope", readOnly: false,
     showThinking: false, developerMode: false, displaySuggestions: false, providerConnectedCount: 0,
     dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {}, onForkAtMessage: () => {}, onEditUserMessage: () => {},
-    onMcpReconnect, onMcpReopenAuthorization: async () => {}, onMcpRetry: () => {}, getConnectionDecision,
+    onMcpReconnect, onMcpReopenAuthorization: async () => {}, getConnectionDecision,
     children: createElement(McpAppFrame, { part }),
   })))
   let reply: ((message: JSONRPCMessage) => void) | undefined
@@ -1557,7 +1575,7 @@ describe("MCP App iframe policy", () => {
       dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {},
       onForkAtMessage: () => {}, onEditUserMessage: () => {},
       onMcpReconnect: async () => { throw new Error("Unexpected reconnect") },
-      onMcpReopenAuthorization: async () => {}, onMcpRetry: () => {},
+      onMcpReopenAuthorization: async () => {},
       children: createElement(McpAppFrame, { part: updated ? {
         ...part, toolCallId: change === "tool-call" ? "updated-call" : part.toolCallId,
         input: structuredClone(nextInput), callProviderMetadata: { openwork: { mcpResult: structuredClone(nextResult) } },
@@ -1685,7 +1703,7 @@ describe("MCP App iframe policy", () => {
               dispatchAction: () => {}, setPrompt: () => {}, onRevertToUserMessage: () => {},
               onForkAtMessage: () => {}, onEditUserMessage: () => {},
               onMcpReconnect: async () => { throw new Error("Unexpected reconnect in protocol fixture") },
-              onMcpReopenAuthorization: async () => {}, onMcpRetry: () => {},
+              onMcpReopenAuthorization: async () => {},
               children: createElement(McpAppFrame, { part: nextPart }),
             }),
       })))

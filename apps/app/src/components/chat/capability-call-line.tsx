@@ -125,7 +125,6 @@ export function CapabilityCallLine({
   statusUnknown = false,
   onReconnect,
   onReopenAuthorization,
-  onRetry,
 }: CapabilityCallLineProps) {
   const [open, setOpen] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
@@ -133,7 +132,7 @@ export function CapabilityCallLine({
   const isFailed = part.state === "output-error"
   const duration = statusUnknown ? null : trackToolCallDuration(part)
   const { reconnectAction, reconnectState, reconnectError, reconnectPresentation, handleReconnect } =
-    useChatToolReconnect(part, { onReconnect, onReopenAuthorization, onRetry })
+    useChatToolReconnect(part, { onReconnect, onReopenAuthorization })
   const ReconnectIcon = reconnectState === "opening"
     ? LoaderCircle
     : reconnectState === "authorization_opened"

@@ -2,11 +2,10 @@
 
 import { useState } from "react"
 import type { DynamicToolUIPart } from "ai"
-import type { ConnectionActionPayload } from "@openwork/types/connection-action-app"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { connectionCardPayloadFromChatToolResult, connectionResultFromChatToolPart, reconnectActionFromChatToolResult, type ChatToolReconnectAction } from "@/components/tools/error-attribution"
+import { connectionCardPayloadFromChatToolResult, connectionResultFromChatToolPart, reconnectActionFromChatToolResult } from "@/components/tools/error-attribution"
 import { useChatToolReconnect, type ChatToolReconnectCallbacks } from "@/components/tools/use-chat-tool-reconnect"
 import type { ConnectorToolIdentity } from "@/react-app/domains/connections/connector-tool-identity"
 import { useOptionalMessageList } from "./message-list-provider"
@@ -22,8 +21,6 @@ const ACTION_OWNER = {
 export function ConnectionCard({ part, callbacks, reconnectCallbacks, reconnectScope, connectorIdentities }: {
   callbacks?: ChatToolReconnectCallbacks
   part: DynamicToolUIPart
-  action: ChatToolReconnectAction | null
-  connection: ConnectionActionPayload | null
   reconnectCallbacks?: ChatToolReconnectCallbacks
   reconnectScope?: string
   connectorIdentities?: ConnectorToolIdentity[]

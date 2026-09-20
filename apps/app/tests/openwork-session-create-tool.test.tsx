@@ -28,7 +28,6 @@ function renderPart(part: DynamicToolUIPart) {
         onEditUserMessage={noop}
         onMcpReconnect={async () => "connected"}
         onMcpReopenAuthorization={async () => {}}
-        onMcpRetry={noop}
       >
         <MessageList messages={[{ id: "history", role: "assistant", parts: [part] }]} status="ready" />
       </MessageListProvider>

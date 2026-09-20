@@ -28,7 +28,6 @@ export type ChatToolReconnectCallbacks = {
     isCurrent?: () => boolean,
   ) => Promise<ChatToolReconnectResult>
   onReopenAuthorization?: (action: ChatToolReconnectAction, authorizeUrl: string, isCurrent?: () => boolean) => Promise<void>
-  onRetry?: (action: ChatToolReconnectAction) => void | Promise<void>
 }
 
 const reopening = new Set<string>()
