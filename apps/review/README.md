@@ -89,34 +89,28 @@ Visual judging is explicit: `pnpm --dir evals evidence:judge -- --test-run <run>
 
 ## PR change proofs
 
-A non-exempt PR must add at least one new runnable
-`evals/specs/**/*.e2e.test.ts`. Modified, renamed, deleted, or pre-existing specs
-do not satisfy the contract. The narrow existing docs-only and generated model
-snapshot lanes are exempt and keep their own required validation.
+Every `evals/specs/**/*.e2e.test.ts` a PR adds or changes is treated as that
+PR's proof of work. Nothing is required and nothing is blocked: a PR that
+touches no E2E spec produces no proof evidence, and the run says so.
 
-`Build and core checks / proof-contract` validates the live changed-file list and
-each new spec's Git blob. Empty, malformed, skip-only, and todo-only files fail.
-Its result feeds the existing `openwork-tests-required` aggregate. This is the
-blocking **proof supplied** contract; it does not claim the change is correct.
-
-The separate non-required **PR change proof** workflow runs only the newly added
-specs against the exact PR head. Each spec gets its own bounded local job and
-artifact. Failed, skipped, unsupported, setup-failed, and cancelled proofs remain
-honest non-passing executions; they do not fall back to packaged smoke or another
-regression. Native/platform requirements not available in this first local lane
-will therefore remain visible rather than being substituted.
+The non-required **PR change proof** workflow selects those specs from the live
+PR file list and runs each one in its own bounded job on the exact PR head, with
+a virtual display so Electron-driving specs can run. Each job uploads one hashed
+artifact. Failed, skipped, unsupported, and cancelled proofs stay visible as
+non-passing executions; they never fall back to packaged smoke or another
+regression.
 
 The credentialed **Evidence review** workflow runs trusted default-branch code.
-It re-reads the current PR file list, derives the same new-spec selection, and
-accepts exactly one artifact per selected spec and run attempt. Every test record
-must name that spec and the current PR SHA. Downloaded PR artifacts are data and
-are never imported or executed. Unrelated smoke, an unexpected proof artifact,
-stale evidence, and missing/duplicate records are refused.
+It re-reads the current PR file list, derives the same selection, and accepts
+exactly one artifact per selected spec and run attempt. Every test record must
+name that spec and the current PR SHA. Records from all selected specs are
+combined into one report with one section per test. Downloaded PR artifacts are
+data and are never imported or executed. Unrelated evidence, unexpected proof
+artifacts, stale heads or attempts, and missing or duplicate records are refused.
 
 Candidate publisher and review-app checks live in the PR-only
 `Evidence review candidate checks` workflow. It has no publishing secret or
-write permission, avoiding a workflow that combines manual privileged dispatch
-with PR-head execution.
+write permission.
 
 For automatic publication, keep repository variable `OPENWORK_REVIEW_URL`, secret
 `OPENWORK_REVIEW_BLOB_TOKEN`, and the existing Vercel Preview/private Blob

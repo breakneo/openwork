@@ -102,10 +102,19 @@ try {
   }
   // The same enterprise artifact, booted as an already-activated install (the update path for existing customers).
   check("desktop-boot-enterprise-activated", "packaged-activated-launch", join(flavorOutput("enterprise"), "linux-unpacked", "openwork-enterprise"), 150_000);
-  // The same enterprise artifact asked to quit (SIGTERM and Browser.close, fresh and activated): it must exit 0 inside
-  // the bound. Linux has no crash reports to read, so the journey names that half skipped and the exit signal is the witness.
-  check("desktop-quit-enterprise", "desktop-quit-path", join(flavorOutput("enterprise"), "linux-unpacked", "openwork-enterprise"), 300_000);
   await runConcurrent(checks);
+  // Browser.close is intentionally isolated from the other packaged Electron
+  // instances. Running the quit contract beside the long egress observation can
+  // make an unrelated attached surface disappear before its quiet window ends.
+  // Linux has no crash reports to read, so the journey names that half skipped
+  // and the exit signal is the witness.
+  await bootPackagedDesktop(
+    "desktop-quit-enterprise",
+    "desktop-quit-path",
+    join(flavorOutput("enterprise"), "linux-unpacked", "openwork-enterprise"),
+    300_000,
+    190,
+  );
   report.passed = true;
 } finally {
   report.totalMilliseconds = Math.round(performance.now() - started);
