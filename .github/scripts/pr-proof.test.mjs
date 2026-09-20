@@ -24,9 +24,16 @@ test("narrow existing lanes are exempt but mixed changes are not", () => {
   assert.throws(() => requireProof(selectProof([file("packages/docs/new.mdx", "renamed", "apps/app/old.ts")])), /NEW runnable/);
 });
 
-test("unsafe, duplicate and malformed file lists fail closed", () => {
-  for (const files of [[], [file("../escape.ts")], [file("apps/a.ts"), file("apps/a.ts")]])
-    assert.throws(() => selectProof(files));
+test("normal Git paths are accepted while traversal, controls, backslashes and duplicates fail closed", () => {
+  assert.deepEqual(selectProof([
+    file("ee/apps/den-web/app/(den)/dashboard/a file.ts"),
+    file("packages/docs/café.mdx"),
+    file("evals/specs/change.e2e.test.ts", "added"),
+  ]).specs, ["evals/specs/change.e2e.test.ts"]);
+  for (const files of [
+    [], [file("../escape.ts")], [file("/absolute.ts")], [file("apps\\escape.ts")],
+    [file("apps/control\n.ts")], [file("apps/a.ts"), file("apps/a.ts")],
+  ]) assert.throws(() => selectProof(files));
   assert.throws(() => requireProof(selectProof([file("evals/specs/a.e2e.test.ts", "added", "evals/specs/old.e2e.test.ts")])));
 });
 

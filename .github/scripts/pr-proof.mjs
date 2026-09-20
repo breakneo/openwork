@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 
 export function safePath(path) {
-  return typeof path === "string" && path.length <= 240 && path.split("/").every(part =>
-    part !== "." && part !== ".." && !part.startsWith("-") && /^[a-zA-Z0-9_.-]+$/.test(part));
+  return typeof path === "string" && path.length > 0 && path.length <= 240
+    && !path.startsWith("/") && !/[\\\0-\x1f\x7f]/u.test(path)
+    && path.split("/").every(part => part.length > 0 && part !== "." && part !== "..");
 }
 
 export function selectProof(files) {
