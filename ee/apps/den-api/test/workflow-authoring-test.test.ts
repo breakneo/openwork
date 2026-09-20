@@ -225,6 +225,8 @@ test("output contract failure retains a private inspectable version but no valid
   expect(f.receipts[0]).not.toHaveProperty("resultMarkdown")
   expect(f.retainSource).toHaveBeenCalledTimes(1)
   expect(await f.store.get(f.identity)).toMatchObject({ code: "return await tools.den.read({})", contract: { outputSchema: { type: "string" } } })
+  expect(await f.store.get({ ...f.identity, orgMembershipId: createDenTypeId("member") })).toBeNull()
+  expect(await f.store.get({ ...f.identity, organizationId: createDenTypeId("organization") })).toBeNull()
   const text = result.content[0]
   if (text?.type !== "text") throw new Error("Expected failure text")
   expect(JSON.parse(text.text)).toMatchObject({ runId: f.identity.receiptId, status: "failed", verification: "failed",

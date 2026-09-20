@@ -592,7 +592,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       if (!name || !await isCodeModeHelperCapability(capabilityContext, name)) {
         return { isError: true, content: [{ type: "text", text: "This helper only opens MCP Apps, connection status and remote sessions. Use execute_capability_script for other actions." }] }
       }
-      return executeCapabilityWithBudget({ capability: name, invoke: () => executeCapability(capabilityContext, { name, body, schemaDigest }) })
+      return executeCapabilityWithBudget({ capability: name, invoke: () => executeCapability(capabilityContext, { name, body, schemaDigest, requireModelVisible: true }) })
     })
 
     server.registerTool(

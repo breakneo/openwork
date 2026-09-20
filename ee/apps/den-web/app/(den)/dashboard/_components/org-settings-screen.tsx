@@ -548,7 +548,7 @@ export function OrgSettingsScreen() {
           {!canManageSettings ? <p className="text-sm text-muted-foreground">Managed by your organization administrator.</p> : null}
           <details className="border-t border-border pt-3 text-sm text-muted-foreground">
             <summary className="cursor-pointer">Connection behavior</summary>
-            <p className="pt-3">Agents discover and run connected actions and saved Workflows through Code Mode. App and sign-in cards stay available. Save settings, then reconnect your agent to refresh its tools.</p>
+            <p className="pt-3">Requires a compatible client that keeps private App tools out of the model. Current OpenWork engines are not yet supported; leave Code Mode off when using OpenWork. Compatible clients keep App and sign-in cards. Save settings, then reconnect your agent to refresh its tools.</p>
           </details>
         </DenCard>
         <DenCard size="spacious" className="grid gap-6">

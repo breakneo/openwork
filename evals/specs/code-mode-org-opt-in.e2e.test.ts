@@ -71,6 +71,8 @@ test("an owner opts into Code Mode and shares a saved Workflow only with the sel
   }).map((tool) => tool.name);
   expect(await advertisedModelTools()).toContain("search_capabilities");
   await user.see({ role: "switch", label: "Enable Code Mode" });
+  await user.click({ text: "Connection behavior" });
+  await user.see({ text: "Current OpenWork engines are not yet supported" });
   await user.screenshot();
   await user.click({ role: "switch", label: "Enable Code Mode" });
   await user.click({ role: "button", label: "Save settings" });
@@ -116,6 +118,24 @@ test("an owner opts into Code Mode and shares a saved Workflow only with the sel
     body: JSON.stringify({ name: "Failed attempt", receiptId: failedId }) });
   expect(denied.response.status).toBe(400);
   expect(record(denied.body).error).toBe("workflow_authoring_run_not_successful");
+  const foreignFailedHistory = await seed.api(world.den.members.teammate, `/v1/workflow-authoring-history?receiptId=${failedId}`);
+  expect(items(record(foreignFailedHistory.body).items)).toEqual([]);
+  const rejectedInput = await world.rpc("tools/call", { name: "execute_capability_script", arguments: {
+    code: `return await ${expression(save)}({body:${JSON.stringify(keep)}})`,
+    input: { count: "invalid" }, inputSchema: schema,
+  } });
+  expect(rejectedInput.isError).toBe(true);
+  const rejected = record(JSON.parse(text(items(rejectedInput.content)[0]?.text)));
+  expect(rejected.error).toBe("invalid_arguments");
+  expect(record(rejected.retention).canSaveByReceipt).toBe(false);
+  const rejectedId = text(rejected.receiptId);
+  const rejectedHistory = await seed.api(world.den.admin, `/v1/workflow-authoring-history?receiptId=${rejectedId}`);
+  const rejectedVersion = items(record(rejectedHistory.body).items)[0];
+  expect(record(record(rejectedVersion).execution).status).toBe("failed");
+  expect(record(record(rejectedVersion).procedure).contract).toEqual({ input: { count: "invalid" }, inputSchema: schema });
+  const rejectedKeep = await seed.api(world.den.admin, "/v1/workflows", { method: "POST",
+    body: JSON.stringify({ name: "Invalid contract attempt", receiptId: rejectedId }) });
+  expect(record(rejectedKeep.body).error).toBe("workflow_authoring_run_not_successful");
   const capability = `plugin:${world.pluginId}:${text(saved.configObjectId)}`;
   const findWorkflow = async (caller: number) => items((await discover("Team report", caller)).items).find((match) => text(match.path).includes(capability));
   expect(await findWorkflow(1)).toBeUndefined();

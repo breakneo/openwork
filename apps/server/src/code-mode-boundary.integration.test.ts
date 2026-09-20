@@ -3,11 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createManagedOpencodeV2Server, installOpencodeV2Binary } from "./managed-opencode-v2.js";
-import artifacts from "./opencode-v2-artifacts.json";
+import artifacts from "./opencode-v2-artifacts.json" with { type: "json" };
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected object");
-  return value;
+  return Object.fromEntries(Object.entries(value));
 }
 
 // Characterization of a release blocker, NOT proof of the desired boundary.

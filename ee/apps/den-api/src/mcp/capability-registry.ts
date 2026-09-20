@@ -6,6 +6,7 @@ import { Effect } from "effect"
 import type { Hono } from "hono"
 import { z } from "zod"
 import { memberFacingMcpConnectionsEnabled } from "../capability-sources/external-mcp-rollout.js"
+import { listNativeProviderUsableEntries } from "../capability-sources/native-provider-connections.js"
 import { isPlatformAdminUserId } from "../middleware/admin.js"
 import type { McpPrincipal } from "./auth.js"
 import type { McpToolOperation } from "./catalog.js"
@@ -103,6 +104,7 @@ export type ExecuteCapabilityToolResult = {
 }
 
 export type CapabilityExecuteInput = {
+  requireModelVisible?: boolean
   name: string
   schemaDigest?: string
   path?: unknown
@@ -496,6 +498,23 @@ const nativeSource: CapabilitySource = {
   })),
   execute: async (ctx, parsed, input) => {
     if (!parsedForKind(parsed, "native")) return unknownCapabilityResult(input.name)
+    if (parsed.toolName === "*") {
+      if (!ctx.member) return unknownCapabilityResult(input.name)
+      // Do not reuse the search snapshot: grants and credentials may have changed.
+      const connections = await listNativeProviderUsableEntries({
+        organizationId: ctx.organizationId,
+        orgMembershipId: ctx.member.orgMembershipId,
+        teamIds: ctx.member.teamIds,
+      })
+      const connection = connections.find((entry) => entry.id === parsed.connectionId)
+      if (!connection) return unknownCapabilityResult(input.name)
+      const status = connectionStatusMatch(connection, 0).connectionStatus
+      if (!status) return unknownCapabilityResult(input.name)
+      const payload = connection.connectedForMe
+        ? connectedConnectionActionPayload({ connectionId: connection.id, connectionName: connection.name })
+        : connectionActionPayloadFromStatus(status)
+      return { content: textContent(connectionActionTextFallback(payload)), structuredContent: { ...payload } }
+    }
     const result = await executeNativeCapability({
       app: ctx.app,
       env: ctx.env,
@@ -580,6 +599,7 @@ const externalMcpSource: CapabilitySource = {
       toolName: parsed.toolName,
       args: normalizeToolBody(input.body),
       schemaDigest: input.schemaDigest,
+      requireModelVisible: input.requireModelVisible,
       redirectUriBase: ctx.redirectUriBase,
     })
     return result.ok

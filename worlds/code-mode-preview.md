@@ -45,11 +45,23 @@ advertisement is not proof of the engine's actual model-facing catalog.
 
 Do not roll out this opt-in as an OpenCode integration yet:
 
+Cloud submission readiness now fails closed when an opt-in catalog cannot
+demonstrate both Code Mode entry tools without the private App routers. Generic
+model tool-call capability is not a substitute for that projection. The existing
+settings disclosure warns that current OpenWork engines are unsupported. This
+is a compatibility guard, not a supported direct-tool integration or proof that
+every other MCP client filters visibility correctly.
+
 - Pinned v1 `v1.18.30` (`3104c1428ec91f809e5ab86631300de41eb6952e`)
   returns from `SessionTools.resolve` before adding any direct MCP tools when
   `experimentalCodeMode` is enabled. Its `CodeModeTool` wraps the MCP catalog
   without a per-server bypass. Disabling that flag globally would change
   unrelated MCP behavior.
+  The pinned plugin API's `tool.definition` hook edits descriptions and schemas;
+  it does not expose the final tool map. Execution hooks run after projection,
+  so they cannot repair model-catalog leakage. Source inspected at
+  `anomalyco/opencode@3104c1428ec91f809e5ab86631300de41eb6952e`,
+  `packages/opencode/src/session/tools.ts` and `packages/plugin/src/index.ts`.
 - Pinned v2 `0.0.0-beta-19086` accepts per-server `codemode: false` and exposes
   `openwork-cloud_execute_capability_script` directly. However, a real provider
   request also contains `openwork-cloud_execute_capability` even when the MCP
