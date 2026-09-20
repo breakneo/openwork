@@ -7,6 +7,7 @@ import {
   getAllowedDesktopVersionsFromMetadata,
   getOrgAccessFlags,
   getRequireSsoFromMetadata,
+  getCodeModeFromMetadata,
 } from "../../_lib/den-org";
 import { DashboardPageTemplate } from "../../_components/ui/dashboard-page-template";
 import { DenButton } from "../../_components/ui/button";
@@ -204,6 +205,7 @@ export function OrgSettingsScreen() {
   const [domainRestrictionsEnabled, setDomainRestrictionsEnabled] =
     useState(false);
   const [requireSsoEnabled, setRequireSsoEnabled] = useState(false);
+  const [codeModeEnabled, setCodeModeEnabled] = useState(false);
   const [domainEditModeEnabled, setDomainEditModeEnabled] = useState(false);
   const [desktopVersionOptions, setDesktopVersionOptions] = useState<string[]>(
     [],
@@ -291,6 +293,7 @@ export function OrgSettingsScreen() {
       (orgContext.organization.allowedEmailDomains?.length ?? 0) > 0,
     );
     setRequireSsoEnabled(getRequireSsoFromMetadata(orgContext.organization.metadata));
+    setCodeModeEnabled(getCodeModeFromMetadata(orgContext.organization.metadata));
     setDomainEditModeEnabled(false);
   }, [orgContext]);
 
@@ -443,6 +446,7 @@ export function OrgSettingsScreen() {
           ? draftAllowedDomains
           : null,
         requireSso: requireSsoEnabled,
+        codeModeEnabled,
         ...(supportedDesktopVersionOptions.length > 0
           ? {
               allowedDesktopVersions: allDesktopVersionsAllowed
@@ -532,6 +536,21 @@ export function OrgSettingsScreen() {
       ) : null}
 
       <form className="grid min-w-0 grid-cols-1 gap-6" onSubmit={handleSaveSettings}>
+        <DenCard className="grid gap-3">
+          <div className="flex min-h-12 items-center justify-between gap-4">
+            <span className="text-sm font-medium">Code Mode</span>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-muted-foreground">{codeModeEnabled ? "On" : "Off"}</span>
+              <SettingsToggle label="Enable Code Mode" checked={codeModeEnabled}
+                disabled={!canManageSettings || Boolean(mutationBusy)} onChange={setCodeModeEnabled} />
+            </div>
+          </div>
+          {!canManageSettings ? <p className="text-sm text-muted-foreground">Managed by your organization administrator.</p> : null}
+          <details className="border-t border-border pt-3 text-sm text-muted-foreground">
+            <summary className="cursor-pointer">Connection behavior</summary>
+            <p className="pt-3">Agents discover and run connected actions and saved Workflows through Code Mode. App and sign-in cards stay available. Save settings, then reconnect your agent to refresh its tools.</p>
+          </details>
+        </DenCard>
         <DenCard size="spacious" className="grid gap-6">
           <div className="grid gap-2">
             <p className="text-[12px] font-semibold uppercase tracking-[0.16em] text-gray-400">

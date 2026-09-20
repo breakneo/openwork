@@ -1,4 +1,5 @@
 import { Tool, toolError } from "@openwork/codemode"
+import { organizationCodeModeEnabled } from "./code-mode-policy.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import type { DenTypeId } from "@openwork-ee/utils/typeid"
 import { Effect } from "effect"
@@ -51,6 +52,7 @@ import { invokeMcpOperation, normalizeToolBody, normalizeToolRecord } from "./in
 import {
   executeMarketplaceCapability,
   listAccessibleMarketplaceCapabilityReferences,
+  listAccessibleWorkflows,
   parseMarketplaceCapabilityName,
   searchMarketplaceCapabilities,
   type MarketplaceCapabilityExecuteResult,
@@ -119,6 +121,7 @@ export type CapabilityRegistryContext = {
   generatedArtifactViewsEnabled: boolean
   externalMcpConnectionsEnabled: boolean
   remoteSessionsEnabled: boolean
+  codeModeEnabled?: boolean
   resolvePlatformAdmin: () => Promise<boolean>
   resolveNamespaceContext: () => Promise<CodemodeConnectionNamespaceContext>
 }
@@ -165,6 +168,7 @@ export function createCapabilityRegistryContext(input: CapabilityRegistryContext
     generatedArtifactViewsEnabled: input.generatedArtifactViewsEnabled,
     externalMcpConnectionsEnabled,
     remoteSessionsEnabled: remoteSessionCapabilitiesEnabled(input.organizationMetadata),
+    codeModeEnabled: organizationCodeModeEnabled(input.organizationMetadata),
     resolvePlatformAdmin,
     resolveNamespaceContext,
   }
@@ -385,6 +389,7 @@ function contentLeaf(input: {
   readOnly: boolean
   authority: "den" | "external"
   input?: Tool.JsonSchema
+  output?: Tool.JsonSchema
   run: (args: unknown) => Promise<unknown>
 }): CapabilityLeaf {
   return {
@@ -397,6 +402,7 @@ function contentLeaf(input: {
     definition: Tool.make({
       description: input.description,
       input: input.input ?? { type: "object" },
+      ...(input.output ? { output: input.output } : {}),
       run: (args) => Effect.promise(() => input.run(args)),
     }),
   }
@@ -527,6 +533,7 @@ const externalMcpSource: CapabilitySource = {
   enumerate: async (ctx) => {
     if (!ctx.externalMcpConnectionsEnabled) return []
     return leavesFromBuilt(await buildExternalMcpToolTree({
+      preserveAppHandoffs: ctx.codeModeEnabled,
       organizationId: ctx.organizationId,
       member: ctx.member,
       scopes: ctx.principal.scopes,
@@ -597,21 +604,26 @@ const marketplaceSource: CapabilitySource = {
       limit,
       enabled: ctx.externalMcpConnectionsEnabled,
     })
-    return matches.map((match) => match.kind !== "workflow"
+    return matches.map((match) => match.kind !== "workflow" || ctx.codeModeEnabled
       ? { ...match, scriptPath: codemodeScriptPath("marketplace", match.name) }
       : match)
   },
   enumerate: async (ctx) => {
     if (!ctx.externalMcpConnectionsEnabled) return []
     const references = await listAccessibleMarketplaceCapabilityReferences({
+      includeDescriptions: ctx.codeModeEnabled,
       organizationId: ctx.organizationId,
       member: ctx.member,
       enabled: ctx.externalMcpConnectionsEnabled,
     })
     const uniqueReferences = new Map(references
-      .filter((reference) => reference.objectType !== "workflow")
+      .filter((reference) => reference.objectType !== "workflow" || ctx.codeModeEnabled)
       .map((reference) => [`${reference.pluginId}:${reference.configObjectId}`, reference]))
+    const workflows = ctx.codeModeEnabled && ctx.member
+      ? await listAccessibleWorkflows({ organizationId: ctx.organizationId, member: ctx.member })
+      : []
     return [...uniqueReferences.values()].map((reference) => {
+      const workflow = workflows.find((entry) => entry.configObjectId === reference.configObjectId)
       const capabilityName = `plugin:${reference.pluginId}:${reference.configObjectId}`
       const parsed: Extract<ParsedCapability, { kind: "marketplace" }> = {
         kind: "marketplace",
@@ -623,12 +635,20 @@ const marketplaceSource: CapabilitySource = {
         namespace: "marketplace",
         toolName: capabilityName,
         capabilityName,
-        description: `Retrieve marketplace capability ${capabilityName}`,
-        readOnly: true,
+        description: workflow
+          ? `Run Workflow: ${workflow.title}. ${workflow.description ?? ""} Returns the run result with output in value.`
+          : reference.title
+            ? `Retrieve ${reference.objectType}: ${reference.title}. ${reference.description ?? ""}`
+            : `Retrieve marketplace capability ${capabilityName}`,
+        ...(workflow?.inputSchema ? { input: workflow.inputSchema } : {}),
+        ...(workflow?.outputSchema ? { output: { type: "object", properties: { value: workflow.outputSchema } } } : {}),
+        // A nested Workflow is never implicitly eligible for live/unattended runs.
+        readOnly: reference.objectType !== "workflow",
         authority: "den",
         run: async (args) => {
           const result = await executeMarketplaceSource(ctx, parsed, { name: capabilityName, body: args })
           if (!result.ok) throw toolError(result.message)
+          if (reference.objectType === "workflow") return result.result
           const content = result.result.content ?? result.result.source ?? result.result.definition
           return typeof content === "string" ? content : JSON.stringify(result.result)
         },

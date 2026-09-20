@@ -265,6 +265,7 @@ export type DenOrgCapabilities = {
 export type DenOrganizationMetadata = {
   allowedDesktopVersions?: string[];
   requireSso?: boolean;
+  codeModeEnabled?: boolean;
   brandAppName?: string;
   brandLogoUrl?: string;
   brandIconUrl?: string;
@@ -363,6 +364,10 @@ export function getAllowedDesktopVersionsFromMetadata(metadata: string | null): 
 export function getRequireSsoFromMetadata(metadata: string | null): boolean {
   const parsed = parseOrganizationMetadata(metadata);
   return parsed?.requireSso === true;
+}
+
+export function getCodeModeFromMetadata(metadata: string | null): boolean {
+  return parseOrganizationMetadata(metadata)?.codeModeEnabled === true;
 }
 
 export function getManagedBrandAssetFromMetadata(

@@ -155,6 +155,40 @@ test("registers execute_capability_script without any org rollout flag", async (
   expect(tools).not.toContain("retire_artifact_view")
 })
 
+test("Code Mode opt-in advertises app-only routers and keeps presentation helpers", async () => {
+  organizationMetadata = { codeModeEnabled: true }
+  const app = buildApp()
+  const tools = resultRecord(await rpc(app, "tools/list")).tools
+  if (!Array.isArray(tools)) throw new Error("Expected tools")
+  for (const name of ["search_capabilities", "execute_capability"]) {
+    expect(tools.find((tool) => isRecord(tool) && tool.name === name)).toMatchObject({
+      _meta: { ui: { visibility: ["app"] } },
+    })
+  }
+  expect(listedToolNames(await rpc(app, "tools/list"))).toContain("capability_helper")
+  const initialized = resultRecord(await rpc(app, "initialize", {
+    protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" },
+  }))
+  expect(initialized.instructions).toContain("tools.$codemode.search")
+  expect(initialized.instructions).not.toMatch(/\bsearch_capabilities\b|\bexecute_capability\b/)
+  const script = tools.find((tool) => isRecord(tool) && tool.name === "execute_capability_script")
+  expect(script).toMatchObject({ description: expect.stringContaining("tools.$codemode.search") })
+  const denied = await rpc(app, "tools/call", { name: "capability_helper", arguments: { name: "saveWorkflow", body: {} } })
+  expect(resultRecord(denied).isError).toBe(true)
+})
+
+test("Code Mode requires a boolean opt-in and leaves standard routers exposed", async () => {
+  for (const metadata of [null, { codeModeEnabled: false }, { codeModeEnabled: "true" }]) {
+    organizationMetadata = metadata
+    const tools = resultRecord(await rpc(buildApp(), "tools/list")).tools
+    if (!Array.isArray(tools)) throw new Error("Expected tools")
+    expect(tools.find((tool) => isRecord(tool) && tool.name === "search_capabilities")).toMatchObject({
+      _meta: { ui: { visibility: ["model", "app"] } },
+    })
+    expect(tools.some((tool) => isRecord(tool) && tool.name === "capability_helper")).toBe(false)
+  }
+})
+
 test("registers Code Mode without enabling agent-authored MCP App views", async () => {
   const names = listedToolNames(await rpc(buildApp(), "tools/list"))
   expect(names).toContain("execute_capability_script")

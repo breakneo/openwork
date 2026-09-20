@@ -398,6 +398,21 @@ test("generic and Code Mode execution require write scope even for misleading re
       expect((await runCodemodeScript({ code: `return await ${leaf.scriptPath}({})`, tools: built.tools, timeoutMs: 1_000 })).ok).toBe(false)
       expect(calls).toBe(before)
       allowed = true
+      liveTool = { ...liveTool, _meta: { ui: { resourceUri: "ui://fixture/app" } } }
+      const appTree = await buildExternalMcpToolTree({
+        organizationId, member, scopes, redirectUriBase: context.redirectUriBase,
+        preserveAppHandoffs: true,
+        namespaceContext: {
+          nativeProviderEntries: [], codemodeNativeProviderEntries: [],
+          externalMcpConnections: [connection], codemodeExternalMcpConnections: [connection],
+          namespaces: buildCodemodeConnectionNamespaceMaps({ native: [], externalMcp: [connection] }),
+        },
+      })
+      const beforeApp = calls
+      const appResult = await runCodemodeScript({ code: `return await ${leaf.scriptPath}({})`, tools: appTree.tools, timeoutMs: 1_000 })
+      expect(appResult).toMatchObject({ ok: false, error: { message: expect.stringContaining("capability_helper") } })
+      expect(calls).toBe(beforeApp)
+      liveTool = { ...liveTool, _meta: undefined }
     }
   } finally {
     mock.restore()

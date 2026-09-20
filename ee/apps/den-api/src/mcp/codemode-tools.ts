@@ -19,6 +19,7 @@ import {
 import {
   buildExternalCapabilityName,
   executeExternalCapability,
+  externalMcpAppResourceUri,
   EXTERNAL_MCP_SEARCH_CONCURRENCY,
   type McpMemberIdentity,
 } from "./external-capabilities.js"
@@ -329,6 +330,7 @@ export async function buildExternalMcpToolTree(input: {
   scopes: ReadonlySet<string>
   redirectUriBase: string
   namespaceContext?: CodemodeConnectionNamespaceContext
+  preserveAppHandoffs?: boolean
 }): Promise<BuiltCodemodeTools> {
   if (!input.member) return { tools: {}, manifest: [] }
   const memberIdentity = input.member
@@ -363,7 +365,9 @@ export async function buildExternalMcpToolTree(input: {
     const definitions = enabledTools.map((tool) => [tool.name, Tool.make({
       description: tool.description ?? tool.title ?? tool.name,
       input: tool.inputSchema,
-      run: (args) => Effect.promise(() => executeExternalCapability({
+      run: (args) => input.preserveAppHandoffs && externalMcpAppResourceUri(tool)
+        ? Effect.fail(toolError(`Use capability_helper with name ${buildExternalCapabilityName(connection.id, tool.name)} and the same body to open this MCP App. No provider call was made.`))
+        : Effect.promise(() => executeExternalCapability({
         organizationId: input.organizationId,
         member: memberIdentity,
         scopes: input.scopes,

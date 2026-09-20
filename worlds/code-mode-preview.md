@@ -1,0 +1,77 @@
+# Local Code Mode preview
+
+Run from the feature worktree. `code-mode-preview` owns its disposable Den
+database and processes; `app-web` owns an isolated local app runtime.
+
+```sh
+pnpm world up code-mode-preview --place local --stage code-mode --detach --timeout 600000
+pnpm world outputs code-mode-preview --stage code-mode
+```
+
+Use the returned `denWeb` and `denApi` origins separately. Den web's
+`/api/den` routes redirect to the API origin; a browser redirect across ports
+is not a same-origin proxy. The explicit API target below bypasses that
+redirect while keeping the sign-in page on the web origin.
+
+```sh
+OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY=1 \
+OPENWORK_DEV_DEN_PROXY_TARGET=<denWeb> \
+OPENWORK_DEV_DEN_API_PROXY_TARGET=<denApi> \
+pnpm world up app-web --place local --stage code-mode-connected --detach --timeout 600000 \
+  --env OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY \
+  --env OPENWORK_DEV_DEN_PROXY_TARGET \
+  --env OPENWORK_DEV_DEN_API_PROXY_TARGET -- --lifetime 480
+```
+
+The separate API target is local-only, must be a nonsecret HTTP(S) origin,
+and must be selected explicitly. It is ignored as ambient environment.
+Production builds and production preview servers do not enable this proxy.
+No credentials are injected by the proxy; requests retain the caller's auth.
+
+Sign into Den with the account from the owner-only world outputs. Enable
+Code Mode in Settings > General and save. Use the existing Den desktop
+handoff page (`/?mode=sign-in&desktopAuth=1&desktopScheme=openwork`), then
+paste its one-time code into app-web's **Paste sign-in code** control.
+No synthetic activation or provider credentials are seeded.
+
+Check that app-web shows the preview owner and that its `openwork-cloud`
+MCP reports connected. A same-origin `/api/den/v1/org` request should return
+the preview organization without redirecting. Code Mode's model-facing
+MCP catalog advertises `execute_capability_script` and `capability_helper`;
+the generic routers retain app-only visibility for existing cards. This
+advertisement is not proof of the engine's actual model-facing catalog.
+
+## OpenCode boundary release blocker
+
+Do not roll out this opt-in as an OpenCode integration yet:
+
+- Pinned v1 `v1.18.30` (`3104c1428ec91f809e5ab86631300de41eb6952e`)
+  returns from `SessionTools.resolve` before adding any direct MCP tools when
+  `experimentalCodeMode` is enabled. Its `CodeModeTool` wraps the MCP catalog
+  without a per-server bypass. Disabling that flag globally would change
+  unrelated MCP behavior.
+- Pinned v2 `0.0.0-beta-19086` accepts per-server `codemode: false` and exposes
+  `openwork-cloud_execute_capability_script` directly. However, a real provider
+  request also contains `openwork-cloud_execute_capability` even when the MCP
+  advertises `_meta.ui.visibility: ["app"]`. Enabling that bypass alone would
+  leak the app-only router into the model catalog.
+- `pnpm exec bun test apps/server/src/code-mode-boundary.integration.test.ts`
+  cold-boots the integrity-pinned v2 binary with an isolated profile and a
+  synthetic local MCP/model endpoint. It characterizes the blocker; a passing
+  result is **not** a passing direct-tool/app-only isolation acceptance test.
+
+Required before release: an engine version/API that preserves app-only
+filtering while exposing Den tools directly, with unrelated MCPs remaining in
+their existing Code Mode path. Then wire that supported boundary in OpenWork,
+replace the blocker assertion with model-catalog exclusion, and verify direct
+script execution/results through that same provider transport. Keep the App
+host's router access and Den's existing Keep/Share backend.
+
+`--lifetime` is set when starting a world. Use a new app-web stage to select
+new origins or obtain a new lease without interrupting another preview.
+Den stays running until explicitly stopped:
+
+```sh
+pnpm world down app-web --stage code-mode-connected
+pnpm world down code-mode-preview --stage code-mode
+```
