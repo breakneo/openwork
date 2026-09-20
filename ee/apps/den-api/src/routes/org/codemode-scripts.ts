@@ -267,6 +267,7 @@ export function registerOrgWorkflowRoutes<T extends { Variables: OrgRouteVariabl
       generatedArtifactViewsEnabled: env.generatedArtifactViewsEnabled,
       organizationMetadata: context.organization.metadata,
       mcpConnectionsGatingEnabled: env.mcpConnectionsGatingEnabled,
+      codeModeOptInEnabled: env.codeModeOptInEnabled,
     })
     const buildTools = () => buildCapabilityToolTree(capabilityContext)
     const actorContext = { organizationContext: context, memberTeams: teams, session: c.get("session") }

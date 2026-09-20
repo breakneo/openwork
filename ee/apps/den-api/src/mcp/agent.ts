@@ -15,7 +15,7 @@ import type { RequestIdVariables } from "hono/request-id"
 import { z } from "zod"
 import { connectorCatalogSchema, type ConnectorCatalog } from "@openwork/types/connection-action-app"
 import { connectorCatalogForQuery } from "./connector-catalog.js"
-import { CODE_MODE_INSTRUCTIONS, organizationCodeModeEnabled } from "./code-mode-policy.js"
+import { CODE_MODE_INSTRUCTIONS } from "./code-mode-policy.js"
 import { isCodeModeHelperCapability } from "./code-mode-helper.js"
 import { publicRoute, tokenRoute } from "../middleware/index.js"
 import { db } from "../db.js"
@@ -448,6 +448,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       generatedArtifactViewsEnabled: env.generatedArtifactViewsEnabled,
       organizationMetadata,
       mcpConnectionsGatingEnabled: env.mcpConnectionsGatingEnabled,
+      codeModeOptInEnabled: env.codeModeOptInEnabled,
     })
     const { externalMcpConnectionsEnabled } = capabilityContext
     let remoteSkills: RemoteSkillDescriptor[] = []
@@ -486,7 +487,9 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       ]
         .sort((a, b) => a.name.localeCompare(b.name) || a.capability.localeCompare(b.capability))
     }
-    const codeModeEnabled = organizationCodeModeEnabled(organizationMetadata)
+    // Single effective value: the registry context already folded the
+    // deployment switch into the stored opt-in.
+    const { codeModeEnabled } = capabilityContext
     const server = createAgentMcpServer(codeModeEnabled)
     if (method === "server/discover" || method === "initialize" || method === "resources/list" || method === "resources/read") {
       if (memberIdentity) {

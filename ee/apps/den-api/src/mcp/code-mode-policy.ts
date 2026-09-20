@@ -1,7 +1,22 @@
 import { readOrganizationMetadata } from "@openwork/types/den/managed-models-policy"
 
-export function organizationCodeModeEnabled(metadata: unknown): boolean {
-  return readOrganizationMetadata(metadata).codeModeEnabled === true
+/**
+ * Effective Code Mode presentation for an organization. The stored opt-in is
+ * inert unless the deployment enables it: no published OpenWork engine keeps
+ * app-only routers out of the model-facing catalog yet, so a Den deployment
+ * must not change its MCP catalog on a stored flag alone.
+ */
+export function organizationCodeModeEnabled(metadata: unknown, options: { optInEnabled: boolean }): boolean {
+  return options.optInEnabled && readOrganizationMetadata(metadata).codeModeEnabled === true
+}
+
+/**
+ * Settings writes may turn Code Mode on only when the deployment enables the
+ * opt-in. Turning it off is always allowed so a stale stored flag can be
+ * cleared, and omitting the field never counts as a change.
+ */
+export function codeModeSettingWriteAllowed(requested: boolean | undefined, options: { optInEnabled: boolean }): boolean {
+  return requested !== true || options.optInEnabled
 }
 
 export const CODE_MODE_INSTRUCTIONS = [

@@ -257,6 +257,8 @@ export type DenOrgCapabilities = {
   mcpConnections: boolean;
   /** Always on: Workflows/Code Mode shipped for every organization. Older servers may still return false. */
   workflows: boolean;
+  /** Deployment switch for the organization Code Mode presentation opt-in; off until a supported engine exists. */
+  codeModeOptIn: boolean;
   /** Effective Web offer; true for the global switch or this organization's complimentary admin grant. */
   openworkWeb: boolean;
   cloud: boolean;
@@ -1017,7 +1019,7 @@ function parseOrgAuthMethods(value: unknown): DenOrgAuthMethods {
 
 function parseOrgCapabilities(value: unknown): DenOrgCapabilities {
   if (!isRecord(value)) {
-    return { gatewayDashboard: false, orgManagedDashboards: false, installLinks: false, mcpConnections: false, workflows: true, openworkWeb: false, cloud: false };
+    return { gatewayDashboard: false, orgManagedDashboards: false, installLinks: false, mcpConnections: false, workflows: true, codeModeOptIn: false, openworkWeb: false, cloud: false };
   }
 
   return {
@@ -1028,6 +1030,7 @@ function parseOrgCapabilities(value: unknown): DenOrgCapabilities {
     // Workflows are enabled everywhere on current servers; only an explicit
     // false from an older server still hides the surface.
     workflows: value.workflows !== false,
+    codeModeOptIn: value.codeModeOptIn === true,
     openworkWeb: value.openworkWeb === true,
     cloud: value.cloud === true,
   };

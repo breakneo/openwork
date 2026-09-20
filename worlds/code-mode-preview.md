@@ -41,15 +41,32 @@ MCP catalog advertises `execute_capability_script` and `capability_helper`;
 the generic routers retain app-only visibility for existing cards. This
 advertisement is not proof of the engine's actual model-facing catalog.
 
+## Deployment gate
+
+The organization opt-in is inert unless the Den deployment sets
+`DEN_CODE_MODE_OPT_IN_ENABLED=true` (default off). While off:
+
+- `PATCH /v1/org` rejects `codeModeEnabled: true` with `code_mode_unavailable`;
+  turning it off is always allowed so a stale stored flag can be cleared.
+- The agent MCP catalog stays in standard mode even for an organization whose
+  metadata already stores `codeModeEnabled: true`.
+- Den web shows the Code Mode row locked with "Not available yet" and names the
+  deployment administrator as the owner of the change (DESIGN P4, C5).
+- `GET /v1/org` advertises `capabilities.codeModeOptIn` so clients render the
+  same locked state.
+
+This preview world and the `code-mode-org-opt-in` journey set the switch
+explicitly to exercise the enabled path; `code-mode-policy.test.ts` and
+`generated-artifact-view-rollout.test.ts` cover the default-off path.
+
 ## OpenCode boundary release blocker
 
-Do not roll out this opt-in as an OpenCode integration yet:
+Do not enable the deployment gate for OpenWork clients yet:
 
-Cloud submission readiness now fails closed when an opt-in catalog cannot
+Cloud submission readiness fails closed when an opt-in catalog cannot
 demonstrate both Code Mode entry tools without the private App routers. Generic
-model tool-call capability is not a substitute for that projection. The existing
-settings disclosure warns that current OpenWork engines are unsupported. This
-is a compatibility guard, not a supported direct-tool integration or proof that
+model tool-call capability is not a substitute for that projection. This is a
+compatibility guard, not a supported direct-tool integration or proof that
 every other MCP client filters visibility correctly.
 
 - Pinned v1 `v1.18.30` (`3104c1428ec91f809e5ab86631300de41eb6952e`)

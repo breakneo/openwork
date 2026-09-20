@@ -123,7 +123,8 @@ export type CapabilityRegistryContext = {
   generatedArtifactViewsEnabled: boolean
   externalMcpConnectionsEnabled: boolean
   remoteSessionsEnabled: boolean
-  codeModeEnabled?: boolean
+  /** Effective presentation: stored organization opt-in AND deployment switch. */
+  codeModeEnabled: boolean
   resolvePlatformAdmin: () => Promise<boolean>
   resolveNamespaceContext: () => Promise<CodemodeConnectionNamespaceContext>
 }
@@ -139,6 +140,8 @@ export type CapabilityRegistryContextInput = {
   generatedArtifactViewsEnabled: boolean
   organizationMetadata: Parameters<typeof memberFacingMcpConnectionsEnabled>[0]
   mcpConnectionsGatingEnabled: boolean
+  /** Deployment switch; a stored organization opt-in is inert without it. */
+  codeModeOptInEnabled: boolean
 }
 
 export function createCapabilityRegistryContext(input: CapabilityRegistryContextInput): CapabilityRegistryContext {
@@ -170,7 +173,7 @@ export function createCapabilityRegistryContext(input: CapabilityRegistryContext
     generatedArtifactViewsEnabled: input.generatedArtifactViewsEnabled,
     externalMcpConnectionsEnabled,
     remoteSessionsEnabled: remoteSessionCapabilitiesEnabled(input.organizationMetadata),
-    codeModeEnabled: organizationCodeModeEnabled(input.organizationMetadata),
+    codeModeEnabled: organizationCodeModeEnabled(input.organizationMetadata, { optInEnabled: input.codeModeOptInEnabled }),
     resolvePlatformAdmin,
     resolveNamespaceContext,
   }

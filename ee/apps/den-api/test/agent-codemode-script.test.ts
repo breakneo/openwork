@@ -10,6 +10,17 @@ function seedRequiredEnv() {
   process.env.DEN_API_PUBLIC_URL = process.env.DEN_API_PUBLIC_URL ?? "http://127.0.0.1:8790"
 }
 
+/**
+ * This suite exercises the opted-in presentation, so the deployment switch is
+ * forced on here regardless of which other suite loaded env.js first in the
+ * same process. The default-off path is covered by code-mode-policy.test.ts
+ * and generated-artifact-view-rollout.test.ts.
+ */
+async function installCodeModeDeploymentSwitch() {
+  const actual = await import("../src/env.js")
+  mock.module("../src/env.js", () => ({ ...actual, env: { ...actual.env, codeModeOptInEnabled: true } }))
+}
+
 const userId = createDenTypeId("user")
 const organizationId = createDenTypeId("organization")
 let organizationMetadata: Record<string, unknown> | null = null
@@ -133,6 +144,7 @@ function firstText(payload: Record<string, unknown>): string {
 
 beforeAll(async () => {
   seedRequiredEnv()
+  await installCodeModeDeploymentSwitch()
   installMocks()
   registerAgentMcpRoutes = (await import("../src/mcp/agent.js")).registerAgentMcpRoutes
 })

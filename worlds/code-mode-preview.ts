@@ -11,7 +11,7 @@ export async function main(): Promise<void> {
   const den = stack.use(await server({
     place, web: true,
     org: { name: "Code Mode preview", admin: { name: "Preview owner", email: "owner@codemode.example.test" } },
-    env: { OPENWORK_DEV_MODE: "1", DEN_REQUIRE_EMAIL_VERIFICATION: "false", RESEND_API_KEY: "", SMTP_HOST: "" },
+    env: { OPENWORK_DEV_MODE: "1", DEN_REQUIRE_EMAIL_VERIFICATION: "false", RESEND_API_KEY: "", SMTP_HOST: "", DEN_CODE_MODE_OPT_IN_ENABLED: "true" },
   }));
   await hold({ name: "code-mode-preview", outputs: {
     denWeb: den.ref.webUrl, denApi: den.ref.apiUrl,
