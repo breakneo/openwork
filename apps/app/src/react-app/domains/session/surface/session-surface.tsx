@@ -3323,6 +3323,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
           {/* Chat column: tighter than the composer (800px) so messages
                keep a comfortable reading width and don't feel "too big". */}
           <div ref={contentRef} className="mx-auto w-full max-w-[720px]">
+            {/* Initial clearance scrolls away, unlike a layout-reserved header.
+                Only the mobile web overlay pane supplies this safe-area height. */}
+            <div aria-hidden className="h-[var(--mobile-chat-top-clearance,0px)]" />
             {/* Clearance so the find bar never covers the first message (short
                  transcripts cannot scroll it clear). It lives in the content
                  flow rather than as scroller padding: a padding change on the

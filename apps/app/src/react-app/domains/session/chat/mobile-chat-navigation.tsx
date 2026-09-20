@@ -3,15 +3,17 @@ import { ArrowLeft, Cloud, FileText, MoreHorizontal, TextSearch } from "lucide-r
 import { SidebarMenuButton, SidebarMenuItem, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { t } from "../../../../i18n";
+import { cn } from "@/lib/utils";
 
-export function MobileChatNavigation() {
+export function MobileChatNavigation({ overlay = false }: { overlay?: boolean }) {
   const { openMobile } = useSidebar();
   return (
     <SidebarTrigger
       data-mobile-chat-navigation
       aria-label="Open sidebar"
       aria-expanded={openMobile}
-      className="ms-[max(0.5rem,env(safe-area-inset-left))] mt-[env(safe-area-inset-top)] size-11 shrink-0 self-start motion-reduce:transition-none"
+      className={cn("ms-[max(0.5rem,env(safe-area-inset-left))] mt-[env(safe-area-inset-top)] size-11 shrink-0 self-start motion-reduce:transition-none",
+        overlay && "absolute start-0 top-0 z-20 rounded-full bg-dls-surface/90")}
     />
   );
 }

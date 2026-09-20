@@ -27,10 +27,24 @@ describe("sidebar-only mobile chat chrome", () => {
     expect(html).toContain('data-sidebar="menu-button"');
   });
 
+  test("overlays only the toggle so the transcript can scroll beneath it", () => {
+    const html = renderToStaticMarkup(<SidebarProvider><MobileChatNavigation overlay /></SidebarProvider>);
+    expect(html.match(/<button/g)).toHaveLength(1);
+    expect(html).toContain('aria-label="Open sidebar"');
+    expect(html).toContain("absolute start-0 top-0 z-20");
+    expect(html).toContain("bg-dls-surface/90");
+    expect(html).not.toMatch(/(?:class="|\s)pointer-events-none(?:\s|")/);
+    const source = readFileSync(new URL("../src/react-app/domains/session/surface/session-surface.tsx", import.meta.url), "utf8");
+    expect(source.indexOf("h-[var(--mobile-chat-top-clearance,0px)]")).toBeGreaterThan(source.indexOf("<div ref={contentRef}"));
+  });
+
   test("keeps desktop, Library and takeover headers outside the mobile chat branch", () => {
     const source = readFileSync(new URL("../src/react-app/domains/session/chat/session-page.tsx", import.meta.url), "utf8");
     expect(source).toContain("isMobile && shellConfig.sidebar && !props.primarySlot && !hasMainContentTakeover && !props.mainContentHeaderActionsRef && !props.primaryTitle && !props.mainContentTitle");
-    expect(source).toContain("sidebarOnlyChrome ? <MobileChatNavigation /> : <header data-session-header");
+    expect(source).toContain("const mobileChatOverlay = sidebarOnlyChrome && !isDesktopRuntime()");
+    expect(source).toContain("!isDesktopRuntime() && !showNarrowPaneSwitcher");
+    expect(source).toContain("mobileChatOverlay && \"relative [--mobile-chat-top-clearance:calc(2.75rem+env(safe-area-inset-top))]\"");
+    expect(source).toContain("sidebarOnlyChrome ? <MobileChatNavigation overlay={mobileChatOverlay} /> : <header data-session-header");
     expect(source).toContain("mobileChatActions={sidebarOnlyChrome ? (");
     expect(source).toContain("onOpenAccountSettings={props.onOpenSettings}");
     expect(source).toContain("onOpenExtensions={props.onOpenExtensions}");

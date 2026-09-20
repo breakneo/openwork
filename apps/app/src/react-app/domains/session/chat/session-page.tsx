@@ -57,6 +57,7 @@ import ProviderAuthModal, { type ProviderAuthModalProps } from "../../connection
 import { RenameSessionModal } from "../modals/rename-session-modal";
 import { AppSidebar } from "../sidebar/app-sidebar";
 import { MobileChatActions, MobileChatNavigation } from "./mobile-chat-navigation";
+import { isDesktopRuntime } from "@/app/lib/runtime-env";
 import { useSessionManagementStore } from "../sidebar/session-management-store";
 import { SessionSurface, type SessionSurfaceProps } from "../surface/session-surface";
 import { useSessionFindStore } from "../surface/find-store";
@@ -1118,6 +1119,8 @@ export function SessionPage(props: SessionPageProps) {
     Boolean(splitSession),
     sidePanelOpen,
   );
+  // Split/tool panes keep their navigation row clear of the sidebar toggle.
+  const mobileChatOverlay = sidebarOnlyChrome && !isDesktopRuntime() && !showNarrowPaneSwitcher;
   const crossWorkspaceSplit = Boolean(splitSession && splitSession.workspaceId !== props.selectedWorkspaceId);
   // Route-level refreshes must only gate the very first paint of a session.
   // Once the surface can mount it owns its own data stream, so replacing a
@@ -1474,13 +1477,14 @@ export function SessionPage(props: SessionPageProps) {
             className="min-h-0 flex-1 max-lg:rounded-none lg:rounded-[14px]"
           >
             <ResizablePanel minSize={isMobile ? "0px" : "360px"} className="min-w-0">
-              <main data-session-pane className="flex h-full min-w-0 flex-col overflow-hidden bg-dls-surface max-lg:rounded-none max-lg:border-0 max-lg:shadow-none lg:rounded-[14px] lg:border lg:border-border lg:shadow-[0_8px_24px_rgba(15,23,42,0.06)] dark:lg:shadow-[0_10px_30px_rgba(0,0,0,0.45)] mac:bg-dls-surface/85 mac:backdrop-blur-2xl mac:backdrop-saturate-150">
+              <main data-session-pane className={cn("flex h-full min-w-0 flex-col overflow-hidden bg-dls-surface max-lg:rounded-none max-lg:border-0 max-lg:shadow-none lg:rounded-[14px] lg:border lg:border-border lg:shadow-[0_8px_24px_rgba(15,23,42,0.06)] dark:lg:shadow-[0_10px_30px_rgba(0,0,0,0.45)] mac:bg-dls-surface/85 mac:backdrop-blur-2xl mac:backdrop-saturate-150",
+                mobileChatOverlay && "relative [--mobile-chat-top-clearance:calc(2.75rem+env(safe-area-inset-top))]")}>
           {/* The pane `<main>` above already carries the macOS vibrancy blur. A
               second backdrop filter on the header (or on the transcript surface
               below) is invisible — nothing scrolls beneath either — but each
               one forces an extra full-pane blur pass every frame the transcript
               repaints. Keep the pane as the only backdrop surface. */}
-          {sidebarOnlyChrome ? <MobileChatNavigation /> : <header data-session-header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
+          {sidebarOnlyChrome ? <MobileChatNavigation overlay={mobileChatOverlay} /> : <header data-session-header className={cn("z-10 flex shrink-0 items-center justify-between border-b border-border mac:titlebar-drag @container/titlebar", props.mainContentHeaderActionsRef ? "h-[52px] px-6" : "h-9 px-3 max-lg:h-12 lg:px-6")}>
             <div className="flex min-w-0 items-center gap-3">
               {shellConfig.sidebar ? <SidebarTrigger className="mac:hidden" /> : null}
               {parentSessionLink && !props.primarySlot && !hasMainContentTakeover ? (
