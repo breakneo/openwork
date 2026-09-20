@@ -243,6 +243,7 @@ jobs:
             ${{ runner.temp }}/openwork-packaged-smoke/timing.json
             ${{ runner.temp }}/openwork-packaged-smoke/profiles/**/electron.log
             evals/results/test-runs/**
+          include-hidden-files: true
           retention-days: 7
 
   # Broad tests, source-layout guards, and test-framework checks remain visible
