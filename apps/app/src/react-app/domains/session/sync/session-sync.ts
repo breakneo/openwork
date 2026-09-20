@@ -540,8 +540,12 @@ function clearTrackedSession(input: SyncOptions, entry: SyncEntry, sessionId: st
   // resurrect a terminal run or a replied interaction after cache release.
   queryClient.removeQueries({ queryKey: permissionKey(input.workspaceId, sessionId), exact: true });
   queryClient.removeQueries({ queryKey: questionKey(input.workspaceId, sessionId), exact: true });
-  // Status entries are exempt from TanStack GC (see query-client.ts), so the
-  // tracked-session lifecycle owns their cleanup.
+  // Transcript, status and todo entries are exempt from TanStack GC (see
+  // query-client.ts), so the tracked-session lifecycle owns their cleanup.
+  // The transcript in particular must survive while a background session is
+  // still streaming; otherwise deltas for its in-flight part have nowhere to
+  // land and are parked until the turn completes.
+  queryClient.removeQueries({ queryKey: transcriptKey(input.workspaceId, sessionId), exact: true });
   queryClient.removeQueries({ queryKey: statusKey(input.workspaceId, sessionId), exact: true });
   queryClient.removeQueries({ queryKey: todoKey(input.workspaceId, sessionId), exact: true });
   if (entry.refs <= 0 && entry.retainedSessionTimers.size === 0) {
