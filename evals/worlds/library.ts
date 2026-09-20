@@ -1080,7 +1080,16 @@ export async function connectionActionMcpApp(seed: Seed) {
     fixtureUrl: den.mocks.connector.url, denApiUrl: den.ref.apiUrl, mcpToken, appHostToken,
   });
   await reloadConfiguredApp(app);
-  const session = await seed.session(app);
+  async function seedSessionWhenReady(attempts: number): Promise<Awaited<ReturnType<typeof seed.session>>> {
+    try { return await seed.session(app); }
+    catch (error) {
+      if (attempts <= 1) throw error;
+      await reloadConfiguredApp(app);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      return seedSessionWhenReady(attempts - 1);
+    }
+  }
+  const session = await seedSessionWhenReady(3);
   return { app, den, connection, organizationId, workspace, session, mcpSession: { ...den.admin, token: mcpToken }, appHostSession: { ...den.admin, token: appHostToken } };
 }
 

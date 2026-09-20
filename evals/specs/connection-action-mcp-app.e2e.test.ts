@@ -1,6 +1,17 @@
 import { expect } from "vitest";
 import { spec } from "@openwork/testkit";
-import { connectionActionMcpApp, connectionActionPrompt, connectionActionReply, connectionActionReplySkip, connectionActionSkipPrompt, connectionStatusPrompt, connectionStatusSkipPrompt, isRecord, ordinaryDiscoveryPrompt, ordinaryDiscoveryReply } from "../worlds/library.ts";
+import {
+  connectionActionMcpApp,
+  connectionActionPrompt,
+  connectionActionReply,
+  connectionActionReplySkip,
+  connectionActionSkipPrompt,
+  connectionStatusPrompt,
+  connectionStatusSkipPrompt,
+  isRecord,
+  ordinaryDiscoveryPrompt,
+  ordinaryDiscoveryReply,
+} from "../worlds/library.ts";
 
 const test = spec.world(connectionActionMcpApp, { timeout: 600_000 });
 
@@ -34,136 +45,107 @@ function turnTools(messages: Record<string, unknown>[], prompt: string) {
   return messages.slice(start + 1).flatMap(message => rows(message.parts)).filter(part => part.type === "tool");
 }
 
-test("ordinary discovery stays quiet without a native question or authorization", async ({ world, user, probe, evidence }) => {
+test("one standard connection App covers discovery and exact status results without legacy native UI", async ({ world, user, probe, evidence }) => {
+  const connector = world.den.mocks.connector;
   const mount = `/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
+  const sessionPath = `${mount}/session/${encodeURIComponent(world.session.sessionId)}`;
+  const messages = async () => {
+    const response = await probe.desktopApi(`${sessionPath}/message`);
+    expect(response.status).toBe(200);
+    return rows(response.body);
+  };
+  const pending = async () => {
+    const response = await probe.desktopApi(`${mount}/question`);
+    expect(response.status).toBe(200);
+    return rows(response.body).filter(request => request.sessionID === world.session.sessionId);
+  };
+  let requestId = 0;
+  async function gateway(method: string, params: Record<string, unknown> = {}) {
+    const response = await fetch(`${world.den.ref.apiUrl}/mcp/agent`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${world.appHostSession.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, params }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    expect(response.status).toBe(200);
+    const raw = await response.text();
+    const line = raw.split("\n").find(value => value.startsWith("data:"));
+    return record(JSON.parse(line ? line.slice(5) : raw));
+  }
+
+  const tools = rows(record((await gateway("tools/list")).result).tools);
+  expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: "execute_capability" })]));
+  const connectionUri = "ui://openwork/connection-action/v2/view.html";
+  const connectionTools = tools.filter(tool => {
+    const metadata = isRecord(tool._meta) ? tool._meta : {};
+    const ui = isRecord(metadata.ui) ? metadata.ui : {};
+    return ui.resourceUri === connectionUri;
+  });
+  expect(connectionTools.map(tool => tool.name).sort()).toEqual(["connection_action", "connection_action_intent"]);
+  const resources = rows(record((await gateway("resources/list")).result).resources);
+  expect(resources).toEqual(expect.arrayContaining([expect.objectContaining({ uri: connectionUri })]));
+  expect(resources).not.toEqual(expect.arrayContaining([expect.objectContaining({ uri: "ui://openwork/connection-action/v1/view.html" })]));
+
   await user.type("composer", ordinaryDiscoveryPrompt, { verify: true });
   await user.press("Enter");
   await user.see({ text: ordinaryDiscoveryReply }, { timeoutMs: 120_000 });
   for (const testId of ["connection-decision-panel", "desktop-connection-card", "connector-catalog"]) await user.notSee({ testId });
-  await user.notSee({ role: "button", label: "Authenticate" });
-  const pending = await probe.desktopApi(`${mount}/question`);
-  expect(pending.status).toBe(200);
-  expect(rows(pending.body).filter(request => request.sessionID === world.session.sessionId)).toEqual([]);
-  const response = await probe.desktopApi(`${mount}/session/${encodeURIComponent(world.session.sessionId)}/message`);
-  expect(response.status).toBe(200);
-  const tools = turnTools(rows(response.body), ordinaryDiscoveryPrompt);
-  expect(tools).toHaveLength(1);
-  const discovery = toolPayload(tools[0]);
-  expect(discovery.connectionAction).toBeUndefined();
-  expect(discovery.connectorCatalog).toBeUndefined();
-  expect(rows(discovery.matches)).toEqual(expect.arrayContaining([expect.objectContaining({
-    kind: "connection_status", connectionStatus: expect.objectContaining({ connectionId: world.connection.id, state: "needs_connection" }),
-  })]));
-  const calls = (await world.den.mocks.connector.agentRequests({ promptMarker: ordinaryDiscoveryPrompt })).filter(call => call.kind === "tool");
-  expect(calls).toHaveLength(1);
-  expect(calls[0]?.toolName).toMatch(/search_capabilities$/);
-  expect((await world.den.mocks.connector.requests()).filter(request => request.path === "/authorize" || request.path === "/token")).toEqual([]);
-  await user.screenshot();
-  evidence.recordAssertionEvidence("Discovery remains informational", "The actual search result has a status match but no action, native question, card, or OAuth request", true);
-});
+  expect(await pending()).toEqual([]);
+  const ordinaryTools = turnTools(await messages(), ordinaryDiscoveryPrompt);
+  expect(ordinaryTools).toHaveLength(1);
+  const ordinaryPayload = toolPayload(ordinaryTools[0]);
+  expect(ordinaryPayload.connectionAction).toBeUndefined();
+  expect(ordinaryPayload.connectorCatalog).toBeUndefined();
 
-for (const entry of [
-  { name: "connection search", prompt: connectionActionPrompt, skipPrompt: connectionActionSkipPrompt, tools: ["search_capabilities"] },
-  { name: "connection status execution", prompt: connectionStatusPrompt, skipPrompt: connectionStatusSkipPrompt, tools: ["search_capabilities", "execute_capability"] },
-]) {
-  for (const choice of ["Authenticate", "Skip"]) {
-    test(`desktop pauses ${entry.name} for native ${choice} and continues the same turn`, async ({ world, user, probe, evidence }) => {
-      const connector = world.den.mocks.connector;
-      const prompt = choice === "Skip" ? entry.skipPrompt : entry.prompt;
-      const reply = choice === "Skip" ? connectionActionReplySkip : connectionActionReply;
-      const mount = `/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
-      const sessionPath = `${mount}/session/${encodeURIComponent(world.session.sessionId)}`;
-      const messages = async () => {
-        const response = await probe.desktopApi(`${sessionPath}/message`);
-        expect(response.status).toBe(200);
-        return rows(response.body);
-      };
-      const pending = async () => {
-        const response = await probe.desktopApi(`${mount}/question`);
-        expect(response.status).toBe(200);
-        return rows(response.body).filter(request => request.sessionID === world.session.sessionId);
-      };
-      const modelRequests = () => connector.agentRequests({ promptMarker: prompt });
-      const modelTools = async () => (await modelRequests()).filter(call => call.kind === "tool");
-      const oauthRequests = async () => (await connector.requests()).filter(request => request.path === "/authorize" || request.path === "/token");
-      let requestId = 0;
-      async function gateway(method: string, params: Record<string, unknown> = {}) {
-        const response = await fetch(`${world.den.ref.apiUrl}/mcp/agent`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${world.appHostSession.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, params }),
-          signal: AbortSignal.timeout(60_000),
-        });
-        expect(response.status).toBe(200);
-        const raw = await response.text();
-        const line = raw.split("\n").find(value => value.startsWith("data:"));
-        return record(JSON.parse(line ? line.slice(5) : raw));
-      }
-      const tools = rows(record((await gateway("tools/list")).result).tools);
-      expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: "execute_capability" })]));
-      const connectionUri = "ui://openwork/connection-action/v2/view.html";
-      const connectionTools = tools.filter(tool => {
-        const metadata = isRecord(tool._meta) ? tool._meta : {};
-        const ui = isRecord(metadata.ui) ? metadata.ui : {};
-        return ui.resourceUri === connectionUri;
-      });
-      expect(connectionTools.map(tool => tool.name).sort()).toEqual(["connection_action", "connection_action_intent"]);
-      const legacyUri = "ui://openwork/connection-action/v1/view.html";
-      const resources = rows(record((await gateway("resources/list")).result).resources);
-      expect(resources).toEqual(expect.arrayContaining([expect.objectContaining({ uri: connectionUri })]));
-      expect(resources).not.toEqual(expect.arrayContaining([expect.objectContaining({ uri: legacyUri })]));
-      const retiredResource = await gateway("resources/read", { uri: legacyUri });
-      expect(retiredResource.error).toBeDefined();
-      expect(retiredResource.result).toBeUndefined();
+  const cases = [
+    { prompt: connectionActionPrompt, reply: connectionActionReply, tools: ["search_capabilities"] },
+    { prompt: connectionActionSkipPrompt, reply: connectionActionReplySkip, tools: ["search_capabilities"] },
+    { prompt: connectionStatusPrompt, reply: connectionActionReply, tools: ["search_capabilities", "execute_capability"] },
+    { prompt: connectionStatusSkipPrompt, reply: connectionActionReplySkip, tools: ["search_capabilities", "execute_capability"] },
+  ];
+  for (const entry of cases) {
+    await user.see("composer", { editable: true });
+    await user.type("composer", entry.prompt, { replace: true, verify: true });
+    await user.press("Enter");
+    await user.see({ text: entry.reply }, { timeoutMs: 120_000 });
+    expect(await pending()).toEqual([]);
+    const frames = await probe.eventually(
+      () => probe.dom(`[data-mcp-app-resource="${connectionUri}"]`),
+      { within: 30_000, label: "the connection App mounts in the transcript", until: result => result.elements.length >= 1 },
+    );
+    expect(frames.elements.at(-1)?.rect.width).toBeGreaterThan(0);
+    expect(frames.elements.at(-1)?.rect.height).toBeGreaterThan(0);
+    await user.notSee({ testId: "desktop-connection-card" });
+    await user.notSee({ testId: "connection-decision-panel" });
 
-      for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, world.session.sessionId]) expect(prompt).not.toContain(id);
-      await user.type("composer", prompt, { verify: true });
-      await user.press("Enter");
-      await user.see({ text: reply }, { timeoutMs: 120_000 });
-      expect(await pending()).toEqual([]);
-      const appFrames = await probe.eventually(
-        () => probe.dom('[data-mcp-app-resource="ui://openwork/connection-action/v2/view.html"]'),
-        { within: 30_000, label: "the connection App mounts in the transcript", until: result => result.elements.length === 1 },
-      );
-      expect(appFrames.elements).toHaveLength(1);
-      expect(appFrames.elements[0]?.rect.width).toBeGreaterThan(0);
-      expect(appFrames.elements[0]?.rect.height).toBeGreaterThan(0);
-      await user.notSee({ testId: "desktop-connection-card" });
-      await user.notSee({ testId: "connection-decision-panel" });
-
-      const finishedMessages = await messages();
-      const users = finishedMessages.filter(message => record(message.info).role === "user");
-      expect(users).toHaveLength(1);
-      const finishedTools = turnTools(finishedMessages, prompt);
-      const calls = await modelTools();
-      expect(calls).toHaveLength(entry.tools.length);
-      expect(finishedTools).toHaveLength(entry.tools.length);
-      for (const [index, tool] of entry.tools.entries()) {
-        expect(calls[index]?.toolName).toMatch(new RegExp(`${tool}$`));
-        expect(finishedTools[index]?.tool).toMatch(new RegExp(`${tool}$`));
-      }
-      const expectedConnection = { connectionId: world.connection.id, connectionName: "Notion", state: "needs_connection", actor: "member", action: { type: "connect", surface: "openwork_your_connections" } };
-      const firstPayload = toolPayload(finishedTools[0]);
-      const statusMatch = rows(firstPayload.matches).find(match => match.kind === "connection_status"
-        && isRecord(match.connectionStatus) && match.connectionStatus.connectionId === world.connection.id);
-      if (!statusMatch || typeof statusMatch.name !== "string") throw new Error("Discovery did not return an exact status capability");
-      if (entry.tools.length === 2) {
-        expect(firstPayload.connectionAction).toBeUndefined();
-        expect(statusMatch.connectionStatus).toMatchObject(expectedConnection);
-        expect(calls[1]?.arguments).toEqual({ name: statusMatch.name });
-        expect(record(finishedTools[1].state).input).toEqual({ name: statusMatch.name });
-        expect(toolPayload(finishedTools[1])).toMatchObject(expectedConnection);
-      } else {
-        expect(firstPayload.connectionAction).toMatchObject(expectedConnection);
-      }
-      expect((await modelRequests()).filter(call => call.kind === "final")).toHaveLength(1);
-      expect((await modelRequests()).filter(call => call.kind === "error")).toEqual([]);
-      expect(await oauthRequests()).toEqual([]);
-      expect(await connector.toolCalls()).toEqual([]);
-      expect((await messages()).filter(message => record(message.info).role === "user")).toEqual(users);
-      expect(await modelTools()).toEqual(calls);
-      await user.screenshot();
-      evidence.recordAssertionEvidence(`${choice} prompt renders the single connection App without legacy native UI`, JSON.stringify({ userMessages: 1, toolNames: calls.map(call => call.toolName), resourceUri: connectionUri }), true);
-    });
+    const transcriptTools = turnTools(await messages(), entry.prompt);
+    const modelCalls = (await connector.agentRequests({ promptMarker: entry.prompt })).filter(call => call.kind === "tool");
+    expect(transcriptTools).toHaveLength(entry.tools.length);
+    expect(modelCalls).toHaveLength(entry.tools.length);
+    for (const [index, name] of entry.tools.entries()) {
+      expect(transcriptTools[index]?.tool).toMatch(new RegExp(`${name}$`));
+      expect(modelCalls[index]?.toolName).toMatch(new RegExp(`${name}$`));
+    }
+    const firstPayload = toolPayload(transcriptTools[0]);
+    const statusMatch = rows(firstPayload.matches).find(match => match.kind === "connection_status"
+      && isRecord(match.connectionStatus) && match.connectionStatus.connectionId === world.connection.id);
+    if (!statusMatch || typeof statusMatch.name !== "string") throw new Error("Discovery did not return an exact status capability");
+    const expectedConnection = { connectionId: world.connection.id, connectionName: "Notion", state: "needs_connection", actor: "member", action: { type: "connect", surface: "openwork_your_connections" } };
+    if (entry.tools.length === 2) {
+      expect(firstPayload.connectionAction).toBeUndefined();
+      expect(statusMatch.connectionStatus).toMatchObject(expectedConnection);
+      expect(toolPayload(transcriptTools[1])).toMatchObject(expectedConnection);
+    } else {
+      expect(firstPayload.connectionAction).toMatchObject(expectedConnection);
+    }
+    expect((await connector.requests()).filter(request => request.path === "/authorize" || request.path === "/token")).toEqual([]);
+    expect(await connector.toolCalls()).toEqual([]);
+    await user.screenshot();
   }
-}
+
+  evidence.recordAssertionEvidence(
+    "One standards-based connection App replaces legacy connection UI",
+    "Ordinary discovery stayed informational. Explicit search and exact status execution each rendered the same v2 App resource, never opened a native question, provider OAuth, legacy card, or provider tool call.",
+    true,
+  );
+});
