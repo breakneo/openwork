@@ -37,6 +37,7 @@ interface MatrixContext {
 
 interface MatrixColumn {
   id: string;
+  apiVersion: string;
   apiImage: string;
   webImage: string;
   apiImageId: string;
@@ -58,6 +59,7 @@ interface MatrixColumn {
 
 interface MatrixPendingColumn {
   id: "pending";
+  apiVersion: string;
   apiImage: string;
   webImage: string;
   apiImageId: string;
@@ -93,17 +95,31 @@ function requiredStringArray(value: unknown, key: string): string[] {
   return value[key];
 }
 
+function nullableString(value: unknown, key: string): string | null {
+  if (!isRecord(value) || (value[key] !== null && typeof value[key] !== "string")) {
+    throw new Error(`Matrix manifest has an invalid ${key}.`);
+  }
+  return value[key];
+}
+
 async function verifyManifestSource(payload: unknown): Promise<void> {
   if (!isRecord(payload)) throw new Error("Matrix manifest is invalid.");
   const source = payload.source;
   const fingerprint = requiredString(source, "fingerprint");
   expect(requiredStringArray(source, "productFiles")).toEqual(SETUP_SSO_PRODUCT_SOURCE_FILES);
   requiredStringArray(source, "dirtyProductFiles");
-  expect(requiredString(source, "apiImageFingerprint")).toBe(fingerprint);
-  expect(requiredString(source, "webImageFingerprint")).toBe(fingerprint);
   expect(fingerprint).toBe(await setupSsoProductSourceFingerprint());
   const currentCommit = await setupSsoCurrentCommit();
   expect(requiredString(payload, "commit")).toBe(currentCommit);
+  if (requiredString(source, "webMode") === "host-production") {
+    expect(requiredString(source, "hostWebFingerprint")).toBe(fingerprint);
+    expect(requiredString(source, "hostWebCommit")).toBe(currentCommit);
+    expect(nullableString(source, "apiImageFingerprint")).toBeNull();
+    expect(nullableString(source, "webImageFingerprint")).toBeNull();
+    return;
+  }
+  expect(requiredString(source, "apiImageFingerprint")).toBe(fingerprint);
+  expect(requiredString(source, "webImageFingerprint")).toBe(fingerprint);
 }
 
 function parseColumn(value: unknown): MatrixColumn {
@@ -111,6 +127,7 @@ function parseColumn(value: unknown): MatrixColumn {
   const contextValue = value.context;
   return {
     id: requiredString(value, "id"),
+    apiVersion: requiredString(value, "apiVersion"),
     apiImage: requiredString(value, "apiImage"),
     webImage: requiredString(value, "webImage"),
     apiImageId: requiredString(value, "apiImageId"),
@@ -161,6 +178,7 @@ async function pendingColumn(): Promise<MatrixPendingColumn> {
   await verifyManifestSource(payload);
   return {
     id: "pending",
+    apiVersion: requiredString(payload.pending, "apiVersion"),
     apiImage: requiredString(payload.pending, "apiImage"),
     webImage: requiredString(payload.pending, "webImage"),
     apiImageId: requiredString(payload.pending, "apiImageId"),

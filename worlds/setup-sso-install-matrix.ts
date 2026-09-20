@@ -9,6 +9,7 @@ export async function main(): Promise<void> {
     manifest: output(setupSsoInstallMatrixManifestPath(), { group: "Proof" }),
     commit: output(matrix.commit, { group: "Proof" }),
     source_fingerprint: output(matrix.source.fingerprint, { group: "Proof" }),
+    web_mode: output(matrix.source.webMode, { group: "Proof" }),
     dirty_product_files: output(JSON.stringify(matrix.source.dirtyProductFiles), { group: "Proof" }),
   };
   for (const column of matrix.columns) {
@@ -17,6 +18,7 @@ export async function main(): Promise<void> {
     outputs[`${key}_api`] = output(column.apiUrl, { group: column.id });
     outputs[`${key}_project`] = output(column.project, { group: column.id });
     outputs[`${key}_api_image`] = output(column.apiImage, { group: column.id });
+    outputs[`${key}_api_version`] = output(column.apiVersion, { group: column.id });
     outputs[`${key}_web_image`] = output(column.webImage, { group: column.id });
   }
   if (matrix.pending) {

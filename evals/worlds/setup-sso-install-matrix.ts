@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { once } from "node:events";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,10 @@ const COMPOSE_FILE = join(REPO_ROOT, "packaging", "docker", "docker-compose.eval
 const MANIFEST_PATH = join(REPO_ROOT, "tmp", "setup-sso-install-matrix.json");
 const DEV_API_IMAGE = "openwork-den-api:setup-sso-dev-a51297520";
 const DEV_WEB_IMAGE = "openwork-den-web:setup-sso-dev-a51297520";
+const HOST_API_VERSION = "0.18.48";
+const HOST_API_IMAGE = "ghcr.io/different-ai/openwork-den-api:0.18.48@sha256:8f2977788063c47d06f3cd2b2c60b43da5137d42c807b577e2f30ad968e86204";
+const HOST_CONTAINER_WEB_IMAGE = "ghcr.io/different-ai/openwork-den-web:0.18.48@sha256:fe856630e05b1ff96accfb2a8a108b416a1fdc1a842ea0af492b3a8472f594a5";
+const HOST_WEB_ARTIFACT = "host://checked-out-den-web";
 const SOURCE_FINGERPRINT_LABEL = "org.openwork.setup-sso-source";
 export const SETUP_SSO_PRODUCT_SOURCE_FILES = [
   "ee/apps/den-web/app/(den)/_components/member-auth-guard.tsx",
@@ -65,6 +70,7 @@ interface MatrixContext {
 
 export interface SetupSsoMatrixColumn {
   id: string;
+  apiVersion: string;
   apiImage: string;
   webImage: string;
   apiImageId: string;
@@ -93,6 +99,9 @@ export interface SetupSsoMatrixManifest {
     dirtyProductFiles: string[];
     apiImageFingerprint: string | null;
     webImageFingerprint: string | null;
+    webMode: "image" | "host-production";
+    hostWebFingerprint: string | null;
+    hostWebCommit: string | null;
   };
   columns: SetupSsoMatrixColumn[];
   pending: SetupSsoPendingColumn | null;
@@ -100,6 +109,7 @@ export interface SetupSsoMatrixManifest {
 
 export interface SetupSsoPendingColumn {
   id: "pending";
+  apiVersion: string;
   apiImage: string;
   webImage: string;
   apiImageId: string;
@@ -235,6 +245,54 @@ async function buildDevImages(fingerprint: string): Promise<void> {
   if (fingerprints.some((value) => value !== fingerprint)) {
     throw new Error("Built development images do not match the tested product-source fingerprint.");
   }
+}
+
+async function buildHostWeb(expectedFingerprint: string): Promise<void> {
+  await command("pnpm", ["--filter", "@openwork-ee/den-web", "build"]);
+  const builtFingerprint = await setupSsoProductSourceFingerprint();
+  if (builtFingerprint !== expectedFingerprint) {
+    throw new Error("Den Web product source changed while the host production artifact was building.");
+  }
+}
+
+function startHostWeb(
+  stack: AsyncDisposableStack,
+  input: { webPort: number; webUrl: string; apiUrl: string; organizationName: string },
+): () => string {
+  let output = "";
+  const child = spawn("pnpm", ["--dir", "ee/apps/den-web", "exec", "next", "start", "--hostname", "127.0.0.1", "--port", String(input.webPort)], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      DEN_API_BASE: input.apiUrl,
+      DEN_API_PUBLIC_URL: input.apiUrl,
+      DEN_AUTH_ORIGIN: input.webUrl,
+      DEN_BASE_URL: input.webUrl,
+      DEN_WEB_PUBLIC_ORIGIN: input.webUrl,
+      DEN_WEB_OPENWORK_AUTH_CALLBACK_URL: input.webUrl,
+      DEN_ORG_MODE: "single_org",
+      DEN_SINGLE_ORG_NAME: input.organizationName,
+      DEN_SINGLE_ORG_SLUG: "default",
+      DEN_SINGLE_ORG_ALLOW_PUBLIC_SIGNUP: "false",
+      NEXT_PUBLIC_POSTHOG_API_KEY: "",
+      NEXT_PUBLIC_POSTHOG_KEY: "",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const append = (chunk: string) => {
+    output = `${output}${chunk}`.slice(-32 * 1024);
+  };
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  stack.adopt(child, async (owned: ChildProcess) => {
+    if (owned.exitCode !== null || owned.signalCode !== null) return;
+    owned.kill("SIGTERM");
+    await Promise.race([once(owned, "exit"), new Promise((resolve) => setTimeout(resolve, 10_000))]);
+    if (owned.exitCode === null && owned.signalCode === null) owned.kill("SIGKILL");
+  });
+  return () => output;
 }
 
 async function waitForHttp(url: string, label: string, logs: () => Promise<string>): Promise<void> {
@@ -491,21 +549,24 @@ async function seedEnterpriseSsoContext(input: {
 
 async function bootColumn(
   stack: AsyncDisposableStack,
-  definition: { id: string; apiImage: string; webImage: string },
+  definition: { id: string; apiVersion: string; apiImage: string; webImage: string },
   pullPolicy: "always" | "never",
   setup: "configured",
+  hostWeb?: { fingerprint: string },
 ): Promise<SetupSsoMatrixColumn>;
 async function bootColumn(
   stack: AsyncDisposableStack,
-  definition: { id: "pending"; apiImage: string; webImage: string },
+  definition: { id: "pending"; apiVersion: string; apiImage: string; webImage: string },
   pullPolicy: "always" | "never",
   setup: "pending",
+  hostWeb?: { fingerprint: string },
 ): Promise<SetupSsoPendingColumn>;
 async function bootColumn(
   stack: AsyncDisposableStack,
-  definition: { id: string; apiImage: string; webImage: string },
+  definition: { id: string; apiVersion: string; apiImage: string; webImage: string },
   pullPolicy: "always" | "never",
   setup: "configured" | "pending",
+  hostWeb?: { fingerprint: string },
 ): Promise<SetupSsoMatrixColumn | SetupSsoPendingColumn> {
   const ports = await allocateFreePorts(3);
   const webPort = ports[0];
@@ -533,6 +594,7 @@ async function bootColumn(
   await mkdir(root, { recursive: true });
   const overridePath = join(root, "docker-compose.override.yml");
   const trustedOrigins = [webUrl, apiUrl, new URL(idp.issuer).origin].join(",");
+  const organizationName = `Synthetic enterprise ${definition.id}`;
   await writeFile(overridePath, [
     "services:",
     "  den-migrate:",
@@ -547,6 +609,7 @@ async function bootColumn(
     "  web:",
     `    image: "${definition.webImage}"`,
     `    pull_policy: ${pullPolicy}`,
+    ...(hostWeb ? ["    profiles: [\"container-web\"]"] : []),
     "",
   ].join("\n"), { mode: 0o600 });
   const composeEnv: NodeJS.ProcessEnv = {
@@ -556,16 +619,23 @@ async function bootColumn(
     OPENWORK_AUTH_SECRET: randomBytes(32).toString("hex"),
     OPENWORK_DB_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
     OPENWORK_ALLOW_SIGNUP: "false",
-    OPENWORK_ORG_NAME: `Synthetic enterprise ${definition.id}`,
+    OPENWORK_ORG_NAME: organizationName,
     OPENWORK_OWNER_EMAILS: ownerEmail,
     OPENWORK_SETUP_CODE: bootstrapCode,
   };
   const composeArgs = ["-p", project, "-f", COMPOSE_FILE, "-f", overridePath];
-  const logs = () => compose([...composeArgs, "logs", "--no-color", "--tail", "120", "den", "web"], composeEnv)
-    .catch((error: unknown) => `logs unavailable: ${messageText(error)}`);
+  let hostWebLogs = () => "";
+  const logs = async () => {
+    const composeLogs = await compose([...composeArgs, "logs", "--no-color", "--tail", "120", "den", "web"], composeEnv)
+      .catch((error: unknown) => `logs unavailable: ${messageText(error)}`);
+    return `${composeLogs}\n${hostWebLogs()}`;
+  };
   try {
     await compose([...composeArgs, "up", "-d", "--wait", "--wait-timeout", "300"], composeEnv);
     await waitForHttp(`${apiUrl}/health`, `${definition.id} Den API`, logs);
+    if (hostWeb) {
+      hostWebLogs = startHostWeb(stack, { webPort, webUrl, apiUrl, organizationName });
+    }
     await waitForHttp(`${webUrl}/api/ready`, `${definition.id} Den web`, logs);
   } catch (error) {
     await writeFile(join(root, "startup-failure.log"), await logs(), { mode: 0o600 });
@@ -579,10 +649,11 @@ async function bootColumn(
   if (setup === "pending") {
     return {
       id: "pending",
+      apiVersion: definition.apiVersion,
       apiImage: definition.apiImage,
-      webImage: definition.webImage,
+      webImage: hostWeb ? HOST_WEB_ARTIFACT : definition.webImage,
       apiImageId: await imageId(definition.apiImage),
-      webImageId: await imageId(definition.webImage),
+      webImageId: hostWeb?.fingerprint ?? await imageId(definition.webImage),
       apiUrl,
       webUrl,
       project,
@@ -607,10 +678,11 @@ async function bootColumn(
   }
   return {
     id: definition.id,
+    apiVersion: definition.apiVersion,
     apiImage: definition.apiImage,
-    webImage: definition.webImage,
+    webImage: hostWeb ? HOST_WEB_ARTIFACT : definition.webImage,
     apiImageId: await imageId(definition.apiImage),
-    webImageId: await imageId(definition.webImage),
+    webImageId: hostWeb?.fingerprint ?? await imageId(definition.webImage),
     apiUrl,
     webUrl,
     idpOrigin: new URL(idp.issuer).origin,
@@ -621,6 +693,7 @@ async function bootColumn(
 }
 
 export async function bootSetupSsoInstallMatrix(stack: AsyncDisposableStack): Promise<SetupSsoMatrixManifest> {
+  const hostWeb = process.env.OPENWORK_SETUP_SSO_HOST_WEB === "1";
   const requested = new Set(
     (process.env.OPENWORK_SETUP_SSO_MATRIX_COLUMNS?.split(",") ?? ["0.18.43", "0.18.48", "dev", "pending"])
       .map((value) => value.trim())
@@ -630,18 +703,36 @@ export async function bootSetupSsoInstallMatrix(stack: AsyncDisposableStack): Pr
   const columns: SetupSsoMatrixColumn[] = [];
   for (const definition of RELEASE_COLUMNS) {
     if (requested.has(definition.id)) {
-      columns.push(await bootColumn(stack, definition, "always", "configured"));
+      columns.push(await bootColumn(stack, { ...definition, apiVersion: definition.id }, "always", "configured"));
     }
   }
   let pending: SetupSsoPendingColumn | null = null;
-  if (requested.has("dev") || requested.has("pending")) {
+  if ((requested.has("dev") || requested.has("pending")) && hostWeb) {
+    await buildHostWeb(fingerprint);
+  } else if (requested.has("dev") || requested.has("pending")) {
     await buildDevImages(fingerprint);
   }
   if (requested.has("dev")) {
-    columns.push(await bootColumn(stack, { id: "dev", apiImage: DEV_API_IMAGE, webImage: DEV_WEB_IMAGE }, "never", "configured"));
+    columns.push(await bootColumn(
+      stack,
+      hostWeb
+        ? { id: "dev", apiVersion: HOST_API_VERSION, apiImage: HOST_API_IMAGE, webImage: HOST_CONTAINER_WEB_IMAGE }
+        : { id: "dev", apiVersion: "a51297520", apiImage: DEV_API_IMAGE, webImage: DEV_WEB_IMAGE },
+      "never",
+      "configured",
+      hostWeb ? { fingerprint } : undefined,
+    ));
   }
   if (requested.has("pending")) {
-    pending = await bootColumn(stack, { id: "pending", apiImage: DEV_API_IMAGE, webImage: DEV_WEB_IMAGE }, "never", "pending");
+    pending = await bootColumn(
+      stack,
+      hostWeb
+        ? { id: "pending", apiVersion: HOST_API_VERSION, apiImage: HOST_API_IMAGE, webImage: HOST_CONTAINER_WEB_IMAGE }
+        : { id: "pending", apiVersion: "a51297520", apiImage: DEV_API_IMAGE, webImage: DEV_WEB_IMAGE },
+      "never",
+      "pending",
+      hostWeb ? { fingerprint } : undefined,
+    );
   }
   const commit = (await command("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], 60_000)).trim();
   const dirtyProductFiles = (await command("git", ["-C", REPO_ROOT, "status", "--short", "--", ...SETUP_SSO_PRODUCT_SOURCE_FILES], 60_000))
@@ -649,15 +740,18 @@ export async function bootSetupSsoInstallMatrix(stack: AsyncDisposableStack): Pr
     .filter(Boolean)
     .map((line) => line.slice(3));
   const includesDevImages = requested.has("dev") || requested.has("pending");
-  const manifest = {
+  const manifest: SetupSsoMatrixManifest = {
     createdAt: new Date().toISOString(),
     commit,
     source: {
       fingerprint,
       productFiles: SETUP_SSO_PRODUCT_SOURCE_FILES,
       dirtyProductFiles,
-      apiImageFingerprint: includesDevImages ? await imageFingerprint(DEV_API_IMAGE) : null,
-      webImageFingerprint: includesDevImages ? await imageFingerprint(DEV_WEB_IMAGE) : null,
+      apiImageFingerprint: includesDevImages && !hostWeb ? await imageFingerprint(DEV_API_IMAGE) : null,
+      webImageFingerprint: includesDevImages && !hostWeb ? await imageFingerprint(DEV_WEB_IMAGE) : null,
+      webMode: hostWeb ? "host-production" : "image",
+      hostWebFingerprint: hostWeb ? fingerprint : null,
+      hostWebCommit: hostWeb ? commit : null,
     },
     columns,
     pending,
