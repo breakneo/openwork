@@ -135,6 +135,13 @@ test("manual navigation restores jump to latest even when the short mobile turn 
   });
   expect(view.container.textContent).toContain("Jump to latest");
   expect(state().mode).toBe("manual");
+  expect(view.container.textContent).not.toContain("Jump to start");
+  const jump = view.container.querySelector<HTMLButtonElement>("button");
+  expect(jump?.classList.contains("rounded-full")).toBe(true);
+  expect(jump?.querySelector(".sr-only")?.textContent).toBe("Jump to latest");
+  await act(async () => { jump?.click(); runFrames(); });
+  expect(state().mode).toBe("stickyBottom");
+  expect(view.container.textContent).not.toContain("Jump to latest");
 });
 
 test("desktop short sends still clamp to the bottom without reserved answer space", async () => {

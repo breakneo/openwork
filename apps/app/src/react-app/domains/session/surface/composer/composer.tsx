@@ -1847,7 +1847,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 <button
                   type="button"
                   onPointerDown={(event) => {
-                    // Keep the mobile editor/keyboard in place when tapping send.
+                    // Preserve focus until submission succeeds; rejected sends keep the keyboard.
                     if (event.pointerType === "touch" && window.matchMedia("(max-width: 1023px)").matches) event.preventDefault();
                   }}
                   onClick={
