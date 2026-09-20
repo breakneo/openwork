@@ -35,7 +35,9 @@ jobs:
   proof:
     needs: select
     if: needs.select.outputs.selected == 'true'
-    runs-on: ubuntu-latest
+    # Same runner as the nightly local journey lane; hosted ubuntu-latest lacks
+    # the setup Electron needs and every desktop proof died before CDP.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -61,6 +63,10 @@ jobs:
         timeout-minutes: 20
         env:
           PROOF_SPEC: ${{ matrix.spec }}
+          # CI runners cannot use Chromium's SUID sandbox (the pnpm-store helper
+          # is not root-owned). The testkit's container mode launches Electron
+          # with --no-sandbox, as it already does on Daytona.
+          OPENWORK_EVAL_CONTAINER_ELECTRON: "1"
         run: |
           set -euo pipefail
           test "$(id -u)" -ne 0
