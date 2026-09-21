@@ -2872,7 +2872,12 @@ function AddConnectionDialog({
     const servers = result.authentication.authorizationServers;
     setAuthorizationServerIssuer(servers.length === 1 ? servers[0].issuer : "");
     setRequestedScopes(result.authentication.recommendedScopes);
-    setShowOAuthClient(Boolean(activePreset?.requiresOAuthClient) || result.authentication.recommendedRegistrationMethod === "pre_registered");
+    // Open the OAuth app form only while a pre-registered client is still
+    // outstanding. A deployment that already supplies one reports the
+    // registration requirement as informational, so the admin is not asked
+    // for credentials they do not need; the manual link stays available.
+    const registrationOutstanding = result.manualRequirements.some((requirement) => requirement.code === "oauth_client_registration" && requirement.required);
+    setShowOAuthClient(Boolean(activePreset?.requiresOAuthClient) || (result.authentication.recommendedRegistrationMethod === "pre_registered" && registrationOutstanding));
   }
 
   async function discover(targetUrl: string, requestId: number) {
