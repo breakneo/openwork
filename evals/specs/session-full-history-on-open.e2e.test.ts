@@ -277,20 +277,51 @@ test("a long conversation pages on demand, restores its saved page cold and load
     return page;
   });
 
-  await step("repeated returns keep a filled newest page visible without fetching earlier history", async () => {
+  const otherRow = { testId: `sidebar-session-${world.other.sessionId}`, role: "button" as const, label: new RegExp(`^${longHistoryOtherTitle}`) };
+  await step("given the unrelated chat the app opened on is still listed beside the long conversation", async () => {
+    await user.see(otherRow);
+    await user.see({ ...sidebarTarget, role: "button", label: new RegExp(`^${longHistoryTitle}`) });
+    evidence.recordAssertionEvidence(
+      "sidebar rows while the long conversation is selected",
+      `"${longHistoryOtherTitle}" and "${longHistoryTitle}" both listed; the app was opened on "${longHistoryOtherTitle}" before its session list had loaded`,
+      true,
+    );
+  });
+
+  await step("when the reader leaves for the unrelated chat and comes back, three times, without scrolling", async () => {
+    const waits: number[] = [];
     for (let visit = 0; visit < 3; visit++) {
-      await user.click({ testId: `sidebar-session-${world.other.sessionId}` });
+      await user.click(otherRow);
       await probe.eventually(() => probe.dom(surface), {
         within: 5_000, label: "the unrelated chat replaces the long conversation", until: (value) => value.elements.length === 0,
       });
       await user.notSee({ text: longHistoryLast });
+      const startedAt = Date.now();
       await user.click(sidebarTarget);
       await probe.eventually(latestVisible, {
         within: 5_000, label: "the newest message returns without a scroll gesture", until: Boolean,
       });
+      waits.push(Date.now() - startedAt);
       await expectIdlePage(pageSize);
-      expect((await readFault()).history.pageReads.every((read) => read.before === null)).toBe(true);
     }
+    evidence.recordAssertionEvidence(
+      "round trips",
+      `3 returns; the newest message was on screen ${waits.join(" / ")} ms after each click, with no scroll gesture`,
+      waits.length === 3,
+    );
+  });
+
+  await step("after: the newest page is on screen and no earlier history was fetched to fill it", async () => {
+    await user.see({ text: longHistoryLast });
+    const reads = (await readFault()).history.pageReads;
+    const older = reads.filter((read) => read.before !== null).length;
+    const { rows } = await historyDom();
+    evidence.recordAssertionEvidence(
+      "history reads after three returns",
+      `${reads.length} newest-page reads, ${older} older-page reads; ${rows.length} messages mounted, newest "${longHistoryLast}" visible`,
+      older === 0 && rows.length <= pageSize,
+    );
+    expect(older).toBe(0);
     await user.screenshot();
   });
 
@@ -430,8 +461,14 @@ test("a long conversation pages on demand, restores its saved page cold and load
     }
     // The clicked first message keeps keyboard focus, so the transcript retains
     // that one group on purpose; the unfocused rows after it must still unmount.
-    await probe.eventually(() => historyDom(), { within: 5_000, label: "the earlier unfocused messages leave the mounted window",
+    const settled = await probe.eventually(() => historyDom(), { within: 5_000, label: "the earlier unfocused messages leave the mounted window",
       until: ({ rows }) => !rows.some((row) => persisted.slice(1, 10).some((text) => row.text.includes(text))) });
+    const retainedFirst = settled.rows.some((row) => row.text.includes(longHistoryFirst));
+    evidence.recordAssertionEvidence(
+      "mounted rows after eight PageDowns through 150 messages",
+      `${settled.rows.length} rows mounted; messages 2-10 unmounted; the clicked first message ${retainedFirst ? "stays" : "is not"} mounted because it holds keyboard focus`,
+      settled.rows.length < 40,
+    );
     expect(renderedCount(await agent.run("session.read_transcript", { count: 1 }))).toBe(longHistoryCount);
     await user.screenshot();
     expect(await agent.run("session.scroll_top")).toMatchObject({ ok: true, position: "top" });
