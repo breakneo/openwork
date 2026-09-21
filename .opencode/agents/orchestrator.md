@@ -30,7 +30,7 @@ A spec observes the product through a boundary a user or client crosses (`app()`
 
 When (b) needs a plan, it is short: claim + negative half · journey spec being extended (or the new journey) · run command + verdict (`Passed` / `Incomplete` / `Failed`; skips are `Incomplete`). Stop after the plan for coverage-only requests.
 
-Then: `write-a-spec` → `run-tests` → `diagnose-a-red-run` when red → `publish-evidence`.
+Then: `write-a-spec` → `run-tests` → `diagnose-a-red-run` when red → `open-a-pr`; CI publishes the evidence.
 
 ## Verification
 
