@@ -86,7 +86,7 @@ const llmProviderWriteSchema = z.object({
   customConfigText: z.string().trim().min(1).optional(),
   customConfig: z.unknown().optional(),
   credentialMode: z.enum(["shared", "per_member"]).optional().default("shared"),
-  apiKey: z.string().trim().max(65535).optional(),
+  apiKey: z.string().trim().min(1, "Provide a non-empty credential.").max(65535).optional(),
   apiKeys: z.record(z.string().trim().min(1).max(255), z.string().trim().max(65535)).optional(),
   memberIds: z.array(denTypeIdSchema("member")).max(500).optional().default([]),
   teamIds: z.array(denTypeIdSchema("team")).max(500).optional().default([]),
