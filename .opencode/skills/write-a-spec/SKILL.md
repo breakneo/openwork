@@ -18,6 +18,10 @@ not for the machine that runs it.
 - You would import `../../apps|packages|ee`, read source files, or spawn another
   runner. That is a unit test in disguise; the boundary ratchet rejects it.
 
+No UI does not mean no spec. A server, proxy, or protocol bug gets a
+browser-less world (see `evals/specs/session-title-recovery.test.ts`); the
+steps still read as one person's before → after.
+
 ## The proof shape
 
 A proof answers: **who** can now do **what** they could not before, and who
@@ -73,6 +77,8 @@ Rules of thumb:
 - For features, show the before state in the same world. Base-vs-head runs are
   expensive; a step that starts with the switch off is not.
 - For permissions, sharing, or scopes, always include the negative persona.
+- The world runs the code on the runtime it ships on. A spec that passes on
+  the wrong runtime proves nothing (`run-tests` → Match the runtime).
 - Prefer `seed.appWeb` (headless Chrome, real app). Use `seed.desktop` only for
   a native capability a browser cannot show, and say why in `nativeReason`.
 - No `seed.evalIn` / `probe.eval` in new specs. If you need one, comment why.
