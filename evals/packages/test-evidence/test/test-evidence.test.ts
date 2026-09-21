@@ -108,6 +108,29 @@ test("test evidence writes visual validations, assertions, failures, and unvalid
   }
 });
 
+test("explicit screenshot captions reach the report without claiming visual validation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "openwork-caption-"));
+  try {
+    const recorder = createTestEvidence({ name: "invoice task", outDir: dir });
+    recorder.recordScreenshot({ ...screenshotArtifact("result"), caption: "  Teammate sees the overdue invoice  " });
+    recorder.recordScreenshot({ ...screenshotArtifact("fallback"), caption: "  " });
+    await recorder.close();
+    const run = await payload(dir);
+    assert.ok(Array.isArray(run.artifacts));
+    assert.ok(isRecord(run.artifacts[0]));
+    assert.equal(run.artifacts[0].caption, "Teammate sees the overdue invoice");
+    assert.equal(run.artifacts[0].ok, null);
+    assert.deepEqual(run.artifacts[0].judgments, []);
+    assert.ok(isRecord(run.artifacts[1]));
+    assert.equal(run.artifacts[1].caption, "invoice task artifact 2");
+    const html = await readFile(join(dir, "index.html"), "utf8");
+    assert.match(html, /Teammate sees the overdue invoice/);
+    await stat(join(dir, "01-teammate-sees-the-overdue-invoice.png"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("test evidence writes a JSON artifact and lists it in the test run", async () => {
   const dir = await mkdtemp(join(tmpdir(), "openwork-test-evidence-json-"));
   try {

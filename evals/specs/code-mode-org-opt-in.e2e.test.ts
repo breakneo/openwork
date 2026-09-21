@@ -1,265 +1,253 @@
 import { expect } from "vitest";
 import { spec } from "@openwork/testkit";
+import { codeModeOrgOptIn, expression, items, record, text, toolPayload, type Persona } from "../worlds/code-mode-org-opt-in.ts";
 
-function record(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Expected object");
-  return Object.fromEntries(Object.entries(value));
-}
-function text(value: unknown): string {
-  if (typeof value !== "string") throw new Error("Expected string");
-  return value;
-}
-function items(value: unknown): Record<string, unknown>[] {
-  if (!Array.isArray(value)) throw new Error("Expected list");
-  return value.map(record);
-}
-function expression(match: Record<string, unknown> | undefined): string {
-  return text(match?.signature).split("(input:")[0];
-}
-type Persona = "owner" | "teammate" | "outsider";
+// Effect: keep a tested connected task, find/run it through Library as a team
+// viewer, and read fresh data without gaining edit rights or the author's
+// connection access. Opt-in changes MCP routing, NOT script availability.
+// Scope: protocol authoring/keep/share, real Den settings and Library execution.
+// No simulated chat, supported OpenCode projection, or speed/token-cost claim.
+const test = spec.world(codeModeOrgOptIn, { timeout: 600_000, resources: { surfaces: ["web"], services: ["den", "mock"] } });
 
-const test = spec.world(async (seed) => {
-  // This is the deployment-enabled backend foundation, not OpenWork chat:
-  // worlds/code-mode-preview.md documents the still-blocked engine projection.
-  // The deployment-default-off boundary remains covered by API unit tests.
-  const den = await seed.den({ web: true, env: { OPENWORK_EVAL_MYSQL8: "1", DEN_CODE_MODE_OPT_IN_ENABLED: "true" }, org: {
-    name: "Code Mode journey", admin: { name: "Workspace owner" }, members: {
-      teammate: { name: "Report teammate" }, outsider: { name: "Outside-team member" },
-    },
-  } });
-  const org = record((await seed.api(den.admin, "/v1/org")).body);
-  const organizationId = text(record(org.organization).id);
-  const member = items(org.members).find((entry) => record(entry.user).email === den.members.teammate.email);
-  const team = await seed.api(den.admin, "/v1/teams", { method: "POST",
-    body: JSON.stringify({ name: "Report team", memberIds: [text(member?.id)] }) });
-  expect(team.response.status, team.text).toBe(201);
-  const teamId = text(record(record(team.body).team).id);
-  const plugin = await seed.api(den.admin, "/v1/plugins", { method: "POST",
-    body: JSON.stringify({ name: "Selected reports", orgWide: false }) });
-  expect(plugin.response.status, plugin.text).toBe(201);
-  const pluginId = text(record(record(plugin.body).item).id);
-  const tokenFor = async (session: typeof den.admin) => {
-    const response = await seed.api(session, "/v1/mcp/token", { method: "POST",
-      headers: { "x-openwork-org-id": organizationId }, body: JSON.stringify({ scopes: ["mcp:read", "mcp:write"] }) });
-    expect(response.response.status, response.text).toBe(200);
-    return text(record(response.body).token);
-  };
-  const tokens = {
-    owner: await tokenFor(den.admin),
-    teammate: await tokenFor(den.members.teammate),
-    outsider: await tokenFor(den.members.outsider),
-  };
-  let requestId = 0;
-  // A real external MCP client transport. Calls happen in the story beat, not
-  // during arrangement; evidence includes only requests/results, never tokens.
-  const rpc = async (method: string, params: Record<string, unknown> = {}, caller: Persona = "owner") => {
-    const response = await fetch(`${den.ref.apiUrl}/mcp/agent`, { method: "POST",
-      headers: { authorization: `Bearer ${tokens[caller]}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, params }), signal: AbortSignal.timeout(60_000) });
-    expect(response.status).toBe(200);
-    const raw = await response.text();
-    const data = raw.split("\n").find((line) => line.startsWith("data:"));
-    const message = record(JSON.parse(data ? data.slice(5) : raw));
-    expect(message.error).toBeUndefined();
-    return record(message.result);
-  };
-  const script = async (code: string, caller: Persona = "owner") => {
-    const result = await rpc("tools/call", { name: "execute_capability_script", arguments: { code } }, caller);
-    expect(result.isError, JSON.stringify(result)).not.toBe(true);
-    return record(result.structuredContent).value;
-  };
-  const viewport = { width: 1280, height: 960 };
-  const web = await seed.web({ den, signedInAs: "admin", startPath: "/dashboard/org-settings", headless: true, viewport });
-  const teammateWeb = await seed.web({ den, signedInAs: "teammate", startPath: "/dashboard/library", headless: true, viewport });
-  const outsiderWeb = await seed.web({ den, signedInAs: "outsider", startPath: "/dashboard/library", headless: true, viewport });
-  return { den, web, teammateWeb, outsiderWeb, rpc, script, pluginId, teamId };
-}, { timeout: 600_000, resources: { surfaces: ["web"], services: ["den"] } });
-
-test("an owner enables Code Mode, a teammate reuses the shared Workflow, and an outside-team member cannot", async ({ world, user, probe, seed, step, evidence }) => {
+test("an owner keeps an invoice follow-up task, a teammate runs it from Library, and sharing never grants billing access", async ({ world, user, probe, step, evidence }) => {
   const teammate = user.on(world.teammateWeb);
   const outsider = user.on(world.outsiderWeb);
-  // MCP advertisement only: app-only routers must not be advertised to a model.
-  // This does not claim that the pinned OpenWork engines honor that projection.
-  const advertisedModelTools = async () => items((await world.rpc("tools/list", {}, "teammate")).tools).filter((tool) => {
-    if (!tool._meta) return true;
-    const ui = record(tool._meta).ui;
+  const withoutBilling = user.on(world.withoutBillingWeb);
+  const witness = (claim: string, summary: string, details: unknown) => {
+    evidence.recordAssertionEvidence(claim, summary, true);
+    evidence.recordJsonArtifact(claim, details);
+  };
+  const name = "Overdue invoice follow-up";
+  const input = { asOf: "2026-09-20" };
+  const inputSchema = { title: "Invoice follow-up cutoff", type: "object", required: ["asOf"], additionalProperties: false,
+    properties: { asOf: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" } } };
+  const outputSchema = { type: "object", required: ["asOf", "summary", "overdueTotal", "followUps"], additionalProperties: false,
+    properties: { asOf: { type: "string" }, summary: { type: "string" }, overdueTotal: { type: "number", minimum: 0 },
+      followUps: { type: "array", items: { type: "object", required: ["invoice", "account", "due", "balance"], additionalProperties: false,
+        properties: { invoice: { type: "string" }, account: { type: "string" }, due: { type: "string" }, balance: { type: "number", minimum: 0 } } } } } };
+  const unpaid = { asOf: input.asOf, summary: "Follow up 1 overdue invoice(s); USD 800 outstanding.", overdueTotal: 800,
+    followUps: [{ invoice: "INV-102", account: "Account B", due: "2026-09-10", balance: 800 }] };
+  const settled = { asOf: input.asOf, summary: "No overdue invoices need follow-up.", overdueTotal: 0, followUps: [] };
+  const advertisedTools = async () => items((await world.rpc("tools/list", {}, "teammate")).tools).filter((tool) => {
+    const ui = tool._meta ? record(tool._meta).ui : undefined;
     const visibility = ui ? record(ui).visibility : undefined;
     return !Array.isArray(visibility) || visibility.includes("model");
   }).map((tool) => tool.name);
-  const discover = async (query: string, caller: Persona = "owner") => record(await world.script(`return await tools.$codemode.search({query:${JSON.stringify(query)}})`, caller));
-  const code = "return { count: input.count }";
-  const schema = { title: "Exact tested contract", type: "object", required: ["count"], additionalProperties: false,
-    properties: { count: { type: "integer", minimum: 1 } } };
-  const scriptRequest = { name: "execute_capability_script", arguments: { code, input: { count: 7 }, inputSchema: schema, outputSchema: schema } };
+  const discover = async (query: string, caller: Persona = "owner") => items(record(await world.script(`return await tools.$codemode.search({query:${JSON.stringify(query)}})`, caller)).items);
+  const calls = () => probe.toolCalls(world.den.mocks.billing);
+  const readPair = async (before: number) => {
+    const observed = await probe.eventually(calls, { within: 60_000, intervalMs: 100,
+      until: (entries) => entries.length >= before + 2, label: "this run read both connected sources" });
+    const added = observed.slice(before);
+    expect(added.map((call) => call.name).sort()).toEqual(["list_invoices", "list_payments"]);
+    expect(added.every((call) => Object.keys(call.args).length === 0)).toBe(true);
+    return added.map(({ name, args }) => ({ name, args }));
+  };
 
-  await step("before: the owner sees Code Mode off and the teammate's MCP client still uses standard tools", async () => {
+  const baseline = await step("before: standard MCP already joins invoices and payments into an overdue follow-up list", async () => {
     await user.see({ role: "switch", label: "Enable Code Mode" });
     expect((await probe.dom('[aria-label="Enable Code Mode"][aria-checked="false"]')).elements).toHaveLength(1);
-    const names = await advertisedModelTools();
+    const names = await advertisedTools();
     expect(names).toContain("search_capabilities");
     expect(names).toContain("execute_capability");
-    // Standard mode already offers optional scripts on this branch. The opt-in
-    // changes discovery/routing, not script availability; do not invent absence.
     expect(names).toContain("execute_capability_script");
     expect(names).not.toContain("capability_helper");
+    const found = await world.rpc("tools/call", { name: "search_capabilities", arguments: { query: "Billing records", type: "mcp", limit: 20 } }, "teammate");
+    expect(found.isError).not.toBe(true);
+    const matches = items(toolPayload(found).matches);
+    const invoices = matches.find((match) => match.name === `mcp:${world.connection.id}:list_invoices`);
+    const payments = matches.find((match) => match.name === `mcp:${world.connection.id}:list_payments`);
+    expect(invoices).toBeDefined(); expect(payments).toBeDefined();
+    const code = [
+      `const [invoiceData, paymentData] = await Promise.all([${text(invoices?.scriptPath)}({}), ${text(payments?.scriptPath)}({})]);`,
+      "const followUps = invoiceData.invoices.filter(row => row.due < input.asOf).map(row => ({",
+      "invoice: row.id, account: row.account, due: row.due,",
+      "balance: row.amount - paymentData.payments.filter(payment => payment.invoiceId === row.id).reduce((total, payment) => total + payment.amount, 0)",
+      "})).filter(row => row.balance > 0).sort((a, b) => a.invoice.localeCompare(b.invoice));",
+      "const overdueTotal = followUps.reduce((total, row) => total + row.balance, 0);",
+      "return { asOf: input.asOf, followUps, overdueTotal, summary: followUps.length ? `Follow up ${followUps.length} overdue invoice(s); USD ${overdueTotal} outstanding.` : 'No overdue invoices need follow-up.' };",
+    ].join("\n");
+    expect(code).not.toContain("INV-102"); expect(code).not.toContain("800");
+    const request = { name: "execute_capability_script", arguments: { code, input, inputSchema, outputSchema } };
+    const before = (await calls()).length;
+    const result = await world.rpc("tools/call", request, "teammate");
+    expect(result.isError).not.toBe(true); expect(toolPayload(result).value).toEqual(unpaid);
+    const reads = await readPair(before);
     await user.click({ text: "Connection behavior" });
     await user.see({ text: /keeps private App tools out of the model/ });
-    evidence.recordAssertionEvidence("Teammate's client before org opt-in", `tools/list (model-visible names): ${JSON.stringify(names)}`, true);
-    await user.screenshot();
+    witness("Off is the counterfactual: scripts and the billing task already work", "With opt-in off, the teammate's client reads invoices and payments and identifies one overdue invoice with USD 800 outstanding. Standard routers and the optional script tool are advertised; the helper is absent.", { modelTools: names, task: "Which overdue invoices need follow-up?", reads, result: toolPayload(result).value });
+    await user.screenshot("Before: Code Mode is off; the connected invoice task already works through standard routing");
+    return { code, request, invoicePath: text(invoices?.scriptPath), paymentPath: text(payments?.scriptPath) };
   });
 
-  await step("the owner enables one switch and saves; reload preserves it, while a teammate cannot change the org setting", async () => {
+  await step("the owner enables script-first routing; save and reload persist it but a teammate cannot change it", async () => {
     await user.click({ role: "switch", label: "Enable Code Mode" });
     await user.click({ role: "button", label: "Save settings" });
     await user.see({ text: "Workspace settings updated." });
-    await user.reload();
-    await user.see({ role: "switch", label: "Enable Code Mode" });
+    await user.reload(); await user.see({ role: "switch", label: "Enable Code Mode" });
     expect((await probe.dom('[aria-label="Enable Code Mode"][aria-checked="true"]')).elements).toHaveLength(1);
-    const blocked = await seed.api(world.den.members.teammate, "/v1/org", { method: "PATCH", body: JSON.stringify({ codeModeEnabled: false }) });
+    const blocked = await world.attempt("teammate", "/v1/org", { codeModeEnabled: false }, "PATCH");
     expect(blocked.response.status).toBe(403);
-    evidence.recordAssertionEvidence("The teammate cannot change this organization setting", `Teammate PATCH /v1/org {codeModeEnabled:false} -> ${blocked.response.status}`, true);
-    await user.screenshot();
+    evidence.recordAssertionEvidence("The setting survives reload and remains owner/admin controlled", "Teammate PATCH codeModeEnabled:false returned 403; reloaded switch is checked.", true);
+    await user.screenshot("After save and reload: the owner's Code Mode opt-in remains on");
   });
 
-  const receiptId = await step("after: the teammate runs a script and gets count 7 — MCP request/response evidence, not a chat UI", async () => {
-    await teammate.see({ role: "heading", label: "My Library" });
-    const names = await advertisedModelTools();
-    expect(names).toContain("execute_capability_script");
-    expect(names).toContain("capability_helper");
-    expect(names).not.toContain("search_capabilities");
-    expect(names).not.toContain("execute_capability");
-    const teammateResult = await world.rpc("tools/call", scriptRequest, "teammate");
-    expect(teammateResult.isError).not.toBe(true);
-    expect(record(teammateResult.structuredContent).value).toEqual({ count: 7 });
-    evidence.recordAssertionEvidence("Teammate executes through the script-first catalog", JSON.stringify({
-      modelVisibleTools: names, request: scriptRequest, response: teammateResult.structuredContent,
-    }, null, 2), true);
-    // The owner authors the shared version. Receipt ownership remains private;
-    // the teammate's successful run above is not reused as the owner's receipt.
-    const tested = await world.rpc("tools/call", scriptRequest);
-    expect(tested.isError).not.toBe(true);
-    expect(record(tested.structuredContent).value).toEqual({ count: 7 });
-    evidence.recordAssertionEvidence("Owner's tested version to keep", JSON.stringify({ request: scriptRequest, response: tested.structuredContent }, null, 2), true);
-    return text(record(record(tested.structuredContent).metadata).receiptId);
+  const receiptId = await step("after: discovery moves inside MCP scripts; the same task still returns the same useful answer", async () => {
+    const names = await advertisedTools();
+    expect(names).toContain("execute_capability_script"); expect(names).toContain("capability_helper");
+    expect(names).not.toContain("search_capabilities"); expect(names).not.toContain("execute_capability");
+    const matches = await discover("Billing records", "teammate");
+    expect(matches.some((match) => expression(match) === baseline.invoicePath)).toBe(true);
+    expect(matches.some((match) => expression(match) === baseline.paymentPath)).toBe(true);
+    const before = (await calls()).length;
+    const result = await world.rpc("tools/call", baseline.request, "teammate");
+    expect(result.isError).not.toBe(true); expect(toolPayload(result).value).toEqual(unpaid);
+    const reads = await readPair(before);
+    const tested = await world.rpc("tools/call", baseline.request);
+    expect(tested.isError).not.toBe(true); expect(toolPayload(tested).value).toEqual(unpaid);
+    const receiptId = text(record(toolPayload(tested).metadata).receiptId);
+    witness("Changed routing, preserved task outcome—not a speed claim", "After opt-in, discovery works inside scripts, the helper is advertised and standard routers are app-only. Reading the same billing records still returns the same USD 800 follow-up. No chat, latency or token-cost comparison is claimed.", { modelTools: names, discovery: 'tools.$codemode.search({query:"Billing records"})', code: baseline.code, input, reads, result: toolPayload(result).value, ownerReceipt: receiptId });
+    return receiptId;
   });
 
-  const saved = await step("the owner keeps the successful result as Team report; the tested contract survives and it starts private", async () => {
-    const save = items((await discover("save Workflow")).items).find((match) => match.path === "tools.den.saveWorkflow");
+  const saved = await step("protocol: the owner keeps the exact tested procedure by receipt; it starts private", async () => {
+    const save = (await discover("save Workflow")).find((match) => match.path === "tools.den.saveWorkflow");
     expect(save).toBeDefined();
-    const keep = { name: "Team report", receiptId, pluginId: world.pluginId };
-    const foreignKeep = await seed.api(world.den.members.teammate, "/v1/workflows", { method: "POST",
-      body: JSON.stringify({ name: "Foreign attempt", receiptId }) });
-    expect(foreignKeep.response.status).toBe(400);
-    const saved = record(await world.script(`return await ${expression(save)}({body:${JSON.stringify(keep)}})`));
-    const detail = await probe.api(world.den.admin, `/v1/workflow-authoring-history?receiptId=${receiptId}`);
-    expect(detail.response.status).toBe(200);
-    expect(record(items(record(detail.body).items)[0]?.procedure).contract).toEqual({ input: { count: 7 }, inputSchema: schema, outputSchema: schema });
-    const capability = `plugin:${world.pluginId}:${text(saved.configObjectId)}`;
-    const findWorkflow = async (caller: Persona) => items((await discover("Team report", caller)).items).find((match) => text(match.path).includes(capability));
-    expect(await findWorkflow("teammate")).toBeUndefined();
-    expect(await findWorkflow("outsider")).toBeUndefined();
-    await user.navigate(`${world.den.ref.webUrl}/dashboard/library/workflows/${text(saved.configObjectId)}`);
-    await user.see({ testId: "workflow-overview" }, { text: /Run workflow/, timeoutMs: 60_000 });
-    await user.see({ role: "heading", label: /^Team report/ });
-    evidence.recordAssertionEvidence("Keep preserves the exact successful procedure without making it org-wide", JSON.stringify({
-      request: keep, saved, contract: record(items(record(detail.body).items)[0]?.procedure).contract,
-      foreignReceiptSaveStatus: foreignKeep.response.status, teammateDiscovery: null, outsiderDiscovery: null,
-    }, null, 2), true);
-    await user.screenshot();
-    return { configObjectId: text(saved.configObjectId), save, keep, findWorkflow };
+    const keep = { name, receiptId, pluginId: world.pluginId };
+    const foreign = await world.attempt("teammate", "/v1/workflows", { name: "Foreign attempt", receiptId });
+    expect(foreign.response.status).toBe(400);
+    const kept = record(await world.script(`return await ${expression(save)}({body:${JSON.stringify(keep)}})`));
+    const history = await probe.api(world.den.admin, `/v1/workflow-authoring-history?receiptId=${receiptId}`);
+    expect(history.response.status).toBe(200);
+    const procedure = record(items(record(history.body).items)[0]?.procedure);
+    expect(procedure.contract).toEqual({ input, inputSchema, outputSchema }); expect(procedure.code).toBe(baseline.code);
+    const id = text(kept.configObjectId);
+    const find = async (caller: Persona) => (await discover(name, caller)).find((match) => text(match.path).includes(`plugin:${world.pluginId}:${id}`));
+    expect(await find("teammate")).toBeUndefined(); expect(await find("outsider")).toBeUndefined();
+    await teammate.reload(); await teammate.click({ role: "button", label: "Plugins" });
+    await teammate.see({ role: "heading", label: "No plugins yet" });
+    await teammate.screenshot("Before sharing: the teammate cannot find the owner's private billing procedure");
+    witness("Receipt-only keep retains exact code/input/schemas without granting team access", "The owner saves using the successful receipt without resubmitting source or schemas. The retained procedure matches exactly. A teammate cannot save that private receipt, and neither teammate nor outsider can discover the Workflow before sharing.", { request: keep, workflowId: id, foreignReceiptSaveStatus: foreign.response.status, teammateDiscovery: false, outsiderDiscovery: false });
+    return { id, version: text(kept.configObjectVersionId), save, keep, find };
   });
 
-  await step("the owner cannot promote failed or invalid-input attempts — request/response evidence; Team report remains the usable version", async () => {
-    await user.see({ role: "heading", label: /^Team report/ });
+  await step("protocol boundary: failed and invalid attempts stay private and cannot become working Workflows", async () => {
     const failed = await world.rpc("tools/call", { name: "execute_capability_script", arguments: { code: "throw new Error('Synthetic failure')" } });
     expect(failed.isError).toBe(true);
-    const failure = record(JSON.parse(text(items(failed.content)[0]?.text)));
-    expect(failure.status).toBe("failed");
+    const failure = toolPayload(failed); expect(failure.status).toBe("failed");
     const failedId = text(failure.receiptId);
     const failedHistory = await probe.api(world.den.admin, `/v1/workflow-authoring-history?receiptId=${failedId}`);
     expect(items(record(failedHistory.body).items)).toHaveLength(1);
-    const denied = await seed.api(world.den.admin, "/v1/workflows", { method: "POST",
-      body: JSON.stringify({ name: "Failed attempt", receiptId: failedId }) });
-    expect(denied.response.status).toBe(400);
-    expect(record(denied.body).error).toBe("workflow_authoring_run_not_successful");
-    const foreignFailedHistory = await probe.api(world.den.members.teammate, `/v1/workflow-authoring-history?receiptId=${failedId}`);
-    expect(items(record(foreignFailedHistory.body).items)).toEqual([]);
-    const rejectedInput = await world.rpc("tools/call", { name: "execute_capability_script", arguments: {
-      code: `return await ${expression(saved.save)}({body:${JSON.stringify(saved.keep)}})`,
-      input: { count: "invalid" }, inputSchema: schema,
+    const denied = await world.attempt("owner", "/v1/workflows", { name: "Failed attempt", receiptId: failedId });
+    expect(denied.response.status).toBe(400); expect(record(denied.body).error).toBe("workflow_authoring_run_not_successful");
+    const foreignHistory = await probe.api(world.den.members.teammate, `/v1/workflow-authoring-history?receiptId=${failedId}`);
+    expect(items(record(foreignHistory.body).items)).toEqual([]);
+    const before = (await calls()).length;
+    const rejectedResult = await world.rpc("tools/call", { name: "execute_capability_script", arguments: {
+      code: `await ${baseline.invoicePath}({}); return await ${expression(saved.save)}({body:${JSON.stringify(saved.keep)}});`,
+      input: { asOf: 42 }, inputSchema,
     } });
-    expect(rejectedInput.isError).toBe(true);
-    const rejected = record(JSON.parse(text(items(rejectedInput.content)[0]?.text)));
-    expect(rejected.error).toBe("invalid_arguments");
-    expect(record(rejected.retention).canSaveByReceipt).toBe(false);
+    expect(rejectedResult.isError).toBe(true);
+    const rejected = toolPayload(rejectedResult);
+    expect(rejected.error).toBe("invalid_arguments"); expect(record(rejected.retention).canSaveByReceipt).toBe(false);
+    expect((await calls()).length).toBe(before);
     const rejectedId = text(rejected.receiptId);
     const rejectedHistory = await probe.api(world.den.admin, `/v1/workflow-authoring-history?receiptId=${rejectedId}`);
-    const rejectedVersion = items(record(rejectedHistory.body).items)[0];
-    expect(record(record(rejectedVersion).execution).status).toBe("failed");
-    expect(record(record(rejectedVersion).procedure).contract).toEqual({ input: { count: "invalid" }, inputSchema: schema });
-    const rejectedKeep = await seed.api(world.den.admin, "/v1/workflows", { method: "POST",
-      body: JSON.stringify({ name: "Invalid contract attempt", receiptId: rejectedId }) });
+    const version = items(record(rejectedHistory.body).items)[0];
+    expect(record(record(version).execution).status).toBe("failed");
+    expect(record(record(version).procedure).contract).toEqual({ input: { asOf: 42 }, inputSchema });
+    const rejectedKeep = await world.attempt("owner", "/v1/workflows", { name: "Invalid contract attempt", receiptId: rejectedId });
     expect(record(rejectedKeep.body).error).toBe("workflow_authoring_run_not_successful");
-    evidence.recordAssertionEvidence("Failed attempts are inspectable only by their author, not saveable", JSON.stringify({
-      failedRequest: "throw new Error('Synthetic failure')", failure, saveFailure: denied.body,
-      failedHistoryCount: items(record(failedHistory.body).items).length, foreignFailedHistory: foreignFailedHistory.body,
-      rejectedInput: { count: "invalid" }, rejected, rejectedVersion, saveRejected: rejectedKeep.body,
-    }, null, 2), true);
+    witness("Failed and invalid attempts remain private and cannot become working tasks", "The author can inspect a failed attempt; the teammate cannot. Failed and invalid-input receipts cannot be saved. Invalid input is retained with its exact contract but stops before any billing call.", { failedStatus: failure.status, ownFailedHistoryCount: 1, foreignFailedHistory: foreignHistory.body, failedSaveError: record(denied.body).error, invalidInputError: rejected.error, invalidSaveError: record(rejectedKeep.body).error, canSaveByReceipt: false, providerDispatches: 0 });
   });
 
-  const shared = await step("the owner shares with Report team; the teammate sees the Plugin in My Library and opens the Workflow's Library link", async () => {
-    const access = items((await discover("postPluginsAccess")).items).find((match) => match.path === "tools.den.postPluginsAccess");
+  const shared = await step("protocol sharing: a team viewer can execute but cannot edit or read private authoring history", async () => {
+    const access = (await discover("postPluginsAccess")).find((match) => match.path === "tools.den.postPluginsAccess");
     expect(access).toBeDefined();
     await world.script(`return await ${expression(access)}({path:{pluginId:${JSON.stringify(world.pluginId)}},body:{teamId:${JSON.stringify(world.teamId)},role:"viewer",orgWide:false}})`);
-    const shared = await saved.findWorkflow("teammate");
-    expect(shared).toBeDefined();
-    await teammate.reload();
-    await teammate.see({ role: "heading", label: "My Library" });
-    await teammate.click({ role: "button", label: "Plugins" });
-    await teammate.see({ role: "link", label: /Selected reports/ });
-    await teammate.see({ text: "Report team" });
-    await teammate.hover({ role: "link", label: /Selected reports/ });
-    await teammate.screenshot();
-    // This branch groups Workflows under their Plugin in My Library, but the
-    // viewer Plugin detail does not expose its Workflow rows. Use the shipped
-    // Workflow Library permalink; do not imply a working tile-to-detail path.
-    await teammate.navigate(`${world.den.ref.webUrl}/dashboard/library/workflows/${saved.configObjectId}`);
-    await teammate.see({ testId: "workflow-overview" }, { text: /Run workflow/, timeoutMs: 60_000 });
-    await teammate.see({ role: "heading", label: /^Team report/ });
-    await teammate.screenshot();
+    const shared = await saved.find("teammate"); expect(shared).toBeDefined(); expect(await saved.find("outsider")).toBeUndefined();
+    const before = (await calls()).length;
+    const result = record(await world.script(`return await ${expression(shared)}(${JSON.stringify(input)})`, "teammate"));
+    expect(result.value).toEqual(unpaid); await readPair(before);
+    const privateHistory = await probe.api(world.den.members.teammate, `/v1/workflow-authoring-history?receiptId=${receiptId}`);
+    expect(items(record(privateHistory.body).items)).toEqual([]);
+    const edit = await world.attempt("teammate", "/v1/workflows/test", { configObjectId: saved.id, name, code: baseline.code, exampleInput: input, inputSchema, outputSchema, requiredCapabilities: [] });
+    expect(edit.response.status).toBe(403);
+    witness("Sharing grants execution, not editing or private attempt history", "The selected team viewer discovers and runs the saved task using their own member access. Editing is rejected with 403 and the owner's private attempt history remains empty for the teammate.", { result: result.value, editStatus: edit.response.status, authoringHistory: privateHistory.body });
     return shared;
   });
 
-  await step("the teammate reuses Team report through MCP and views its saved result in Den, without the owner's private history", async () => {
-    const result = await world.script(`return await ${expression(shared)}({count:7})`, "teammate");
-    expect(result).toMatchObject({ value: { count: 7 } });
-    const privateHistory = await probe.api(world.den.members.teammate, `/v1/workflow-authoring-history?receiptId=${receiptId}`);
-    expect(items(record(privateHistory.body).items)).toEqual([]);
-    await teammate.reload();
-    // A viewer can execute through MCP, but this branch's Den run form does not
-    // grant canRun to a Plugin viewer. Show the real result, not an invented act.
-    await teammate.see({ text: "You do not have permission to run this workflow." });
-    await teammate.see({ testId: "den-workflow-artifact-result" }, { text: /Count\s*7/, timeoutMs: 60_000 });
-    await teammate.see({ role: "heading", label: /^Team report/ });
-    evidence.recordAssertionEvidence("Sharing grants saved execution, not private authoring history", JSON.stringify({
-      request: `return await ${expression(shared)}({count:7})`, response: result, authoringHistory: privateHistory.body,
-    }, null, 2), true);
-    await teammate.screenshot();
+  await step("boundary: an outsider has billing access but no Workflow access; guessed execution never reaches the provider", async () => {
+    await outsider.reload(); await outsider.click({ role: "button", label: "Plugins" });
+    await outsider.see({ role: "heading", label: "No plugins yet" });
+    await outsider.notSee({ role: "link", label: /Billing procedures/ }); await outsider.notSee({ text: name });
+    expect(await saved.find("outsider")).toBeUndefined();
+    const before = (await calls()).length;
+    const guessed = await world.rpc("tools/call", { name: "execute_capability_script", arguments: { code: `return await ${expression(shared)}(${JSON.stringify(input)})` } }, "outsider");
+    expect(guessed.isError).toBe(true); expect((await calls()).length).toBe(before);
+    witness("Workflow access is required even with billing access", "The outside-team member sees no shared Workflow and cannot discover it. Calling its known path is rejected without reaching either billing tool.", { discovered: false, error: items(guessed.content)[0]?.text, providerDispatches: 0 });
+    await outsider.screenshot("After team sharing: the outside-team member still has no billing Workflow");
   });
 
-  await step("boundary: the outside-team member's Library omits the report and even a guessed execution is denied", async () => {
-    await outsider.reload();
-    await outsider.see({ role: "heading", label: "My Library" });
-    await outsider.click({ role: "button", label: "Plugins" });
-    await outsider.see({ role: "heading", label: "No plugins yet" });
-    await outsider.notSee({ role: "link", label: /Selected reports/ });
-    await outsider.notSee({ text: "Team report" });
-    expect(await saved.findWorkflow("outsider")).toBeUndefined();
-    const guessed = await world.rpc("tools/call", { name: "execute_capability_script", arguments: { code: `return await ${expression(shared)}({count:7})` } }, "outsider");
-    expect(guessed.isError).toBe(true);
-    evidence.recordAssertionEvidence("Knowing the shared Workflow's callable path does not grant access", JSON.stringify({
-      request: { code: `return await ${expression(shared)}({count:7})` }, response: guessed,
-    }, null, 2), true);
-    await outsider.screenshot();
+  await step("the owner finds the saved task through Library, and the teammate opens the shared task through the same path", async () => {
+    await user.click({ role: "link", label: "My Library" }); await user.click({ role: "button", label: "Plugins" });
+    await user.click({ role: "link", label: /Billing procedures/ });
+    await user.see({ role: "button", label: /Overdue invoice follow-up/ });
+    await user.screenshot("The owner's saved invoice Workflow appears inside its Library Plugin");
+    await user.click({ role: "button", label: /Overdue invoice follow-up/ });
+    await user.see({ role: "button", label: "Run workflow" });
+    await user.screenshot("The owner opens the saved task by clicking through Library, without a supplied link");
+    await teammate.reload(); await teammate.click({ role: "button", label: "Plugins" });
+    await teammate.see({ text: "Billing team" }); await teammate.click({ role: "link", label: /Billing procedures/ });
+    await teammate.see({ role: "button", label: /Overdue invoice follow-up/ });
+    await teammate.screenshot("After sharing: the teammate finds the invoice Workflow in the shared Library Plugin");
+    await teammate.click({ role: "button", label: /Overdue invoice follow-up/ });
+    await teammate.see({ role: "button", label: "Run workflow" });
+    await teammate.notSee({ role: "tab", label: "Edit" });
+    await teammate.screenshot("The teammate can run the shared task, but cannot edit its procedure");
+  });
+
+  await step("the teammate runs the task in Den and sees the overdue invoice, not just a successful tool call", async () => {
+    await teammate.type({ role: "textbox", label: /^As of/ }, input.asOf, { replace: true, verify: true });
+    const before = (await calls()).length;
+    await teammate.click({ role: "button", label: "Run workflow" });
+    await teammate.see({ testId: "den-workflow-artifact-result" }, { text: /Follow up 1 overdue invoice\(s\); USD 800 outstanding\./, timeoutMs: 60_000 });
+    await teammate.see({ testId: "den-workflow-artifact-result" }, { text: /INV-102/ });
+    const reads = await readPair(before);
+    await teammate.see({ role: "button", label: "Run workflow" });
+    witness("The teammate's Library run produces an actionable payment follow-up", "After normal Library navigation and entering the cutoff date, Run workflow reads both sources. Den shows INV-102, Account B and USD 800 outstanding; it excludes the fully paid and not-yet-due invoices.", { reads, result: unpaid, excluded: ["INV-101 already paid", "INV-103 not due"] });
+    await teammate.screenshot("The teammate's Den run identifies Account B's overdue invoice with USD 800 outstanding");
+  });
+
+  await step("after a payment arrives, rerunning the same saved task removes the settled invoice from follow-up", async () => {
+    await world.settleInvoice();
+    const before = (await calls()).length;
+    await teammate.click({ role: "button", label: "Run workflow" });
+    await teammate.see({ testId: "den-workflow-artifact-result" }, { text: /No overdue invoices need follow-up\./, timeoutMs: 60_000 });
+    const reads = await readPair(before);
+    witness("The same saved task changes its answer when a payment arrives", "Only the external payment fixture changes: INV-102 receives USD 800. Rerunning the same saved code with the same cutoff rereads both sources and displays no overdue invoices. It does not replay the previous answer.", { fixtureChange: "USD 800 payment for INV-102", reads, before: unpaid, after: settled });
+    await teammate.screenshot("After payment: the same saved task rereads billing records and shows no overdue invoices");
+  });
+
+  await step("a team viewer without billing access cannot borrow the author's connection through MCP or Den", async () => {
+    // This member shares the Workflow team but has never received its source grant.
+    expect(await saved.find("withoutBilling")).toBeDefined();
+    const sources = await discover("Billing records", "withoutBilling");
+    expect(sources.some((match) => text(match.path).includes(world.connection.id))).toBe(false);
+    const before = (await calls()).length;
+    const rejected = await world.rpc("tools/call", { name: "execute_capability_script", arguments: { code: `return await ${expression(shared)}(${JSON.stringify(input)})` } }, "withoutBilling");
+    expect(rejected.isError).toBe(true);
+    expect((await calls()).length).toBe(before);
+    const rest = await world.attempt("withoutBilling", `/v1/workflows/${saved.id}/run`, { pluginId: world.pluginId, configObjectVersionId: saved.version, input });
+    expect(rest.response.status).toBe(400); expect(record(rest.body).error).toBe("capability_unavailable");
+    await withoutBilling.reload(); await withoutBilling.click({ role: "button", label: "Plugins" });
+    await withoutBilling.click({ role: "link", label: /Billing procedures/ });
+    await withoutBilling.click({ role: "button", label: /Overdue invoice follow-up/ });
+    await withoutBilling.type({ role: "textbox", label: /^As of/ }, input.asOf, { replace: true, verify: true });
+    await withoutBilling.click({ role: "button", label: "Run workflow" });
+    await withoutBilling.see({ role: "alert" }, { timeoutMs: 60_000 });
+    expect((await calls()).length).toBe(before);
+    witness("Sharing the procedure does not grant billing access", "A second team viewer can find the Workflow but has no billing connection grant. MCP, the run endpoint and the Den form reject execution; the provider receives zero calls. Existing explicitly shared snapshots retain their current policy—this proves no new execution borrows the author's access.", { workflowDiscovered: true, restStatus: rest.response.status, restError: rest.body, mcpError: items(rejected.content)[0]?.text, providerDispatches: 0 });
+    await withoutBilling.screenshot("A Workflow grant without billing access cannot run the task or borrow the author's connection");
   });
 });

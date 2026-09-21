@@ -345,7 +345,9 @@ export async function getWorkflowDetail(input: {
     configObjectId: resource.configObject.id,
     title: resource.configObject.title,
     description: resource.configObject.description,
-    canRun: role === "editor" || role === "manager",
+    // Interactive execution uses the caller's tools and accepts the same
+    // viewer grant as executeMarketplaceCapability. Editing stays manager-only.
+    canRun: role === "viewer" || role === "editor" || role === "manager",
     canManage: role === "manager",
     currentVersion,
     versions,
@@ -672,9 +674,8 @@ export async function validateWorkflowAutomationAction(input: {
       )),
     ])
     const grantInput = { memberId: ownerMemberId, teamIds: teams.map((team) => team.id) }
-    // Scheduling a Workflow executes it, so the owner needs run access — the
-    // same editor-or-manager bar the detail response reports as `canRun`. A
-    // viewer may read results but must not gain scheduled execution.
+    // Unattended scheduling retains its stronger editor-or-manager grant.
+    // Interactive viewer execution does not grant Cloud Automation ownership.
     const roles = [
       resolvePluginArchGrantRole({ ...grantInput, grants: configObjectGrants }),
       resolvePluginArchGrantRole({ ...grantInput, grants: pluginGrants }),

@@ -818,9 +818,9 @@ export class UserChannel implements User {
     });
   }
 
-  screenshot() {
+  screenshot(caption?: string) {
     const surface = requireSurface(this.#surface);
-    return this.#runtime.call("user", "screenshot", "screenshot", surface, () => screenshot(surface));
+    return this.#runtime.call("user", "screenshot", caption ?? "screenshot", surface, () => screenshot(surface, caption));
   }
 
   looks(expectations: string[]): Promise<void> {

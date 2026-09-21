@@ -644,7 +644,7 @@ export function createTestEvidence(meta: { name: string; specFile?: string; outD
       assertOpen();
       const sequence = nextSequence;
       nextSequence += 1;
-      const caption = artifactCaption(name, sequence);
+      const caption = screenshotArtifact.caption?.trim() || artifactCaption(name, sequence);
       const screenshotFileName = fileName(sequence, caption);
       artifacts.push({
         caption,
