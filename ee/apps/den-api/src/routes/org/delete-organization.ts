@@ -1,4 +1,5 @@
 import { eq, inArray } from "@openwork-ee/den-db/drizzle"
+import { deleteGatewayUsageForOrganization } from "@openwork-ee/den-db/gateway-usage-limits"
 import {
   AuthApiKeyTable,
   AuthSessionTable,
@@ -15,6 +16,7 @@ import {
   ConnectorSourceTombstoneTable,
   ConnectorSyncEventTable,
   ConnectorTargetTable,
+  CloudRuntimeInstanceTable,
   DaytonaSandboxTable,
   DesktopConnectGrantTable,
   DesktopPolicyMemberTable,
@@ -369,6 +371,9 @@ export function registerDeleteOrganizationRoutes<T extends { Variables: OrgRoute
 
       let affectedSessions: Array<{ id: typeof AuthSessionTable.$inferSelect.id; token: typeof AuthSessionTable.$inferSelect.token }> = []
       await db.transaction(async (tx) => {
+        await tx.select({ id: OrganizationTable.id }).from(OrganizationTable)
+          .where(eq(OrganizationTable.id, organizationId)).for("update")
+        await deleteGatewayUsageForOrganization(tx, organizationId)
         await deleteModelsAnalyticsForOrganization(tx, organizationId)
         const memberRows = await tx
           .select({ id: MemberTable.id, userId: MemberTable.userId })
@@ -418,6 +423,7 @@ export function registerDeleteOrganizationRoutes<T extends { Variables: OrgRoute
           .map((row) => row.id)
         if (workerIds.length > 0) {
           await tx.delete(WorkerInstanceTable).where(inArray(WorkerInstanceTable.worker_id, workerIds))
+          await tx.delete(CloudRuntimeInstanceTable).where(inArray(CloudRuntimeInstanceTable.worker_id, workerIds))
           await tx.delete(DaytonaSandboxTable).where(inArray(DaytonaSandboxTable.worker_id, workerIds))
           await tx.delete(WorkerTokenTable).where(inArray(WorkerTokenTable.worker_id, workerIds))
           await tx.delete(WorkerBundleTable).where(inArray(WorkerBundleTable.worker_id, workerIds))

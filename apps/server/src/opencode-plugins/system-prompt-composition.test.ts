@@ -4,8 +4,8 @@ import { OPENWORK_AGENT_PROMPT } from "../openwork-agent-prompt.js";
 import { OpenWorkCapabilitiesKnowledge } from "./openwork-capabilities-knowledge.js";
 import { OpenWorkExtensionsPreview } from "./openwork-extensions-preview.js";
 import {
-  OPENWORK_CLOUD_CONNECTION_INSTRUCTION,
-  OPENWORK_CLOUD_SKILL_AUTHORING_INSTRUCTION,
+  OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION,
+  OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION,
   OPENWORK_GOOGLE_CONNECTION_INSTRUCTION,
 } from "./openwork-extensions-preview-steering.js";
 import { OpenWorkSpreadsheets } from "./openwork-spreadsheets.js";
@@ -37,7 +37,7 @@ test("the composed OpenWork prompt is single, deduplicated, ordered, and current
   expect(prompt).toContain("\n\nYou are running inside OpenWork.");
   expect(prompt).toContain("\n\n## OpenWork app context");
   expect(prompt).toContain("\n\n## Built-in Browser (external websites)");
-  expect(prompt).toContain(`\n\n${OPENWORK_CLOUD_CONNECTION_INSTRUCTION}`);
+  expect(prompt).toContain(`\n\n${OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION}`);
 
   expect(prompt).not.toContain("Memory Bank");
   expect(prompt).not.toContain("postMemory");
@@ -51,9 +51,9 @@ test("the composed OpenWork prompt is single, deduplicated, ordered, and current
   expect(occurrences(OPENWORK_AGENT_PROMPT, "openwork-cloud_search_capabilities")).toBe(1);
   expect(prompt).not.toContain("2-4 keyword variants");
   expect(prompt).not.toContain("A successful search proves");
-  expect(occurrences(prompt, OPENWORK_CLOUD_CONNECTION_INSTRUCTION)).toBe(1);
+  expect(occurrences(prompt, OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION)).toBe(1);
   expect(prompt).not.toContain("require the user to sign in to OpenWork first");
-  expect(occurrences(prompt, OPENWORK_CLOUD_SKILL_AUTHORING_INSTRUCTION)).toBe(1);
+  expect(occurrences(prompt, OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION)).toBe(1);
   expect(prompt).not.toContain("retrieve the listed remote `create-skill` skill");
   expect(prompt).not.toContain("factor them into a skill");
   expect(occurrences(prompt, "never browser_* tools for the OpenWork app itself")).toBe(1);
@@ -68,8 +68,8 @@ test("the composed OpenWork prompt is single, deduplicated, ordered, and current
   const knowledgeAt = prompt.indexOf("You are running inside OpenWork.");
   const appContextAt = prompt.indexOf("## OpenWork app context");
   const browserAt = prompt.indexOf("## Built-in Browser (external websites)");
-  const steeringAt = prompt.indexOf(OPENWORK_CLOUD_CONNECTION_INSTRUCTION);
-  const skillAuthoringAt = prompt.indexOf(OPENWORK_CLOUD_SKILL_AUTHORING_INSTRUCTION);
+  const steeringAt = prompt.indexOf(OPENWORK_EXTENSION_DISCOVERY_INSTRUCTION);
+  const skillAuthoringAt = prompt.indexOf(OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION);
   expect(knowledgeAt).toBeGreaterThan(0);
   expect(appContextAt).toBeGreaterThan(knowledgeAt);
   expect(browserAt).toBeGreaterThan(appContextAt);
@@ -109,7 +109,7 @@ test("all OpenWork prompt hooks retain one ordered system message", async () => 
   const capabilities = output.system[0].indexOf("You are running inside OpenWork.");
   const appContext = output.system[0].indexOf("## OpenWork app context");
   const browser = output.system[0].indexOf("## Built-in Browser (external websites)");
-  const routing = output.system[0].indexOf("verified ready for this exact workspace/model");
+  const routing = output.system[0].indexOf(OPENWORK_ON_DEMAND_DISCOVERY_INSTRUCTION);
   const workbooks = output.system[0].indexOf("## Spreadsheets and Excel workbooks");
   expect(capabilities).toBeGreaterThan("engine header".length);
   expect(appContext).toBeGreaterThan(capabilities);

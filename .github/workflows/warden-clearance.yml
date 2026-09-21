@@ -19,9 +19,7 @@
 name: Warden Clearance
 
 on:
-  workflow_run:
-    workflows: [Warden]
-    types: [completed]
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -156,6 +154,7 @@ jobs:
         if: steps.identity.outputs.configured == 'true'
         id: verdict
         env:
+          PUBLISH_STATUS: ${{ steps.publish.outputs.status }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -176,7 +175,7 @@ jobs:
           advisory="$(jq -r '.sync_advisory_count' "$RECEIPT_PATH")"
           echo "advisory=$advisory" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ steps.publish.outputs.status }}" != "published" ]; then
+          if [ "$PUBLISH_STATUS" != "published" ]; then
             echo "Summary publication was stale; skipping clearance."
             verdict skip
           fi

@@ -32,8 +32,17 @@ Create a project with root directory `apps/review`, enable source files outside
 that directory, and connect a **private** Vercel Blob store. Configure
 `BLOB_READ_WRITE_TOKEN` for the Preview environment. Enable **Vercel Authentication**
 under Deployment Protection with **Standard Protection** (or All Deployments).
-Deploy with `vercel deploy --target preview` and use that protected preview URL
-for `OPENWORK_REVIEW_URL`.
+Deploy with `vercel deploy --target preview`, then give the deployment a stable
+alias and use that alias for `OPENWORK_REVIEW_URL`:
+
+```sh
+vercel alias set <deployment-url> openwork-review-<team>.vercel.app
+```
+
+Never use a deployment URL (`<project>-<hash>-<team>.vercel.app`) for
+`OPENWORK_REVIEW_URL`: it is an immutable snapshot, so every report link would
+keep opening the app version from that one deploy. Aliases on `*.vercel.app`
+stay under Standard Protection; do not alias a production custom domain.
 
 Teammates open the PR's report link using their existing Vercel account with
 access to this project. There is no app password. Vercel authenticates requests
@@ -48,8 +57,15 @@ and image routes must return Vercel's authentication response. An authenticated
 request (or `vercel curl` for verification) must reach the app with no Basic
 authorization header. See [Vercel Authentication](https://vercel.com/docs/deployment-protection/methods-to-protect-deployments/vercel-authentication).
 
-The app only rebuilds when it or its dependencies change. Report publication
-uploads data to the existing app; it never creates a deployment.
+The **Review app deploy** workflow redeploys the app whenever `apps/review`,
+`packages/review`, or the lockfile changes on the default branch (or on manual
+dispatch) and moves the alias named by `OPENWORK_REVIEW_URL` to the new
+deployment, then checks that the alias still answers anonymous requests with
+Vercel Authentication. It needs repository variables
+`OPENWORK_REVIEW_VERCEL_ORG_ID` and `OPENWORK_REVIEW_VERCEL_PROJECT_ID` (from
+`.vercel/project.json` after `vercel link`) and the `VERCEL_TOKEN` secret.
+Report publication uploads data to the existing app; it never creates a
+deployment.
 
 Set `OPENWORK_REVIEW_URL` and `BLOB_READ_WRITE_TOKEN` in the publishing
 environment. The existing command publishes a compact link when configured:
@@ -71,15 +87,48 @@ the comment's identity. Include all claimed runs in that selection.
 publication remains available when the review app is not configured.
 Visual judging is explicit: `pnpm --dir evals evidence:judge -- --test-run <run>`.
 
-For automatic publication, configure repository variable `OPENWORK_REVIEW_URL`
-and secret `OPENWORK_REVIEW_BLOB_TOKEN`. The separate **Evidence review** workflow
-consumes existing uploaded artifacts after checks finish. It runs trusted
-default-branch code, ignores stale runs, and only publishes when GitHub supplies
-an associated PR and matching source commit. It never runs downloaded code.
-An existing review of that commit takes precedence, preserving the author's
-selected evidence. Explicit publication can update that selection.
-**Do not require Evidence review in branch protection.** Failures remain visible
-in its optional workflow; existing test checks retain their verdicts.
+## PR change proofs
+
+Every `evals/specs/**/*.e2e.test.ts` a PR adds or changes is treated as that
+PR's proof of work. Nothing is required and nothing is blocked: a PR that
+touches no E2E spec produces no proof evidence, and the run says so.
+
+The non-required **PR change proof** workflow selects those specs from the live
+PR file list and runs each one in its own bounded job on the exact PR head, with
+a virtual display so Electron-driving specs can run. Each job uploads one hashed
+artifact. Failed, skipped, unsupported, and cancelled proofs stay visible as
+non-passing executions; they never fall back to packaged smoke or another
+regression.
+
+The credentialed **Evidence review** workflow runs trusted default-branch code.
+It re-reads the current PR file list, derives the same selection, and accepts
+exactly one artifact per selected spec and run attempt. Every test record must
+name that spec and the current PR SHA. Records from all selected specs are
+combined into one report with one section per test. Downloaded PR artifacts are
+data and are never imported or executed. Unrelated evidence, unexpected proof
+artifacts, stale heads or attempts, and missing or duplicate records are refused.
+
+Candidate publisher and review-app checks live in the PR-only
+`Evidence review candidate checks` workflow. It has no publishing secret or
+write permission.
+
+For automatic publication, keep repository variable `OPENWORK_REVIEW_URL`, secret
+`OPENWORK_REVIEW_BLOB_TOKEN`, and the existing Vercel Preview/private Blob
+configuration. No new environment variable is required. Do not require Evidence
+review or PR change proof in branch protection; only the proof-supplied contract
+is part of the existing required aggregate. Human approval remains in GitHub.
+
+To replay publication without rerunning a proof (default branch only):
+
+```sh
+gh workflow run evidence-review.yml --ref dev -f run_id=<pr-change-proof-run-id>
+```
+
+The publish job summary says **published**, **skipped**, **unavailable**, or
+**failed**. Only **published** confirms delivery. A compact sticky PR comment
+links to the private report; no raw trace or public screenshots are used as a
+fallback. Signed-in project members should verify the report commit and sources.
+Anonymous report, JSON, and image requests must redirect to Vercel Authentication.
 
 ## Contract
 

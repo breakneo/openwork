@@ -37,6 +37,8 @@ import {
   mergeComposerConnectionInventory,
 } from "./composer-connections";
 import { DevProfiler } from "@/react-app/shell/dev-profiler";
+import { connectionDiagnosticHistory, type ConnectionDiagnosticSource, type SendDiagnosticReason } from "@/app/lib/connection-diagnostic-history";
+import { composerDiagnosticBlockers } from "./composer-diagnostics";
 
 type MentionItem = {
   id: string;
@@ -63,6 +65,8 @@ type ComposerProps = {
   submissionPreparingLabel?: string;
   queuedCount: number;
   disabled: boolean;
+  disabledReasons?: readonly SendDiagnosticReason[];
+  preparingReasons?: readonly SendDiagnosticReason[];
   modelUnavailable?: boolean;
   modelUnavailableMessage?: string | null;
   organizationModelsEmpty?: boolean;
@@ -121,6 +125,7 @@ type ComposerProps = {
   flush?: boolean;
   topAccessory?: ReactNode;
   runModeControl?: ReactNode;
+  contextControl?: ReactNode;
 };
 
 const FLUSH_PROMPT_EVENT = "openwork:flushPromptDraft";
@@ -531,7 +536,11 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     if (!mentionOpen) return;
     let cancelled = false;
     setMentionItems(COMPUTER_MENTIONS);
-    void Promise.all([props.listAgents(), props.searchFiles(mentionQuery), listRunningAppsForMention()]).then(([agentList, files, apps]) => {
+    void Promise.all([
+      props.listAgents().catch(() => []),
+      props.searchFiles(mentionQuery).catch(() => []),
+      listRunningAppsForMention(),
+    ]).then(([agentList, files, apps]) => {
       if (cancelled) return;
       const recent = props.recentFiles.slice(0, 8);
       const next: MentionItem[] = [
@@ -778,6 +787,26 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     ? importedPlugins.find((plugin) => `plugin:${plugin.pluginId}` === toolMenuSection) ?? null
     : null;
   const canSend = props.draft.trim().length > 0 || props.attachments.length > 0;
+  const diagnosticsRef = useRef<ConnectionDiagnosticSource | null>(null);
+  useEffect(() => {
+    const diagnostics = connectionDiagnosticHistory.createSource();
+    diagnosticsRef.current = diagnostics;
+    return () => {
+      diagnostics.dispose();
+      diagnosticsRef.current = null;
+    };
+  }, [props.sessionId, props.draftScopeKey]);
+  useEffect(() => {
+    diagnosticsRef.current?.blockers(composerDiagnosticBlockers({
+      disabled: props.disabled,
+      disabledReasons: props.disabledReasons,
+      busy: props.busy,
+      stopping: props.stopping,
+      canSend,
+      submissionPreparing: props.submissionPreparing,
+      preparingReasons: props.preparingReasons,
+    }));
+  });
 
   const renderConnectionRows = () => {
     const servers = connectionInventory.servers;
@@ -995,7 +1024,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
       if (useComposerStateStore.getState().pendingFocusSessionId !== props.sessionId) return;
       const editable = rootRef.current?.querySelector<HTMLElement>("[contenteditable='true']");
       if (!editable) return;
-      editable.focus();
+      editable.focus({ preventScroll: window.matchMedia("(max-width: 1023px)").matches });
       useComposerStateStore.setState({ pendingFocusSessionId: null });
     });
     return () => cancelAnimationFrame(frame);
@@ -1009,7 +1038,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
       const root = rootRef.current;
       if (!root) return;
       const editable = root.querySelector<HTMLElement>("[contenteditable='true']");
-      editable?.focus();
+      editable?.focus({ preventScroll: window.matchMedia("(max-width: 1023px)").matches });
     };
     const handleFlush = () => {
       // onDraftChange always runs synchronously on every keystroke, so this
@@ -1293,7 +1322,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     <DevProfiler id="SessionComposer">
     <div
       ref={rootRef}
-      className={props.flush ? `relative ${toolMenuOpen ? "z-50" : "z-20"}` : `sticky bottom-0 ${toolMenuOpen ? "z-50" : "z-20"} bg-gradient-to-t from-dls-surface via-dls-surface/95 to-transparent px-4 pb-[max(0.5rem,calc(env(safe-area-inset-bottom)+var(--keyboard-inset,0px)))] max-lg:px-3 lg:px-8 ${props.compactTopSpacing ? "pt-0" : "pt-1"}`}
+      className={props.flush ? `relative ${toolMenuOpen ? "z-50" : "z-20"}` : `sticky bottom-0 shrink-0 ${toolMenuOpen ? "z-50" : "z-20"} bg-gradient-to-t from-dls-surface via-dls-surface/95 to-transparent px-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] max-lg:px-3 lg:px-8 ${props.compactTopSpacing ? "pt-0" : "pt-1"}`}
       style={{ contain: "layout style" }}
       onKeyDownCapture={handleKeyDownCapture}
       onCompositionStart={() => {
@@ -1427,7 +1456,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 {t("composer.escape_to_stop")}
               </div>
             ) : null}
-            <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 @min-[560px]/composer:flex">
+            <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 max-lg:flex @min-[560px]/composer:flex">
               <div className="contents">
                 <div className="col-start-1 row-start-2 flex shrink-0 items-center gap-1.5">
                 <input
@@ -1695,16 +1724,16 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
 
                 </div>
 
-                <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-wrap items-center gap-1 border-b border-dls-border pb-2 @min-[560px]/composer:flex-1 @min-[560px]/composer:border-0 @min-[560px]/composer:pb-0">
+                <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-wrap items-center gap-1 border-b border-dls-border pb-2 max-lg:flex-1 max-lg:flex-nowrap max-lg:border-0 max-lg:pb-0 @min-[560px]/composer:flex-1 @min-[560px]/composer:border-0 @min-[560px]/composer:pb-0">
                 {/* Agent picker (#2101/#1971). Only shown once a non-default
                     agent is selected. Switching back to Default agent lives in
-                    this menu and in the + tools menu. */}
-                <div ref={agentMenuRef} className={showAgentPicker ? "relative min-w-0 max-w-full shrink-0" : "hidden"}>
+                    this menu and in the + tools menu. Selection configures
+                    subsequent submissions without interrupting the running turn. */}
+                <div ref={agentMenuRef} className={showAgentPicker ? "relative min-w-0 max-w-full shrink-0 max-lg:max-w-[40%] max-lg:shrink" : "hidden"}>
                   <button
                     type="button"
                     className="flex h-9 max-h-9 max-w-full items-center gap-1 rounded-md px-1.5 text-[12px] font-medium text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12"
                     onClick={() => setAgentMenuOpen((value) => !value)}
-                    disabled={props.busy}
                     aria-expanded={agentMenuOpen}
                     title={t("composer.agent_label")}
                   >
@@ -1785,7 +1814,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 {props.modelUnavailable ? props.onRefreshOrganizationModels ? (
                   <button
                     type="button"
-                    className="inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 rounded-full border border-red-5 bg-red-2 px-2.5 text-[11px] font-medium text-red-11 transition-colors hover:border-red-6 hover:bg-red-3 disabled:cursor-wait disabled:opacity-70 sm:max-w-80"
+                    className="inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 px-2 text-xs text-dls-secondary transition-colors hover:text-foreground disabled:cursor-wait disabled:opacity-70 sm:max-w-80"
                     onClick={() => void handleRefreshOrganizationModels()}
                     disabled={refreshingOrganizationModels}
                     title={t("models.refresh_organization_models")}
@@ -1799,10 +1828,11 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                     </span>
                   </button>
                 ) : (
-                  <span className="min-w-0 max-w-full truncate text-xs font-medium text-red-10">
+                  <span className="min-w-0 max-w-full truncate text-xs text-dls-secondary">
                     {props.modelUnavailableMessage ?? t("models.model_unavailable_short")}
                   </span>
                 ) : null}
+                {props.contextControl}
                 </div>
 
               </div>
@@ -1816,6 +1846,10 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
               <div data-composer-actions className="col-start-2 row-start-2 ml-auto flex shrink-0 items-center gap-1.5">
                 <button
                   type="button"
+                  onPointerDown={(event) => {
+                    // Preserve focus until submission succeeds; rejected sends keep the keyboard.
+                    if (event.pointerType === "touch" && window.matchMedia("(max-width: 1023px)").matches) event.preventDefault();
+                  }}
                   onClick={
                     props.busy
                       ? props.onStop

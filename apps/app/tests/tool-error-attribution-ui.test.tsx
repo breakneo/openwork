@@ -4,7 +4,7 @@ import type { DynamicToolUIPart } from "ai"
 
 import { Tool } from "../src/components/ui/tool"
 
-test("renders compact MCP attribution in a failed chat tool row", () => {
+test("keeps raw MCP diagnostics behind a quiet control in a failed tool row", () => {
   const toolPart: DynamicToolUIPart = {
     type: "dynamic-tool",
     toolName: "openwork-cloud_execute_capability",
@@ -19,18 +19,19 @@ test("renders compact MCP attribution in a failed chat tool row", () => {
 
   const html = renderToStaticMarkup(<Tool toolPart={toolPart} />)
 
-  expect(html).toContain("Remote MCP · HTTP 504")
-  expect(html).toContain("Error attribution: Remote MCP · HTTP 504. Confirmed.")
-  expect(html).not.toContain(">failed<")
+  expect(html).toContain("The service didn’t respond in time")
+  expect(html).toContain('aria-label="Technical details"')
+  expect(html).not.toContain("MCP_HTTP_504")
+  expect(html).not.toContain("text-destructive")
 })
 
-test("renders an inline reconnect button when Cloud capability discovery finds expired credentials", () => {
+test("renders an inline reconnect button for explicitly requested Cloud connection setup", () => {
   const toolPart: DynamicToolUIPart = {
     type: "dynamic-tool",
     toolName: "openwork-cloud_search_capabilities",
     toolCallId: "call-reconnect",
     state: "output-available",
-    input: {},
+    input: { intent: "connect" },
     output: JSON.stringify({
       matches: [{
         kind: "connection_status",
@@ -61,7 +62,7 @@ test("renders an inline reconnect button when Cloud capability discovery finds e
   expect(html).toContain("Reconnect required")
   expect(html).toContain('aria-label="Reconnect Knowledge Hub"')
   expect(html).toContain("Reconnect</button>")
-  expect(html).toContain("bg-amber-3/60")
+  expect(html).not.toContain("bg-amber-3/60")
   expect(html).toContain('data-testid="chat-mcp-reconnect-action"')
 })
 

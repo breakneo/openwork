@@ -5,9 +5,7 @@ name: Warden
 # produce findings_count=0 without analysis and wrongly grant clearance.
 # Analyze drafts as they evolve, then refresh the review when they become ready.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [dev]
+  workflow_dispatch:
 
 permissions:
   # contents:write is required by GitHub to resolve review threads via

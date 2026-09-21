@@ -47,6 +47,7 @@ let managedOpencode: ManagedOpencodeServer | null = null;
 let managedOpencodeIdentity: string | null = null;
 let managedEngineRecordId: string | null = null;
 let enginePool: EnginePool | null = null;
+let stopRuntimeConfigFileRefresh: (() => void) | undefined;
 
 if (!config.readOnly) {
   await ensureLocalWorkspaceFiles(config.workspaces);
@@ -58,13 +59,16 @@ if (!config.readOnly) {
 // to an OS-assigned port on EADDRINUSE, and the engine's spawn-time env
 // (OPENWORK_SERVER_URL) must point at the port that actually bound, not the
 // requested one.
-const server = await startServer(config);
+const managedWorkspace = !config.opencodeBaseUrl && process.env.OPENWORK_MANAGE_OPENCODE === "1"
+  ? findManagedEngineWorkspace(config.workspaces)
+  : undefined;
+const server = await startServer(config, { deferManagedEngineStartup: Boolean(managedWorkspace) });
 config.port = server.port;
 const serverUrl = `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`;
 const workerActivityHeartbeat = startWorkerActivityHeartbeat(config, logger);
 
 if (!config.opencodeBaseUrl && process.env.OPENWORK_MANAGE_OPENCODE === "1") {
-  const workspace = findManagedEngineWorkspace(config.workspaces);
+  const workspace = managedWorkspace;
   if (workspace) {
     // Reap engines recorded by servers that died without cleanup. Best
     // effort: a failed reap must never block startup.
@@ -73,7 +77,7 @@ if (!config.opencodeBaseUrl && process.env.OPENWORK_MANAGE_OPENCODE === "1") {
     // instance rebuild, and keepOpenworkRuntimeConfigFileFresh synchronizes it
     // on every runtime-DB write — so disposes always pick up current state.
     const { path: runtimeConfigPath } = await writeOpenworkRuntimeConfigFile(config);
-    keepOpenworkRuntimeConfigFileFresh(config);
+    stopRuntimeConfigFileRefresh = keepOpenworkRuntimeConfigFileFresh(config);
     const managedOpencodeCwd = process.env.OPENWORK_MANAGED_OPENCODE_CWD?.trim() || workspace.path;
     await mkdir(managedOpencodeCwd, { recursive: true });
     const opencodeModelsUrl = await resolveOpencodeModelsUrl();
@@ -145,6 +149,16 @@ if (!config.opencodeBaseUrl && process.env.OPENWORK_MANAGE_OPENCODE === "1") {
       registryId: managedEngineRecordId,
       trustedIdentity: managedOpencodeIdentity,
     });
+    try {
+      await server.completeManagedEngineStartup();
+    } catch (startupError) {
+      try {
+        await shutdown();
+      } catch (cleanupError) {
+        throw new AggregateError([startupError, cleanupError], "Managed engine startup failed and cleanup was incomplete");
+      }
+      throw startupError;
+    }
     logger.log("info", `Managed OpenCode listening on ${managedOpencode.url}`);
   }
 }
@@ -188,8 +202,9 @@ if (args.verbose) {
   logger.log("info", `Host token source: ${config.hostTokenSource}`);
 }
 
-const shutdown = async () => {
+async function shutdown() {
   workerActivityHeartbeat?.stop();
+  stopRuntimeConfigFileRefresh?.();
   if (managedOpencodeIdentity && !enginePool) {
     clearTrustedOpencodeProcess(config, managedOpencodeIdentity);
   }
@@ -209,8 +224,8 @@ const shutdown = async () => {
   if (managedEngineRecordId && !enginePool) {
     await removeEngineInstance(config, managedEngineRecordId).catch(() => undefined);
   }
-  (server as { stop?: (closeActiveConnections?: boolean) => void }).stop?.(true);
-};
+  await server.stop();
+}
 
 process.once("SIGINT", () => {
   void shutdown().finally(() => process.exit(0));

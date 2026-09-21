@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import { selectModel } from "@openwork/behaviors";
-import { spec, type Agent, type Target, type User } from "@openwork/testkit";
+import { spec, type Agent, type Probe, type Target, type User } from "@openwork/testkit";
 import { defaultPolicyEditorAndMemberDesktop, managedPolicyRecovery, policyTransportRollback, readDefaultDesktopPolicy, teamAccess } from "../worlds/desktop-policies.ts";
 
 // An organization that wants a vanilla OpenWork picks one decision, Restricted,
@@ -10,7 +10,7 @@ import { defaultPolicyEditorAndMemberDesktop, managedPolicyRecovery, policyTrans
 // collapse to what the policy leaves reachable.
 const defaultJourney = "an admin restricts the default policy and the member desktop enforces it";
 const teamJourney = "team access overrides overlapping grants and restores only selected desktop capabilities";
-const recoveryJourney = "managed policy evaluation bounds transient Den retries and never reuses stale access";
+const recoveryJourney = "managed policy refresh and live model grants bound transient Den retries";
 const rollbackJourney = "POLICY-ROLLBACK tools complete when policy HTTP fails and IPC is disconnected";
 // Register one fixture extension: Vitest 3 accumulates fixtures when the same
 // base is extended twice. Choose the setup at the test boundary, keeping the
@@ -80,6 +80,29 @@ function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+async function expectMemberCloudDiscovery(
+  member: { user: User; probe: Probe },
+  browserUrls: { opened(): Promise<string[]> },
+  denWebUrl: string,
+) {
+  const expectedUrl = new URL("/dashboard/your-connections", denWebUrl).toString();
+  const libraryHash = await member.probe.hash();
+  const openedBefore = await member.probe.eventually(() => browserUrls.opened(), {
+    within: 10_000, label: "external-open requests before member Cloud discovery",
+  });
+  await member.user.click({ role: "button", label: "View available MCPs", nth: 0 });
+  const openedAfter = await member.probe.eventually(() => browserUrls.opened(), {
+    within: 10_000,
+    label: "member Cloud discovery issues a fresh external-open request",
+    until: (urls) => urls.length > openedBefore.length,
+  });
+  expect(openedAfter).toHaveLength(openedBefore.length + 1);
+  expect(openedAfter.slice(openedBefore.length)).toEqual([expectedUrl]);
+  expect(openedAfter.map((url) => new URL(url).pathname)).not.toContain("/dashboard/mcp-connections");
+  expect(await member.probe.hash()).toBe(libraryHash);
+  return { before: openedBefore.length, after: openedAfter.length, url: openedAfter.at(-1), expectedUrl };
+}
+
 test(defaultJourney, async ({ world: selectedWorld, user, agent, probe, step, evidence }) => {
   const world = selectedWorld.defaultPolicy;
   if (!world) throw new Error("Expected the default-policy world");
@@ -100,13 +123,16 @@ test(defaultJourney, async ({ world: selectedWorld, user, agent, probe, step, ev
     await member.user.see({ text: "Library" }, { timeoutMs: 90_000 });
     await member.user.notSee(manageExtensionsNotice);
     await member.user.click({ role: "button", label: /^MCPs$/ });
+    await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
     await member.user.click({ role: "button", label: "Add workspace MCP" });
     await member.user.see({ text: "Add workspace MCP" });
     await member.user.see({ role: "textbox", label: "App name" });
     const localMcpFormText = await member.probe.text();
     await member.user.press("Escape");
     await member.user.notSee({ role: "textbox", label: "App name" });
-    await member.user.click({ role: "button", label: /^All$/ });
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.notSee({ role: "button", label: "Add workspace MCP" });
     return { libraryHashBefore: await member.probe.hash(), localMcpFormText };
   });
   expect(libraryHashBefore).toContain("/extensions");
@@ -114,7 +140,7 @@ test(defaultJourney, async ({ world: selectedWorld, user, agent, probe, step, ev
     "The Library page is open and shows no notice that extension management was disabled by an organization administrator",
   ]);
   evidence.recordAssertionEvidence(
-    "Before the policy change the member can open the local workspace MCP add form",
+    "Before the policy change the member can open the local workspace MCP add form only through Advanced",
     `hash=${libraryHashBefore}; manage-extensions notice absent; local form=${localMcpFormText}`,
     libraryHashBefore.includes("/extensions") && localMcpFormText.includes("Add workspace MCP") && localMcpFormText.includes("App name"),
   );
@@ -295,7 +321,7 @@ test(defaultJourney, async ({ world: selectedWorld, user, agent, probe, step, ev
     restrictedMenuText.includes("Account") && !restrictedMenuText.includes("Settings"),
   );
 
-  const { libraryHashAfter, builtInNoticeShown, restrictedMcpText } = await step("the member opens the Library under the Restricted policy", async () => {
+  const { libraryHashAfter, builtInNoticeShown, restrictedMcpText, cloudDiscovery } = await step("the member opens the Library under the Restricted policy", async () => {
     await member.user.click("Library");
     await member.user.see(manageExtensionsNotice, { timeoutMs: 90_000, text: /disabled local extension management/ });
     // Restricted also turns off allowBuiltInExtensions, so the Library's
@@ -308,20 +334,24 @@ test(defaultJourney, async ({ world: selectedWorld, user, agent, probe, step, ev
     });
     await member.user.click({ role: "button", label: /^MCPs$/ });
     await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.notSee({ role: "textbox", label: "App name" });
     const mcpFilterText = await member.probe.text();
     expect(mcpFilterText).not.toContain("Add workspace MCP");
-    await member.user.click({ role: "button", label: /^All$/ });
-    await member.user.click({ role: "button", label: /^Add$/ });
-    await member.user.see({ testId: "library-add-choices" });
-    await member.user.see({ text: "Connection" });
-    await member.user.notSee({ text: "Local MCP" });
-    const choicesText = await member.probe.text();
-    expect(choicesText).not.toContain("Local MCP");
-    const restrictedMcpText = `${mcpFilterText}\n${choicesText}`;
-    expect(restrictedMcpText).not.toContain("Add workspace MCP");
-    await member.user.press("Escape");
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.see({ role: "button", label: "View available MCPs", nth: 0 });
+    expect((await member.probe.dom('header button[aria-label="View available MCPs"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
+    await member.user.notSee({ role: "button", label: "Add MCP" });
+    const cloudDiscovery = await expectMemberCloudDiscovery(member, world.browserUrls, world.den.ref.webUrl);
     await member.user.notSee({ testId: "library-add-choices" });
-    return { libraryHashAfter: await member.probe.hash(), builtInNoticeShown, restrictedMcpText };
+    await member.user.notSee({ role: "textbox", label: "App name" });
+    await member.user.notSee({ text: "Local MCP" });
+    const restrictedMcpText = `${mcpFilterText}\n${await member.probe.text()}`;
+    expect(restrictedMcpText).not.toContain("Local MCP");
+    expect(restrictedMcpText).not.toContain("Add workspace MCP");
+    expect((await member.probe.dom('[role="dialog"]')).elements).toHaveLength(0);
+    return { libraryHashAfter: await member.probe.hash(), builtInNoticeShown, restrictedMcpText, cloudDiscovery };
   });
   expect(libraryHashAfter).toContain("/extensions");
   expect(builtInNoticeShown).toBe(true);
@@ -330,9 +360,9 @@ test(defaultJourney, async ({ world: selectedWorld, user, agent, probe, step, ev
     "A notice says built-in OpenWork extensions are disabled by your organization",
   ]);
   evidence.recordAssertionEvidence(
-    "The Library removes local MCP creation while retaining Connection as a separate picker choice",
-    `hash=${libraryHashAfter}; manage-extensions notice visible; builtInNotice=${builtInNoticeShown}; MCP filter and All picker=${restrictedMcpText}`,
-    libraryHashAfter.includes("/extensions") && builtInNoticeShown && restrictedMcpText.includes("Connection") && !restrictedMcpText.includes("Local MCP") && !restrictedMcpText.includes("Add workspace MCP"),
+    "Restricted removes local MCP creation even in Advanced while retaining the ordinary member's Cloud discovery action",
+    `hash=${libraryHashAfter}; manage-extensions notice visible; builtInNotice=${builtInNoticeShown}; final desktop external-open capture=${JSON.stringify(cloudDiscovery)}; View available MCPs remained enabled without an admin Add MCP action or local dialog; MCP inventory and Advanced=${restrictedMcpText}`,
+    libraryHashAfter.includes("/extensions") && builtInNoticeShown && !restrictedMcpText.includes("Local MCP") && !restrictedMcpText.includes("Add workspace MCP"),
   );
 
 });
@@ -392,6 +422,11 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
+  // Policy transport cases exercise explicit refresh; restricted model grants
+  // still require a live catalog read on each evaluation.
+  const verify = (path: string, evaluation: Record<string, unknown>) => path === policyPath
+    ? world.refreshPolicy()
+    : world.evaluate(evaluation);
   const faultedEvaluation = async (
     path: string,
     evaluation: Record<string, unknown>,
@@ -403,7 +438,7 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     const start = (await world.proxy.requestLog()).length;
     await world.proxy.faults.status(path, statusCode, { times, body });
     const startedAt = performance.now();
-    const result = await world.evaluate(evaluation);
+    const result = await verify(path, evaluation);
     const elapsedMs = performance.now() - startedAt;
     const requests = await waitForRequests(start, path, statusCode === 503 ? 2 : 1);
     return { result, requests, elapsedMs };
@@ -414,7 +449,7 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     await world.proxy.faults.latency(path, 5_000, { times });
     const startedAt = performance.now();
     let evaluationComplete = false;
-    const evaluationPromise = world.evaluate(evaluation).finally(() => { evaluationComplete = true; });
+    const evaluationPromise = verify(path, evaluation).finally(() => { evaluationComplete = true; });
     await new Promise((resolve) => setTimeout(resolve, 250));
     const requestsBeforeCompletion = (await world.proxy.requestLog()).slice(start).filter((request) => request.path === path);
     const completedBeforeRequestProbe = evaluationComplete;
@@ -427,10 +462,10 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     const freshWithinEvaluation = requests.filter((request) => request.faulted === false).length;
     // Aborted requests are not completed-response log entries. Give every
     // five-second latency handler a bounded drain window, then prove that a
-    // fault-free evaluation is healthy before starting the next case.
+    // fault-free refresh or catalog evaluation is healthy before the next case.
     await new Promise((resolve) => setTimeout(resolve, 5_250));
     await world.proxy.faults.clear();
-    const healthy = await world.evaluate(evaluation);
+    const healthy = await verify(path, evaluation);
     return { result, healthy, elapsedMs, start, afterEvaluation, requests, completedBeforeRequestProbe, freshBeforeCompletion, freshWithinEvaluation };
   };
 
@@ -461,9 +496,10 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     );
   });
 
-  await step("one transient policy response backs off before retrying once and applies the live allow", async () => {
+  await step("explicit policy refresh backs off before retrying once and installs the live allow", async () => {
     const recovered = await faultedEvaluation(policyPath, builtInModel, 503, 1);
     expect(recovered.result.status).toBe(200);
+    expect((await world.evaluate(builtInModel)).status).toBe(200);
     expect(recovered.requests).toMatchObject([
       { status: 503, faulted: true },
       { status: 200, faulted: false },
@@ -471,14 +507,14 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     expect(recovered.requests).toHaveLength(2);
     expect(recovered.elapsedMs).toBeGreaterThanOrEqual(190);
     evidence.recordAssertionEvidence(
-      "A transient Den policy failure backs off before retrying exactly once and the real OpenWork server applies the live allow",
+      "Explicit refresh retries a transient Den policy failure exactly once and the installed policy allows the built-in model",
       JSON.stringify(recovered),
       recovered.result.status === 200 && recovered.requests.length === 2 && recovered.elapsedMs >= 190
         && recovered.requests[0]?.status === 503 && recovered.requests[1]?.status === 200,
     );
   });
 
-  await step("persistent and non-retryable policy verification failures stay closed", async () => {
+  await step("persistent and non-retryable explicit policy refresh failures stay closed", async () => {
     const outage = await faultedEvaluation(policyPath, builtInModel, 503, 2);
     expect(outage.result.status).toBe(403);
     expect(code(outage.result.body)).toBe("policy_unavailable");
@@ -499,11 +535,26 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
       nonRetryable.push({ fault: fault.name, ...observed });
     }
     evidence.recordAssertionEvidence(
-      "Persistent outage, authentication, authorization, rate limit, and invalid policy responses fail closed without stale access",
+      "Explicit refresh rejects persistent outage, authentication, authorization, rate limit, and invalid policy responses rather than reporting stale refresh success",
       JSON.stringify({ outage, nonRetryable }),
       outage.result.status === 403 && code(outage.result.body) === "policy_unavailable" && outage.requests.length === 2
         && nonRetryable.every((item) => item.result.status === 403 && code(item.result.body) === "policy_unavailable" && item.requests.length === 1),
     );
+  });
+
+  await step("the installed built-in model allow survives a policy outage without a Den read", async () => {
+    await world.proxy.faults.clear();
+    await world.proxy.faults.status(policyPath, 503, { times: 100 });
+    const start = (await world.proxy.requestLog()).length;
+    const allowed = await world.evaluate(builtInModel);
+    const requests = (await world.proxy.requestLog()).slice(start);
+    expect(allowed.status).toBe(200);
+    expect(requests).toEqual([]);
+    evidence.recordAssertionEvidence(
+      "The installed built-in model allow requires no Den request during a policy outage",
+      JSON.stringify({ allowed, requests }), allowed.status === 200 && requests.length === 0,
+    );
+    await world.proxy.faults.clear();
   });
 
   await step("assigned-model catalog verification has the same bounded retry and fail-closed behavior", async () => {
@@ -623,19 +674,23 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     );
   });
 
-  await step("a retry reads and applies a fresh denial instead of the prior allow", async () => {
+  await step("an explicit refresh retry installs a fresh denial instead of the prior allow", async () => {
     const updated = await world.updateBuiltInModel(false);
     expect(updated.response.ok).toBe(true);
-    const denied = await faultedEvaluation(policyPath, builtInModel, 503, 1);
-    expect(denied.result.status).toBe(403);
-    expect(code(denied.result.body)).toBe("organization_policy_denied");
-    expect(denied.requests).toHaveLength(2);
-    expect(denied.requests.map((request) => request.status)).toEqual([503, 200]);
+    const refreshed = await faultedEvaluation(policyPath, builtInModel, 503, 1);
+    expect(refreshed.result.status).toBe(200);
+    expect(refreshed.requests).toHaveLength(2);
+    expect(refreshed.requests.map((request) => request.status)).toEqual([503, 200]);
+    const start = (await world.proxy.requestLog()).length;
+    const denied = await world.evaluate(builtInModel);
+    expect(denied.status).toBe(403);
+    expect(code(denied.body)).toBe("organization_policy_denied");
+    expect((await world.proxy.requestLog()).slice(start)).toEqual([]);
     evidence.recordAssertionEvidence(
-      "After an earlier allow, the retry uses the fresh Den denial rather than stale policy",
-      JSON.stringify(denied),
-      denied.result.status === 403 && code(denied.result.body) === "organization_policy_denied"
-        && denied.requests.length === 2 && denied.requests[0]?.status === 503 && denied.requests[1]?.status === 200,
+      "After an earlier allow, explicit refresh retries and installs the fresh Den denial for subsequent local assertions",
+      JSON.stringify({ refreshed, denied }),
+      denied.status === 403 && code(denied.body) === "organization_policy_denied"
+        && refreshed.requests.length === 2 && refreshed.requests[0]?.status === 503 && refreshed.requests[1]?.status === 200,
     );
   });
 });
@@ -648,7 +703,7 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
   const openOwnedPolicyTab = async (tabAgent: Agent, tabUser: User, title: string, url: string) => {
     const sessionId = await tabAgent.createSession(title);
     const opening = tabAgent.run("browser.open_url", { url, provider: "builtin" });
-    await tabUser.click({ role: "button", label: "Allow origin in this tab" });
+    await tabUser.click({ role: "button", label: "Allow for this thread" });
     expect(await opening).toMatchObject({ owner_session_id: sessionId });
   };
   const effective = async (identity: typeof world.den.admin) => {
@@ -868,20 +923,24 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
     await member.user.see({ text: /Need an MCP server or skill/ });
     await member.user.click({ role: "button", label: /^MCPs$/ });
     await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.notSee({ role: "textbox", label: "App name" });
     const mcpFilterText = await member.probe.text();
     expect(mcpFilterText).not.toContain("Add workspace MCP");
-    await member.user.click({ role: "button", label: /^All$/ });
-    await member.user.click({ role: "button", label: /^Add$/ });
-    await member.user.see({ testId: "library-add-choices" });
-    await member.user.see({ text: "Connection" });
-    await member.user.notSee({ text: "Local MCP" });
-    const choicesText = await member.probe.text();
-    expect(choicesText).not.toContain("Local MCP");
-    const mcpText = `${mcpFilterText}\n${choicesText}`;
-    expect(mcpText).not.toContain("Add workspace MCP");
-    await member.user.press("Escape");
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.see({ role: "button", label: "View available MCPs", nth: 0 });
+    expect((await member.probe.dom('header button[aria-label="View available MCPs"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
+    await member.user.notSee({ role: "button", label: "Add MCP" });
+    const cloudDiscovery = await expectMemberCloudDiscovery(member, world.browserUrls, world.den.ref.webUrl);
     await member.user.notSee({ testId: "library-add-choices" });
-    evidence.recordAssertionEvidence("Blocked local tool management removes local MCP creation while retaining Connection as a separate picker choice", mcpText, mcpText.includes("Connection") && !mcpText.includes("Local MCP") && !mcpText.includes("Add workspace MCP"));
+    await member.user.notSee({ role: "textbox", label: "App name" });
+    await member.user.notSee({ text: "Local MCP" });
+    const mcpText = `${mcpFilterText}\n${await member.probe.text()}`;
+    expect(mcpText).not.toContain("Local MCP");
+    expect(mcpText).not.toContain("Add workspace MCP");
+    expect((await member.probe.dom('[role="dialog"]')).elements).toHaveLength(0);
+    evidence.recordAssertionEvidence("Blocked local tool management removes local MCP creation even in Advanced while retaining the enabled member Cloud discovery action, not admin setup", JSON.stringify({ mcpText, cloudDiscovery }), !mcpText.includes("Local MCP") && !mcpText.includes("Add workspace MCP"));
     const libraryText = await member.probe.text();
     evidence.recordAssertionEvidence("The locked desktop hides Settings, redirects forbidden routes, and explains how to get an MCP server", JSON.stringify({ redirected, forbiddenRoute, permissionsText, menuText, libraryText }), redirected.includes("/settings/cloud-account") && forbiddenRoute.includes("/settings/cloud-account") && count(permissionsText, "Blocked") === lockedKeys.length && libraryText.includes("Need an MCP server or skill"));
     await member.user.looks(["The Library shows organization restrictions and guidance for requesting an MCP server or skill"]);
@@ -951,28 +1010,33 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
     expect(count(permissionsText, "Allowed")).toBe(lockedKeys.length - 1);
     evidence.recordAssertionEvidence("The Custom account permissions tab shows Settings Allowed and tools Blocked", permissionsText, count(permissionsText, "Blocked") === 1 && count(permissionsText, "Allowed") === lockedKeys.length - 1);
     await member.user.looks(["The dedicated App permissions tab shows Change app settings Allowed and Add tools, skills & MCP servers Blocked, without a policy banner"]);
-    // Wait for the Library data before checking its filtered and All add controls.
+    // Wait for the assigned plugin before checking Cloud discovery and Advanced.
     await member.user.click({ role: "button", label: "Back to app" });
     await member.user.click("Library");
     await member.user.see(manageExtensionsNotice, { timeoutMs: 90_000 });
+    await member.user.click({ role: "button", label: /^Plugins$/ });
     await member.user.see({ text: world.pluginName }, { timeoutMs: 90_000 });
-    await member.user.see({ text: "No MCP servers configured yet." }, { timeoutMs: 90_000 });
     await member.user.click({ role: "button", label: /^MCPs$/ });
+    await member.user.see({ text: "No MCPs yet" }, { timeoutMs: 90_000 });
     await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.notSee({ role: "button", label: "Add workspace MCP" });
+    await member.user.notSee({ role: "textbox", label: "App name" });
     const mcpFilterText = await member.probe.text();
     expect(mcpFilterText).not.toContain("Add workspace MCP");
-    await member.user.click({ role: "button", label: /^All$/ });
-    await member.user.click({ role: "button", label: /^Add$/ });
-    await member.user.see({ testId: "library-add-choices" });
-    await member.user.see({ text: "Connection" });
-    await member.user.notSee({ text: "Local MCP" });
-    const choicesText = await member.probe.text();
-    expect(choicesText).not.toContain("Local MCP");
-    const mcpText = `${mcpFilterText}\n${choicesText}`;
-    expect(mcpText).not.toContain("Add workspace MCP");
-    await member.user.press("Escape");
+    await member.user.click({ role: "button", label: /^Advanced\b/ });
+    await member.user.see({ role: "button", label: "View available MCPs", nth: 0 });
+    expect((await member.probe.dom('header button[aria-label="View available MCPs"]:not(:disabled):not([aria-disabled="true"])')).elements).toHaveLength(1);
+    await member.user.notSee({ role: "button", label: "Add MCP" });
+    const cloudDiscovery = await expectMemberCloudDiscovery(member, world.browserUrls, world.den.ref.webUrl);
     await member.user.notSee({ testId: "library-add-choices" });
-    evidence.recordAssertionEvidence("Blocked local tool management removes local MCP creation while retaining Connection as a separate picker choice", mcpText, mcpText.includes("Connection") && !mcpText.includes("Local MCP") && !mcpText.includes("Add workspace MCP"));
+    await member.user.notSee({ role: "textbox", label: "App name" });
+    await member.user.notSee({ text: "Local MCP" });
+    const mcpText = `${mcpFilterText}\n${await member.probe.text()}`;
+    expect(mcpText).not.toContain("Local MCP");
+    expect(mcpText).not.toContain("Add workspace MCP");
+    expect((await member.probe.dom('[role="dialog"]')).elements).toHaveLength(0);
+    evidence.recordAssertionEvidence("Custom access with local tools still blocked retains the assigned plugin and member Cloud discovery without restoring local MCP creation", JSON.stringify({ mcpText, cloudDiscovery }), !mcpText.includes("Local MCP") && !mcpText.includes("Add workspace MCP"));
     await admin.user.looks(["Tools and connections is Admin managed while AI setup and Settings, workspaces and updates are Allowed"]);
   });
 
@@ -1073,6 +1137,7 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
     await admin.probe.eventually(async () => (await effective(world.den.members.jordan)).allowZenModel, {
       within: 30_000, label: "built-in model restriction saved", until: (allowed) => allowed === false,
     });
+    expect((await member.probe.desktopApi("/managed-policy")).status).toBe(200);
     const deniedBuiltIn = await member.agent.desktopApi("/managed-policy/evaluate", { method: "POST", body: builtInModel });
     const allowedBuiltIn = await other.agent.desktopApi("/managed-policy/evaluate", { method: "POST", body: builtInModel });
     expect(deniedBuiltIn.status).toBe(403);
@@ -1218,6 +1283,7 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
     await saveReviewed([{ label: "Browse websites", before: origin, after: "Browsing blocked" }]);
     const saved = await effective(world.den.members.jordan);
     expect(isRecord(saved.execution) && saved.execution.browserOrigins).toEqual([]);
+    expect((await member.probe.desktopApi("/managed-policy")).status).toBe(200);
     const denied = await member.agent.desktopApi("/managed-policy/evaluate", { method: "POST", body: { action: "browser", input: { url, method: "GET" } } });
     expect(denied.status).toBe(403);
     expect(isRecord(denied.body) && denied.body.code).toBe("organization_policy_denied");

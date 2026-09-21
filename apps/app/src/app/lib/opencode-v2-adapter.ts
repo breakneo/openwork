@@ -1,4 +1,5 @@
 import type {
+  ApiError,
   FilePart,
   Model,
   Part,
@@ -16,6 +17,7 @@ import type {
 } from "@opencode-ai/sdk/v2/client";
 
 import { createClient, createDesktopFetch, type FieldsResult } from "./opencode";
+import type { OpenworkSessionHistory } from "./openwork-server";
 import { isDesktopRuntime } from "./runtime-env";
 import type { OpencodeEvent } from "../types";
 import { normalizeDirectoryPath } from "../utils";
@@ -153,7 +155,7 @@ export type V2MappedMessage = {
       created: number;
       completed?: number;
     };
-    error?: UnknownError;
+    error?: UnknownError | ApiError;
   };
   parts: Part[];
 };
@@ -624,7 +626,7 @@ function mapV2Message(
         ...(completed === undefined ? {} : { completed }),
       },
       ...(role === "assistant" && error
-        ? { error: { name: "UnknownError", data: { message: errorMessage(error) } } }
+        ? { error: mapV2SessionError(error) }
         : {}),
     },
     parts,
@@ -781,6 +783,27 @@ function mapDefaultModels(value: unknown): Record<string, string> {
     if (typeof item === "string") defaults[key] = item;
   }
   return defaults;
+}
+
+export function mapV2SessionError(value: unknown): UnknownError | ApiError {
+  const data = readRecord(value, "data") ?? value;
+  const reportedStatus = readNumber(data, "statusCode") ?? readNumber(data, "status");
+  const statuses = [readNumber(value, "statusCode"), readNumber(value, "status"), readNumber(data, "status"),
+    readNumber(readRecord(value, "response"), "status"), readNumber(readRecord(data, "response"), "status")];
+  const statusCode = reportedStatus === 429 ? statuses.find((status) => status !== undefined && status !== 429) ?? reportedStatus : reportedStatus;
+  const responseBody = readString(data, "responseBody");
+  if (statusCode !== undefined && responseBody !== undefined) {
+    const rawHeaders = readRecord(data, "responseHeaders");
+    const responseHeaders: Record<string, string> = {};
+    for (const [key, header] of Object.entries(rawHeaders ?? {})) {
+      if (typeof header === "string") responseHeaders[key] = header;
+    }
+    return { name: "APIError", data: {
+      message: errorMessage(data), statusCode, responseBody, responseHeaders,
+      isRetryable: isRecord(data) && data.isRetryable === true,
+    } };
+  }
+  return { name: "UnknownError", data: { message: errorMessage(value) } };
 }
 
 function errorMessage(value: unknown): string {
@@ -1091,7 +1114,7 @@ export function translateV2Event(
     return [{ type, properties: {
       ...properties, sequence: readNumber(value.durable, "seq"),
       ...(type === "session.execution.failed" ? {
-        error: { name: "UnknownError", data: { message: errorMessage(properties.error) } },
+        error: mapV2SessionError(properties.error),
       } : {}),
     } }];
   }
@@ -1845,22 +1868,57 @@ export function createClientV2(
     messages: async (
       parameters: SessionParameters & { limit?: number; before?: string },
       options?: RequestOptions,
-    ): Promise<FieldsResult<V2MappedMessage[]>> => {
-      const query = new URLSearchParams();
-      if (parameters.limit !== undefined) query.set("limit", String(parameters.limit));
-      const suffix = query.size ? `?${query.toString()}` : "";
-      const result = await request(
-        "GET",
-        `/api/session/${encodeURIComponent(parameters.sessionID)}/message${suffix}`,
-        undefined,
-        options?.signal,
-      );
-      if (!result.response.ok) return failedResult(result);
-      const data = responseItems(result.payload).flatMap((item) => {
-        const mapped = mapV2Message(item, parameters.sessionID, taskSessions);
-        return mapped ? [mapped] : [];
-      });
-      return successfulResult(result, data);
+    ): Promise<FieldsResult<V2MappedMessage[]> & Pick<OpenworkSessionHistory, "pagination">> => {
+      const limit = parameters.limit === undefined ? undefined : Math.min(parameters.limit, 200);
+      if ((parameters.limit !== undefined && (!Number.isInteger(parameters.limit) || parameters.limit <= 0))
+        || (parameters.before !== undefined && limit === undefined)) {
+        throw new Error("A session history page requires a positive integer limit.");
+      }
+      let before = parameters.before;
+      const seen = new Set<string>();
+      if (before !== undefined) seen.add(before);
+      const data: V2MappedMessage[] = [];
+      while (true) {
+        options?.signal?.throwIfAborted();
+        const query = new URLSearchParams();
+        if (limit !== undefined) query.set("limit", String(limit));
+        if (before !== undefined) query.set("cursor", before);
+        const suffix = query.size ? `?${query.toString()}` : "";
+        const result = await request(
+          "GET",
+          `/api/session/${encodeURIComponent(parameters.sessionID)}/message${suffix}`,
+          undefined,
+          options?.signal,
+        );
+        options?.signal?.throwIfAborted();
+        if (!result.response.ok) return failedResult(result);
+        const items = responseData(result.payload);
+        const hasCursor = isRecord(result.payload) && "cursor" in result.payload;
+        const cursor = readRecord(result.payload, "cursor");
+        const next = cursor?.next;
+        if (!Array.isArray(items)
+          || (hasCursor && (!cursor || (next !== undefined && (typeof next !== "string" || !next))))
+          || (hasCursor && Array.isArray(items) && (items.length > 0) !== (next !== undefined))
+          || (!hasCursor && before !== undefined)) {
+          return failedResult({ ...result, payload: { name: "InvalidV2MessagePageResponse" } });
+        }
+        if (typeof next === "string" && seen.has(next)) {
+          return failedResult({ ...result, payload: { name: "InvalidV2MessagePageResponse", message: "Session history pagination cursor did not advance." } });
+        }
+        data.push(...items.flatMap((item) => {
+          const mapped = mapV2Message(item, parameters.sessionID, taskSessions);
+          return mapped ? [mapped] : [];
+        }));
+        if (limit !== undefined) {
+          return {
+            ...successfulResult(result, hasCursor ? data.toReversed() : data),
+            ...(hasCursor ? { pagination: { before: parameters.before, nextCursor: typeof next === "string" ? next : null, limit } } : {}),
+          };
+        }
+        if (typeof next !== "string") return successfulResult(result, hasCursor ? data.toReversed() : data);
+        seen.add(next);
+        before = next;
+      }
     },
     todo: async (parameters: SessionParameters): Promise<FieldsResult<never[]>> =>
       localResult(baseUrl, `/api/session/${encodeURIComponent(parameters.sessionID)}/todo`, []),
@@ -2144,7 +2202,7 @@ export function createClientV2(
   Object.assign(compatibilityClient.mcp, adapter.mcp);
   Object.assign(compatibilityClient.event, adapter.event);
   v2Clients.add(compatibilityClient);
-  return Object.assign(compatibilityClient, { listSessionsPage: session.list });
+  return Object.assign(compatibilityClient, { listSessionsPage: session.list, listMessagesPage: session.messages });
 }
 
 export type OpencodeV2Client = ReturnType<typeof createClientV2>;

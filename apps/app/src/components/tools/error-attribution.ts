@@ -81,7 +81,7 @@ export function connectionCardPayloadFromChatToolResult(
   result: unknown,
   input?: unknown,
 ): ConnectionActionPayload | null {
-  if (!OPENWORK_CLOUD_CAPABILITY_TOOLS.has(toolName)) return null
+  if (!(OPENWORK_CLOUD_CAPABILITY_TOOLS.has(toolName) || /^openwork-cloud_run_artifact_[A-Za-z0-9_-]+$/.test(toolName))) return null
   if (toolName === "openwork-cloud_search_capabilities" && (!isRecord(input) || input.intent !== "connect")) return null
   const parsed = parseResultRecord(result)
   if (!parsed) return null
@@ -110,7 +110,7 @@ export function reconnectActionFromChatToolResult(
   // Only canonical OpenWork Cloud tools may produce a native connection action.
   // Discovery may offer authorization only for an explicit setup request;
   // finding an unavailable connection is not itself a reason to prompt.
-  if (!OPENWORK_CLOUD_CAPABILITY_TOOLS.has(toolName)) return null
+  if (!(OPENWORK_CLOUD_CAPABILITY_TOOLS.has(toolName) || /^openwork-cloud_run_artifact_[A-Za-z0-9_-]+$/.test(toolName))) return null
   if (toolName === "openwork-cloud_search_capabilities" && (!isRecord(input) || input.intent !== "connect")) return null
 
   const parsed = parseResultRecord(result)
@@ -220,4 +220,15 @@ export function attributeChatToolError(errorText: string): ToolErrorAttribution 
   }
 
   return null
+}
+
+/** End-user copy; attribution and raw provider payloads belong in details. */
+export function describeChatToolFailure(errorText: string): string {
+  const attribution = attributeChatToolError(errorText)
+  if (attribution?.label === "Blocked by OpenWork") return "This action is blocked by your workspace settings."
+  if (/timeout|timed out|deadline|\b504\b/i.test(errorText)) return "The service didn’t respond in time. Check whether the action finished before trying again."
+  if (/\b401\b|unauthorized|invalid[_ ]token|authentication required/i.test(errorText)) return "This connection needs attention. Check its sign-in settings."
+  if (/\b403\b|forbidden|access[_ ]denied|insufficient[_ ]scope/i.test(errorText)) return "This connection doesn’t have access to the requested action."
+  if (/\b50[0234]\b|internal[_ ]server[_ ]error|bad gateway|service unavailable|fetch failed|ECONNRESET|ENOTFOUND/i.test(errorText)) return "The service couldn’t complete this action. Check its status before trying again."
+  return "This action couldn’t finish. Check the details before trying again."
 }

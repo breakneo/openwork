@@ -15,6 +15,13 @@ Use the skills in this order:
 
 Demo-driven features start from a world script plus a spec in `evals/specs`.
 
+## Experimental verification dictionary
+
+See [Verification dictionary](./verification-dictionary.md) for closed-set Jev
+compilation, deterministic replay with zero model calls, the full 59-method
+channel inventory, privacy boundaries, and offline/live benchmark instructions.
+This opt-in compiler selects checked-in assertions; it is not an app-state judge.
+
 ## Glossary
 
 | Term | Meaning |
