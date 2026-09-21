@@ -14,4 +14,4 @@
 ## Evidence
 
 <!-- One line per proof, phrased before → after. Link the report. Say plainly if it is red. -->
-- 
+-
