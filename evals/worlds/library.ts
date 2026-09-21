@@ -1061,7 +1061,7 @@ export async function connectionActionMcpApp(seed: Seed) {
         promptMarker,
         latestUserTurn: true,
         finalReply: "No connection outcome was observed.",
-        finalReplyInitiallyReleasedChunks: 0,
+        finalReplyFrom: "last-tool-text",
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
           { tool: "question", arguments: { questions: [connectionActionQuestion] } },
@@ -1070,7 +1070,7 @@ export async function connectionActionMcpApp(seed: Seed) {
         promptMarker,
         latestUserTurn: true,
         finalReply: "No connection outcome was observed.",
-        finalReplyInitiallyReleasedChunks: 0,
+        finalReplyFrom: "last-tool-text",
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
