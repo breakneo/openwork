@@ -39,6 +39,17 @@ describe("OpenWork Models page", () => {
     expect(screen).toContain('method: "PATCH"');
   });
 
+  test("restores shared usage meters above the lineup without removing them from Analytics", () => {
+    const analytics = readFileSync(
+      join(import.meta.dir, "..", "app", "(den)", "dashboard", "_features", "analytics", "models-analytics-screen.tsx"),
+      "utf8",
+    );
+    expect(screen).toContain('import { UsageLimitsCard } from "../_features/analytics/usage-limits-card";');
+    expect(screen).toContain("{enabled && status ? <UsageLimitsCard buckets={status.buckets} /> : null}");
+    expect(screen.indexOf("<UsageLimitsCard")).toBeLessThan(screen.indexOf("<ModelsLineup"));
+    expect(analytics).toContain("<UsageLimitsCard buckets={status.data.buckets} />");
+  });
+
   test("cross-links to bring your own keys", () => {
     expect(screen).toContain("getCustomLlmProvidersRoute");
     expect(screen).toContain("Set up Bring your Own Keys.");

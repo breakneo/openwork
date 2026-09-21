@@ -221,3 +221,14 @@ export function attributeChatToolError(errorText: string): ToolErrorAttribution 
 
   return null
 }
+
+/** End-user copy; attribution and raw provider payloads belong in details. */
+export function describeChatToolFailure(errorText: string): string {
+  const attribution = attributeChatToolError(errorText)
+  if (attribution?.label === "Blocked by OpenWork") return "This action is blocked by your workspace settings."
+  if (/timeout|timed out|deadline|\b504\b/i.test(errorText)) return "The service didn’t respond in time. Check whether the action finished before trying again."
+  if (/\b401\b|unauthorized|invalid[_ ]token|authentication required/i.test(errorText)) return "This connection needs attention. Check its sign-in settings."
+  if (/\b403\b|forbidden|access[_ ]denied|insufficient[_ ]scope/i.test(errorText)) return "This connection doesn’t have access to the requested action."
+  if (/\b50[0234]\b|internal[_ ]server[_ ]error|bad gateway|service unavailable|fetch failed|ECONNRESET|ENOTFOUND/i.test(errorText)) return "The service couldn’t complete this action. Check its status before trying again."
+  return "This action couldn’t finish. Check the details before trying again."
+}

@@ -27,6 +27,10 @@ never reruns a test.
   If a claim has no inspectable evidence, report the PR `Incomplete`.
 - Write the `<!-- test-evidence -->` marker. The publisher recognizes old sticky
   markers only to update comments created before the migration.
+- The report's headings and captions come straight from the spec (title, step
+  names, `looks()` expectations, assertion claims; see `write-a-spec`). If the
+  report is hard to read, fix the spec and rerun; never annotate it by hand in
+  the PR body.
 
 ## Publish the PR head
 

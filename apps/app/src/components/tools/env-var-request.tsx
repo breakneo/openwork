@@ -69,7 +69,7 @@ export function EnvVarRequestTool({ part }: EnvVarRequestToolProps) {
   }
 
   return (
-    <div className="not-prose w-full max-w-xl rounded-2xl border border-dls-border bg-dls-surface/95 p-4 shadow-sm">
+    <div className="not-prose w-full max-w-xl rounded-2xl bg-dls-surface/95 p-4 shadow-sm">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-violet-6/35 bg-violet-3/30 text-violet-11">
           <KeyRound className="size-4" />
@@ -100,7 +100,7 @@ export function EnvVarRequestTool({ part }: EnvVarRequestToolProps) {
           />
 
           {!canModify ? (
-            <p className="rounded-lg border border-amber-6/40 bg-amber-3/20 px-3 py-2 text-xs text-amber-11">
+            <p className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-foreground">
               Environment variables can only be edited from a local desktop workspace.
             </p>
           ) : null}

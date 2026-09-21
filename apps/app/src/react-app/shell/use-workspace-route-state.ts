@@ -56,6 +56,7 @@ import {
   shouldAttemptDesktopLocalReconnect,
 } from "./desktop-local-openwork";
 import { resolveOpenworkConnection } from "./openwork-connection";
+import { createEngineRoutingPoller } from "./engine-routing-poller";
 import {
   commitRouteWorkspaceSelection,
   createRouteRefreshLifecycle,
@@ -97,6 +98,8 @@ import {
 } from "./workspace-routes";
 
 export type UseWorkspaceRouteStateInput = {
+  /** A local first-send owner must survive workspace preparation until it has a real session. */
+  preservePendingConversationRoute?: boolean;
   developerMode: boolean;
   workspaceRoute?: "session" | "automations" | "dashboard" | "apps";
   /** Invoked when the openwork-server settings-changed event fires (the route bumps its settings version). */
@@ -206,6 +209,19 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const [token, setToken] = useState("");
   const [engineRoutingByServer, setEngineRoutingByServer] = useState<Record<string, boolean>>({});
   const engineRoutingByServerRef = useRef(engineRoutingByServer);
+  const [engineRoutingPoller] = useState(() => createEngineRoutingPoller({
+    publish: (key, routing) => {
+      if (engineRoutingByServerRef.current[key] === routing) return;
+      const next = { ...engineRoutingByServerRef.current, [key]: routing };
+      engineRoutingByServerRef.current = next;
+      setEngineRoutingByServer(next);
+    },
+    onError: (error) => console.warn("[opencode-v2] failed to read chat routing status; retaining the current engine", error),
+    schedule: (run, delay) => {
+      const timer = window.setTimeout(run, delay);
+      return () => window.clearTimeout(timer);
+    },
+  }));
   const [workspaces, setWorkspaces] = useState<RouteWorkspace[]>([]);
   const [workspaceOrderIds, setWorkspaceOrderIds] = useState<string[]>(() => readWorkspaceOrderIds());
   const [sessionsByWorkspaceId, setSessionsByWorkspaceId] = useState<Record<string, RouteSession[]>>({});
@@ -282,7 +298,9 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     backgroundSessionLoadCoalescerRef.current.invalidate(workspaceId);
     loadedWorkspaceIdsRef.current.delete(workspaceId);
     delete pendingCreatedSessionIdsRef.current[workspaceId];
-    delete hydratedRouteSessionIdsRef.current[workspaceId];
+    // Invalidate reference authority, not the open session's verified display
+    // metadata. A same-scope refresh can return an empty index; keep the direct
+    // session.get result until navigation, deletion, or an engine scope change.
     sessionMetadataGenerationsRef.current.set(workspaceId, (sessionMetadataGenerationsRef.current.get(workspaceId) ?? 0) + 1);
     sessionMetadataCallbacksRef.current.delete(workspaceId);
     runtimeSessionChangesRef.current.delete(workspaceId);
@@ -1125,6 +1143,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   // session in the URL lands on the empty "new task" state instead of
   // jumping back into the previously opened session.
   useEffect(() => {
+    if (input.preservePendingConversationRoute) return;
     if (loading) return;
     if (routeWorkspaceId && workspaces.length > 0 && !workspaces.some((workspace) => workspace.id === routeWorkspaceId)) {
       const fallbackWorkspaceId = workspaces.some((workspace) => workspace.id === legacySelectedWorkspaceId)
@@ -1139,6 +1158,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
       normalizeWorkspaceRoute(selectedWorkspaceId, selectedSessionId, { replace: true });
     }
   }, [
+    input.preservePendingConversationRoute,
     extensionsRouteActive,
     extensionsRoutePath,
     loading,
@@ -1156,11 +1176,11 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     if (isDesktopRuntime()) return;
     if (loading) return;
     if (workspaces.length > 0) return;
-    if (local.prefs.hasCompletedOnboarding) return;
+    if (input.preservePendingConversationRoute || local.prefs.hasCompletedOnboarding) return;
     if (denAuth.status === "checking") return;
     if (denAuth.isSignedIn) return;
     navigate("/welcome", { replace: true });
-  }, [denAuth.isSignedIn, denAuth.status, loading, local.prefs.hasCompletedOnboarding, navigate, workspaces.length]);
+  }, [denAuth.isSignedIn, denAuth.status, input.preservePendingConversationRoute, loading, local.prefs.hasCompletedOnboarding, navigate, workspaces.length]);
 
   // NOTE: Blueprint seeding was removed from the route.
   // It was firing `materializeBlueprintSessions` + a session re-fetch on every
@@ -1219,8 +1239,14 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const engineRoutingReady = Boolean(routingServerUrl) && selectedEngineRouting !== undefined;
   const engineV2ChatRouting = selectedEngineRouting === true;
   useEffect(() => {
-    let cancelled = false;
-    const refreshers: Array<() => Promise<void>> = [];
+    window.addEventListener("openwork-server-settings-changed", engineRoutingPoller.refresh);
+    return () => {
+      engineRoutingPoller.dispose();
+      window.removeEventListener("openwork-server-settings-changed", engineRoutingPoller.refresh);
+    };
+  }, [engineRoutingPoller]);
+  useEffect(() => {
+    const sources: Array<{ key: string; read: () => Promise<boolean> }> = [];
     const serverKeys = new Set<string>();
     // Local inventories must not borrow the selected remote worker's routing
     // or wait for that worker to connect. The selected client still uses its owner.
@@ -1229,27 +1255,16 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
       if (!server.baseUrl || serverKeys.has(key)) continue;
       serverKeys.add(key);
       const openworkClient = createOpenworkServerClient(server);
-      let requestVersion = 0;
-      refreshers.push(async () => {
-        const version = ++requestVersion;
-        let routing: boolean;
+      sources.push({ key, read: async () => {
         try {
           const status = await withRouteRefreshTimeout(openworkClient.getEngineV2PreviewStatus(), "Engine routing status");
-          routing = status.enabled && status.chatRouting;
+          return status.enabled && status.chatRouting;
         } catch (error) {
-          if (cancelled || version !== requestVersion) return;
           // Only a legacy server's 404 establishes v1; transient failures stay unknown.
-          if (!(error instanceof OpenworkServerError && error.status === 404)) {
-            console.warn("[opencode-v2] failed to read chat routing status; retaining the current engine", error);
-            return;
-          }
-          routing = false;
+          if (error instanceof OpenworkServerError && error.status === 404) return false;
+          throw error;
         }
-        if (cancelled || version !== requestVersion || engineRoutingByServerRef.current[key] === routing) return;
-        const next = { ...engineRoutingByServerRef.current, [key]: routing };
-        engineRoutingByServerRef.current = next;
-        setEngineRoutingByServer(next);
-      });
+      } });
     }
     // A server that stopped being polled must revalidate when selected again.
     // Keep the local server's readiness while it remains in the polling set.
@@ -1259,18 +1274,8 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
       engineRoutingByServerRef.current = next;
       setEngineRoutingByServer(next);
     }
-    const refresh = () => {
-      for (const refreshRouting of refreshers) void refreshRouting();
-    };
-    refresh();
-    window.addEventListener("openwork-server-settings-changed", refresh);
-    const interval = window.setInterval(() => { void refresh(); }, 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("openwork-server-settings-changed", refresh);
-    };
-  }, [baseUrl, token, routingServerUrl, routingServerToken]);
+    engineRoutingPoller.reconcile(sources);
+  }, [baseUrl, token, routingServerUrl, routingServerToken, engineRoutingPoller]);
   useEffect(() => {
     const scopes = workspaceSessionLoadScopesRef.current;
     const changed: RouteWorkspace[] = [];
@@ -1297,6 +1302,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     for (const id of scopes.keys()) {
       if (workspaces.some((workspace) => workspace.id === id)) continue;
       scopes.delete(id);
+      delete hydratedRouteSessionIdsRef.current[id];
       invalidateSessionInventory(id);
     }
     if (changed.length === 0) return;
@@ -1529,6 +1535,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     selectedSessionId,
     loading,
     effectiveLoading,
+    connectionPending,
     client,
     baseUrl,
     token,

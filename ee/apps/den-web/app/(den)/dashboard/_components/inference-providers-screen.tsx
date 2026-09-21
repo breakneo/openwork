@@ -14,6 +14,9 @@ import { getGatewayProviderRoute, getNewGatewayProviderRoute } from "../../_lib/
 import { useOrgDashboard } from "../_providers/org-dashboard-provider";
 import { useOrgInferenceProviders } from "./inference-provider-data";
 import { GatewayUsageSection } from "./gateway-usage-section";
+import { GatewayUsageLimitsSection } from "./gateway-usage-limits-section";
+import { GatewayUsageResetRequests } from "./gateway-usage-reset-requests";
+import { getOrgAccessFlags } from "../../_lib/den-org";
 import {
   getCredentialStatusLabel,
   getCredentialStatusTone,
@@ -85,7 +88,8 @@ function GatewayProviderCard({ provider, orgSlug }: { provider: DenInferenceProv
 }
 
 export function InferenceProvidersScreen() {
-  const { orgId, orgSlug } = useOrgDashboard();
+  const { orgId, orgSlug, orgContext } = useOrgDashboard();
+  const access = getOrgAccessFlags(orgContext?.currentMember.role ?? "member", orgContext?.currentMember.isOwner ?? false, orgContext?.roles);
   const { inferenceProviders, busy, error } = useOrgInferenceProviders(orgId);
   const [query, setQuery] = useState("");
 
@@ -109,9 +113,10 @@ export function InferenceProvidersScreen() {
       description="Configure your organizations AI Model Providers once, track and control each user's access and usage individually"
       colors={["#F1F5FF", "#1D4ED8", "#60A5FA", "#A7F3D0"]}
     >
+      {orgId && orgContext && access.isAdmin ? <GatewayUsageResetRequests key={`resets-${orgId}`} orgId={orgId} members={orgContext.members} /> : null}
       {orgId ? <GatewayUsageSection key={orgId} orgId={orgId} /> : null}
 
-      <section aria-labelledby="gateway-providers-heading">
+      <section aria-labelledby="gateway-providers-heading" className="mb-10">
         <h2 id="gateway-providers-heading" className="mb-4 text-lg font-semibold tracking-tight text-gray-950">Providers</h2>
         <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <DenInput
@@ -158,6 +163,8 @@ export function InferenceProvidersScreen() {
           </section>
         )}
       </section>
+
+      {orgId && orgContext && access.isAdmin ? <GatewayUsageLimitsSection key={`limits-${orgId}`} orgId={orgId} teams={orgContext.teams} members={orgContext.members} /> : null}
     </DashboardPageTemplate>
   );
 }

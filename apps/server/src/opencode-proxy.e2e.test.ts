@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
+import type { BufferEncodingOption, ObjectEncodingOptions, PathLike } from "node:fs";
+import * as nodeServer from "./serve-node.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { proxyOpencodeRequest, startServer } from "./server.js";
+import { withEngineDirectoryFence } from "./engine-directory-fence.js";
 import * as engineV2Preview from "./engine-v2-preview.js";
 import { ApiError } from "./errors.js";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
@@ -40,8 +43,10 @@ function auth(token: string) {
 }
 
 type MockReadOptions = {
+  onPrompt?: () => Response;
   onRead?: (request: Request) => Promise<void>;
   sessions?: unknown;
+  messagePage?: (request: Request) => Response;
 };
 
 function startMockOpencode(input?: MockReadOptions & { holdCommand?: Promise<void>; foreignSessionDirectory?: string; nativeV2Directory?: string; recovery?: { active: boolean; turn: number } }) {
@@ -162,6 +167,7 @@ function startMockOpencode(input?: MockReadOptions & { holdCommand?: Promise<voi
       }
 
       if (url.pathname === "/session/ses_1/message") {
+        if (input?.messagePage) return input.messagePage(request);
         return Response.json([
           {
             info: {
@@ -184,6 +190,7 @@ function startMockOpencode(input?: MockReadOptions & { holdCommand?: Promise<voi
       }
 
       if (url.pathname === "/session/ses_created/prompt_async" && request.method === "POST") {
+        if (input?.onPrompt) return input.onPrompt();
         return new Response(null, { status: 204 });
       }
 
@@ -327,6 +334,269 @@ async function waitUntil(predicate: () => boolean, attempts = 20) {
 }
 
 describe("workspace OpenCode proxy", () => {
+  test.serial("prompt admission bypasses held same-directory maintenance", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const engine = startMockOpencode();
+    const openwork = await startOpenworkServer({
+      workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}`, readOnly: false,
+    });
+    const entered = deferred();
+    const release = deferred();
+    let maintenanceFinished = false;
+    const maintenance = withEngineDirectoryFence(openwork.config, openwork.config.workspaces[0]!, async () => {
+      entered.resolve();
+      await release.promise;
+      maintenanceFinished = true;
+    });
+    const caller = new AbortController();
+    const deadline = setTimeout(() => caller.abort(), 1_000);
+    try {
+      await entered.promise;
+      const response = await fetch(`http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
+        method: "POST", headers: { ...auth(openwork.token), "Content-Type": "application/json" },
+        body: JSON.stringify({ parts: [] }), signal: caller.signal,
+      });
+      expect(response.status).toBe(204);
+      expect(maintenanceFinished).toBe(false);
+      expect(engine.requests).toEqual([{
+        pathname: "/session/ses_created/prompt_async", search: `?directory=${encodeURIComponent(workspaceRoot)}`,
+        directory: workspaceRoot, method: "POST", body: { parts: [] },
+      }]);
+    } finally {
+      clearTimeout(deadline);
+      caller.abort();
+      release.resolve();
+      await maintenance;
+    }
+  });
+
+  async function signedInPromptFixture(options?: { rejectIdentity?: boolean; onPrompt?: () => Response }) {
+    const workspaceRoot = await createWorkspaceRoot();
+    const engine = startMockOpencode({ onPrompt: options?.onPrompt });
+    const denRequests: Array<{ method: string; pathname: string }> = [];
+    let outage = false;
+    const den = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(request) {
+        const pathname = new URL(request.url).pathname;
+        denRequests.push({ method: request.method, pathname });
+        if (options?.rejectIdentity) return Response.json({ error: "unauthorized" }, { status: 401 });
+        if (outage) return Response.json({ error: "unavailable" }, { status: 503 });
+        if (request.method === "GET" && pathname === "/v1/me/desktop-config") {
+          return Response.json({ allowCustomProviders: true });
+        }
+        return Response.json({ error: "unexpected_den_request" }, { status: 404 });
+      },
+    });
+    stops.push(() => den.stop(true));
+    const openwork = await startOpenworkServer({
+      workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}`, readOnly: false,
+    });
+    const base = `http://127.0.0.1:${openwork.server.port}`;
+    const identity = await fetch(`${base}/den-session/identity`, {
+      method: "PUT", headers: { "x-openwork-host-token": openwork.config.hostToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${den.port}`, token: "den-fixture-token", orgId: "org_test" }),
+      signal: AbortSignal.timeout(1_000),
+    });
+    expect(identity.status).toBe(204);
+    expect(denRequests).toEqual([]);
+    outage = true;
+    const denCount = denRequests.length;
+    const prompt = (providerID: string, token = openwork.token) => fetch(`${base}/workspace/ws_1/opencode/session/ses_created/prompt_async`, {
+      method: "POST", headers: { ...auth(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ model: { providerID, modelID: "fixture" }, parts: [] }),
+      signal: AbortSignal.timeout(1_000),
+    });
+    const prompts = () => engine.requests.filter(({ method, pathname }) => method === "POST" && pathname === "/session/ses_created/prompt_async");
+    return { prompt, prompts, engine, denRequests, denCount, workspaceRoot };
+  }
+
+  for (const providerID of ["local-byok", "alternate-byok"]) {
+    test.serial(`signed-in ${providerID} prompt reaches the engine once without Den after identity installation`, async () => {
+      const fixture = await signedInPromptFixture();
+      const response = await fixture.prompt(providerID);
+      expect(response.status).toBe(204);
+      expect(fixture.prompts()).toHaveLength(1);
+      expect(fixture.prompts()[0]).toMatchObject({
+        directory: fixture.workspaceRoot,
+        body: { model: { providerID, modelID: "fixture" }, parts: [] },
+      });
+      expect(fixture.denRequests).toHaveLength(fixture.denCount);
+    });
+  }
+
+  test.serial("signed-in prompt rejects an unauthorized client before the engine without Den", async () => {
+    const fixture = await signedInPromptFixture();
+    const engineCount = fixture.engine.requests.length;
+    const response = await fixture.prompt("local-byok", "invalid-client-token");
+    expect(response.status).toBe(401);
+    await response.body?.cancel();
+    expect(fixture.prompts()).toHaveLength(0);
+    expect(fixture.engine.requests).toHaveLength(engineCount);
+    expect(fixture.denRequests).toHaveLength(fixture.denCount);
+  });
+
+  test.serial("signed-in prompt forwards engine credential rejection unchanged without Den", async () => {
+    // This is an engine stand-in error, not evidence of actual provider inference.
+    const rejection = { code: "upstream_credential_rejected", message: "Fixture provider rejected credentials" };
+    const fixture = await signedInPromptFixture({ onPrompt: () => Response.json(rejection, { status: 401 }) });
+    const response = await fixture.prompt("local-byok");
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual(rejection);
+    expect(fixture.prompts()).toHaveLength(1);
+    expect(fixture.denRequests).toHaveLength(fixture.denCount);
+  });
+
+  test.serial("optional desktop policy does not verify Den identity or block a local prompt", async () => {
+    const fixture = await signedInPromptFixture({ rejectIdentity: true });
+    const response = await fixture.prompt("local-byok");
+    expect(response.status).toBe(204);
+    expect(fixture.prompts()).toHaveLength(1);
+    expect(fixture.denRequests).toEqual([]);
+  });
+
+  test.serial("native history pagination exposes cursors to browsers, preserves upstream headers, and verifies every page owner", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const cursor = "opaque+/=%25?older&owner=one";
+    const link = '<http://internal-engine/session/ses_1/message?before=opaque>; rel="next"';
+    const engine = startMockOpencode({
+      foreignSessionDirectory: "/workspace/foreign",
+      messagePage: (request) => {
+        const before = new URL(request.url).searchParams.get("before");
+        if (before !== null) {
+          expect(before).toBe(cursor);
+          return Response.json([], { headers: { "Access-Control-Expose-Headers": "X-Upstream-Trace" } });
+        }
+        return Response.json([{ info: { id: "msg_1", sessionID: "ses_1" }, parts: [] }], { headers: {
+          "X-Next-Cursor": cursor, Link: link, "Access-Control-Expose-Headers": "X-Upstream-Trace",
+        } });
+      },
+    });
+    const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+    const request = (sessionId: string, before?: string) => fetch(
+      `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode/session/${sessionId}/message?${new URLSearchParams({ limit: "1", ...(before ? { before } : {}) })}`,
+      { headers: { ...auth(openwork.token), Origin: "https://app.example" }, signal: AbortSignal.timeout(2_000) },
+    );
+    const newest = await request("ses_1");
+    expect(newest.status).toBe(200);
+    expect(newest.headers.get("X-Next-Cursor")).toBe(cursor);
+    expect(newest.headers.get("Link")).toBe(link);
+    const older = await request("ses_1", newest.headers.get("X-Next-Cursor") ?? undefined);
+    expect(older.status).toBe(200);
+    expect(await older.json()).toEqual([]);
+    expect(older.headers.get("X-Next-Cursor")).toBeNull();
+    for (const response of [newest, older]) {
+      expect(response.headers.get("Access-Control-Expose-Headers")?.split(/,\s*/)).toEqual(expect.arrayContaining(["X-Upstream-Trace", "X-Next-Cursor", "Link"]));
+    }
+    const foreign = await request("ses_foreign", cursor);
+    expect(foreign.status).toBe(404);
+    // The proof runs beside the read; only the proof decides what the caller receives.
+    expect(await foreign.text()).not.toContain("msg_foreign");
+    expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1")).toHaveLength(2);
+    const pages = engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/message");
+    expect(pages).toHaveLength(2);
+    expect(new URLSearchParams(pages[1]?.search).get("before")).toBe(cursor);
+    expect(pages.every(({ method }) => method === "GET")).toBe(true);
+  });
+
+  test.serial("v1 session reads dispatch beside the ownership proof and withhold a foreign body until it fails", async () => {
+    const workspaceRoot = await createWorkspaceRoot();
+    const release = deferred();
+    const engine = startMockOpencode({
+      foreignSessionDirectory: "/workspace/foreign",
+      onRead: async (request) => {
+        if (new URL(request.url).pathname === "/session/ses_foreign") await release.promise;
+      },
+    });
+    const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+    const request = (path: string) => fetch(
+      `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode${path}`,
+      { headers: auth(openwork.token), signal: AbortSignal.timeout(2_000) },
+    );
+    const foreign = request("/session/ses_foreign/message");
+    try {
+      // The requested read reaches the engine while its proof is still pending.
+      expect(await waitUntil(() => engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign/message"), 100)).toBe(true);
+      expect(engine.requests.some(({ pathname }) => pathname === "/session/ses_foreign")).toBe(true);
+      // Nothing is released before the proof settles, even though the engine already answered.
+      expect(await Promise.race([foreign.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 20))])).toBe("pending");
+    } finally {
+      release.resolve();
+    }
+    const response = await foreign;
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("msg_foreign");
+    // An owned read still answers from a single pass over the engine.
+    const owned = await request("/session/ses_1/todo");
+    expect(owned.status).toBe(200);
+    expect(await owned.json()).toEqual([{ content: "Validate session reads", status: "completed", priority: "high" }]);
+    expect(engine.requests.filter(({ pathname }) => pathname === "/session/ses_1/todo")).toHaveLength(1);
+  });
+
+  for (const mount of ["/workspace/ws_1/opencode", "/opencode"]) {
+    for (const sessionId of ["ses_1", "ses_foreign"]) {
+      test.serial(`v1 ${mount} ${sessionId} history transport rejection stays request-scoped while ownership is pending`, async () => {
+        const workspaceRoot = await createWorkspaceRoot();
+        const release = deferred();
+        const metadataPath = `/session/${sessionId}`;
+        const historyPath = `${metadataPath}/message`;
+        const engine = startMockOpencode({
+          foreignSessionDirectory: "/workspace/foreign",
+          onRead: async (request) => {
+            if (new URL(request.url).pathname === metadataPath) await release.promise;
+          },
+        });
+        const engineUrl = `http://127.0.0.1:${engine.server.port}`;
+        const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: engineUrl });
+        const base = `http://127.0.0.1:${openwork.server.port}`;
+        const originalFetch = globalThis.fetch;
+        const unhandled: unknown[] = [];
+        const onUnhandled = (error: unknown) => { unhandled.push(error); };
+        let rejected = false;
+        globalThis.fetch = Object.assign(
+          (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+            const url = new URL(input instanceof Request ? input.url : String(input));
+            if (url.origin === engineUrl && url.pathname === historyPath) {
+              rejected = true;
+              return Promise.reject(Object.assign(new Error("Synthetic history connection reset"), { code: "ECONNRESET" }));
+            }
+            return originalFetch(input, init);
+          },
+          { preconnect: originalFetch.preconnect },
+        );
+        process.on("unhandledRejection", onUnhandled);
+        const result = originalFetch(`${base}${mount}${historyPath}`, {
+          headers: auth(openwork.token), signal: AbortSignal.timeout(2_000),
+        });
+        void result.catch(() => undefined);
+        try {
+          expect(await waitUntil(() => rejected && engine.requests.some(({ pathname }) => pathname === metadataPath), 100)).toBe(true);
+          expect(await Promise.race([result.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 20))])).toBe("pending");
+          expect((await originalFetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).status).toBe(200);
+          expect(unhandled).toEqual([]);
+          release.resolve();
+          const response = await result;
+          if (sessionId === "ses_1") {
+            expect(response.status).toBe(502);
+            expect(await response.json()).toMatchObject({
+              code: "opencode_unreachable",
+              details: { path: `/opencode${historyPath}`, cause: "Synthetic history connection reset" },
+            });
+          } else {
+            expect(response.status).toBe(404);
+            expect(await response.json()).toEqual({ code: "session_not_found", message: "Session not found" });
+          }
+          expect((await originalFetch(`${base}/health`, { signal: AbortSignal.timeout(2_000) })).status).toBe(200);
+        } finally {
+          release.resolve();
+          await result.catch(() => undefined);
+          process.off("unhandledRejection", onUnhandled);
+          globalThis.fetch = originalFetch;
+        }
+      });
+    }
+  }
+
   for (const version of ["v1", "v2"]) {
     for (const phase of ["ownership", "history"]) {
       test.serial(`${version} history disconnect cancels the upstream ${phase} GET`, async () => {
@@ -356,12 +626,91 @@ describe("workspace OpenCode proxy", () => {
           caller.abort();
           expect(await result).toMatchObject({ name: "AbortError" });
           expect(await waitUntil(() => observed?.aborted === true, 100)).toBe(true);
-          if (phase === "ownership") expect(fixture.engine.requests.some((entry) => entry.pathname === historyPath)).toBe(false);
+          // v1 dispatches the history read beside its ownership proof; v2 still proves first.
+          if (phase === "ownership" && version === "v2") expect(fixture.engine.requests.some((entry) => entry.pathname === historyPath)).toBe(false);
           expect(fixture.engine.requests.every((entry) => entry.method === "GET")).toBe(true);
         } finally {
           caller.abort();
           release.resolve();
           await result;
+        }
+      });
+    }
+  }
+
+  for (const mount of ["/workspace/ws_1/opencode", "/w/ws_1/opencode", "/opencode"]) {
+    for (const method of ["GET", "HEAD"]) {
+      test.serial(`${method} ${mount} cancellation after ownership metadata stays request-scoped`, async () => {
+        const workspaceRoot = await createWorkspaceRoot();
+        const release = deferred();
+        let proofStarted = false;
+        let canonicalizationPending = false;
+        const engine = startMockOpencode({
+          foreignSessionDirectory: "/workspace/foreign",
+          onRead: async (request) => {
+            if (new URL(request.url).pathname === "/session/ses_1") proofStarted = true;
+          },
+        });
+        // Capture the real HTTP handler so the server's response remains
+        // observable after cancellation (a disconnected HTTP client cannot read it).
+        const transport: { handle?: nodeServer.ServeOptions["fetch"] } = {};
+        const originalServe = nodeServer.serve;
+        const serveSpy = spyOn(nodeServer, "serve").mockImplementation((options) => {
+          transport.handle = options.fetch;
+          return originalServe(options);
+        });
+        const previousTelemetry = globalThis.__openworkDesktopTelemetry;
+        const captured: unknown[] = [];
+        globalThis.__openworkDesktopTelemetry = { captureException: (error) => { captured.push(error); return true; } };
+        let restorePath = () => {};
+        const caller = new AbortController();
+        let result: Promise<Response> | undefined;
+        try {
+          const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${engine.server.port}` });
+          const handle = transport.handle;
+          if (!handle) throw new Error("Missing server request handler");
+          const originalRealpath = fs.realpath;
+          function delayedRealpath(path: PathLike, options?: ObjectEncodingOptions | BufferEncoding | null): Promise<string>;
+          function delayedRealpath(path: PathLike, options: BufferEncodingOption): Promise<Buffer<ArrayBuffer>>;
+          function delayedRealpath(path: PathLike, options?: ObjectEncodingOptions | BufferEncoding | BufferEncodingOption | null): Promise<string | Buffer<ArrayBuffer>>;
+          async function delayedRealpath(path: PathLike, options?: ObjectEncodingOptions | BufferEncoding | BufferEncodingOption | null): Promise<string | Buffer<ArrayBuffer>> {
+            if (proofStarted && path === workspaceRoot) {
+              canonicalizationPending = true;
+              await release.promise;
+            }
+            const encoding = typeof options === "object" && options !== null ? options.encoding : options;
+            return encoding === "buffer" ? originalRealpath(path, { encoding: "buffer" }) : originalRealpath(path, encoding);
+          }
+          const pathSpy = spyOn(fs, "realpath").mockImplementation(delayedRealpath);
+          restorePath = () => pathSpy.mockRestore();
+          const base = `http://127.0.0.1:${openwork.server.port}`;
+          result = Promise.resolve(handle(new Request(`${base}${mount}/session/ses_1/message`, {
+            method, headers: auth(openwork.token), signal: caller.signal,
+          })));
+          void result.catch(() => undefined);
+          expect(await waitUntil(() => canonicalizationPending, 2_000)).toBe(true);
+          expect(engine.requests.some((entry) => entry.pathname === "/session/ses_1/message")).toBe(true);
+          caller.abort();
+          release.resolve();
+          const response = await result;
+          expect(response.status, JSON.stringify(captured.map((error) => error instanceof Error
+            ? { name: error.name, message: error.message, stack: error.stack } : error))).toBe(499);
+          expect(await response.json()).toEqual({ code: "request_aborted", message: "Request was canceled" });
+          expect(captured).toEqual([]);
+          restorePath();
+          restorePath = () => {};
+          const control = await handle(new Request(`${base}${mount}/session/ses_1/todo`, { headers: auth(openwork.token) }));
+          expect(control.status).toBe(200);
+          expect(await control.json()).toEqual([{ content: "Validate session reads", status: "completed", priority: "high" }]);
+          const foreign = await handle(new Request(`${base}${mount}/session/ses_foreign/message`, { headers: auth(openwork.token) }));
+          expect(foreign.status).toBe(404);
+          expect(await foreign.text()).not.toContain("msg_foreign");
+        } finally {
+          release.resolve();
+          await result?.catch(() => undefined);
+          restorePath();
+          serveSpy.mockRestore();
+          globalThis.__openworkDesktopTelemetry = previousTelemetry;
         }
       });
     }
@@ -570,11 +919,11 @@ describe("workspace OpenCode proxy", () => {
     expect(resumed()).toHaveLength(1);
   });
 
-  test("accepts empty engine request bodies and rejects malformed JSON before forwarding", async () => {
+  test.each(["/workspace/ws_1/opencode", "/w/ws_1/opencode", "/opencode"])("%s accepts empty engine request bodies and rejects malformed JSON before forwarding", async (mount) => {
     const workspaceRoot = await createWorkspaceRoot();
     const mock = startMockOpencode();
     const openwork = await startOpenworkServer({ workspaceRoot, opencodeBaseUrl: `http://127.0.0.1:${mock.server.port}`, readOnly: false });
-    const url = `http://127.0.0.1:${openwork.server.port}/workspace/ws_1/opencode/session`;
+    const url = `http://127.0.0.1:${openwork.server.port}${mount}/session`;
     for (const body of [undefined, ""]) {
       const response = await fetch(url, { method: "POST", headers: auth(openwork.token), body });
       expect(response.status).toBe(200);
@@ -584,7 +933,18 @@ describe("workspace OpenCode proxy", () => {
     expect(sessionPosts()).toHaveLength(2);
     const malformed = await fetch(url, { method: "POST", headers: auth(openwork.token), body: "{" });
     expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toMatchObject({ code: "invalid_request" });
     expect(sessionPosts()).toHaveLength(2);
+  });
+
+  test.serial("native malformed JSON is rejected before execution preparation or forwarding", async () => {
+    const fixture = await startV2Proxy();
+    const response = await fixture.request("/api/session", { method: "POST", body: "{" });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: "invalid_request" });
+    expect(fixture.provider.calls).toEqual([]);
+    expect(fixture.mcp.calls).toEqual([]);
+    expect(fixture.engine.requests).toEqual([]);
   });
 
   test("accepts guest-side rem_ workspace aliases", async () => {

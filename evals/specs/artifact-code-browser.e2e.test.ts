@@ -89,4 +89,28 @@ test("artifact editor renders code with Pierre and browses workspace files", asy
     await user.see({ text: "Second row" });
     await user.see({ role: "link", label: "Documentation" });
   });
+
+  await step("Unlisted chat files expose exact paths through right-click and keyboard actions", async () => {
+    await user.rightClick({ role: "link", label: "Unlisted report" });
+    await user.see({ role: "button", label: "Copy path" });
+    await user.see({ role: "button", label: place.kind === "local" && process.platform === "darwin" ? "Reveal in Finder" : "Show in folder" });
+    await user.click({ role: "button", label: "Copy path" });
+    await user.click("composer");
+    await user.press(place.kind === "local" && process.platform === "darwin" ? "Meta+V" : "Control+V");
+    await user.see("composer", { text: world.fileLinkPath });
+    await user.type("composer", "", { replace: true });
+    await user.rightClick({ role: "link", label: "Relative report" });
+    await user.press("Escape");
+    await user.click({ role: "button", label: "Open with", nth: 1 });
+    await user.press("Enter");
+    await user.click("composer");
+    await user.press(place.kind === "local" && process.platform === "darwin" ? "Meta+V" : "Control+V");
+    await user.see("composer", { text: `${world.workspacePath}/docs/Unlisted-Relative.pdf` });
+    await user.type("composer", "", { replace: true });
+    await user.click({ role: "button", label: "Open with", nth: 1 });
+    await user.press("Escape");
+    await user.press("Enter");
+    await user.see({ role: "button", label: "Copy path" });
+    await user.press("Escape");
+  });
 });

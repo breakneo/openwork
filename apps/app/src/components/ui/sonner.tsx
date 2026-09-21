@@ -98,7 +98,7 @@ const toastTile = cva(
       { size: "default", type: "default", className: "border-sky-6/40 bg-sky-4/80" },
       { size: "default", type: "success", className: "border-emerald-6/40 bg-emerald-4/80" },
       { size: "default", type: "info", className: "border-sky-6/40 bg-sky-4/80" },
-      { size: "default", type: "warning", className: "border-amber-6/40 bg-amber-4/80" },
+      { size: "default", type: "warning", className: "border-border bg-muted" },
       { size: "default", type: "error", className: "border-red-6/40 bg-red-4/80" },
     ],
     defaultVariants: { type: "default", size: "default" },
@@ -136,7 +136,7 @@ interface ToastCardProps {
 function ToastCard({ id, type, title, description, action, cancel, notification }: ToastCardProps) {
   if (notification) {
     return (
-      <div className={cn("flex w-full gap-3 rounded-2xl border border-border bg-popover/95 backdrop-blur-sm p-4 text-popover-foreground shadow-md md:max-w-sm ring-1 ring-popover-border/20 items-center")}>
+      <div className={cn("flex w-full gap-3 rounded-2xl bg-popover/95 backdrop-blur-sm p-4 text-popover-foreground shadow-md md:max-w-sm items-center")}>
         <ToastIcon type={type} size="sm" />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex items-center gap-2">
@@ -152,7 +152,7 @@ function ToastCard({ id, type, title, description, action, cancel, notification 
   }
 
   return (
-    <div className={cn("flex w-full items-start gap-3 rounded-2xl border border-border bg-popover/95 backdrop-blur-sm p-4 text-popover-foreground shadow-md md:max-w-sm ring-1 ring-popover-border/20")}>
+    <div className={cn("flex w-full items-start gap-3 rounded-2xl bg-popover/95 backdrop-blur-sm p-4 text-popover-foreground shadow-md md:max-w-sm")}>
       <ToastIcon type={type} />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-center gap-2">
@@ -236,7 +236,7 @@ function UndoToastCard({ id, title, icon: Icon, undo, view, closeLabel }: UndoTo
     <div className="flex w-[var(--width)] max-w-full justify-center">
       <div
         data-undo-toast
-        className="flex w-fit max-w-full items-center gap-3 rounded-2xl border border-border bg-popover/95 py-1.5 pl-4 pr-1.5 text-popover-foreground shadow-md ring-1 ring-popover-border/20 backdrop-blur-sm"
+        className="flex w-fit max-w-full items-center gap-3 rounded-2xl bg-popover/95 py-1.5 pl-4 pr-1.5 text-popover-foreground shadow-md backdrop-blur-sm"
       >
         {Icon ? <Icon className="size-4 shrink-0" /> : null}
         <p className="min-w-0 truncate text-sm font-medium">{title}</p>

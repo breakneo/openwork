@@ -6,6 +6,7 @@ import {
   AUTOMATION_MODEL_ATTENTION_CAPABILITY,
   AUTOMATION_MODEL_ATTENTION_CAPABILITY_HEADER,
 } from "@openwork/types/automations";
+import type { GatewayProviderSummary } from "@openwork/types/den/gateway";
 import type {
   AutomationDetail,
   AutomationDesktopRunnerPresence,
@@ -19,6 +20,7 @@ import type {
   UpdateAutomation,
 } from "@openwork/types/automations";
 import { generatedArtifactViewSchema, savedAppDetailSchema, savedAppSummarySchema, type SaveApp, type WorkflowDetail } from "@openwork/types/workflows";
+import { gatewayUsageStatusSchema, gatewayUsageResetRequestSchema } from "@openwork/types/den/gateway-usage-limits";
 
 // Re-export the shared schema under the local alias so React consumers
 // (e.g. the cloud domain's desktop-config provider) can import it alongside
@@ -312,6 +314,8 @@ export type DenMcpToken = {
   scopes: string[];
   resource: string;
 };
+
+export type DenOrgGatewayProvider = Pick<GatewayProviderSummary, "id" | "providerId" | "name" | "source">;
 
 export type DenOrgLlmProviderModel = {
   id: string;
@@ -851,8 +855,8 @@ export function resolveDenBaseUrls(input: { baseUrl?: string | null; apiBaseUrl?
   const seedUrl = stripDenApiBasePath(normalizedBaseUrl ?? normalizedApiBaseUrl) ?? DEFAULT_DEN_BASE_URL;
   const baseUrl = stripDenApiBasePath(seedUrl) ?? DEFAULT_DEN_BASE_URL;
 
-  // Build-time API pin (headless/dev web): route API calls through the
-  // configured proxy regardless of which web base the caller resolved.
+  // Build-time API pin (headless/dev web): use the configured API base exactly,
+  // whether it names a direct API origin or a same-origin /api/den proxy.
   const buildDenApiBaseUrl = normalizedApiBaseUrl ? null : normalizeDenBaseUrl(readBuildDenApiBaseUrl());
   const deterministicApiBaseUrl = denApiOriginForDenBaseUrl(baseUrl);
 
@@ -861,7 +865,7 @@ export function resolveDenBaseUrls(input: { baseUrl?: string | null; apiBaseUrl?
     apiBaseUrl: normalizedApiBaseUrl
       ? normalizedApiBaseUrl
       : buildDenApiBaseUrl
-        ? ensureDenApiBasePath(buildDenApiBaseUrl) ?? buildDenApiBaseUrl
+        ? buildDenApiBaseUrl
         : deterministicApiBaseUrl ?? ensureDenApiBasePath(baseUrl) ?? baseUrl,
   };
 }
@@ -2128,6 +2132,35 @@ function getDenOrgLlmProviders(payload: unknown): DenOrgLlmProvider[] {
   });
 }
 
+function getDenOrgGatewayProviders(payload: unknown): DenOrgGatewayProvider[] {
+  const invalidPayload = () => new DenApiError(
+    500,
+    "invalid_gateway_providers_payload",
+    "AI Gateway provider response was invalid.",
+  );
+  if (!isRecord(payload) || !Array.isArray(payload.inferenceProviders)) {
+    throw invalidPayload();
+  }
+
+  return payload.inferenceProviders.map((provider: unknown) => {
+    if (
+      !isRecord(provider) ||
+      typeof provider.id !== "string" || !provider.id.trim() ||
+      typeof provider.providerId !== "string" || !provider.providerId.trim() ||
+      typeof provider.name !== "string" || !provider.name.trim() ||
+      provider.source !== "openwork_gateway"
+    ) {
+      throw invalidPayload();
+    }
+    return {
+      id: provider.id,
+      providerId: provider.providerId,
+      name: provider.name,
+      source: provider.source,
+    };
+  });
+}
+
 function parseDenExternalMcpConnection(value: unknown): DenExternalMcpConnection | null {
   if (
     !isRecord(value) ||
@@ -3089,6 +3122,24 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
       };
     },
 
+    async getGatewayUsageStatus(orgId: string) {
+      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to view usage limits.");
+      const status = gatewayUsageStatusSchema.parse(await requestJson<unknown>(baseUrls, "/v1/gateway/usage-limits/me", {
+        method: "GET", token, organizationId: orgId,
+      }));
+      if (status.organizationId !== orgId) throw new Error("Usage response belongs to a different organization.");
+      return status;
+    },
+    async requestGatewayUsageReset(orgId: string, input: { bucketId: string; reason: string }) {
+      if (!token || !orgId.trim()) throw new Error("Sign in and select an organization to request an increase.");
+      const reason = input.reason.trim();
+      if (!reason || reason.length > 2000 || !input.bucketId || input.bucketId.length > 64) {
+        throw new Error("Choose a usage bucket and enter a reason (1–2000 characters).");
+      }
+      return gatewayUsageResetRequestSchema.parse(await requestJson<unknown>(baseUrls, "/v1/gateway/usage-limit-reset-requests", {
+        method: "POST", token, organizationId: orgId, body: { bucketId: input.bucketId, reason },
+      }));
+    },
     async listSavedApps(orgId: string) {
       const payload = await requestJson<unknown>(baseUrls, "/v1/apps", {
         method: "GET", token, organizationId: orgId,
@@ -3280,6 +3331,20 @@ export function createDenClient(options: { baseUrl: string; apiBaseUrl?: string 
         organizationId: orgId,
       });
       return getDenOrgLlmProviders(payload);
+    },
+
+    async listOrgGatewayProviders(orgId: string): Promise<DenOrgGatewayProvider[]> {
+      try {
+        const payload = await requestJson<unknown>(baseUrls, "/v1/inference-providers?scope=usable", {
+          method: "GET",
+          token,
+          organizationId: orgId,
+        });
+        return getDenOrgGatewayProviders(payload);
+      } catch (error) {
+        if (error instanceof DenApiError && [404, 405, 501].includes(error.status)) return [];
+        throw error;
+      }
     },
 
     async listAutomations(
