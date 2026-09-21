@@ -51,7 +51,7 @@ permissions:
 
 concurrency:
   group: alpha-macos-aarch64-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   publish-alpha-macos-aarch64:

@@ -1,4 +1,5 @@
 import { processBlankSlateProfile, resolveBlankSlateLaunch } from "./blank-slate-profile.mjs";
+import { DESKTOP_POLICY_ENFORCEMENT_ENABLED } from "@openwork/types/den/desktop-policies-runtime";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import net from "node:net";
@@ -55,8 +56,10 @@ import {
 } from "./connect-link-branding.mjs";
 import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
+import { resolveWorkspaceFileLaunch } from "./workspace-file-access.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
+import { fetchFiniteDesktopHttp } from "./finite-http-fetch.mjs";
 import { createDesktopTransferRegistry, downloadBinaryToPath, uploadMultipartFromBytes } from "./binary-transfer.mjs";
 import {
   createLinuxDesktopIntegration,
@@ -1111,6 +1114,7 @@ browserPanel = createBrowserPanel({
   getWindow: () => mainWindow,
   onDeepLink: (urls) => queueDeepLinks(urls),
   checkPolicy: async (input) => {
+    if (!DESKTOP_POLICY_ENFORCEMENT_ENABLED) return;
     let code = "policy_unavailable";
     try {
       const server = await runtimeManager.openworkServerInfo();
@@ -2236,6 +2240,23 @@ const desktopCommandHandlers = {
       if (!target) return "Path is required.";
       return shell.openPath(target);
   },
+  "__openWorkspaceFile": async (event, ...args) => {
+      // Chat links are renderer-derived text. Resolve them on disk here so only a real
+      // file inside the real workspace launches; anything else is revealed, never run.
+      const workspaceRoot = String(args[0] ?? "").trim();
+      const target = String(args[1] ?? "").trim();
+      const decision = await resolveWorkspaceFileLaunch(workspaceRoot, target);
+      if (decision.ok === true) {
+        const error = await shell.openPath(decision.path);
+        if (error && error.trim()) return { ok: false, error };
+        return { ok: true, action: "opened" };
+      }
+      if (decision.reason === "outside" && existsSync(target)) {
+        shell.showItemInFolder(target);
+        return { ok: true, action: "revealed" };
+      }
+      return { ok: false, error: decision.error };
+  },
   "__revealItemInDir": async (event, ...args) => {
       const target = String(args[0] ?? "").trim();
       if (!target) return "Path is required.";
@@ -2357,9 +2378,13 @@ const desktopCommandHandlers = {
       return results;
   },
   "__openWithApp": async (event, ...args) => {
-      const target = String(args[0] ?? "").trim();
+      const requested = String(args[0] ?? "").trim();
       const appPath = String(args[1] ?? "").trim();
-      if (!target || !appPath) return "Target and app path are required.";
+      const workspaceRoot = String(args[2] ?? "").trim();
+      if (!requested || !appPath) return "Target and app path are required.";
+      const decision = await resolveWorkspaceFileLaunch(workspaceRoot, requested);
+      if (decision.ok === false) return decision.error;
+      const target = decision.path;
       const platform = process.platform;
       try {
         if (platform === "darwin") {
@@ -2398,7 +2423,7 @@ const desktopCommandHandlers = {
       const fetchResponse = async (callerSignal) => {
         const deadline = Number.isFinite(timeoutMs) && timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
         const signal = callerSignal && deadline ? AbortSignal.any([callerSignal, deadline]) : callerSignal ?? deadline;
-        const response = await electronNet.fetch(url, { ...requestInit, signal });
+        const response = await fetchFiniteDesktopHttp(url, { ...requestInit, signal }, electronNet.fetch);
         return {
           status: response.status,
           statusText: response.statusText,
@@ -2406,7 +2431,10 @@ const desktopCommandHandlers = {
           body: await response.text(),
         };
       };
-      return (requestInit.method ?? "GET").toUpperCase() === "GET" && init.transferId
+      const method = (requestInit.method ?? "GET").toUpperCase();
+      const cancellable = ["GET", "PATCH"].includes(method)
+        || (method === "POST" && /\/(?:session\/[^/]+\/abort|permission\/[A-Za-z0-9_-]+\/reply)$/.test(new URL(url).pathname));
+      return cancellable && init.transferId
         ? desktopTransfers.run(event, init.transferId, fetchResponse)
         : fetchResponse(undefined);
   },

@@ -287,6 +287,32 @@ export async function workflowSnapshotPage(
   }
 }
 
+/** The same resource/version gate as detail, without source, graphs, automations or receipts. */
+export async function getWorkflowAccess(input: {
+  context: PluginArchActorContext
+  configObjectId: string
+}) {
+  const resource = await workflowResource(input.context, input.configObjectId, "viewer")
+  const role = await resolvePluginArchResourceRole({
+    context: input.context,
+    resourceId: resource.configObject.id,
+    resourceKind: "config_object",
+  })
+  // A malformed newest version does not hide an older valid version. Do not
+  // replace this with an existence check or a latest-version-only check.
+  const versions = await db.select({ payload: ConfigObjectVersionTable.normalizedPayloadJson })
+    .from(ConfigObjectVersionTable).where(and(
+      eq(ConfigObjectVersionTable.organizationId, input.context.organizationContext.organization.id),
+      eq(ConfigObjectVersionTable.configObjectId, resource.configObject.id),
+      eq(ConfigObjectVersionTable.isDeletedVersion, false),
+    ))
+  if (!versions.some((version) => parseCodemodeScriptPayload(version.payload).ok)) {
+    throw new Error("workflow_version_not_found")
+  }
+  if (!input.context.organizationContext.currentMember.id) throw new Error("workflow_receipt_member_required")
+  return { configObjectId: resource.configObject.id, title: resource.configObject.title, canManage: role === "manager" }
+}
+
 export async function getWorkflowDetail(input: {
   context: PluginArchActorContext
   configObjectId: string

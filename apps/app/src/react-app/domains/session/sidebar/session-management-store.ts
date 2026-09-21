@@ -176,6 +176,22 @@ function reportSyncError(error: unknown): void {
   console.warn("[session-groups] server sync failed", error);
 }
 
+/** First send cannot proceed until its captured group has been assigned. */
+export async function assignNewSessionGroup(workspaceId: string, sessionId: string, groupId: string | null): Promise<void> {
+  if (groupId && !useSessionManagementStore.getState().groupsByWorkspace[workspaceId]?.groups.some((group) => group.id === groupId)) {
+    throw new Error("Group is unavailable. Choose another destination.");
+  }
+  const version = beginSessionGroupMutation(workspaceId);
+  try {
+    const state = await sessionGroupSyncHandler?.assignGroup(workspaceId, sessionId, groupId);
+    if (!state) throw new Error("Workspace is disconnected. Reconnect and try again.");
+    completeSessionGroupMutation(workspaceId, version, state);
+  } catch (error) {
+    completeSessionGroupMutation(workspaceId, version, null);
+    throw error;
+  }
+}
+
 function syncServerState(request: Promise<SessionGroupServerState | null> | undefined, workspaceId: string): void {
   if (!request) return;
   const version = beginSessionGroupMutation(workspaceId);

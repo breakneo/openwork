@@ -291,6 +291,12 @@ export class SpecRuntime {
   get resources(): WorldResources | undefined { return this.#resources; }
   #stepDepth = 0;
   #stepBlocked = false;
+  readonly #stepNames: string[] = [];
+
+  /** Name of the innermost `step()` currently running; screenshots taken inside it are captioned with it. */
+  currentStepName(): string | undefined {
+    return this.#stepNames.at(-1);
+  }
 
   constructor(place: Place, stack: AsyncDisposableStack, sink: EvidenceSink, adapters: SpecAdapters = {}, resources?: WorldResources) {
     this.place = place;
@@ -420,6 +426,7 @@ export class SpecRuntime {
     }
     const depth = this.#stepDepth;
     this.#stepDepth += 1;
+    this.#stepNames.push(name);
     const startedAt = Date.now();
     try {
       const result = await fn();
@@ -439,6 +446,7 @@ export class SpecRuntime {
       throw error;
     } finally {
       this.#stepDepth -= 1;
+      this.#stepNames.pop();
     }
   };
 }
@@ -820,7 +828,8 @@ export class UserChannel implements User {
 
   screenshot() {
     const surface = requireSurface(this.#surface);
-    return this.#runtime.call("user", "screenshot", "screenshot", surface, () => screenshot(surface));
+    const caption = this.#runtime.currentStepName();
+    return this.#runtime.call("user", "screenshot", "screenshot", surface, () => screenshot(surface, { caption }));
   }
 
   looks(expectations: string[]): Promise<void> {

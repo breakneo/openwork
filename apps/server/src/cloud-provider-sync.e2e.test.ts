@@ -338,11 +338,10 @@ describe("cloud provider sync gateway", () => {
       return Response.json(true);
     } });
     stops.push(() => engine.stop(true));
-    let denyPolicyB = true;
     const den = Bun.serve({ port: 0, fetch(request) {
       const path = new URL(request.url).pathname;
       const org = request.headers.get("x-openwork-legacy-org-id");
-      if (path === "/v1/me/desktop-config") return org === "org_b" && denyPolicyB
+      if (path === "/v1/me/desktop-config") return org === "org_b"
         ? Response.json({ error: "denied" }, { status: 401 }) : Response.json({});
       if (org === "org_b") return Response.json({ error: "not_found" }, { status: 404 });
       if (path === "/v1/inference-providers") return Response.json({ inferenceProviders: [] });
@@ -367,10 +366,10 @@ describe("cloud provider sync gateway", () => {
     busy = true;
     engineRequests.length = 0;
 
-    // Repeated early A delivery and a rejected B identity must both retain A's
-    // actual ownership. Resuming A is reconciliation, never forced cleanup.
+    // Early identity delivery does not authorize Cloud resources or replace
+    // materialized ownership. Policy failure cannot reject the local identity.
     for (const org of ["org_a", "org_a", "org_b"]) {
-      expect((await put("/den-session/identity", org)).status).toBe(org === "org_b" ? 403 : 204);
+      expect((await put("/den-session/identity", org)).status).toBe(204);
       expect(await runSync(base, "suspended")).toEqual({ status: "no_session" });
     }
     expect((await put("/den-session", "org_a")).status).toBe(204);
@@ -379,7 +378,6 @@ describe("cloud provider sync gateway", () => {
     expect(await readFile(openworkRuntimeConfigFilePath(config), "utf8")).toBe(configBefore);
     expect(engineRequests.filter((request) => !request.startsWith("GET "))).toEqual([]);
 
-    denyPolicyB = false;
     expect((await put("/den-session/identity", "org_b")).status).toBe(204);
     expect((await put("/den-session", "org_b")).status).toBe(204);
     await waitForLastRun(base, "failed");
@@ -1741,8 +1739,8 @@ describe("cloud provider sync gateway", () => {
     expect((await deliverIdentity()).status).toBe(403);
     config.readOnly = false;
     policyFailure = true;
-    expect((await deliverIdentity()).status).toBe(403);
-    expect(await runSync(base, "unverified-identity")).toEqual({ status: "no_session" });
+    expect((await deliverIdentity()).status).toBe(204);
+    expect(await runSync(base, "policy-is-optional")).toEqual({ status: "no_session" });
     policyFailure = false;
     const env = new EnvService({ path: process.env.OPENWORK_ENV_STORE });
     const envBefore = await env.list();
@@ -1752,8 +1750,8 @@ describe("cloud provider sync gateway", () => {
     expect((await deliverIdentity()).status).toBe(204);
     await Bun.sleep(80);
     expect(await runSync(base, "identity-is-not-ready")).toEqual({ status: "no_session" });
-    expect(denRequests.every((request) => request.path === "/v1/me/desktop-config")).toBe(true);
-    expect((await readGlobalRuntimeOpencodeConfig(config)).managedPolicy).toBeDefined();
+    expect(denRequests).toEqual([]);
+    expect((await readGlobalRuntimeOpencodeConfig(config)).managedPolicy).toBeUndefined();
     expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))).toEqual(providersBefore);
     expect(await env.list()).toEqual(envBefore);
     expect(await readFile(openworkRuntimeConfigFilePath(config), "utf8").catch(() => null)).toBe(fileBefore);

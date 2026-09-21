@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, expect, mock, setSystemTime, test } from "bun:test"
 import { Tool } from "@openwork/codemode"
 import {
   ArtifactViewRevisionTable, ArtifactViewTable, ConfigObjectAccessGrantTable,
@@ -85,6 +85,15 @@ const transactionDb = {
       if (table === ConfigObjectTable) return result.map((configObject) => ({ configObject, plugin: rows(PluginTable)[0], marketplace: null }))
       if (table === ConfigObjectAccessGrantTable) return result.map((row) => ({ ...row, resourceId: row.configObjectId }))
       if (table === WorkflowRunTable && projection?.receipt) return result.map((receipt) => ({ receipt, automationTrigger: null }))
+      if (projection && (table === ConfigObjectVersionTable || table === ArtifactViewRevisionTable) && isRecord(table)) {
+        const columns = Object.entries(table)
+        const fields = Object.entries(projection).map(([alias, column]) => {
+          const entry = columns.find(([, candidate]) => candidate === column)
+          if (!entry) throw new Error(`Unsupported test database projection: ${alias}`)
+          return { alias, key: entry[0] }
+        })
+        return result.map((row) => Object.fromEntries(fields.map(({ alias, key }) => [alias, row[key]])))
+      }
       return result
     }
     const query = {
@@ -211,6 +220,17 @@ function savedResponse(value: unknown) {
   }
 }
 
+test("database projections retain aliases without returning unselected workflow source", async () => {
+  const saved = seed()
+  const selected = await database.select({ payload: ConfigObjectVersionTable.normalizedPayloadJson })
+    .from(ConfigObjectVersionTable)
+  expect(selected).toEqual([{ payload: rows(ConfigObjectVersionTable)[0]?.normalizedPayloadJson }])
+  expect(selected[0]).not.toHaveProperty("rawSourceText")
+  expect(selected[0]).not.toHaveProperty("normalizedPayloadJson")
+  await expect(workflows.getWorkflowAccess({ context, configObjectId: saved.configObjectId }))
+    .resolves.toMatchObject({ configObjectId: saved.configObjectId, canManage: true })
+})
+
 test("live authoring -> receipt-only save -> exact saved live run -> validated snapshot -> artifact build", async () => {
   const timeZone = "America/Los_Angeles"
   const tested = await authoring.executeWorkflowAuthoringTest({ mode: "live", timeZone, code, inputSchema: runtimeSchema, outputSchema }, {
@@ -281,6 +301,31 @@ test("live saved runs generate fresh runtime, default UTC, and validate without 
     expect(rows(WorkflowRunTable).at(-1)).toMatchObject({ validated_result: result.result.value, output_schema_digest: artifactDigest(runtimeSchema) })
   }
   expect(new Set(rows(WorkflowRunTable).map((row) => row.id)).size).toBe(2)
+})
+
+test("opening a live app regenerates calendar bounds across Los Angeles midnight and fall-back", async () => {
+  const saved = seed(code, { inputSchema: runtimeSchema, exampleInput: { runtime: { today: "2000-01-01" } } })
+  const savedPayload = structuredClone(rows(ConfigObjectVersionTable)[0]?.normalizedPayloadJson)
+  const timeZone = "America/Los_Angeles"
+  try {
+    for (const [now, today, dayStart, dayEnd] of [
+      ["2026-11-01T06:59:59.999Z", "2026-10-31", "2026-10-31T07:00:00.000Z", "2026-11-01T07:00:00.000Z"],
+      ["2026-11-01T07:00:00.000Z", "2026-11-01", "2026-11-01T07:00:00.000Z", "2026-11-02T08:00:00.000Z"],
+      ["2026-11-01T08:30:00.000Z", "2026-11-01", "2026-11-01T07:00:00.000Z", "2026-11-02T08:00:00.000Z"],
+      ["2026-11-01T09:30:00.000Z", "2026-11-01", "2026-11-01T07:00:00.000Z", "2026-11-02T08:00:00.000Z"],
+      ["2026-11-02T08:00:00.000Z", "2026-11-02", "2026-11-02T08:00:00.000Z", "2026-11-03T08:00:00.000Z"],
+    ]) {
+      setSystemTime(new Date(now))
+      const result = await workflows.executeLiveArtifactWorkflow({
+        context, configObjectId: saved.configObjectId, expectedOutputSchemaDigest: artifactDigest(outputSchema), timeZone, buildTools,
+      })
+      expect(result).toMatchObject({ ok: true, value: { count: 2 } })
+      expect(calls.at(-1)).toEqual({ name: "read", input: { now, today, dayStart, dayEnd, timeZone } })
+      expect(rows(ConfigObjectVersionTable)[0]?.normalizedPayloadJson).toEqual(savedPayload)
+    }
+    expect(calls).toHaveLength(5)
+    expect(new Set(rows(WorkflowRunTable).map(row => row.id)).size).toBe(5)
+  } finally { setSystemTime() }
 })
 
 test("exact saved version is executed rather than a newer version or retained authoring source", async () => {

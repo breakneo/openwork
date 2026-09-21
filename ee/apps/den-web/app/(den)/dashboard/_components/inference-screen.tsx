@@ -16,6 +16,7 @@ import { getBillingRoute, getCustomLlmProvidersRoute, getOrgAccessFlags } from "
 import { useDenFlow } from "../../_providers/den-flow-provider";
 import { useOrgDashboard } from "../_providers/org-dashboard-provider";
 import { getGatewayDashboardAccess } from "../_lib/gateway-dashboard-access";
+import { UsageLimitsCard } from "../_features/analytics/usage-limits-card";
 
 /**
  * Editorial detail per model: what a knowledge worker should reach for it for,
@@ -277,6 +278,8 @@ function InferenceContent() {
       {showGettingStarted ? <DenCard>
         <p className="text-sm leading-6 text-[#637291]">One subscription activates models for everyone in your workspace. After subscribing, choose a model from the OpenWork group in the app and start a task.</p>
       </DenCard> : null}
+
+      {enabled && status ? <UsageLimitsCard buckets={status.buckets} /> : null}
 
       <ModelsLineup subscribed={subscribed} />
 

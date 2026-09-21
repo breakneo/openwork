@@ -30,6 +30,7 @@ interface RegisterCoreRoutesOptions {
   env: EnvService;
   serverVersion: string;
   opencodeVersion: string;
+  isReady?: () => boolean;
   jsonResponse: JsonResponse;
   readJsonBody: ReadJsonBody;
   readOptionalJsonBody: ReadJsonBody;
@@ -116,12 +117,15 @@ export function registerCoreRoutes(options: RegisterCoreRoutesOptions): void {
     serverMetadata: { serverVersion, expectedOpencodeVersion: opencodeVersion },
   };
 
-  const healthResponse = () => jsonResponse({
-    ok: true,
-    version: serverVersion,
-    opencodeVersion,
-    uptimeMs: Date.now() - config.startedAt,
-  });
+  const healthResponse = () => {
+    const ok = options.isReady?.() ?? true;
+    return jsonResponse({
+      ok,
+      version: serverVersion,
+      opencodeVersion,
+      uptimeMs: Date.now() - config.startedAt,
+    }, ok ? 200 : 503);
+  };
 
   addRoute(routes, "GET", "/health", "none", async () => healthResponse());
 

@@ -108,11 +108,19 @@
       <div style="min-height: 100dvh; display: flex; align-items: center; justify-content: center; font: 14px system-ui; text-align: center; padding: 24px; box-sizing: border-box">
         <div>
           <p role="status">Starting OpenWork</p>
-          <p>If startup does not finish, reload to try again.</p>
-          <button type="button" onclick="window.location.reload()" style="font: inherit; padding: 8px 16px; cursor: pointer">Reload</button>
+          <div id="startup-recovery" hidden>
+            <p>OpenWork is taking longer than usual to start.</p>
+            <button type="button" onclick="window.location.reload()" style="font: inherit; padding: 8px 16px; cursor: pointer">Reload</button>
+          </div>
         </div>
       </div>
     </div>
+    <script>
+      setTimeout(function () {
+        var recovery = document.getElementById("startup-recovery");
+        if (recovery) recovery.hidden = false;
+      }, 45000);
+    </script>
     <script type="module" src="/src/index.react.tsx"></script>
   </body>
 </html>

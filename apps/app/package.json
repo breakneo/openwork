@@ -6,8 +6,10 @@
   "scripts": {
     "test": "bun test --isolate tests/",
     "dev": "OPENWORK_DEV_MODE=1 vite",
+    "prebuild": "pnpm --filter @openwork/types build",
     "build": "vite build",
     "dev:web": "OPENWORK_DEV_MODE=1 vite",
+    "prebuild:web": "pnpm --filter @openwork/types build",
     "build:web": "VITE_OPENWORK_DEPLOYMENT=web VITE_DEN_REQUIRE_SIGNIN=1 vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",

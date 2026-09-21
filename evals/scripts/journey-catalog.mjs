@@ -12,6 +12,7 @@ import { readdir, readFile } from 'node:fs/promises';
 // journey-ci.test.mjs checks these against what each spec and world guards.
 const PACKAGED_BINARY = { env: ['OPENWORK_EVAL_ELECTRON_BINARY'] };
 const definitions = {
+  'gateway-usage-policy.e2e.test.ts': { name: 'Request and approve a Gateway usage extension', placement: 'local' },
   'composer-model-picker-no-subscribe-promo.e2e.test.ts': {
     cases: [{ id: 'MODEL-01', engines: ['v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v2' } }],
   },
@@ -51,9 +52,23 @@ const definitions = {
   // Drives the real error boundary and web error monitor in a standalone Chrome; needs no Den or Electron.
   'crash-recovery.e2e.test.ts': { name: 'Recover from a render crash without leaking secrets' },
   // Serves the model mock from the spec process's 127.0.0.1; only the local lane can reach it.
-  'v2-sessionless-first-send.e2e.test.ts': { name: 'Send the first prompt from the New task route', placement: 'local' },
+  'v2-sessionless-first-send.e2e.test.ts': {
+    name: 'Send the first prompt from the New task route', placement: 'local',
+    cases: [
+      { id: 'DEN-LOCAL-SEND', engines: ['v1'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v1' } },
+      { id: 'MOBILE-CHAT-01', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--daytona', engine: 'v1' } },
+    ],
+  },
   'streamed-markdown-answer.e2e.test.ts': {
     cases: [{ id: 'CONT-01', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--local', engine: 'v2' } }],
+  },
+  'live-stream-continuity.e2e.test.ts': {
+    name: 'Keep a real OpenAI answer streaming across conversation switches', placement: 'local', model: 'live',
+    needs: { env: ['OPENAI_API_KEY'], optIn: ['OPENWORK_EVAL_LIVE_OPENAI'] },
+    cases: [
+      { id: 'CONT-01-live', engines: ['v1'], optIns: ['OPENWORK_EVAL_E2E_TESTS', 'OPENWORK_EVAL_LIVE_OPENAI'], example: { placement: '--local', engine: 'v1' } },
+      { id: 'CONT-01-live-history', engines: ['v1'], optIns: ['OPENWORK_EVAL_E2E_TESTS', 'OPENWORK_EVAL_LIVE_OPENAI'], example: { placement: '--local', engine: 'v1' } },
+    ],
   },
   'live-tool-visible-after-session-switch.e2e.test.ts': {
     cases: [{ id: 'SWITCH-10', engines: ['v1', 'v2'], optIns: ['OPENWORK_EVAL_E2E_TESTS'], example: { placement: '--daytona', engine: 'v1' } }],
@@ -119,6 +134,7 @@ export const ciLane = Object.freeze({ platform: 'linux', env: Object.freeze([]) 
 // Needs the lane cannot meet, phrased as the action that would meet them; empty when the journey is applicable.
 export function unmetLaneNeeds(entry, lane = ciLane) {
   const missing = (entry.needs?.env ?? []).filter(name => !lane.env.includes(name)).map(name => `set ${name}`);
+  missing.push(...(entry.needs?.optIn ?? []).filter(name => !lane.optIns?.includes(name)).map(name => `set ${name}=1`));
   if (entry.needs?.platform && entry.needs.platform !== lane.platform) missing.push(`run on ${entry.needs.platform}`);
   return missing;
 }

@@ -10,7 +10,7 @@ import { defaultPolicyEditorAndMemberDesktop, managedPolicyRecovery, policyTrans
 // collapse to what the policy leaves reachable.
 const defaultJourney = "an admin restricts the default policy and the member desktop enforces it";
 const teamJourney = "team access overrides overlapping grants and restores only selected desktop capabilities";
-const recoveryJourney = "managed policy evaluation bounds transient Den retries and never reuses stale access";
+const recoveryJourney = "managed policy refresh and live model grants bound transient Den retries";
 const rollbackJourney = "POLICY-ROLLBACK tools complete when policy HTTP fails and IPC is disconnected";
 // Register one fixture extension: Vitest 3 accumulates fixtures when the same
 // base is extended twice. Choose the setup at the test boundary, keeping the
@@ -422,6 +422,11 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
+  // Policy transport cases exercise explicit refresh; restricted model grants
+  // still require a live catalog read on each evaluation.
+  const verify = (path: string, evaluation: Record<string, unknown>) => path === policyPath
+    ? world.refreshPolicy()
+    : world.evaluate(evaluation);
   const faultedEvaluation = async (
     path: string,
     evaluation: Record<string, unknown>,
@@ -433,7 +438,7 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     const start = (await world.proxy.requestLog()).length;
     await world.proxy.faults.status(path, statusCode, { times, body });
     const startedAt = performance.now();
-    const result = await world.evaluate(evaluation);
+    const result = await verify(path, evaluation);
     const elapsedMs = performance.now() - startedAt;
     const requests = await waitForRequests(start, path, statusCode === 503 ? 2 : 1);
     return { result, requests, elapsedMs };
@@ -444,7 +449,7 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     await world.proxy.faults.latency(path, 5_000, { times });
     const startedAt = performance.now();
     let evaluationComplete = false;
-    const evaluationPromise = world.evaluate(evaluation).finally(() => { evaluationComplete = true; });
+    const evaluationPromise = verify(path, evaluation).finally(() => { evaluationComplete = true; });
     await new Promise((resolve) => setTimeout(resolve, 250));
     const requestsBeforeCompletion = (await world.proxy.requestLog()).slice(start).filter((request) => request.path === path);
     const completedBeforeRequestProbe = evaluationComplete;
@@ -457,10 +462,10 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     const freshWithinEvaluation = requests.filter((request) => request.faulted === false).length;
     // Aborted requests are not completed-response log entries. Give every
     // five-second latency handler a bounded drain window, then prove that a
-    // fault-free evaluation is healthy before starting the next case.
+    // fault-free refresh or catalog evaluation is healthy before the next case.
     await new Promise((resolve) => setTimeout(resolve, 5_250));
     await world.proxy.faults.clear();
-    const healthy = await world.evaluate(evaluation);
+    const healthy = await verify(path, evaluation);
     return { result, healthy, elapsedMs, start, afterEvaluation, requests, completedBeforeRequestProbe, freshBeforeCompletion, freshWithinEvaluation };
   };
 
@@ -491,9 +496,10 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     );
   });
 
-  await step("one transient policy response backs off before retrying once and applies the live allow", async () => {
+  await step("explicit policy refresh backs off before retrying once and installs the live allow", async () => {
     const recovered = await faultedEvaluation(policyPath, builtInModel, 503, 1);
     expect(recovered.result.status).toBe(200);
+    expect((await world.evaluate(builtInModel)).status).toBe(200);
     expect(recovered.requests).toMatchObject([
       { status: 503, faulted: true },
       { status: 200, faulted: false },
@@ -501,14 +507,14 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     expect(recovered.requests).toHaveLength(2);
     expect(recovered.elapsedMs).toBeGreaterThanOrEqual(190);
     evidence.recordAssertionEvidence(
-      "A transient Den policy failure backs off before retrying exactly once and the real OpenWork server applies the live allow",
+      "Explicit refresh retries a transient Den policy failure exactly once and the installed policy allows the built-in model",
       JSON.stringify(recovered),
       recovered.result.status === 200 && recovered.requests.length === 2 && recovered.elapsedMs >= 190
         && recovered.requests[0]?.status === 503 && recovered.requests[1]?.status === 200,
     );
   });
 
-  await step("persistent and non-retryable policy verification failures stay closed", async () => {
+  await step("persistent and non-retryable explicit policy refresh failures stay closed", async () => {
     const outage = await faultedEvaluation(policyPath, builtInModel, 503, 2);
     expect(outage.result.status).toBe(403);
     expect(code(outage.result.body)).toBe("policy_unavailable");
@@ -529,11 +535,26 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
       nonRetryable.push({ fault: fault.name, ...observed });
     }
     evidence.recordAssertionEvidence(
-      "Persistent outage, authentication, authorization, rate limit, and invalid policy responses fail closed without stale access",
+      "Explicit refresh rejects persistent outage, authentication, authorization, rate limit, and invalid policy responses rather than reporting stale refresh success",
       JSON.stringify({ outage, nonRetryable }),
       outage.result.status === 403 && code(outage.result.body) === "policy_unavailable" && outage.requests.length === 2
         && nonRetryable.every((item) => item.result.status === 403 && code(item.result.body) === "policy_unavailable" && item.requests.length === 1),
     );
+  });
+
+  await step("the installed built-in model allow survives a policy outage without a Den read", async () => {
+    await world.proxy.faults.clear();
+    await world.proxy.faults.status(policyPath, 503, { times: 100 });
+    const start = (await world.proxy.requestLog()).length;
+    const allowed = await world.evaluate(builtInModel);
+    const requests = (await world.proxy.requestLog()).slice(start);
+    expect(allowed.status).toBe(200);
+    expect(requests).toEqual([]);
+    evidence.recordAssertionEvidence(
+      "The installed built-in model allow requires no Den request during a policy outage",
+      JSON.stringify({ allowed, requests }), allowed.status === 200 && requests.length === 0,
+    );
+    await world.proxy.faults.clear();
   });
 
   await step("assigned-model catalog verification has the same bounded retry and fail-closed behavior", async () => {
@@ -653,19 +674,23 @@ test(recoveryJourney, { timeout: 300_000 }, async ({ world: selectedWorld, step,
     );
   });
 
-  await step("a retry reads and applies a fresh denial instead of the prior allow", async () => {
+  await step("an explicit refresh retry installs a fresh denial instead of the prior allow", async () => {
     const updated = await world.updateBuiltInModel(false);
     expect(updated.response.ok).toBe(true);
-    const denied = await faultedEvaluation(policyPath, builtInModel, 503, 1);
-    expect(denied.result.status).toBe(403);
-    expect(code(denied.result.body)).toBe("organization_policy_denied");
-    expect(denied.requests).toHaveLength(2);
-    expect(denied.requests.map((request) => request.status)).toEqual([503, 200]);
+    const refreshed = await faultedEvaluation(policyPath, builtInModel, 503, 1);
+    expect(refreshed.result.status).toBe(200);
+    expect(refreshed.requests).toHaveLength(2);
+    expect(refreshed.requests.map((request) => request.status)).toEqual([503, 200]);
+    const start = (await world.proxy.requestLog()).length;
+    const denied = await world.evaluate(builtInModel);
+    expect(denied.status).toBe(403);
+    expect(code(denied.body)).toBe("organization_policy_denied");
+    expect((await world.proxy.requestLog()).slice(start)).toEqual([]);
     evidence.recordAssertionEvidence(
-      "After an earlier allow, the retry uses the fresh Den denial rather than stale policy",
-      JSON.stringify(denied),
-      denied.result.status === 403 && code(denied.result.body) === "organization_policy_denied"
-        && denied.requests.length === 2 && denied.requests[0]?.status === 503 && denied.requests[1]?.status === 200,
+      "After an earlier allow, explicit refresh retries and installs the fresh Den denial for subsequent local assertions",
+      JSON.stringify({ refreshed, denied }),
+      denied.status === 403 && code(denied.body) === "organization_policy_denied"
+        && refreshed.requests.length === 2 && refreshed.requests[0]?.status === 503 && refreshed.requests[1]?.status === 200,
     );
   });
 });
@@ -1112,6 +1137,7 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
     await admin.probe.eventually(async () => (await effective(world.den.members.jordan)).allowZenModel, {
       within: 30_000, label: "built-in model restriction saved", until: (allowed) => allowed === false,
     });
+    expect((await member.probe.desktopApi("/managed-policy")).status).toBe(200);
     const deniedBuiltIn = await member.agent.desktopApi("/managed-policy/evaluate", { method: "POST", body: builtInModel });
     const allowedBuiltIn = await other.agent.desktopApi("/managed-policy/evaluate", { method: "POST", body: builtInModel });
     expect(deniedBuiltIn.status).toBe(403);
@@ -1257,6 +1283,7 @@ test(teamJourney, { timeout: 20 * 60_000 }, async ({ world: selectedWorld, user,
     await saveReviewed([{ label: "Browse websites", before: origin, after: "Browsing blocked" }]);
     const saved = await effective(world.den.members.jordan);
     expect(isRecord(saved.execution) && saved.execution.browserOrigins).toEqual([]);
+    expect((await member.probe.desktopApi("/managed-policy")).status).toBe(200);
     const denied = await member.agent.desktopApi("/managed-policy/evaluate", { method: "POST", body: { action: "browser", input: { url, method: "GET" } } });
     expect(denied.status).toBe(403);
     expect(isRecord(denied.body) && denied.body.code).toBe("organization_policy_denied");

@@ -4,6 +4,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SseError } from "@modelcontextprotocol/sdk/client/sse.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
   CallToolRequestSchema,
@@ -738,6 +742,77 @@ describe("MCP Apps host transport", () => {
       workspaceRoot: root,
       projectedToolName: "fixture_render_fixture",
     })).rejects.toMatchObject({ code: "mcp_unreachable" });
+  });
+
+  test.each([
+    { error: new StreamableHTTPError(401, "https://private.invalid Authorization: Bearer secret body"), code: "mcp_auth_required" },
+    { error: new StreamableHTTPError(403, "https://private.invalid Authorization: Bearer secret body"), code: "mcp_access_denied" },
+    { error: new UnauthorizedError("https://private.invalid Authorization: Bearer secret body"), code: "mcp_auth_required" },
+    { error: new SseError(401, "https://private.invalid Authorization: Bearer secret body", new Event("error")), code: "mcp_auth_required" },
+    { error: new SseError(403, "https://private.invalid Authorization: Bearer secret body", new Event("error")), code: "mcp_access_denied" },
+  ])("classifies $code without retry, fallback, or provider disclosure ($error.name)", async ({ error, code }) => {
+    const { config, root } = await configuredFixture("openwork-mcp-app-auth-");
+    const connect = spyOn(Client.prototype, "connect").mockRejectedValue(error);
+    stops.push(() => { connect.mockRestore(); });
+    const failure = await resolveMcpAppResource({
+      serverConfig: config, workspaceId: WORKSPACE_ID, workspaceRoot: root,
+      projectedToolName: "fixture_render_fixture",
+    }).catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(McpAppHostError);
+    if (!(failure instanceof McpAppHostError)) throw new Error("Expected host error");
+    expect(failure.code).toBe(code);
+    expect(failure.message).toContain("before reopening the App");
+    for (const sensitive of ["https://", "private.invalid", "Authorization", "Bearer", "secret", "body"]) {
+      expect(failure.message).not.toContain(sensitive);
+    }
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([400, 404, 405])("preserves legacy initialize fallback for HTTP %i but stops on SSE auth denial", async (status) => {
+    const { config, root } = await configuredFixture("openwork-mcp-app-legacy-auth-");
+    const connect = spyOn(Client.prototype, "connect")
+      .mockRejectedValueOnce(new StreamableHTTPError(status, "legacy"))
+      .mockRejectedValueOnce(new SseError(403, "private provider body", new Event("error")));
+    stops.push(() => { connect.mockRestore(); });
+    await expect(resolveMcpAppResource({
+      serverConfig: config, workspaceId: WORKSPACE_ID, workspaceRoot: root,
+      projectedToolName: "fixture_render_fixture",
+    })).rejects.toMatchObject({ code: "mcp_access_denied" });
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([500, 502, 503])("keeps HTTP %i transient without SSE fallback", async (status) => {
+    const { config, root } = await configuredFixture("openwork-mcp-app-transient-");
+    const connect = spyOn(Client.prototype, "connect").mockRejectedValue(new StreamableHTTPError(status, "private body"));
+    stops.push(() => { connect.mockRestore(); });
+    await expect(resolveMcpAppResource({
+      serverConfig: config, workspaceId: WORKSPACE_ID, workspaceRoot: root,
+      projectedToolName: "fixture_render_fixture",
+    })).rejects.toMatchObject({ code: "mcp_unreachable", message: `Streamable HTTP POST: HTTP ${status}` });
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  test("HTTP auth status contract preserves 401 and 403 instead of 502", async () => {
+    const { config } = await configuredFixture("openwork-mcp-app-auth-route-");
+    const { startServer } = await import("./server.js");
+    const server = await startServer(config);
+    stops.push(() => server.stop());
+    const connect = spyOn(Client.prototype, "connect");
+    stops.push(() => { connect.mockRestore(); });
+    for (const { status, code } of [
+      { status: 401, code: "mcp_auth_required" },
+      { status: 403, code: "mcp_access_denied" },
+    ]) {
+      connect.mockRejectedValue(new StreamableHTTPError(status, "private provider body"));
+      const response = await fetch(`http://127.0.0.1:${server.port}/workspace/${WORKSPACE_ID}/mcp-apps/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
+        body: JSON.stringify({ projectedToolName: "fixture_render_fixture" }),
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({ code, message: expect.stringContaining("before reopening the App") });
+    }
+    expect(connect).toHaveBeenCalledTimes(2);
   });
 
   test("mediates explicitly read-only same-server tool calls", async () => {

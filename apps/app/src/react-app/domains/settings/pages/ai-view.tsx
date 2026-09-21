@@ -329,7 +329,7 @@ export function AiSettingsView(props: AiSettingsViewProps) {
         ) : null}
 
         {providersReady && props.showOpenWorkModelsSyncing ? (
-          <LayoutSectionItem className="flex-row flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-6/50 bg-amber-2/20 px-4 py-3">
+          <LayoutSectionItem className="flex-row flex-wrap items-center justify-between gap-3 rounded-2xl border border-dls-border bg-dls-hover px-4 py-3">
             <div className="flex min-w-0 items-center gap-3">
               <ProviderIcon providerId="openwork" size={20} className="text-amber-11" />
               <div className="min-w-0">

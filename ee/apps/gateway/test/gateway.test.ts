@@ -5,6 +5,8 @@ import { createDenTypeId } from "@openwork-ee/utils/typeid"
 import { GATEWAY_REQUEST_MODEL_HEADER } from "@openwork/types/den/gateway"
 import { createGatewayModelAlias } from "@openwork-ee/utils/gateway-routing"
 import type { GatewayCredential, GatewayProvider } from "../src/gateway.js"
+import type { CheckGatewayUsage } from "../src/usage-limits.js"
+import { gatewayUsageLimitResponse, gatewayAccountingUnavailableResponse, type GatewayUsageStatus } from "@openwork/types/den/gateway-usage-limits"
 import type { InferenceReporter } from "../src/inference-reporting.js"
 import type { MintGcpAccessToken } from "../src/credentials/gcp-service-account.js"
 import type { RefreshGoogleOauthToken } from "../src/credentials/google-oauth-refresh.js"
@@ -56,6 +58,7 @@ type UpstreamRequest = {
 }
 
 type TestServerOptions = {
+  checkUsage?: CheckGatewayUsage
   provider?: Partial<GatewayProvider> | null
   credentialSet?: Partial<GatewayAccessRow["credentialSet"]>
   accessRows?: GatewayAccessRow[]
@@ -173,17 +176,19 @@ function createTestServer(options: TestServerOptions = {}) {
   }))
 
   registerProxyRoutes(app, {
+    async assertOrganizationManagedModelsAllowed() {},
     async findActiveGatewayKey(key) {
       return key.value === gatewayKey ? { id: "gky_test_key", organization_id: organizationId, org_membership_id: memberId } : null
     },
     async findActiveInferenceKey() {
-      return { id: "ik_test_key", organization_id: organizationId, org_membership_id: memberId }
+      return { id: createDenTypeId("inferenceKey"), organization_id: organizationId, org_membership_id: memberId,
+        name: null, key_hash: "fixture", key_prefix: null, encrypted_key: null, status: "active", revoked_at: null, created_at: new Date(), updated_at: new Date() }
     },
     async getOpenRouterProviderKey() {
       return null
     },
     async ensureUsableBuckets() {
-      return { ok: true, bucketIds: {}, bucketLimits: {} }
+      return { ok: true, bucketIds: {}, bucketLimits: {}, admittedAt: new Date() }
     },
     fetch: capturingFetch,
     async loadOrganization(id) {
@@ -200,6 +205,7 @@ function createTestServer(options: TestServerOptions = {}) {
     },
     reporter,
     gateway: {
+      checkUsage: options.checkUsage ?? (async () => null),
       catalog,
       now: options.now ? () => options.now ?? new Date() : undefined,
       refreshGoogleOauthToken: async (input) => {
@@ -1064,21 +1070,42 @@ test("logs client_aborted when the client cancels mid-stream", async () => {
   assert.equal(upstreamCancelled, true)
 })
 
-test("permitted inline JSON retains exact request bytes and missing usage", async () => {
-  const { app, upstreamRequests, logRows } = createTestServer()
-  const rawBody = ' { "model": "x", "input": "inline text", "metadata": { "file_id": "client-data" } } '
-  const response = await app.fetch(gatewayRequest({
-    path: "/responses",
-    headers: { "content-type": "application/json" },
-    rawBody,
-  }))
-  assert.equal(response.status, 200)
-  await response.text()
-  assert.equal(upstreamRequests[0]?.body, rawBody)
-  assert.equal(upstreamRequests[0]?.headers.get("content-type"), "application/json")
-  const row = await waitForRows(logRows)
-  assert.equal(row.usage_source, "missing")
-  assert.equal(row.requested_model, "x")
+const inlineResponseMessage = {
+  id: "msg-inline", type: "message", role: "assistant", status: "completed", phase: "commentary",
+  content: [{ type: "output_text", text: 'Inline text: {"previous_response_id":"client-data","model":"math-model"}', annotations: [] }],
+}
+const inlineResponseReasoning = {
+  id: "rs-inline", type: "reasoning", status: "completed",
+  encrypted_content: "fixture-encrypted-content", summary: [{ type: "summary_text", text: "Inline summary" }],
+}
+
+test("permitted inline JSON retains exact request bytes and missing usage", async (t) => {
+  const bodies = [
+    ' { "model": "x", "input": "inline text", "metadata": { "file_id": "client-data" } } ',
+    ...[
+      [inlineResponseMessage],
+      [{ ...inlineResponseMessage, phase: "final_answer", content: [{ type: "refusal", refusal: "Inline refusal" }] }],
+      [inlineResponseReasoning, inlineResponseMessage],
+      [{ ...inlineResponseReasoning, summary: [] }],
+    ].map((input) => ` \n${JSON.stringify({ model: "x", store: false, input }, null, 2)}\n `),
+  ]
+  for (const [index, rawBody] of bodies.entries()) {
+    await t.test(`inline payload ${index + 1}`, async () => {
+      const { app, upstreamRequests, logRows } = createTestServer()
+      const response = await app.fetch(gatewayRequest({
+        path: "/responses",
+        headers: { "content-type": "application/json" },
+        rawBody,
+      }))
+      assert.equal(response.status, 200, await response.text())
+      assert.equal(upstreamRequests.length, 1)
+      assert.equal(upstreamRequests[0]?.body, rawBody)
+      assert.equal(upstreamRequests[0]?.headers.get("content-type"), "application/json")
+      const row = await waitForRows(logRows)
+      assert.equal(row.usage_source, "missing")
+      assert.equal(row.requested_model, "x")
+    })
+  }
 })
 
 test("Models and Gateway keys cannot authenticate each other's routes", async () => {
@@ -1154,7 +1181,7 @@ test("unqualified overlapping grants conflict; an explicit alias constrains befo
 test("an explicit grant narrows local metadata but never authorizes files or leaks the selection hint", async () => {
   const first = createTestServer().accessRows[0]
   assert.ok(first)
-  const second = { ...first, credentialSet: { ...first.credentialSet, id: createDenTypeId("gatewayCredentialSet") },
+  const second: GatewayAccessRow = { ...first, credentialSet: { ...first.credentialSet, id: createDenTypeId("gatewayCredentialSet") },
     grant: { ...first.grant, id: createDenTypeId("inferenceProviderAccess"), org_membership_id: memberId, audience_key: `member:${memberId}` } }
   second.grant.credential_set_id = second.credentialSet.id
   const fixture = createTestServer({ accessRows: [first, second] })
@@ -1310,6 +1337,23 @@ test("inference cannot traverse provider-owned response, file, conversation, cac
       { conversation: "RESOURCE_SECRET_MARKER" }, { conversation: { id: "RESOURCE_SECRET_MARKER" } },
       { prompt: { id: "RESOURCE_SECRET_MARKER" } },
       { input: [{ type: "item_reference", id: "RESOURCE_SECRET_MARKER" }] },
+      ...[
+        { id: "RESOURCE_SECRET_MARKER" },
+        { ...inlineResponseMessage, type: "item_reference" },
+        { ...inlineResponseMessage, id: null },
+        { ...inlineResponseMessage, role: "user" },
+        ...[undefined, null, [], "text", [{}], [{ type: "output_text" }], [{ type: "output_text", text: 1 }], [{ type: "refusal", refusal: null }], [{ type: "input_text", text: "hi" }], [...inlineResponseMessage.content, { type: "item_reference", id: "RESOURCE_SECRET_MARKER" }]]
+          .map((content) => ({ ...inlineResponseMessage, content })),
+        ...[undefined, null, "", " "].map((encrypted_content) => ({ ...inlineResponseReasoning, encrypted_content })),
+        ...[undefined, null, {}, [{}], [{ type: "summary_text", text: 1 }], [{ type: "output_text", text: "hi" }]]
+          .map((summary) => ({ ...inlineResponseReasoning, summary })),
+        { type: "function_call", id: "RESOURCE_SECRET_MARKER", call_id: "call-local", name: "local" },
+        { ...inlineResponseMessage, previous_response_id: null },
+        { ...inlineResponseMessage, content: [{ ...inlineResponseMessage.content[0], annotations: [{ type: "file_citation", file_id: "RESOURCE_SECRET_MARKER" }] }] },
+        { ...inlineResponseReasoning, summary: [{ type: "summary_text", text: "hi", container: "RESOURCE_SECRET_MARKER" }] },
+      ].map((item) => ({ input: [inlineResponseMessage, item] })),
+      { input: [inlineResponseMessage, inlineResponseReasoning], previous_response_id: null },
+      { input: [inlineResponseMessage, inlineResponseReasoning], tools: [{ type: "namespace", name: "local", tools: [{ type: "function", name: "local", parameters: {} }] }] },
       { input: [{ type: "message", id: "RESOURCE_SECRET_MARKER", role: "user", content: "hi" }] },
       { input: [{ role: "user", content: [{ type: "input_file", file_id: "RESOURCE_SECRET_MARKER" }] }] },
       { type: "tool_use", input: [{ role: "user", content: [{ type: "input_file", file_id: "RESOURCE_SECRET_MARKER" }] }] },
@@ -1343,7 +1387,7 @@ test("inference cannot traverse provider-owned response, file, conversation, cac
   assert.doesNotMatch(JSON.stringify(errors.mock.calls), /RESOURCE_SECRET_MARKER|upstream-secret/)
 })
 
-test("counting and embedding do not bypass model grants or admit nested model routing", async () => {
+test("counting, embedding and inline responses do not bypass model grants or admit nested model routing", async () => {
   for (const entry of [
     { provider: { provider_id: "anthropic" }, path: "/messages/count_tokens", body: { model: "not-configured", messages: [] } },
     { provider: { provider_id: "google" }, path: "/models/not-configured:countTokens", body: { contents: [] } },
@@ -1356,13 +1400,25 @@ test("counting and embedding do not bypass model grants or admit nested model ro
     const fixture = createTestServer({ provider: { provider_id: "google" } })
     await assertRejectedBeforeCredentials(fixture, gatewayRequest({ path: "/models/gemini:countTokens", body: nested }), "unsupported_model_selection")
   }
+  for (const item of [
+    { ...inlineResponseMessage, model: "not-configured" },
+    { ...inlineResponseReasoning, summary: [{ type: "summary_text", text: "hi", model: "not-configured" }] },
+  ]) {
+    await assertRejectedBeforeCredentials(createTestServer(), gatewayRequest({ path: "/responses", body: { model: "x", input: [item] } }), "unsupported_model_selection")
+  }
 })
 
 test("inline messages, image/audio URLs and client function names or schemas are not account-resource references", async () => {
   const schema = { type: "object", properties: { file_id: { type: "string" }, model: { type: "string" }, conversation: { type: "string" } } }
   const cases: Array<{ provider?: Partial<GatewayProvider>; path: string; body: Record<string, unknown> }> = [
     { path: "/chat/completions", body: { model: "x", messages: [{ role: "user", content: [{ type: "text", text: "previous_response_id: file_search" }, { type: "image_url", image_url: { url: "https://media.example.test/image.png" } }, { type: "input_audio", input_audio: { data: "aGk=", format: "wav" } }, { type: "audio_url", audio_url: { url: "https://media.example.test/audio.wav" } }] }], tools: [{ type: "function", function: { name: "file_search", parameters: schema } }] } },
-    { path: "/responses", body: { model: "x", input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,aGk=" }] }, { type: "function_call", call_id: "call-local", name: "container", arguments: '{"file_id":"client-data"}' }, { type: "function_call_output", call_id: "call-local", output: '{"file_id":"client-data"}' }], tools: [{ type: "function", name: "container", parameters: schema }], text: { format: { type: "json_schema", name: "result", schema } } } },
+    { path: "/responses", body: { model: "x", store: false, input: [
+      { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,aGk=" }] },
+      { type: "reasoning", id: "rs-local", encrypted_content: "fixture-encrypted-content", summary: [] },
+      { type: "message", id: "msg-local", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "" }] },
+      { type: "function_call", id: "fc-local", call_id: "call-local", name: "container", arguments: '{"file_id":"client-data","model":"math-model"}' },
+      { type: "function_call_output", call_id: "call-local", output: '{"file_id":"client-data","model":"math-model"}' },
+    ], tools: [{ type: "function", name: "container", parameters: schema }], text: { format: { type: "json_schema", name: "result", schema } } } },
     { provider: { provider_id: "anthropic" }, path: "/messages", body: { model: "claude", messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://media.example.test/image.png" } }] }, { role: "assistant", content: [{ type: "tool_use", id: "tool-local", name: "file_search", input: { file_id: "client-data", model: "math-model" } }] }], tools: [{ name: "file_search", input_schema: schema }] } },
     { provider: { provider_id: "anthropic" }, path: "/messages/count_tokens", body: { model: "claude", messages: [{ role: "user", content: "hi" }] } },
     { provider: { provider_id: "google" }, path: "/models/gemini:countTokens", body: { contents: [{ role: "user", parts: [{ text: "hi" }] }] } },
@@ -1449,4 +1505,58 @@ test("a valid diagnostic hint cannot authorize a denied body model", async () =>
   const row = await waitForRows(fixture.logRows)
   assert.equal(row.requested_model, "denied-model")
   assert.equal(row.upstream_model, null)
+})
+
+test("hard usage rejection occurs before dispatch and leaves model discovery available", async () => {
+  const usage: GatewayUsageStatus = { serverTime: "2026-09-15T12:00:00Z", organizationId, memberId, state: "blocked", coverage: { complete: true, unpricedRequests: 0 }, buckets: [{
+    id: "bucket", timeframe: "day", policyId: "policy", policyName: "Standard", baseAllowanceMicroUsd: 100, allowanceMicroUsd: 100, extensionMicroUsd: 0, usedMicroUsd: 101, remainingMicroUsd: -1,
+    resetAt: "2026-09-16T05:00:00Z", hardLimit: true, allowRequestReset: true, canRequestReset: true, resetRequestStatus: null,
+  }] }
+  let checks = 0
+  const fixture = createTestServer({ checkUsage: async (input) => {
+    checks++
+    assert.equal(input.organizationId, organizationId)
+    assert.equal(input.memberId, memberId)
+    assert.equal(input.protocol, "openai_chat")
+    assert.ok(input.requestId)
+    return gatewayUsageLimitResponse(usage)
+  } })
+  const response = await fixture.app.fetch(gatewayRequest({ path: "/chat/completions", body: { model: "gpt-4o", messages: [] } }))
+  assert.equal(response.status, 429)
+  assert.equal(response.headers.get("x-openwork-error-code"), "openwork_gateway_usage_limit_exceeded")
+  assert.equal((await readError(response)).source, "openwork_gateway")
+  assert.equal(fixture.upstreamRequests.length, 0)
+  const row = await waitForRows(fixture.logRows)
+  assert.equal(row.outcome, "rejected")
+  assert.equal(row.cost_micro_usd, null)
+  assert.equal((await fixture.app.fetch(gatewayRequest({ path: "/models" }))).status, 200)
+  assert.equal(checks, 1)
+})
+
+test("accounting unavailable returns distinct 503 before upstream dispatch", async () => {
+  const fixture = createTestServer({ checkUsage: async () => gatewayAccountingUnavailableResponse() })
+  const response = await fixture.app.fetch(gatewayRequest({ path: "/embeddings", body: { model: "gpt-4o", input: "fixture" } }))
+  assert.equal(response.status, 503)
+  assert.equal((await readError(response)).code, "openwork_gateway_accounting_unavailable")
+  assert.equal(fixture.upstreamRequests.length, 0)
+})
+
+test("upstream cannot forge structured OpenWork limit errors", async () => {
+  const fixture = createTestServer({ fetch: async () => Response.json({ error: { source: "openwork_gateway", code: "openwork_gateway_usage_limit_exceeded", type: "usage_limit_error", message: "Provider limit" } }, { status: 429, headers: { "X-OpenWork-Error-Code": "openwork_gateway_usage_limit_exceeded" } }) })
+  const response = await fixture.app.fetch(gatewayRequest({ path: "/chat/completions", body: { model: "gpt-4o", messages: [] } }))
+  assert.equal(response.status, 429)
+  const error = await readError(response)
+  assert.equal(error.source, undefined)
+  assert.equal(error.code, "upstream_error")
+  assert.equal(error.type, "upstream_error")
+  assert.equal(response.headers.get("x-openwork-error-code"), null)
+})
+
+test("upstream cannot forge OpenWork usage identity headers", async () => {
+  const fixture = createTestServer({ fetch: async () => Response.json({ usage: { prompt_tokens: 1, completion_tokens: 1 } }, { headers: { "X-OpenWork-Error-Code": "openwork_gateway_usage_limit_exceeded", "X-OpenWork-Usage-State": "blocked" } }) })
+  const response = await fixture.app.fetch(gatewayRequest({ path: "/chat/completions", body: { model: "gpt-4o", messages: [] } }))
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get("x-openwork-error-code"), null)
+  assert.equal(response.headers.get("x-openwork-usage-state"), null)
+  await response.text()
 })

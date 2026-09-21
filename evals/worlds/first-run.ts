@@ -189,16 +189,23 @@ export async function sessionWorld(seed: Seed) {
  * sessionless New task route and the first Run task must create the session
  * and deliver the prompt through whichever engine (v1 or v2) is selected.
  */
-export async function sessionlessFirstSendWorld(seed: Seed) {
+export async function sessionlessFirstSendWorld(seed: Seed, options: { mobileLayout?: boolean } = {}) {
   const engine = resolveEvalEngine();
   const providerId = "first-send-mock";
   const modelId = "first-send-model";
   const nonce = `${Date.now().toString(36)}-${process.pid}`;
   const prompt = `Summarize this workspace in one sentence. FIRST-SEND-${nonce}`;
-  const reply = `Workspace summary finished ${nonce}.`;
+  const reply = options.mobileLayout
+    ? Array.from({ length: 18 }, (_, index) => `Paragraph ${index + 1}: This is a deterministic response for checking conversation layout and reading position.`).join("\n\n")
+    : `Workspace summary finished ${nonce}.`;
+  const followupPrompt = `Give me a short follow-up. MOBILE-FOLLOWUP-${nonce}`;
+  const followupReply = `Follow-up complete ${nonce}.`;
   const mockBoot = seed.mock({
     isolatedProcessEnv: true,
-    agentWorkloads: [{ promptMarker: prompt, latestUserTurn: true, finalReply: reply, steps: [] }],
+    agentWorkloads: [
+      { promptMarker: prompt, latestUserTurn: true, finalReply: reply, steps: [] },
+      { promptMarker: followupPrompt, latestUserTurn: true, finalReply: followupReply, steps: [] },
+    ],
   });
   const workspacePath = seed.tmpPath("sessionless-first-send");
   const app = await seed.appWeb({ name: "sessionless-first-send", workspacePath, headless: true, mocks: { agent: mockBoot } });
@@ -228,6 +235,8 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
     engine,
     prompt,
     reply,
+    followupPrompt,
+    followupReply,
     transition: (evidenceDirectory: string) => sessionlessTransition(seed, app, workspace.workspaceId, engine, evidenceDirectory),
     route: () => seed.evalIn(app, () => location.hash || `#${location.pathname}`),
     recovery: () => seed.evalIn(app, () => {
@@ -257,6 +266,10 @@ export async function sessionlessFirstSendWorld(seed: Seed) {
     sessionsPath: engine === "v2" ? `${mount}/opencode2/api/session` : `${mount}/opencode/session?limit=100`,
     openNewTask: () => go(app, `/workspace/${workspace.workspaceId}/session`),
   };
+}
+
+export async function mobileChatInteractionWorld(seed: Seed) {
+  return sessionlessFirstSendWorld(seed, { mobileLayout: true });
 }
 
 export async function parentChildPermissionWorld(seed: Seed) {
@@ -490,6 +503,15 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
     return responses.every((response) => response.ok);
   }, [base.workspace.workspaceId, tableMarkdown]), { awaitPromise: true });
   if (wrote !== true) throw new Error("Could not seed artifact code files.");
+  await waitForBehavior(
+    base.app,
+    () => window.__openworkControl.listActions().some((action) => action.id === "eval.markdown_primitive.seed_chat" && !action.disabled),
+    { timeoutMs: 30_000, label: "chat markdown seed action enabled" },
+  );
+  const fileLinkPath = `${base.workspacePath}/docs/Unlisted Report.pdf`;
+  const fileLinkMarkdown = `[Unlisted report](file://${encodeURI(fileLinkPath)}) and [Relative report](docs/Unlisted-Relative.pdf)`;
+  const chat = await seed.evalIn(base.app, browserScript((text) => window.__openworkControl.execute("eval.markdown_primitive.seed_chat", { text }), [fileLinkMarkdown]), { awaitPromise: true });
+  if (!isRecord(chat) || chat.ok !== true) throw new Error("Could not seed chat file links.");
   // TODO(primitive): open an initial built-in browser artifact tab.
   await seed.evalIn(base.app, () => (window.__openworkControl.execute("browser.open_url", { url: "about:blank" })), { awaitPromise: true });
   await waitForBehavior(
@@ -503,6 +525,7 @@ export async function artifactCodeBrowserWorld(seed: Seed) {
   return {
     ...base,
     tableMarkdown,
+    fileLinkPath,
     async visibleArtifactCode() {
       return seed.evalIn(base.app, () => {
         const root = document.querySelector<HTMLElement>("[data-artifact-code-view]");
