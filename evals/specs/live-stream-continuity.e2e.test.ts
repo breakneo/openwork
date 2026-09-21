@@ -3,6 +3,10 @@ import { spec, type SpecBodyContext } from "@openwork/testkit";
 import { normalizeContinuityText } from "../worlds/chat-continuity.ts";
 import { chatStreamContinuityLiveWeb, liveContinuityPrompt } from "../worlds/chat-stream-continuity.ts";
 
+// Before, returning to an ongoing answer could freeze it or lose its prefix; now the original
+// prefix keeps growing into the complete generated result without reload or resend, leaving the neighbor untouched.
+// Witnesses: UI send/switch, session/message-scoped SSE, and normalized final text equality.
+// Scope: paid OpenAI, local web/native v1, initially empty neighbor; not guide accuracy, v2, or cross-account isolation.
 const liveContinuityTest = spec.world(chatStreamContinuityLiveWeb, {
   timeout: 480_000,
   needs: { placement: "local", optIn: ["OPENWORK_EVAL_LIVE_OPENAI"], env: ["OPENAI_API_KEY"] },
@@ -66,7 +70,7 @@ async function liveContinuityJourney(
     });
   };
   try {
-    await step("a member sends once to a real OpenAI model and sees assistant text with Stop", async () => {
+    await step("a member asks for a guide once and sees the answer begin", async () => {
       const facts = await world.runtimeFacts();
       evidence.recordJsonArtifact("CONT-01-live runtime", {
         ...facts, model: world.modelId, provider: world.providerId, outputBudget: 6_500, historyGetDelayMs: delayedHistory ? 8_000 : 0,
@@ -88,21 +92,38 @@ async function liveContinuityJourney(
         until: (value) => value.length > 100 && value.stop,
       });
       originalPrefix = initial.text;
+      const initialPassed = initial.length > 100 && initial.stop && initial.deltas > 0 && initial.nativeCharacters > 100
+        && started.promptPosts[world.session.sessionId] === 1 && Object.keys(started.promptPosts).length === 1;
+      evidence.recordAssertionEvidence("One send starts visible live text in the original conversation", JSON.stringify({
+        renderedLength: initial.length, stop: initial.stop, scopedDeltas: initial.deltas, scopedNativeCharacters: initial.nativeCharacters,
+        promptPostCount: started.promptPosts[world.session.sessionId], promptSessionCount: Object.keys(started.promptPosts).length,
+      }), initialPassed);
+      expect(initialPassed).toBe(true);
       expect(started.promptPosts).toEqual({ [world.session.sessionId]: 1 });
       await user.screenshot();
     });
 
-    await step("B stays unrelated for at least twenty seconds while A-specific native text keeps arriving", async () => {
+    await step("the member spends twenty seconds in an empty neighboring conversation while the guide keeps generating", async () => {
       await select(world.neighbor);
       const awayAt = Date.now();
       const before = await delta();
-      await probe.eventually(async () => {
-        expect((await probe.dom(`${surface(world.neighbor.sessionId)} [data-message-role]`)).elements).toHaveLength(0);
-        expect((await probe.dom(surface(world.session.sessionId))).elements).toHaveLength(0);
+      const away = await probe.eventually(async () => {
+        const neighborMessages = (await probe.dom(`${surface(world.neighbor.sessionId)} [data-message-role]`)).elements;
+        const originalSurfaces = (await probe.dom(surface(world.session.sessionId))).elements;
+        expect(neighborMessages).toHaveLength(0);
+        expect(originalSurfaces).toHaveLength(0);
         const current = await sample("away");
-        return { ...current, elapsed: Date.now() - awayAt };
+        return { ...current, elapsed: Date.now() - awayAt, neighborVisibleMessages: neighborMessages.length, originalVisibleSurfaces: originalSurfaces.length };
       }, { within: 25_000, intervalMs: 500, label: "real wall-clock inactive interval beyond the 15-second GC window", until: (value) => value.elapsed >= 20_500 });
       const after = await delta();
+      const lastDeltaAgeMs = Date.now() - after.lastAt;
+      const awayPassed = away.elapsed >= 20_500 && away.neighborVisibleMessages === 0 && away.originalVisibleSurfaces === 0
+        && after.count > before.count && lastDeltaAgeMs < 5_000;
+      evidence.recordAssertionEvidence("The neighbor stays empty during twenty seconds away while the original answer keeps generating", JSON.stringify({
+        elapsedMs: away.elapsed, neighborVisibleMessages: away.neighborVisibleMessages, originalVisibleSurfaces: away.originalVisibleSurfaces,
+        scopedDeltasBefore: before.count, scopedDeltasAfter: after.count, lastDeltaAgeMs,
+      }), awayPassed);
+      expect(awayPassed).toBe(true);
       expect(after.count).toBeGreaterThan(before.count);
       expect(Date.now() - after.lastAt).toBeLessThan(5_000);
       await user.notSee({ text: liveContinuityPrompt });
@@ -111,8 +132,8 @@ async function liveContinuityJourney(
     });
 
     await step(delayedHistory
-      ? "during an eight-second history GET delay, A preserves its original prefix and shows two live increases"
-      : "returning to A preserves its original prefix and shows two further live increases without replay", async () => {
+      ? "the member returns to the same growing guide even while its history takes eight seconds to load"
+      : "the member returns to the same growing guide without asking again", async () => {
       await using historyFault = delayedHistory ? await world.continuity.holdHistory(world.session.sessionId) : null;
       let releasedByTimer = false;
       const historyRelease = historyFault ? new Promise<void>((resolve) => setTimeout(resolve, 8_000)).then(() => {
@@ -141,6 +162,23 @@ async function liveContinuityJourney(
               && value.text.startsWith(previous.text) && value.length > previous.length
               && value.deltas > previous.deltas && value.nativeCharacters > previous.nativeCharacters,
           });
+          const prefixPreserved = next.text.startsWith(originalPrefix);
+          const previousTextPreserved = next.text.startsWith(previous.text);
+          const growthPassed = next.at - previous.at >= 1_000 && next.stop && next.prefixPreserved === true
+            && prefixPreserved && previousTextPreserved && next.length > previous.length
+            && next.deltas > previous.deltas && next.nativeCharacters > previous.nativeCharacters && next.lastDeltaAt > previous.at
+            && (!delayedHistory || ((next.historyBefore?.outstanding ?? 0) > 0
+              && (next.historyAfter?.outstanding ?? 0) > 0 && !next.releasedByTimer));
+          evidence.recordAssertionEvidence(`Live increase ${increase} preserves the prefix and grows with scoped native deltas${delayedHistory ? " while history is outstanding" : ""}`, JSON.stringify({
+            elapsedMs: next.at - previous.at, stop: next.stop, prefixPreserved, previousTextPreserved,
+            renderedLengthBefore: previous.length, renderedLengthAfter: next.length,
+            scopedDeltasBefore: previous.deltas, scopedDeltasAfter: next.deltas,
+            scopedCharactersBefore: previous.nativeCharacters, scopedCharactersAfter: next.nativeCharacters,
+            lastDeltaAfterPreviousMs: next.lastDeltaAt - previous.at, delayedHistory,
+            outstandingBefore: next.historyBefore?.outstanding ?? null, outstandingAfter: next.historyAfter?.outstanding ?? null,
+            releasedByTimer: next.releasedByTimer,
+          }), growthPassed);
+          expect(growthPassed).toBe(true);
           expect(next.stop).toBe(true);
           expect(next.text.startsWith(originalPrefix)).toBe(true);
           expect(next.text.startsWith(previous.text)).toBe(true);
@@ -166,7 +204,7 @@ async function liveContinuityJourney(
       }
     });
 
-    await step("the completed rendered answer equals native text, keeps its original prefix, and leaves B empty", async () => {
+    await step("the member can revisit the complete guide while the neighboring conversation stays empty", async () => {
       await user.see("Run task", { timeoutMs: 180_000 });
       await user.notSee(stop);
       const messages = await native(world.session.sessionId);
@@ -188,6 +226,14 @@ async function liveContinuityJourney(
       const settled = await probe.eventually(rendered, {
         within: 10_000, intervalMs: 200, label: "rendered assistant equals the entire normalized native answer", until: (text) => text === nativeText,
       });
+      const completedPassed = settled === nativeText && settled.startsWith(originalPrefix)
+        && nativeText.startsWith(originalPrefix) && nativeText.length > originalPrefix.length;
+      evidence.recordAssertionEvidence("The completed visible guide equals the full normalized native answer and retains its original prefix", JSON.stringify({
+        nativeLength: nativeText.length, renderedLength: settled.length, originalPrefixLength: originalPrefix.length,
+        completeTextMatches: settled === nativeText, renderedPrefixPreserved: settled.startsWith(originalPrefix),
+        nativePrefixPreserved: nativeText.startsWith(originalPrefix),
+      }), completedPassed);
+      expect(completedPassed).toBe(true);
       expect(settled).toBe(nativeText);
       expect(settled.startsWith(originalPrefix)).toBe(true);
       const until = Date.now() + 2_000;
@@ -196,8 +242,36 @@ async function liveContinuityJourney(
         expect(await hasStop()).toBe(false);
         return Date.now() >= until;
       }, { within: 4_000, intervalMs: 250, label: "complete normalized answer remains stable" });
-      expect(await native(world.neighbor.sessionId)).toEqual([]);
+      const neighborNativeMessages = await native(world.neighbor.sessionId);
+      expect(neighborNativeMessages).toEqual([]);
       expect((await world.engineHttpEvents()).promptPosts).toEqual({ [world.session.sessionId]: 1 });
+      await user.screenshot();
+      await select(world.neighbor);
+      await user.notSee(stop);
+      await user.notSee({ text: liveContinuityPrompt });
+      const neighborVisibleMessages = (await probe.dom(`${surface(world.neighbor.sessionId)} [data-message-role]`)).elements.length;
+      expect(neighborVisibleMessages).toBe(0);
+      await user.screenshot();
+      await select(world.session);
+      const revisited = await probe.eventually(rendered, {
+        within: 10_000, intervalMs: 200, label: "the complete guide remains available after revisiting", until: (text) => text === nativeText,
+      });
+      expect(revisited).toBe(nativeText);
+      const promptPosts = (await world.engineHttpEvents()).promptPosts;
+      const revisitPassed = revisited === nativeText && revisited.startsWith(originalPrefix)
+        && neighborVisibleMessages === 0 && neighborNativeMessages.length === 0
+        && promptPosts[world.session.sessionId] === 1 && Object.keys(promptPosts).length === 1;
+      evidence.recordAssertionEvidence("Revisiting preserves the complete guide, leaves the neighbor empty in UI and native history, and sends no new prompt", JSON.stringify({
+        nativeLength: nativeText.length, renderedLength: revisited.length, completeTextMatches: revisited === nativeText,
+        prefixPreserved: revisited.startsWith(originalPrefix), neighborVisibleMessages, neighborNativeMessages: neighborNativeMessages.length,
+        promptPostCount: promptPosts[world.session.sessionId], promptSessionCount: Object.keys(promptPosts).length,
+      }), revisitPassed);
+      expect(revisitPassed).toBe(true);
+      expect(promptPosts).toEqual({ [world.session.sessionId]: 1 });
+      evidence.recordJsonArtifact("CONT-01-live completed guide", {
+        prefixPreserved: revisited.startsWith(originalPrefix), nativeLength: nativeText.length, renderedLength: revisited.length,
+        completeTextMatches: revisited === nativeText, neighborVisibleMessages, promptPosts,
+      });
       await user.screenshot();
     });
   } finally {
