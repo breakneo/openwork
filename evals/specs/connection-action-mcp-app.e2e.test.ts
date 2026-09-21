@@ -63,7 +63,7 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
   const sessionPath = () => `${mount}/session/${encodeURIComponent(sessionId)}`;
   const messages = async () => {
       const response = await probe.desktopApi(`${sessionPath()}/message`);
-      expect(response.status).toBe(200);
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
       return rows(response.body);
     };
     const pending = async () => {
@@ -139,8 +139,14 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
         within: 120_000,
         label: "The hidden connection question pauses the original task",
         until: requests => requests.length === 1,
+      }).catch(async error => {
+        const calls = await modelCalls(entry.prompt);
+        evidence.recordAssertionEvidence("Pending connection question diagnostics", JSON.stringify({ calls, questions: await pending(), transcript: await messages() }), false);
+        throw error;
       });
-      expect(requests[0]?.questions).toEqual([connectionActionQuestion]);
+      const { custom, ...engineQuestion } = connectionActionQuestion;
+      expect(custom).toBe(false);
+      expect(requests[0]?.questions).toEqual([expect.objectContaining(engineQuestion)]);
       try {
         await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 30_000 });
       } catch (error) {
@@ -206,10 +212,11 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
           expect(authorization.params.get("state")).toBeTruthy();
         } catch (error) {
           const screen = await probe.text();
+          const iframeHeading = await world.connectionAppHeading().catch(String);
           await user.screenshot();
           evidence.recordAssertionEvidence(
             "Authenticate reaches the OAuth provider",
-            `No authorization request arrived. Visible app text after the click:\n${screen}`,
+            `No authorization request arrived. Iframe heading: ${iframeHeading}\nVisible outer app text after the click:\n${screen}`,
             false,
           );
           throw error;
@@ -241,13 +248,33 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
     await step("the original task stays on this turn and shows the real decision without another user message", async () => {
       const heading = entry.choice === "Skip" ? "Skipped Notion" : "Notion connected";
       await user.see({ mcpApp, role: "heading", text: heading });
-      expect((await messages()).filter(message => record(message.info).role === "user")).toEqual(usersBefore);
-      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(callsBefore);
-      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "error")).toEqual([]);
+      const continued = await probe.eventually(async () => {
+        const transcript = await messages();
+        const question = turnTools(transcript, entry.prompt).find(part => part.tool === "question");
+        const state = question && record(question.state);
+        const output = state?.status === "completed" && typeof state.output === "string" ? state.output : null;
+        const final = transcript.find(message => record(message.info).role === "assistant"
+          && rows(message.parts).some(part => part.type === "text" && part.text === output));
+        return { transcript, output, final, calls: await modelCalls(entry.prompt) };
+      }, {
+        within: 30_000,
+        label: "The model continues with the actual completed question result",
+        until: result => Boolean(result.output && result.final && result.calls.some(call => call.kind === "final")),
+      });
+      expect(continued.output).toContain(entry.choice);
+      expect(continued.calls.filter(call => call.kind === "final")).toEqual([
+        expect.objectContaining({ completedTools: entry.tools.length + 1 }),
+      ]);
+      await user.see({ text: continued.output ?? "Missing question result" });
+      expect(continued.transcript.filter(message => record(message.info).role === "user")).toEqual(usersBefore);
+      expect(continued.calls.filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect(continued.calls.filter(call => call.kind === "error")).toEqual([]);
       expect(await pending()).toEqual([]);
       await user.notSee({ text: "No connection outcome was observed." });
       await user.screenshot();
-      evidence.recordAssertionEvidence("The original task continues from the real decision", JSON.stringify({ choice: entry.choice, heading, userMessages: usersBefore.length }), true);
+      const iframeText = await world.connectionAppHeading();
+      expect(iframeText).toBe(heading);
+      evidence.recordAssertionEvidence("The original task continues from the real decision", JSON.stringify({ choice: entry.choice, iframeText, questionOutput: continued.output, finalMessage: continued.final, finalCalls: continued.calls.filter(call => call.kind === "final"), userMessages: usersBefore.length }), true);
     });
 
     if (entry.choice === "Authenticate") await step("revoked credentials never inherit the earlier connected result", async () => {

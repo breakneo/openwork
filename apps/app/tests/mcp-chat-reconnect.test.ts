@@ -140,6 +140,15 @@ test("binds initial connect and reconnect to the exact native question", () => {
   expect(bindQuestion({ ...nativeQuestion, tool: undefined, sessionID: undefined })).not.toBeNull()
 })
 
+test("binds native engine questions that omit the custom option", () => {
+  const { custom, ...engineQuestion } = questionItem
+  expect(custom).toBe(false)
+  const question = { ...nativeQuestion, questions: [engineQuestion] }
+  expect(isReservedConnectionQuestion(question)).toBe(true)
+  expect(bindQuestion(question)).toEqual({ ...request, requestId: "question-1", questionToolCallId: "question-call" })
+  expect(bindQuestion({ ...question, tool: { callID: "other-call" } })).toBeNull()
+})
+
 test("native connection binding fails closed on malformed questions and mismatched session or question tool", () => {
   for (const question of [
     null,
@@ -153,7 +162,6 @@ test("native connection binding fails closed on malformed questions and mismatch
       { ...questionItem, question: "Connect Other to continue?" },
       { ...questionItem, multiple: true },
       { ...questionItem, custom: true },
-      { ...questionItem, custom: undefined },
       { ...questionItem, options: [...questionItem.options].reverse() },
     ].map(question => ({ ...nativeQuestion, questions: [question] })),
   ]) expect(bindQuestion(question)).toBeNull()

@@ -1,4 +1,4 @@
-import { browserScript } from "@openwork/cdp";
+import { browserScript, locate } from "@openwork/cdp";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -1107,6 +1107,17 @@ export async function connectionActionMcpApp(seed: Seed) {
   if (!mcpToken || !appHostToken || mcpToken === appHostToken) throw new Error("Distinct model and app-host tokens were not minted.");
   const app = await seed.desktop({ den, as: "admin", name: "connection-action-mcp-app" });
   const workspace = await seed.workspace(app, seed.tmpPath("connection-action-mcp-app"));
+  const questionPolicyWritten = await seed.evalIn(app, browserScript(async (workspaceId) => {
+    const port = localStorage.getItem("openwork.server.port");
+    const token = localStorage.getItem("openwork.server.token");
+    const response = await fetch("http://127.0.0.1:" + port + "/workspace/" + encodeURIComponent(workspaceId) + "/files/content", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "opencode.json", content: JSON.stringify({ permission: { question: "allow" } }) }),
+    });
+    return response.ok;
+  }, [workspace.workspaceId]), { awaitPromise: true });
+  if (questionPolicyWritten !== true) throw new Error("Could not arrange the connection question-tool policy.");
   await configureWorkspaceModel(seed, {
     app, workspaceId: workspace.workspaceId, providerId, modelId,
     fixtureUrl: den.mocks.connector.url, denApiUrl: den.ref.apiUrl, mcpToken, appHostToken,
@@ -1125,7 +1136,10 @@ export async function connectionActionMcpApp(seed: Seed) {
     }
   }
   if (!session) throw lastError instanceof Error ? lastError : new Error(String(lastError));
-  return { app, den, connection, organizationId, workspace, session, mcpSession: { ...den.admin, token: mcpToken }, appHostSession: { ...den.admin, token: appHostToken } };
+  const connectionAppHeading = async () => (await locate(app, {
+    mcpApp: { resourceUri: "ui://openwork/connection-action/v2/view.html" }, role: "heading",
+  })).text;
+  return { app, den, connection, organizationId, workspace, session, connectionAppHeading, mcpSession: { ...den.admin, token: mcpToken }, appHostSession: { ...den.admin, token: appHostToken } };
 }
 
 export const inlineResourceUri = "ui://openwork/artifacts/arv_eval_card/views/avr_eval_card/index.html";

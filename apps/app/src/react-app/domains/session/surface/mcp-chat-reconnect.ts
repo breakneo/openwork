@@ -40,7 +40,7 @@ const reservedConnectionQuestionItemSchema = z.object({
   header: z.literal("Connection"),
   options: z.tuple([z.object({ label: z.literal("Authenticate") }), z.object({ label: z.literal("Skip") })]),
   multiple: z.literal(false),
-  custom: z.literal(false),
+  custom: z.literal(false).optional(),
 })
 const questionItemsSchema = z.object({ questions: z.array(z.unknown()) })
 
