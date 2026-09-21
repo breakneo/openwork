@@ -47,8 +47,9 @@ shows Suspend; after: it does not, and a page still opens and can be used.
   moment. If they disagree, fix one.
 - No spec changed? Say why in one line: `No E2E; unit-tested` or
   `node --test .github/scripts/pr-proof.test.mjs — 6 passed`.
-- Red evidence: one sentence, plainly. "Evidence is red before it reaches the
-  new assertions: the approval button is not found."
+- Red evidence needs no sentence in the body: CI's comment says Failed on
+  that SHA and flips on its own when the head goes green. Fix the spec or the
+  code; do not narrate the verdict.
 - UI changes: one trailing line `Design: P3, S4, C6` (DESIGN.md rule ids).
 
 ## Leave out
