@@ -962,19 +962,31 @@ async function configureWorkspaceModel(seed: Seed, input: {
     });
     if (patched !== "ok") return patched;
     const reloaded = await request("/workspace/" + encodeURIComponent(workspaceId) + "/engine/reload", { method: "POST" });
-    if (reloaded !== "ok") return reloaded;
+    if (reloaded !== "ok" && !reloaded.includes("opencode_reload_timeout") && !reloaded.includes("opencode_engine_unreachable")) return reloaded;
     if (inputValue2) {
       const reconcile = await request("/workspace/" + encodeURIComponent(workspaceId) + "/mcp/openwork-cloud/reconcile", {
         method: "POST", body: JSON.stringify(inputValue2),
       });
       if (reconcile !== "ok") return reconcile;
     }
-    const health = await fetch("http://127.0.0.1:" + port + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/global/health", {
-      headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(10_000),
-    });
-    if (!health.ok) return "Engine health failed: " + health.status;
-    const readiness: unknown = await health.json();
-    if (!readiness || typeof readiness !== "object" || !("healthy" in readiness) || readiness.healthy !== true) return "Engine did not report healthy";
+    const deadline = Date.now() + 90_000;
+    let healthy = false;
+    while (Date.now() < deadline) {
+      try {
+        const health = await fetch("http://127.0.0.1:" + port + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/global/health", {
+          headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(5_000),
+        });
+        if (health.ok) {
+          const readiness: unknown = await health.json();
+          if (readiness && typeof readiness === "object" && "healthy" in readiness && readiness.healthy === true) {
+            healthy = true;
+            break;
+          }
+        }
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (!healthy) return "Engine did not report healthy";
     const raw = localStorage.getItem("openwork.preferences");
     let preferences: Record<string, unknown> = {};
     try { preferences = raw ? JSON.parse(raw) : {}; } catch {}
