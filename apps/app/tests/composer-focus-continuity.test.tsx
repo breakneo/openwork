@@ -92,7 +92,13 @@ test.each([
   { name: "follow-up keeps history before the prompt and early assistant output through settlement", orderingRegression: "history" },
   { name: "multiple identical pending prompts keep submission order as native siblings settle", orderingRegression: "siblings" },
   { name: "created conversation owns first-send assignment and admission failures without recreating or resending", firstSendRegression: true },
-])("$name", async ({ queueRegression, modeRegression, orderingRegression, firstSendRegression }) => {
+  { name: "mobile web accepted send closes the keyboard", mobileOutcome: "accepted" },
+  { name: "mobile web sent message closes the keyboard", mobileOutcome: "sent" },
+  { name: "mobile web blocked send keeps the keyboard", mobileOutcome: "blocked" },
+  { name: "mobile web cancelled send keeps the keyboard", mobileOutcome: "cancelled" },
+  { name: "mobile web rejected send keeps the keyboard", mobileOutcome: "rejected" },
+  { name: "mobile web uncertain send keeps the keyboard", mobileOutcome: "unknown" },
+])("$name", async ({ queueRegression, modeRegression, orderingRegression, firstSendRegression, mobileOutcome }) => {
   const sessionId = `session-focus-continuity${orderingRegression ? `-${orderingRegression}` : firstSendRegression ? "-first-send" : ""}`;
   window.localStorage.clear();
   const require = createRequire(import.meta.url);
@@ -178,6 +184,12 @@ test.each([
   Object.defineProperty(window, "fetch", { configurable: true, value: fetchStub });
   window.localStorage.setItem("openwork.shell-config", JSON.stringify({ starterCards: false }));
   let fetchedSnapshot = createSnapshot({ type: "busy" }, 1);
+  if (mobileOutcome) {
+    fetchedSnapshot = createSnapshot({ type: "idle" }, 1);
+    const media = window.matchMedia("(max-width: 1023px)");
+    Object.defineProperty(media, "matches", { value: true });
+    spyOn(window, "matchMedia").mockReturnValue(media);
+  }
   let snapshotRead: Promise<OpenworkSessionSnapshot> | null = null;
   let historyOnly = false;
   const otherSessionId = `${sessionId}-other`;
@@ -205,7 +217,7 @@ test.each([
   const { claimQueuedSend, dispatchQueuedDrain, getQueuedDrainState, resetQueuedDrainForTests, subscribeQueuedDrain } = await import("../src/react-app/domains/session/surface/queued-drain-machine");
   const queryClient = getReactQueryClient();
   queryClient.clear();
-  queryClient.setQueryData(snapshotKey(workspaceId, sessionId), createSnapshot({ type: "busy" }, 1));
+  queryClient.setQueryData(snapshotKey(workspaceId, sessionId), fetchedSnapshot);
   queryClient.setQueryData(transcriptKey(workspaceId, sessionId), [{
     id: "existing-user-message",
     role: "user",
@@ -528,6 +540,30 @@ test.each([
     if (!editor) throw new Error("Expected the Lexical editor");
     editor.focus();
     expect(document.activeElement).toBe(editor);
+
+    if (mobileOutcome) {
+      await act(async () => useComposerStateStore.getState().setDraft(sessionId, ""));
+      await act(async () => {
+        editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      });
+      expect(sentDrafts).toHaveLength(0);
+      expect(document.activeElement).toBe(editor);
+      await act(async () => useComposerStateStore.getState().setDraft(sessionId, draft));
+      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Run task"]')?.click());
+      await waitFor(() => sentDrafts.length === 1, "mobile submission");
+      expect(document.activeElement).toBe(editor);
+      await act(async () => {
+        if (mobileOutcome === "accepted") submission.resolve({ outcome: "accepted" });
+        else if (mobileOutcome === "sent") submission.resolve({ outcome: "sent" });
+        else if (mobileOutcome === "blocked") submission.resolve({ outcome: "blocked" });
+        else if (mobileOutcome === "cancelled") submission.resolve({ outcome: "cancelled" });
+        else if (mobileOutcome === "rejected") submission.reject(new Error("Submission rejected"));
+        else submission.resolve({ outcome: "unknown" });
+      });
+      if (mobileOutcome === "accepted" || mobileOutcome === "sent") expect(document.activeElement).not.toBe(editor);
+      else expect(document.activeElement).toBe(editor);
+      return;
+    }
 
     if (queueRegression) {
       const { getSessionDraft } = await import("../src/react-app/domains/session/sync/draft-store");

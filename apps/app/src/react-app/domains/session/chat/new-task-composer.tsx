@@ -81,6 +81,7 @@ export type NewTaskComposerContext = {
 };
 
 export type NewTaskComposerProps = {
+  flush?: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
   /** Called with a non-empty draft and in-memory attachments; the caller creates the session (and workspace if needed). */
@@ -519,7 +520,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       busy={false}
       steering={false}
       submissionPreparing={props.busy || pendingSubmission !== null || failedSubmission !== null}
-      submissionPreparingLabel={failedSubmission ? "Restore the unsent message before sending" : "Creating conversation..."}
+      submissionPreparingLabel={failedSubmission ? "Restore the unsent message before sending" : "Send"}
       queuedCount={0}
       disabled={Boolean(context?.modelUnavailable)}
       disabledReasons={["send_model_unavailable"]}
@@ -574,7 +575,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       isSandboxWorkspace={context?.isSandboxWorkspace ?? false}
       onUploadInboxFiles={null}
       // The hero owns its own page padding, so the composer must fill the hero column and line up with the suggestion cards.
-      flush
+      flush={props.flush ?? true}
       draftScopeKey={context?.draftOwnerKey || `new-task:${workspaceId ?? "chat-first"}`}
     />
     </div>

@@ -48,9 +48,11 @@ jobs:
               per_page: 100,
             })
             const snapshotOnly = files.length === 1
+              && files[0].status === "modified"
               && files[0].filename === "ee/apps/gateway/src/models/base.json"
             const docsOnly = files.length > 0
-              && files.every((file) => file.filename.startsWith("packages/docs/"))
+              && files.every((file) => file.filename.startsWith("packages/docs/")
+                && (!file.previous_filename || file.previous_filename.startsWith("packages/docs/")))
             const lane = snapshotOnly ? "snapshot" : docsOnly ? "docs" : "full"
             core.setOutput("lane", lane)
             core.info(`Selected lane: ${lane}`)
@@ -241,6 +243,7 @@ jobs:
             ${{ runner.temp }}/openwork-packaged-smoke/timing.json
             ${{ runner.temp }}/openwork-packaged-smoke/profiles/**/electron.log
             evals/results/test-runs/**
+          include-hidden-files: true
           retention-days: 7
 
   # Broad tests, source-layout guards, and test-framework checks remain visible

@@ -206,7 +206,10 @@ test("pending creation, failure, retry and real publication keep one row in the 
       clearSessionDraft("local", workspaceId, newSessionDraftSlot(destination));
     });
     expect(ui.container.querySelectorAll('[data-sidebar-draft-group-id="research"]')).toHaveLength(1);
-    expect(element(ui.container, `[data-sidebar-pending-conversation="${id}"]`).textContent).toContain("Pending");
+    const row = element(ui.container, `[data-sidebar-pending-conversation="${id}"]`);
+    expect(row.textContent).toBe("First message");
+    expect(row.dataset.sidebarDraftWorkspaceId).toBe(workspaceId);
+    expect(row.parentElement).toBe(element(ui.container, '[data-sidebar-session-id="ses_group"]').parentElement);
     let tries = 0;
     const session = { id: "ses_handoff", slug: "handoff", directory: "/workspace", projectID: "project", version: "1", title: "First message", time: { created: 2, updated: 2 } };
     await act(async () => createPendingConversation(id, async () => {
@@ -214,7 +217,8 @@ test("pending creation, failure, retry and real publication keep one row in the 
       if (tries === 1) throw new Error("Creation failed");
       return { session };
     }, () => {}));
-    expect(element(ui.container, `[data-sidebar-pending-conversation="${id}"]`).textContent).toContain("Not created");
+    expect(element(ui.container, `[data-sidebar-pending-conversation="${id}"]`)).toBe(row);
+    expect(row.textContent).toBe("First messageNot sent");
     await act(async () => retryPendingConversation(id));
     expect(ui.container.querySelectorAll('[data-sidebar-session-id="ses_handoff"]')).toHaveLength(1);
     expect(ui.container.querySelector('[data-sidebar-draft-group-id="research"]')).toBeNull();

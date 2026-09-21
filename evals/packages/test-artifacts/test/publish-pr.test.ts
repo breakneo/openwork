@@ -114,6 +114,11 @@ test("automatic reviews accumulate records but preserve manual, legacy and unava
     });
     assert.equal(cumulative.posted, true);
     assert.deepEqual(counts, [1, 2]);
+    const replacement = await publishReviewPr({ ...options, replaceAutomatic: true }, {
+      exec: recordingExec(calls, [{ databaseId: 77, body: cumulative.markdown }]), upload,
+    });
+    assert.equal(replacement.posted, true);
+    assert.deepEqual(counts, [1, 2, 1]);
     const manual = await publishReviewPr({ ...options, automatic: false }, { exec: recordingExec(calls), upload });
     assert.match(manual.markdown, /selection:manual-v1/);
     for (const body of [cumulative.markdown, manual.markdown, first.markdown.replace(/\n<!-- test-evidence-selection:.* -->/, "")]) {
@@ -124,6 +129,10 @@ test("automatic reviews accumulate records but preserve manual, legacy and unava
       assert.equal(counts.length, before);
       assert.equal(calls.some((call) => call.args.includes("PATCH")), false);
     }
+    const preserveManualReplacement = await publishReviewPr({ ...options, replaceAutomatic: true }, {
+      exec: recordingExec(calls, [{ databaseId: 77, body: manual.markdown }]), upload,
+    });
+    assert.equal(preserveManualReplacement.posted, false);
     // A human selection made during upload is protected by the final comment read.
     let reads = 0;
     const initial = recordingExec(calls);
