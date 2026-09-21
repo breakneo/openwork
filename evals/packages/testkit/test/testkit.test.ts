@@ -14,9 +14,38 @@ import {
   validateWorldSurfaceSelection,
 } from "@openwork/env";
 import type { Den, WorldResources } from "@openwork/env";
+import type { Surface } from "@openwork/cdp";
 import type { DenRef, DenSession } from "@openwork/behaviors";
 import type { MockMcpHandle } from "@openwork/labs";
-import { BufferedEvidenceSink, SeedChannel, SpecRuntime, copyWorldResources, registerWorldDisposable } from "../src/spec/runtime.ts";
+import { BufferedEvidenceSink, SeedChannel, SpecRuntime, UserChannel, copyWorldResources, registerWorldDisposable } from "../src/spec/runtime.ts";
+
+test("user screenshots forward optional captions without changing capture bytes", async () => {
+  await using stack = new AsyncDisposableStack();
+  const runtime = new SpecRuntime(resolvePlace({}), stack, new BufferedEvidenceSink());
+  runtime.stage = "body";
+  const png = Buffer.from("unit screenshot bytes");
+  const surface: Surface = {
+    handle: { name: "fake", kind: "chrome", hostKind: "test", cdpUrl: "http://127.0.0.1" },
+    client: {
+      close() {},
+      async send(method) {
+        if (method === "Page.bringToFront") return {};
+        if (method === "Page.captureScreenshot") return { data: png.toString("base64") };
+        if (method === "Runtime.evaluate") return { result: { value: { route: "#/guide", visibleText: "Guide" } } };
+        throw new Error(`Unexpected CDP method: ${method}`);
+      },
+    },
+  };
+  const user = new UserChannel(runtime, surface);
+  const defaultShot = await user.screenshot();
+  const caption = "after: the original answer keeps growing without asking again";
+  const captionedShot = await user.on(surface).screenshot(caption);
+  assert.equal(defaultShot.caption, undefined);
+  assert.equal(captionedShot.caption, caption);
+  assert.deepEqual(defaultShot.png, png);
+  assert.deepEqual(captionedShot.png, png);
+  assert.equal(defaultShot.hash, captionedShot.hash);
+});
 
 test("world resource validation rejects malformed and conflicting contracts", () => {
   for (const value of [null, [], {}, { surfaces: [], services: ["unknown"] },

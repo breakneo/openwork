@@ -222,46 +222,68 @@ test("test evidence accepts unchanged screenshots and only lets one validation u
   }
 });
 
-test("screenshot automatically records an artifact in ambient test evidence", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "openwork-test-evidence-screenshot-"));
-  try {
-    const png = Buffer.from("ambient screenshot pixels");
-    const methods: string[] = [];
-    const client: CdpClient = {
-      close() {},
-      async send(method) {
-        methods.push(method);
-        if (method === "Page.bringToFront") return {};
-        if (method === "Page.captureScreenshot") return { data: png.toString("base64") };
-        if (method === "Runtime.evaluate") {
-          return { result: { value: { route: "#/ambient", visibleText: "Ambient screenshot" } } };
-        }
-        throw new Error(`Unexpected CDP method: ${method}`);
-      },
-    };
-    const app: Surface = {
-      handle: { name: "fake", kind: "chrome", hostKind: "test", cdpUrl: "http://127.0.0.1" },
-      client,
-    };
-    const testEvidence = createTestEvidence({ name: "ambient screenshot", outDir: dir });
-    const captured = await withTestEvidence(testEvidence, () => screenshot(app));
-    assert.deepEqual(methods.slice(0, 2), ["Page.bringToFront", "Page.captureScreenshot"]);
-    assert.equal(captured.route, "#/ambient");
-    await testEvidence.close();
+for (const caption of [undefined, 'after: <guide> grows & keeps "its beginning"']) {
+  test(`screenshot persists ${caption === undefined ? "the default" : "an explicit escaped"} caption in ambient evidence`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openwork-test-evidence-screenshot-"));
+    try {
+      const png = Buffer.from("ambient screenshot pixels");
+      const methods: string[] = [];
+      const client: CdpClient = {
+        close() {},
+        async send(method) {
+          methods.push(method);
+          if (method === "Page.bringToFront") return {};
+          if (method === "Page.captureScreenshot") return { data: png.toString("base64") };
+          if (method === "Runtime.evaluate") {
+            return { result: { value: { route: "#/ambient", visibleText: "Ambient screenshot" } } };
+          }
+          throw new Error(`Unexpected CDP method: ${method}`);
+        },
+      };
+      const app: Surface = {
+        handle: { name: "fake", kind: "chrome", hostKind: "test", cdpUrl: "http://127.0.0.1" },
+        client,
+      };
+      const testEvidence = createTestEvidence({ name: "ambient screenshot", outDir: dir });
+      const captured = await withTestEvidence(testEvidence, () => caption === undefined ? screenshot(app) : screenshot(app, caption));
+      assert.equal(captured.caption, caption);
+      assert.deepEqual(captured.png, png);
+      assert.equal(captured.hash, createHash("sha256").update(png).digest("hex"));
+      assert.deepEqual(methods.slice(0, 2), ["Page.bringToFront", "Page.captureScreenshot"]);
+      assert.equal(captured.route, "#/ambient");
+      await testEvidence.close();
 
-    const testRun = await payload(dir);
-    assert.deepEqual(testRun.summary, {
-      ok: false,
-      totalArtifacts: 1,
-      passedArtifacts: 0,
-      failedArtifacts: 0,
-      unvalidatedArtifacts: 1,
-      pendingArtifacts: 0,
-      passedExpectations: 0,
-      failedExpectations: 0,
-      pendingJudgments: 0,
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+      const testRun = await payload(dir);
+      assert.deepEqual(testRun.summary, {
+        ok: false,
+        totalArtifacts: 1,
+        passedArtifacts: 0,
+        failedArtifacts: 0,
+        unvalidatedArtifacts: 1,
+        pendingArtifacts: 0,
+        passedExpectations: 0,
+        failedExpectations: 0,
+        pendingJudgments: 0,
+      });
+      assert.ok(Array.isArray(testRun.artifacts));
+      const artifact = testRun.artifacts[0];
+      assert.ok(isRecord(artifact));
+      assert.equal(artifact.caption, caption ?? "ambient screenshot artifact 1");
+      assert.ok(typeof artifact.fileName === "string");
+      assert.deepEqual(await readFile(join(dir, artifact.fileName)), png);
+      const index = await readFile(join(dir, "index.html"), "utf8");
+      if (caption === undefined) {
+        assert.equal(artifact.fileName, "01-ambient-screenshot-artifact-1.png");
+        assert.match(index, /<h2>ambient screenshot artifact 1<\/h2>/);
+      } else {
+        assert.match(index, /<h2>after: &lt;guide&gt; grows &amp; keeps &quot;its beginning&quot;<\/h2>/);
+        assert.doesNotMatch(index, /<guide>/);
+      }
+      assert.deepEqual(artifact.results, []);
+      assert.deepEqual(artifact.judgments, []);
+      assert.equal(artifact.ok, null);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}

@@ -9,13 +9,14 @@ export interface ScreenshotArtifact {
   route: string;
   visibleText: string;
   at: string;
+  caption?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function screenshot(app: Surface): Promise<ScreenshotArtifact> {
+export async function screenshot(app: Surface, caption?: string): Promise<ScreenshotArtifact> {
   const at = new Date().toISOString();
   const png = await captureScreenshot(app.client);
   const page = await evaluate(app.client, () => (({
@@ -31,6 +32,7 @@ export async function screenshot(app: Surface): Promise<ScreenshotArtifact> {
     route: page.route,
     visibleText: page.visibleText,
     at,
+    ...(caption === undefined ? {} : { caption }),
   };
   currentTestEvidence()?.recordScreenshot(screenshotArtifact);
   return screenshotArtifact;
