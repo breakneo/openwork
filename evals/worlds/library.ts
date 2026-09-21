@@ -1076,10 +1076,12 @@ export async function connectionActionMcpApp(seed: Seed) {
         ],
       })), {
         promptMarker: connectorCatalogPrompt,
+        latestUserTurn: true,
         finalReply: connectorCatalogReply,
         steps: [{ tool: "search_capabilities", arguments: { query: "Slack", type: "mcp", intent: "connect" } }],
       }, {
         promptMarker: allConnectorsPrompt,
+        latestUserTurn: true,
         finalReply: allConnectorsReply,
         steps: [{ tool: "search_capabilities", arguments: { query: "quick add connectors", type: "connectors" } }],
       }] }),

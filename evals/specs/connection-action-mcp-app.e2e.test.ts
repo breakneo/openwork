@@ -176,9 +176,20 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       const clickedAt = new Date().toISOString();
       await user.click({ mcpApp, role: "button", label: entry.choice });
       if (entry.choice === "Authenticate") {
-        const authorization = await connector.authorizeRequestSince(clickedAt, { timeoutMs: 60_000 });
-        expect(authorization.path).toBe("/authorize");
-        expect(authorization.params.get("state")).toBeTruthy();
+        try {
+          const authorization = await connector.authorizeRequestSince(clickedAt, { timeoutMs: 60_000 });
+          expect(authorization.path).toBe("/authorize");
+          expect(authorization.params.get("state")).toBeTruthy();
+        } catch (error) {
+          const screen = await probe.text();
+          await user.screenshot();
+          evidence.recordAssertionEvidence(
+            "Authenticate reaches the OAuth provider",
+            `No authorization request arrived. Visible app text after the click:\n${screen}`,
+            false,
+          );
+          throw error;
+        }
       }
       await user.see({ mcpApp, role: "heading", text: entry.choice === "Skip" ? "Skipped Notion" : "Notion connected" }, { timeoutMs: 120_000 });
       await user.notSee({ mcpApp, role: "button", label: "Authenticate" });
