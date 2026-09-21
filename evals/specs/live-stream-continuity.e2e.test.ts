@@ -102,7 +102,7 @@ async function liveContinuityJourney(
       });
       expect(initialPassed).toBe(true);
       expect(started.promptPosts).toEqual({ [world.session.sessionId]: 1 });
-      await user.screenshot("a member asks for a guide once and sees the answer begin");
+      await user.screenshot();
     });
 
     await step("the member spends over twenty seconds in an empty neighboring conversation", async () => {
@@ -198,7 +198,7 @@ async function liveContinuityJourney(
             expect(next.releasedByTimer).toBe(false);
           }
           previous = next;
-          await user.screenshot(`${growthClaim} — ${increase === 1 ? "first view after returning" : "more text a moment later"}`);
+          await user.screenshot();
         }
         expect((await world.engineHttpEvents()).promptPosts).toEqual({ [world.session.sessionId]: 1 });
       } finally {
@@ -252,7 +252,7 @@ async function liveContinuityJourney(
       }, { within: 4_000, intervalMs: 250, label: "complete normalized answer remains stable" });
       expect(await native(world.neighbor.sessionId)).toEqual([]);
       expect((await world.engineHttpEvents()).promptPosts).toEqual({ [world.session.sessionId]: 1 });
-      await user.screenshot("after: the complete answer is ready without reloading or asking again");
+      await user.screenshot();
     });
 
     await step("the neighboring conversation stays empty", async () => {
@@ -263,7 +263,7 @@ async function liveContinuityJourney(
       await user.notSee({ text: liveContinuityPrompt });
       const neighborVisibleMessages = (await probe.dom(`${surface(world.neighbor.sessionId)} [data-message-role]`)).elements.length;
       expect(neighborVisibleMessages).toBe(0);
-      await user.screenshot("the neighboring conversation stays empty");
+      await user.screenshot();
       await select(world.session);
       const revisited = await probe.eventually(rendered, {
         within: 10_000, intervalMs: 200, label: "the complete guide remains available after revisiting", until: (text) => text === nativeText,
@@ -288,7 +288,7 @@ async function liveContinuityJourney(
       });
     });
   } catch (error) {
-    await user.screenshot("the journey stopped here: failure state").catch(() => undefined);
+    await user.screenshot().catch(() => undefined);
     throw error;
   } finally {
     const state = await world.engineHttpEvents();

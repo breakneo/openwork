@@ -32,15 +32,29 @@ after    → what they now see; screenshot at that moment
 boundary → who else is affected, and the negative half: who is not
 ```
 
+The review app is generated from the spec. It shows exactly four strings, and
+each comes from one place in your code; write those strings for the reviewer:
+
+| Reviewer sees | Comes from | Rule |
+| --- | --- | --- |
+| Section heading | the `test("…")` title | names the persona and what they can now do |
+| Caption under a screenshot | the `step("…")` the `user.screenshot()` ran inside | the old state starts `before:`, the new state `after:`; otherwise a plain claim |
+| Caption + judgment on a `looks()` image | the first expectation in `user.looks([...])` | judged later; pending until then, so CI proof stays `Incomplete` |
+| Assertion line | `recordAssertionEvidence(claim, evidence, ok)` | `claim` is the caption, `evidence` the text under it |
+
+A screenshot taken outside any `step()` is captioned "<title> artifact N",
+which tells the reviewer nothing. No verbs like "assert", no selectors, no
+internal names anywhere in those strings.
+
 Example title and steps:
 
 ```ts
 test("an owner enables Code Mode and a teammate turns one chat into a shared Workflow", async ({ user, probe, step }) => {
-  await step("before: the teammate's agent has no script tool", …);      // screenshot
-  await step("the owner enables Code Mode with one switch", …);           // screenshot
-  await step("the teammate's request now runs as one script", …);        // screenshot
-  await step("the result is saved as a Workflow the team can open", …);  // screenshot
-  await step("a member outside the team cannot see it", …);              // screenshot
+  await step("before: the teammate's agent has no script tool", …);        // screenshot
+  await step("the owner enables Code Mode with one switch", …);             // screenshot
+  await step("after: the teammate's request runs as one script", …);        // screenshot
+  await step("the result is saved as a Workflow the team can open", …);    // screenshot
+  await step("a member outside the team cannot see it", …);                // screenshot
 });
 ```
 
@@ -111,6 +125,8 @@ placeholder, or test id. Bound every wait; declare external requirements in
   ```
 
   If the screenshots would not convince you, they will not convince the reviewer.
+  Read the captions in `index.html` top to bottom: they should tell the
+  before → after story on their own.
 - In CI the spec runs on `PR change proof`, one job per spec; the trusted
   publisher aggregates every changed spec's records into one report. Failed,
   skipped, and cancelled runs stay visible as such; nothing substitutes for them.
