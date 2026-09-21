@@ -1927,19 +1927,26 @@ test("denied, canceled, closed and background task opens never load and release 
   }
 });
 
-test("the task timeout cancels the longer approval dialog and late acceptance cannot navigate", async (t) => {
+test("thread consent can outlive the operation timeout without navigating early", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { invoke, panel, views } = createPanel();
   invoke("openwork:browser:show", PANEL_BOUNDS, "A");
-  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://slow.example/" } });
+  let settled = false;
+  let earlyResult;
+  const opening = panel.browserTask({ sessionId: "A", operation: "open", args: { url: "https://slow.example/" } })
+    .then((result) => { settled = true; earlyResult = result; return result; });
   await flush();
   const tab = invoke("openwork:browser:state").tabs[0];
-  t.mock.timers.tick(30_000);
-  assert.equal((await opening).code, "timeout");
-  assert.equal(invoke("openwork:browser:approve", tab.id, tab.browserApproval.id, true), false);
+  t.mock.timers.tick(31_000);
+  await flush();
+  assert.equal(settled, false, JSON.stringify(earlyResult));
+  assert.equal(invoke("openwork:browser:state").tabs[0].browserApproval.id, tab.browserApproval.id);
   assert.deepEqual(views()[0].webContents.loads, []);
   assert.deepEqual(views()[0].webContents.destinations, []);
-  assert.deepEqual(invoke("openwork:browser:state").tabs, []);
+  assert.equal(invoke("openwork:browser:approve", tab.id, tab.browserApproval.id, true), true);
+  assert.equal((await opening).ok, true);
+  assert.deepEqual(views()[0].webContents.loads, ["https://slow.example/"]);
+  assert.deepEqual(views()[0].webContents.destinations, ["https://slow.example/"]);
 });
 
 test("human link clicks open without control state but later agent reads require consent", async () => {

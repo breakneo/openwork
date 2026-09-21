@@ -4,8 +4,6 @@ import type { Surface } from "@openwork/cdp";
 import { currentTestEvidence } from "./ambient.ts";
 
 export interface ScreenshotArtifact {
-  /** Reviewer-facing description; not a visual judgment or assertion. */
-  caption?: string;
   png: Buffer;
   hash: string;
   route: string;
@@ -17,7 +15,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function screenshot(app: Surface, caption?: string): Promise<ScreenshotArtifact> {
+export async function screenshot(app: Surface, options?: { caption?: string }): Promise<ScreenshotArtifact> {
   const at = new Date().toISOString();
   const png = await captureScreenshot(app.client);
   const page = await evaluate(app.client, () => (({
@@ -28,13 +26,12 @@ export async function screenshot(app: Surface, caption?: string): Promise<Screen
     throw new Error("CDP did not return the current route and visible text for the screenshot.");
   }
   const screenshotArtifact: ScreenshotArtifact = {
-    caption,
     png,
     hash: createHash("sha256").update(png).digest("hex"),
     route: page.route,
     visibleText: page.visibleText,
     at,
   };
-  currentTestEvidence()?.recordScreenshot(screenshotArtifact);
+  currentTestEvidence()?.recordScreenshot(screenshotArtifact, options);
   return screenshotArtifact;
 }
