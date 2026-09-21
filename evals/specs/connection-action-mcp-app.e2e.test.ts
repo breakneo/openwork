@@ -3,6 +3,7 @@ import { spec } from "@openwork/testkit";
 import {
   connectionActionMcpApp,
   connectionActionPrompt,
+  connectionActionQuestion,
   connectionActionSkipPrompt,
   connectionStatusPrompt,
   connectionStatusSkipPrompt,
@@ -134,8 +135,14 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, sessionId]) expect(entry.prompt).not.toContain(id);
       await user.type("composer", entry.prompt, { replace: true, verify: true });
       await user.press("Enter");
+      const requests = await probe.eventually(pending, {
+        within: 120_000,
+        label: "The hidden connection question pauses the original task",
+        until: requests => requests.length === 1,
+      });
+      expect(requests[0]?.questions).toEqual([connectionActionQuestion]);
       try {
-        await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 120_000 });
+        await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 30_000 });
       } catch (error) {
         const [screen, appDom, questions, transcript] = await Promise.all([
           probe.text(),
@@ -153,12 +160,13 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       }
       await user.see({ mcpApp, role: "button", label: "Skip" });
       for (const testId of ["desktop-connection-card", "connection-decision-panel", "question-panel"]) await user.notSee({ testId });
-      expect(await pending()).toEqual([]);
+      expect(await pending()).toEqual(requests);
       const tools = turnTools(await messages(), entry.prompt);
       const calls = (await modelCalls(entry.prompt)).filter(call => call.kind === "tool");
-      expect(tools).toHaveLength(entry.tools.length);
-      expect(calls).toHaveLength(entry.tools.length);
-      for (const [index, name] of entry.tools.entries()) {
+      const expectedTools = [...entry.tools, "question"];
+      expect(tools).toHaveLength(expectedTools.length);
+      expect(calls).toHaveLength(expectedTools.length);
+      for (const [index, name] of expectedTools.entries()) {
         expect(tools[index]?.tool).toMatch(new RegExp(`${name}$`));
         expect(calls[index]?.toolName).toMatch(new RegExp(`${name}$`));
       }
@@ -175,7 +183,7 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       } else expect(payload.connectionAction).toMatchObject(expectedConnection);
       const quietUntil = Date.now() + 3_000;
       await probe.eventually(async () => {
-        expect(await pending()).toEqual([]);
+        expect(await pending()).toEqual(requests);
         expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(calls);
         expect((await modelCalls(entry.prompt)).filter(call => call.kind === "final")).toEqual([]);
         expect(await oauthRequests()).toEqual(oauthBefore);

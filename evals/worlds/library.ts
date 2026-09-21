@@ -1064,6 +1064,7 @@ export async function connectionActionMcpApp(seed: Seed) {
         finalReplyInitiallyReleasedChunks: 0,
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
+          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), ...[connectionStatusPrompt, connectionStatusSkipPrompt].map((promptMarker): MockAgentWorkload => ({
         promptMarker,
@@ -1073,6 +1074,7 @@ export async function connectionActionMcpApp(seed: Seed) {
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
+          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), {
         promptMarker: connectorCatalogPrompt,
