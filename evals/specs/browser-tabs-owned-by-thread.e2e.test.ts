@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { expect } from "vitest";
 import { browserImageTarget, eventually, spec } from "@openwork/testkit";
 import type { BrowserTaskInput, Target } from "@openwork/testkit";
@@ -272,9 +273,16 @@ test("a background conversation reads its owned page silently and requests atten
   await agent.run("session.rename", { sessionId: reading.sessionId, title: reading.title });
   const researching = { sessionId: await agent.createSession("Background research"), title: "Background research" };
   await user.click(conversation(reading.title));
-  const readingOpen = agent.run("browser.open_url", { url: `${world.origin}/?viewport-probe=reading`, provider: "builtin" });
+  await probe.eventually(() => probe.browserState(), { within: 15_000,
+    until: (state) => state.visibleSessionId === reading.sessionId,
+    label: "the reading conversation is selected before requesting browser access" });
+  // Match the real agent's origin-stamped command rather than a captured renderer selection.
+  const readingOpen = world.commandFrom(reading.sessionId, "browser.open_url", { url: `${world.origin}/?viewport-probe=reading`, provider: "builtin" });
   await user.click({ role: "button", label: "Allow for this thread" });
-  const readingTab = browserTabHandle(await readingOpen);
+  const readingResult = await readingOpen;
+  expect(readingResult).toMatchObject({ ok: true, result: { owner_session_id: reading.sessionId } });
+  if (!readingResult || typeof readingResult !== "object" || !("result" in readingResult)) throw new Error("Reading browser command returned no result.");
+  const readingTab = browserTabHandle(readingResult.result);
   await user.see(tabButton("reading"), { timeoutMs: 30_000 });
   const initial = await probe.browserTabMetrics(readingTab.targetId);
   const panelViewport = { width: initial.width, height: initial.height };
@@ -410,7 +418,14 @@ test("a background conversation reads its owned page silently and requests atten
     }
     const completed = await probe.eventually(witness, { within: 5_000, until: (value) => value.records.length === 1 && value.inputValue === "ok", label: "the fixture receives only the approved click and text" });
     expect(completed.records).toEqual([{ method: "dom", count: 1, signedIn: false }]);
-    expect((await task("observe")).text).toContain("Saved 1");
+    const savedPage = await task("observe", { includeImage: true });
+    expect(savedPage.text).toContain("Saved 1");
+    if (!savedPage.image) throw new Error("The saved page observation did not include its screenshot.");
+    // App screenshots do not include Electron's native child view. Preserve the
+    // real page image separately so the reviewer can see the saved result too.
+    const png = Buffer.from(savedPage.image.data, "base64");
+    evidence.recordScreenshot({ png, hash: createHash("sha256").update(png).digest("hex"),
+      route: `${world.origin}/?viewport-probe=research`, visibleText: savedPage.text ?? "", at: new Date().toISOString() });
     await user.see({ role: "button", label: "Go back" });
     await user.see({ role: "button", label: "Go forward" });
     await user.see({ role: "button", label: "Reload page" });
