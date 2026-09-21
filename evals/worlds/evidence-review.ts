@@ -141,11 +141,11 @@ export async function reviewWorld(
     "Desktop restart remains outside this selected evidence.",
   );
   const skipped = incompleteReport.sources.find(
-    (source) => source.kind === "test-run",
+    (source: { kind: string }) => source.kind === "test-run",
   );
   if (skipped?.kind === "test-run") skipped.outcome = "skipped";
   const pending = incompleteReport.evidence.find(
-    (item) => item.kind === "image",
+    (item: { kind: string }) => item.kind === "image",
   );
   pending?.judgments.push({
     expectation: "Dialog is readable",
@@ -157,7 +157,7 @@ export async function reviewWorld(
   });
   const failedReport = structuredClone(bundle.report);
   const assertion = failedReport.evidence.find(
-    (item) => item.kind === "assertion",
+    (item: { kind: string }) => item.kind === "assertion",
   );
   if (!assertion?.judgments[0]) throw new Error("Missing fixture assertion.");
   assertion.judgments[0].state = "failed";

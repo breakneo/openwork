@@ -251,11 +251,11 @@ export async function publishReviewPr(
   const { report, assets } = await assembleReview(options);
   // Hash complete source records, not just IDs: a partial reread must never erase
   // evidence. Legacy/unknown provenance is conservatively treated as manual.
-  const fingerprints = report.sources.map((source) => createHash("sha256").update(JSON.stringify({
+  const fingerprints = report.sources.map((source: { id: string; asset: string }) => createHash("sha256").update(JSON.stringify({
     source,
     receipt: createHash("sha256").update(assets.find((asset) => asset.name === source.asset)?.body ?? "").digest("hex"),
-    sections: report.sections.filter((section) => section.sourceId === source.id),
-    evidence: report.evidence.filter((item) => item.sourceId === source.id),
+    sections: report.sections.filter((section: { sourceId: string }) => section.sourceId === source.id),
+    evidence: report.evidence.filter((item: { sourceId: string }) => item.sourceId === source.id),
   })).digest("hex")).sort();
   const selectionMarker = options.automatic
     ? `<!-- test-evidence-selection:auto-v1:${fingerprints.join(",")} -->`

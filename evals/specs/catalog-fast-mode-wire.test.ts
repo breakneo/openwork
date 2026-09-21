@@ -100,7 +100,10 @@ for (const engine of ["v1", "v2"]) {
         await server.injectProvider({
           id: "witness", name: "Synthetic witness", apiKey: "synthetic-only",
           baseUrl: `${baseURL}/v1`, package: "@opencode-ai/ai/providers/openai",
-          models: Object.entries(models).map(([id, config]) => ({ id, name: config.name ?? id, config })),
+          models: Object.entries(models).map(([id, config]) => {
+            const model = isRecord(config) ? config : {};
+            return { id, name: typeof model.name === "string" ? model.name : id, config: model };
+          }),
         });
       }
       const request = async (path: string, body?: unknown): Promise<unknown> => {

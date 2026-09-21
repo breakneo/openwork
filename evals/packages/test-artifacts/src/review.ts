@@ -48,7 +48,7 @@ export async function assembleReview(options: {
       throw new Error(`No committed test evidence in ${directory}`);
     const run = stored.testRun;
     const sourceId = `run-${digest(`${run.gitSha}:${run.name}:${run.createdAt}`)}`;
-    if (sources.some((source) => source.id === sourceId)) continue;
+    if (sources.some((source: { id: string }) => source.id === sourceId)) continue;
     const sourceAsset = `${sourceId}.json`;
     assets.set(sourceAsset, {
       name: sourceAsset,
@@ -116,7 +116,7 @@ export async function assembleReview(options: {
     const body = await regularFile(path);
     const shot = docShotReceiptSchema.parse(JSON.parse(body.toString("utf8")));
     const sourceId = `shot-${digest(`${shot.gitSha}:${shot.name}:${shot.createdAt}`)}`;
-    if (sources.some((source) => source.id === sourceId)) continue;
+    if (sources.some((source: { id: string }) => source.id === sourceId)) continue;
     const sourceAsset = `${sourceId}.json`;
     assets.set(sourceAsset, { name: sourceAsset, body });
     sources.push({

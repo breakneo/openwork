@@ -1408,8 +1408,8 @@ export async function pinnedSessions(seed: Seed) {
       return {
         pinnedSessionIds: c?.conversations?.pinnedSessionIds ?? null,
         pinnedResourceRefs: (c?.resources ?? [])
-          .filter((r) => r.kind === "session" && r.state?.pinned === true)
-          .map((r) => r.ref),
+          .filter((r: { kind?: unknown; state?: { pinned?: unknown } }) => r.kind === "session" && r.state?.pinned === true)
+          .map((r: { ref?: unknown }) => r.ref),
       };
     });
     if (!isRecord(value)
@@ -1883,7 +1883,7 @@ export async function archiveActiveSessions(seed: Seed, { place }: { place: Plac
         requests: window.__archiveNetwork.requests,
         surfaces: [...document.querySelectorAll("[data-session-surface-id]")].map(el => el.getAttribute("data-session-surface-id")),
         activeRows: [...document.querySelectorAll("[data-sidebar-workspace-id] [data-sidebar-session-id]")].map(el => el.getAttribute("data-sidebar-session-id")),
-        tabs: window.__openworkControl.context().conversations.tabs.map(tab => tab.sessionId),
+        tabs: window.__openworkControl.context().conversations.tabs.map((tab: { sessionId: string }) => tab.sessionId),
         memory: JSON.parse(localStorage.getItem("openwork.react.sessionByWorkspace") ?? "{}"),
       };
     }, [[workspaceA.workspaceId, workspaceB.workspaceId]]), { timeoutMs: 30_000 });

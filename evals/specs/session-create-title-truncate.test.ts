@@ -24,7 +24,7 @@ function records(value: unknown): Record<string, unknown>[] {
 
 test("session.create advertises clipping and returns every validation issue without creating sessions", async ({ evidence }) => {
   const create = buildOpenworkProviderContributions([]).flatMap((entry) => entry.affordances).find((entry) => entry.id === "session.create");
-  const description = create?.arguments.find((argument) => argument.name === "sessions")?.description;
+  const description = create?.arguments.find((argument: { name: string; description?: string }) => argument.name === "sessions")?.description;
   expect(description).toContain("title (≤120 chars, longer is clipped)");
   expect(description).toContain("prompt (≤100000 chars)");
   const plugin = await OpenWorkExtensionsPreview();

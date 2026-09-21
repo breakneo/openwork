@@ -34,8 +34,8 @@ test("A reviewer can inspect two runs and a DocShot with honest results and priv
   );
 
   const source = world.report.sources[0];
-  const image = world.report.evidence.find((item) => item.kind === "image");
-  if (!source || image?.kind !== "image")
+  const image = world.report.evidence.find((item: { kind: string; asset?: string }) => item.kind === "image");
+  if (!source || image?.kind !== "image" || typeof image.asset !== "string")
     throw new Error("Missing expected review evidence.");
   const mediaPath = `/r/${world.passed}/assets/${image.asset}`;
   const media = await get(mediaPath);

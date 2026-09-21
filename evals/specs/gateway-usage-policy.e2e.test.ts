@@ -254,7 +254,7 @@ test("GATEWAY-USAGE-01 admin policy blocks member Gateway calls until a reviewed
     expect(await requests(world.member, "/me")).toEqual(rows);
     expect(await requests(world.control, "/me")).toEqual([]);
     expect((await seed.api(world.member, `${requestsPath}/${request.id}/approve`, { method: "POST" })).response.status).toBe(403);
-    expect((await own()).buckets).toEqual(exhausted.buckets.map((bucket) => ({ ...bucket, resetRequestStatus: "pending", canRequestReset: false })));
+    expect((await own()).buckets).toEqual(exhausted.buckets.map((bucket: GatewayUsageStatus["buckets"][number]) => ({ ...bucket, resetRequestStatus: "pending", canRequestReset: false })));
     return request;
   });
 

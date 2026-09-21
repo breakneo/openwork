@@ -17,6 +17,7 @@ const PROBE_RANK = 177;
 const LONG_TRANSCRIPT = 300;
 
 type Message = { info: { id: string; role: string; time: { created: number } }; parts: Array<{ type: string; text: string }> };
+type Affordance = { id: string; arguments: Array<{ name: string }>; description?: string };
 
 function transcript(sessionId: string, count: number): Message[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -122,11 +123,11 @@ async function plugin() {
 
 test("session.search advertises every schema argument so agents can widen a truncated scan", async ({ evidence }) => {
   const contributions = buildOpenworkProviderContributions([]);
-  const affordances = contributions.find((contribution) => contribution.featureId === "sessions")?.affordances ?? [];
+  const affordances: Affordance[] = contributions.find((contribution) => contribution.featureId === "sessions")?.affordances ?? [];
   const drift: string[] = [];
   for (const [id, schema] of Object.entries(sessionAffordanceArgsSchemas)) {
     const advertised = new Set(affordances.find((affordance) => affordance.id === id)?.arguments.map((argument) => argument.name));
-    const accepted = new Set(Object.keys(schema.shape));
+    const accepted = new Set(Object.keys(isRecord(schema) && isRecord(schema.shape) ? schema.shape : {}));
     for (const name of accepted) if (!advertised.has(name)) drift.push(`${id}: ${name} accepted but hidden`);
     for (const name of advertised) if (!accepted.has(name)) drift.push(`${id}: ${name} advertised but ignored`);
   }

@@ -136,11 +136,15 @@ async function readSplitFacts(app: Surface, primary: SplitCandidate, secondary: 
     const secondaryPane = document.querySelector<HTMLElement>('[data-workbench-pane="secondary"]');
     const primarySurface = primaryPane?.querySelector<HTMLElement>(`[data-session-surface-id="${inputSessionId}"]`);
     const secondarySurface = secondaryPane?.querySelector<HTMLElement>(`[data-session-surface-id="${inputSessionId2}"]`);
-    const resources = Array.isArray(context?.resources) ? context.resources : [];
-    const primaryResource = resources.find((resource) => resource?.kind === "session"
-      && resource?.state?.pane === "primary" && resource?.state?.visible === true);
-    const secondaryResource = resources.find((resource) => resource?.kind === "session"
-      && resource?.state?.pane === "secondary" && resource?.state?.visible === true);
+    const resources: unknown[] = Array.isArray(context?.resources) ? context.resources : [];
+    type SessionResource = { kind?: unknown; state?: { pane?: unknown; visible?: unknown; workspaceId?: string } };
+    const isVisibleSession = (resource: unknown, pane: string): resource is SessionResource => {
+      if (typeof resource !== "object" || resource === null) return false;
+      const candidate = resource as { kind?: unknown; state?: { pane?: unknown; visible?: unknown } };
+      return candidate.kind === "session" && candidate.state?.pane === pane && candidate.state.visible === true;
+    };
+    const primaryResource = resources.find((resource) => isVisibleSession(resource, "primary"));
+    const secondaryResource = resources.find((resource) => isVisibleSession(resource, "secondary"));
     return {
       layout: layout?.kind ?? "",
       primarySessionId: (layout?.kind === "split" ? layout.primarySessionId : undefined) ?? (layout?.kind === "single" ? layout.sessionId : undefined) ?? "",
