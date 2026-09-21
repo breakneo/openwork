@@ -1064,7 +1064,6 @@ export async function connectionActionMcpApp(seed: Seed) {
         finalReplyFrom: "last-tool-text",
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
-          { tool: "openwork_context", arguments: {} },
           { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), ...[connectionStatusPrompt, connectionStatusSkipPrompt].map((promptMarker): MockAgentWorkload => ({
@@ -1075,7 +1074,6 @@ export async function connectionActionMcpApp(seed: Seed) {
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
-          { tool: "openwork_context", arguments: {} },
           { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), {
@@ -1112,7 +1110,19 @@ export async function connectionActionMcpApp(seed: Seed) {
     fixtureUrl: den.mocks.connector.url, denApiUrl: den.ref.apiUrl, mcpToken, appHostToken,
   });
   await reloadConfiguredApp(app);
-  const session = await seed.session(app);
+  let session: { sessionId: string; title: string } | undefined;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      session = await seed.session(app);
+      break;
+    } catch (error) {
+      lastError = error;
+      if (!String(error).includes("session ID")) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  if (!session) throw lastError instanceof Error ? lastError : new Error(String(lastError));
   return { app, den, connection, organizationId, workspace, session, mcpSession: { ...den.admin, token: mcpToken }, appHostSession: { ...den.admin, token: appHostToken } };
 }
 

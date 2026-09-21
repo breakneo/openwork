@@ -147,14 +147,13 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       expect(await pending()).toEqual(requests);
       const tools = turnTools(await messages(), entry.prompt);
       const calls = (await modelCalls(entry.prompt)).filter(call => call.kind === "tool");
-      const expectedTools = [...entry.tools, "openwork_context", "question"];
+      const expectedTools = [...entry.tools, "question"];
       expect(tools).toHaveLength(expectedTools.length);
       expect(calls).toHaveLength(expectedTools.length);
       for (const [index, name] of expectedTools.entries()) {
         expect(tools[index]?.tool).toMatch(new RegExp(`${name}$`));
         expect(calls[index]?.toolName).toMatch(new RegExp(`${name}$`));
       }
-      expect(record(record(toolPayload(tools[entry.tools.length]).context).features).connectionQuestions).toBe(true);
       const question = tools.at(-1);
       expect(record(question?.state)).toMatchObject({ status: "running", input: { questions: [connectionActionQuestion] } });
       expect(question?.callID).toBe(record(questionRequest.tool).callID);

@@ -4,6 +4,7 @@ import { allConnectorsPrompt, allConnectorsReply, connectorCatalogDiscovery, con
 
 const test = spec.world(connectorCatalogDiscovery, {
   timeout: 600_000,
+  scope: "file",
   resources: { surfaces: ["desktop", "web"], services: ["den", "mock"], nativeReason: "The catalog Chat link must reach the desktop OS deep-link listener without sending a message." },
 });
 
