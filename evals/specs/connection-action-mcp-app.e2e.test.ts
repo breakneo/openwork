@@ -134,7 +134,23 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, sessionId]) expect(entry.prompt).not.toContain(id);
       await user.type("composer", entry.prompt, { replace: true, verify: true });
       await user.press("Enter");
-      await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 120_000 });
+      try {
+        await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 120_000 });
+      } catch (error) {
+        const [screen, appDom, questions, transcript] = await Promise.all([
+          probe.text(),
+          probe.dom(`[data-mcp-app-resource="${mcpApp.resourceUri}"]`),
+          pending(),
+          messages(),
+        ]);
+        await user.screenshot();
+        evidence.recordAssertionEvidence(
+          "The connection App renders for the pending decision",
+          JSON.stringify({ screen, appDom, questions, transcript }),
+          false,
+        );
+        throw error;
+      }
       await user.see({ mcpApp, role: "button", label: "Skip" });
       for (const testId of ["desktop-connection-card", "connection-decision-panel", "question-panel"]) await user.notSee({ testId });
       expect(await pending()).toEqual([]);
