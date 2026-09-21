@@ -3,8 +3,7 @@ import { spec } from "@openwork/testkit";
 import {
   connectionActionMcpApp,
   connectionActionPrompt,
-  connectionActionReply,
-  connectionActionReplySkip,
+  connectionActionQuestion,
   connectionActionSkipPrompt,
   connectionStatusPrompt,
   connectionStatusSkipPrompt,
@@ -13,7 +12,12 @@ import {
   ordinaryDiscoveryReply,
 } from "../worlds/library.ts";
 
-const test = spec.world(connectionActionMcpApp, { timeout: 600_000 });
+const test = spec.world(connectionActionMcpApp, {
+  timeout: 600_000,
+  resources: { surfaces: ["desktop"], services: ["den", "mock"], nativeReason: "Authenticate uses the desktop OAuth callback and native connection host." },
+});
+const connectionUri = "ui://openwork/connection-action/v2/view.html";
+const mcpApp = { resourceUri: connectionUri };
 
 function record(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) throw new Error("Expected an object");
@@ -45,107 +49,210 @@ function turnTools(messages: Record<string, unknown>[], prompt: string) {
   return messages.slice(start + 1).flatMap(message => rows(message.parts)).filter(part => part.type === "tool");
 }
 
-test("one standard connection App covers discovery and exact status results without legacy native UI", async ({ world, user, probe, evidence }) => {
-  const connector = world.den.mocks.connector;
-  const mount = `/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
-  const sessionPath = `${mount}/session/${encodeURIComponent(world.session.sessionId)}`;
-  const messages = async () => {
-    const response = await probe.desktopApi(`${sessionPath}/message`);
-    expect(response.status).toBe(200);
-    return rows(response.body);
-  };
-  const pending = async () => {
-    const response = await probe.desktopApi(`${mount}/question`);
-    expect(response.status).toBe(200);
-    return rows(response.body).filter(request => request.sessionID === world.session.sessionId);
-  };
-  let requestId = 0;
-  async function gateway(method: string, params: Record<string, unknown> = {}) {
-    const response = await fetch(`${world.den.ref.apiUrl}/mcp/agent`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${world.appHostSession.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, params }),
-      signal: AbortSignal.timeout(60_000),
+for (const entry of [
+  { prompt: connectionActionPrompt, choice: "Authenticate", tools: ["search_capabilities"] },
+  { prompt: connectionActionSkipPrompt, choice: "Skip", tools: ["search_capabilities"] },
+  { prompt: connectionStatusPrompt, choice: "Authenticate", tools: ["search_capabilities", "execute_capability"] },
+  { prompt: connectionStatusSkipPrompt, choice: "Skip", tools: ["search_capabilities", "execute_capability"] },
+]) {
+  test(`a member chooses ${entry.choice} in the v2 App after ${entry.tools.join(" then ")} and continues the original task`, async ({ world, user, probe, evidence, step }) => {
+    const connector = world.den.mocks.connector;
+    const mount = `/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
+    const sessionPath = `${mount}/session/${encodeURIComponent(world.session.sessionId)}`;
+    const messages = async () => {
+      const response = await probe.desktopApi(`${sessionPath}/message`);
+      expect(response.status).toBe(200);
+      return rows(response.body);
+    };
+    const pending = async () => {
+      const response = await probe.desktopApi(`${mount}/question`);
+      expect(response.status).toBe(200);
+      return rows(response.body).filter(request => request.sessionID === world.session.sessionId);
+    };
+    const modelCalls = () => connector.agentRequests({ promptMarker: entry.prompt });
+    const oauthRequests = async () => (await connector.requests()).filter(request => request.path === "/authorize" || request.path === "/token");
+    let requestId = 0;
+    async function gateway(method: string, params: Record<string, unknown> = {}) {
+      const response = await fetch(`${world.den.ref.apiUrl}/mcp/agent`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${world.appHostSession.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, params }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      expect(response.status).toBe(200);
+      const raw = await response.text();
+      const line = raw.split("\n").find(value => value.startsWith("data:"));
+      return record(JSON.parse(line ? line.slice(5) : raw));
+    }
+
+    await step("the host advertises only the v2 connection App and rejects the retired resource", async () => {
+      const tools = rows(record((await gateway("tools/list")).result).tools);
+      expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: "execute_capability" })]));
+      const connectionTools = tools.filter(tool => {
+        const metadata = isRecord(tool._meta) ? tool._meta : {};
+        return isRecord(metadata.ui) && metadata.ui.resourceUri === connectionUri;
+      });
+      expect(connectionTools.map(tool => tool.name).sort()).toEqual(["connection_action", "connection_action_intent"]);
+      const resources = rows(record((await gateway("resources/list")).result).resources);
+      expect(resources).toEqual(expect.arrayContaining([expect.objectContaining({ uri: connectionUri })]));
+      const legacyUri = "ui://openwork/connection-action/v1/view.html";
+      expect(resources).not.toEqual(expect.arrayContaining([expect.objectContaining({ uri: legacyUri })]));
+      const retired = await gateway("resources/read", { uri: legacyUri });
+      expect(retired.error).toBeDefined();
+      expect(retired.result).toBeUndefined();
+      evidence.recordAssertionEvidence("Standard v2 resource only", "tools/list and resources/list advertise v2; resources/read refuses v1.", true);
     });
-    expect(response.status).toBe(200);
-    const raw = await response.text();
-    const line = raw.split("\n").find(value => value.startsWith("data:"));
-    return record(JSON.parse(line ? line.slice(5) : raw));
-  }
 
-  const tools = rows(record((await gateway("tools/list")).result).tools);
-  expect(tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: "execute_capability" })]));
-  const connectionUri = "ui://openwork/connection-action/v2/view.html";
-  const connectionTools = tools.filter(tool => {
-    const metadata = isRecord(tool._meta) ? tool._meta : {};
-    const ui = isRecord(metadata.ui) ? metadata.ui : {};
-    return ui.resourceUri === connectionUri;
-  });
-  expect(connectionTools.map(tool => tool.name).sort()).toEqual(["connection_action", "connection_action_intent"]);
-  const resources = rows(record((await gateway("resources/list")).result).resources);
-  expect(resources).toEqual(expect.arrayContaining([expect.objectContaining({ uri: connectionUri })]));
-  expect(resources).not.toEqual(expect.arrayContaining([expect.objectContaining({ uri: "ui://openwork/connection-action/v1/view.html" })]));
+    await step("ordinary discovery stays informational without authorization or an App", async () => {
+      await user.type("composer", ordinaryDiscoveryPrompt, { verify: true });
+      await user.press("Enter");
+      await user.see({ text: ordinaryDiscoveryReply }, { timeoutMs: 120_000 });
+      for (const testId of ["connection-decision-panel", "desktop-connection-card", "connector-catalog"]) await user.notSee({ testId });
+      expect((await probe.dom(`[data-mcp-app-resource="${connectionUri}"]`)).elements).toEqual([]);
+      expect(await pending()).toEqual([]);
+      const tools = turnTools(await messages(), ordinaryDiscoveryPrompt);
+      expect(tools).toHaveLength(1);
+      const payload = toolPayload(tools[0]);
+      expect(payload.connectionAction).toBeUndefined();
+      expect(payload.connectorCatalog).toBeUndefined();
+      expect(rows(payload.matches)).toEqual(expect.arrayContaining([expect.objectContaining({
+        kind: "connection_status", connectionStatus: expect.objectContaining({ connectionId: world.connection.id, state: "needs_connection" }),
+      })]));
+      expect(await oauthRequests()).toEqual([]);
+      expect(await connector.toolCalls()).toEqual([]);
+      await user.screenshot();
+    });
 
-  await user.type("composer", ordinaryDiscoveryPrompt, { verify: true });
-  await user.press("Enter");
-  await user.see({ text: ordinaryDiscoveryReply }, { timeoutMs: 120_000 });
-  for (const testId of ["connection-decision-panel", "desktop-connection-card", "connector-catalog"]) await user.notSee({ testId });
-  expect(await pending()).toEqual([]);
-  const ordinaryTools = turnTools(await messages(), ordinaryDiscoveryPrompt);
-  expect(ordinaryTools).toHaveLength(1);
-  const ordinaryPayload = toolPayload(ordinaryTools[0]);
-  expect(ordinaryPayload.connectionAction).toBeUndefined();
-  expect(ordinaryPayload.connectorCatalog).toBeUndefined();
-
-  const cases = [
-    { prompt: connectionActionPrompt, reply: connectionActionReply, tools: ["search_capabilities"] },
-    { prompt: connectionActionSkipPrompt, reply: connectionActionReplySkip, tools: ["search_capabilities"] },
-    { prompt: connectionStatusPrompt, reply: connectionActionReply, tools: ["search_capabilities", "execute_capability"] },
-    { prompt: connectionStatusSkipPrompt, reply: connectionActionReplySkip, tools: ["search_capabilities", "execute_capability"] },
-  ];
-  for (const entry of cases) {
-    await user.see("composer", { editable: true });
-    await user.type("composer", entry.prompt, { replace: true, verify: true });
-    await user.press("Enter");
-    await user.see({ text: entry.reply }, { timeoutMs: 120_000 });
-    expect(await pending()).toEqual([]);
-    const frames = await probe.eventually(
-      () => probe.dom(`[data-mcp-app-resource="${connectionUri}"]`),
-      { within: 30_000, label: "the connection App mounts in the transcript", until: result => result.elements.length >= 1 },
-    );
-    expect(frames.elements.at(-1)?.rect.width).toBeGreaterThan(0);
-    expect(frames.elements.at(-1)?.rect.height).toBeGreaterThan(0);
-    await user.notSee({ testId: "desktop-connection-card" });
-    await user.notSee({ testId: "connection-decision-panel" });
-
-    const transcriptTools = turnTools(await messages(), entry.prompt);
-    const modelCalls = (await connector.agentRequests({ promptMarker: entry.prompt })).filter(call => call.kind === "tool");
-    expect(transcriptTools).toHaveLength(entry.tools.length);
-    expect(modelCalls).toHaveLength(entry.tools.length);
-    for (const [index, name] of entry.tools.entries()) {
-      expect(transcriptTools[index]?.tool).toMatch(new RegExp(`${name}$`));
-      expect(modelCalls[index]?.toolName).toMatch(new RegExp(`${name}$`));
-    }
-    const firstPayload = toolPayload(transcriptTools[0]);
-    const statusMatch = rows(firstPayload.matches).find(match => match.kind === "connection_status"
-      && isRecord(match.connectionStatus) && match.connectionStatus.connectionId === world.connection.id);
-    if (!statusMatch || typeof statusMatch.name !== "string") throw new Error("Discovery did not return an exact status capability");
     const expectedConnection = { connectionId: world.connection.id, connectionName: "Notion", state: "needs_connection", actor: "member", action: { type: "connect", surface: "openwork_your_connections" } };
-    if (entry.tools.length === 2) {
-      expect(firstPayload.connectionAction).toBeUndefined();
-      expect(statusMatch.connectionStatus).toMatchObject(expectedConnection);
-      expect(toolPayload(transcriptTools[1])).toMatchObject(expectedConnection);
-    } else {
-      expect(firstPayload.connectionAction).toMatchObject(expectedConnection);
-    }
-    expect((await connector.requests()).filter(request => request.path === "/authorize" || request.path === "/token")).toEqual([]);
-    expect(await connector.toolCalls()).toEqual([]);
-    await user.screenshot();
-  }
+    let statusName = "";
+    let questionRequest: Record<string, unknown> = {};
+    await step("the original task waits behind the iframe controls without exposing native question UI", async () => {
+      for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, world.session.sessionId]) expect(entry.prompt).not.toContain(id);
+      await user.type("composer", entry.prompt, { replace: true, verify: true });
+      await user.press("Enter");
+      const requests = await probe.eventually(pending, {
+        within: 120_000, label: "The host-supported question pauses the original task", until: requests => requests.length === 1,
+      });
+      questionRequest = requests[0];
+      expect(questionRequest.questions).toEqual([connectionActionQuestion]);
+      await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 30_000 });
+      await user.see({ mcpApp, role: "button", label: "Skip" });
+      for (const testId of ["desktop-connection-card", "connection-decision-panel", "question-panel"]) await user.notSee({ testId });
+      expect(await pending()).toEqual(requests);
+      const tools = turnTools(await messages(), entry.prompt);
+      const calls = (await modelCalls()).filter(call => call.kind === "tool");
+      const expectedTools = [...entry.tools, "openwork_context", "question"];
+      expect(tools).toHaveLength(expectedTools.length);
+      expect(calls).toHaveLength(expectedTools.length);
+      for (const [index, name] of expectedTools.entries()) {
+        expect(tools[index]?.tool).toMatch(new RegExp(`${name}$`));
+        expect(calls[index]?.toolName).toMatch(new RegExp(`${name}$`));
+      }
+      expect(record(record(toolPayload(tools[entry.tools.length]).context).features).connectionQuestions).toBe(true);
+      const question = tools.at(-1);
+      expect(record(question?.state)).toMatchObject({ status: "running", input: { questions: [connectionActionQuestion] } });
+      expect(question?.callID).toBe(record(questionRequest.tool).callID);
+      const payload = toolPayload(tools[0]);
+      const match = rows(payload.matches).find(match => match.kind === "connection_status"
+        && isRecord(match.connectionStatus) && match.connectionStatus.connectionId === world.connection.id);
+      if (!match || typeof match.name !== "string") throw new Error("Discovery did not return an exact status capability");
+      statusName = match.name;
+      if (entry.tools.length === 2) {
+        expect(payload.connectionAction).toBeUndefined();
+        expect(match.connectionStatus).toMatchObject(expectedConnection);
+        expect(calls[1]?.arguments).toEqual({ name: statusName });
+        expect(toolPayload(tools[1])).toMatchObject(expectedConnection);
+      } else expect(payload.connectionAction).toMatchObject(expectedConnection);
+      const quietUntil = Date.now() + 3_000;
+      await probe.eventually(async () => {
+        expect(await pending()).toEqual(requests);
+        expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(calls);
+        expect((await modelCalls()).filter(call => call.kind === "final")).toEqual([]);
+        expect(await oauthRequests()).toEqual([]);
+        expect(await connector.toolCalls()).toEqual([]);
+        return Date.now() >= quietUntil;
+      }, { within: 10_000, label: "The actual pending decision waits without a delayed fake success", until: Boolean });
+      await user.screenshot();
+    });
 
-  evidence.recordAssertionEvidence(
-    "One standards-based connection App replaces legacy connection UI",
-    "Ordinary discovery stayed informational. Explicit search and exact status execution each rendered the same v2 App resource, never opened a native question, provider OAuth, legacy card, or provider tool call.",
-    true,
-  );
-});
+    const beforeDecision = await messages();
+    const usersBefore = beforeDecision.filter(message => record(message.info).role === "user");
+    const callsBefore = (await modelCalls()).filter(call => call.kind === "tool");
+    const finalIdsBefore = beforeDecision.filter(message => record(message.info).role === "assistant"
+      && rows(message.parts).some(part => part.type === "text")).map(message => record(message.info).id);
+    await step(`${entry.choice} completes in the actual iframe and agrees with observed connection status`, async () => {
+      const clickedAt = new Date().toISOString();
+      await user.click({ mcpApp, role: "button", label: entry.choice });
+      if (entry.choice === "Authenticate") {
+        const authorization = await connector.authorizeRequestSince(clickedAt, { timeoutMs: 60_000 });
+        expect(authorization.path).toBe("/authorize");
+        expect(authorization.params.get("state")).toBeTruthy();
+      }
+      await user.see({ mcpApp, role: "heading", text: entry.choice === "Skip" ? "Skipped Notion" : "Notion connected" }, { timeoutMs: 120_000 });
+      await user.notSee({ mcpApp, role: "button", label: "Authenticate" });
+      await user.notSee({ mcpApp, role: "button", label: "Skip" });
+      const status = record((await gateway("tools/call", { name: "execute_capability", arguments: { name: statusName } })).result);
+      expect(status.isError).not.toBe(true);
+      expect(status.structuredContent).toMatchObject({ connectionId: world.connection.id, state: entry.choice === "Skip" ? "needs_connection" : "connected" });
+      const oauth = await oauthRequests();
+      if (entry.choice === "Skip") expect(oauth).toEqual([]);
+      else {
+        expect(oauth.filter(request => request.path === "/authorize")).toHaveLength(1);
+        expect(oauth.filter(request => request.path === "/token" && request.grantType === "authorization_code")).toEqual([
+          expect.objectContaining({ status: 200 }),
+        ]);
+      }
+      expect(await connector.toolCalls()).toEqual([]);
+      expect(await pending()).toEqual([]);
+      expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect((await messages()).filter(message => record(message.info).role === "user")).toEqual(usersBefore);
+      for (const text of ["Task interrupted", "MessageAbortedError", "Turn stopped. Nothing retried."]) await user.notSee({ text });
+      await user.screenshot();
+      evidence.recordAssertionEvidence("Iframe decision agrees with Den", JSON.stringify({ choice: entry.choice, status: status.structuredContent, authorizationRequests: oauth.filter(request => request.path === "/authorize").length }), true);
+    });
+
+    await step("the original task receives the actual decision result without another user turn or duplicate model tools", async () => {
+      const answered = turnTools(await messages(), entry.prompt).at(-1);
+      expect(answered?.callID).toBe(record(questionRequest.tool).callID);
+      const answer = record(answered?.state);
+      expect(answer).toMatchObject({ status: "completed", input: { questions: [connectionActionQuestion] } });
+      const output = answer.output;
+      if (typeof output !== "string") throw new Error("The answered connection question has no result");
+      expect(output).toContain(entry.choice);
+      const finished = await probe.eventually(messages, {
+        within: 30_000,
+        label: "The resumed model receives and reports the actual answered question, not a scripted success",
+        until: transcript => transcript.some(message => record(message.info).role === "assistant"
+          && !finalIdsBefore.includes(record(message.info).id)
+          && rows(message.parts).some(part => part.type === "text" && typeof part.text === "string" && part.text.includes(output))),
+      });
+      expect(finished.filter(message => record(message.info).role === "user")).toEqual(usersBefore);
+      const final = finished.findLast(message => record(message.info).role === "assistant"
+        && rows(message.parts).some(part => part.type === "text" && typeof part.text === "string" && part.text.includes(output)));
+      expect(record(final?.info).parentID).toBe(record(usersBefore.at(-1)?.info).id);
+      expect(record(record(final?.info).time).completed).toEqual(expect.any(Number));
+      expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect((await modelCalls()).filter(call => call.kind === "final")).toHaveLength(1);
+      expect((await modelCalls()).filter(call => call.kind === "error")).toEqual([]);
+      for (const message of finished) expect(record(message.info).error).toBeUndefined();
+      await user.see({ text: output });
+      await user.screenshot();
+      evidence.recordAssertionEvidence("The original task continues from the real decision", JSON.stringify({ choice: entry.choice, answer: output, parentId: record(final?.info).parentID, userMessages: usersBefore.length }), true);
+    });
+
+    if (entry.choice === "Authenticate") await step("revoked credentials never inherit the earlier connected result", async () => {
+      await connector.resetOAuth();
+      const rejected = await probe.api(world.den.admin, `/v1/mcp-connections/${encodeURIComponent(world.connection.id)}/tools`);
+      expect(rejected.response.status).toBe(502);
+      expect(rejected.body).toMatchObject({ error: "tool_catalog_failed", diagnostic: { httpStatus: 400 } });
+      const status = record((await gateway("tools/call", { name: "execute_capability", arguments: { name: statusName } })).result);
+      expect(status.isError).not.toBe(true);
+      expect(status.structuredContent).toMatchObject(expectedConnection);
+      expect((await oauthRequests()).filter(request => request.path === "/authorize")).toHaveLength(1);
+      expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect(await pending()).toEqual([]);
+      expect(await connector.toolCalls()).toEqual([]);
+      evidence.recordAssertionEvidence("Revocation does not reuse the prior success", "Exact status returns needs_connection after refresh is rejected; no repeated authorization, model tool, or native question.", true);
+    });
+  });
+}

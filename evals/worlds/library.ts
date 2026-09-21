@@ -962,13 +962,19 @@ async function configureWorkspaceModel(seed: Seed, input: {
     });
     if (patched !== "ok") return patched;
     const reloaded = await request("/workspace/" + encodeURIComponent(workspaceId) + "/engine/reload", { method: "POST" });
-    if (reloaded !== "ok" && !reloaded.includes("opencode_reload_timeout") && !reloaded.includes("opencode_engine_unreachable")) return reloaded;
+    if (reloaded !== "ok") return reloaded;
     if (inputValue2) {
       const reconcile = await request("/workspace/" + encodeURIComponent(workspaceId) + "/mcp/openwork-cloud/reconcile", {
         method: "POST", body: JSON.stringify(inputValue2),
       });
       if (reconcile !== "ok") return reconcile;
     }
+    const health = await fetch("http://127.0.0.1:" + port + "/workspace/" + encodeURIComponent(workspaceId) + "/opencode/global/health", {
+      headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(10_000),
+    });
+    if (!health.ok) return "Engine health failed: " + health.status;
+    const readiness: unknown = await health.json();
+    if (!readiness || typeof readiness !== "object" || !("healthy" in readiness) || readiness.healthy !== true) return "Engine did not report healthy";
     const raw = localStorage.getItem("openwork.preferences");
     let preferences: Record<string, unknown> = {};
     try { preferences = raw ? JSON.parse(raw) : {}; } catch {}
@@ -1006,8 +1012,16 @@ async function reloadConfiguredApp(app: import("@openwork/cdp").Surface): Promis
   throw new Error("The configured desktop control did not return after reload.");
 }
 
-export const connectionActionReply = "Notion authentication finished. The original request continued.";
-export const connectionActionReplySkip = "I continued without Notion and did not retry the connection.";
+export const connectionActionQuestion = {
+  header: "Connection",
+  question: "Connect Notion to continue?",
+  options: [
+    { label: "Authenticate", description: "Connect this account to continue." },
+    { label: "Skip", description: "Continue without this connection." },
+  ],
+  multiple: false,
+  custom: false,
+};
 export const connectionActionSkipPrompt = "I want to connect Notion, but let me skip if I choose.";
 export const connectionStatusSkipPrompt = "Check my Notion connection so I can sign in, but let me skip if I choose.";
 export const ordinaryDiscoveryPrompt = "Create a dashboard using my notes.";
@@ -1034,17 +1048,23 @@ export async function connectionActionMcpApp(seed: Seed) {
       }, ...[connectionActionPrompt, connectionActionSkipPrompt].map((promptMarker): MockAgentWorkload => ({
         promptMarker,
         latestUserTurn: true,
-        finalReply: promptMarker === connectionActionSkipPrompt ? connectionActionReplySkip : connectionActionReply,
+        finalReply: "No connection outcome was observed.",
+        finalReplyFrom: "last-tool-text",
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
+          { tool: "openwork_context", arguments: {} },
+          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), ...[connectionStatusPrompt, connectionStatusSkipPrompt].map((promptMarker): MockAgentWorkload => ({
         promptMarker,
         latestUserTurn: true,
-        finalReply: promptMarker === connectionStatusSkipPrompt ? connectionActionReplySkip : connectionActionReply,
+        finalReply: "No connection outcome was observed.",
+        finalReplyFrom: "last-tool-text",
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
+          { tool: "openwork_context", arguments: {} },
+          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), {
         promptMarker: connectorCatalogPrompt,
@@ -1080,16 +1100,7 @@ export async function connectionActionMcpApp(seed: Seed) {
     fixtureUrl: den.mocks.connector.url, denApiUrl: den.ref.apiUrl, mcpToken, appHostToken,
   });
   await reloadConfiguredApp(app);
-  async function seedSessionWhenReady(attempts: number): Promise<Awaited<ReturnType<typeof seed.session>>> {
-    try { return await seed.session(app); }
-    catch (error) {
-      if (attempts <= 1) throw error;
-      await reloadConfiguredApp(app);
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      return seedSessionWhenReady(attempts - 1);
-    }
-  }
-  const session = await seedSessionWhenReady(3);
+  const session = await seed.session(app);
   return { app, den, connection, organizationId, workspace, session, mcpSession: { ...den.admin, token: mcpToken }, appHostSession: { ...den.admin, token: appHostToken } };
 }
 
