@@ -32,15 +32,23 @@ after    → what they now see; screenshot at that moment
 boundary → who else is affected, and the negative half: who is not
 ```
 
+Step names are copied verbatim into the PR body's Evidence section (see
+`open-a-pr`) and rendered as-is in the report, so name them for the reviewer:
+
+- The step that shows the old state starts with `before:`.
+- The step that shows the new state starts with `after:`.
+- Every other step is a plain claim a non-engineer could confirm from the
+  screenshot. No verbs like "assert", no selectors, no internal names.
+
 Example title and steps:
 
 ```ts
 test("an owner enables Code Mode and a teammate turns one chat into a shared Workflow", async ({ user, probe, step }) => {
-  await step("before: the teammate's agent has no script tool", …);      // screenshot
-  await step("the owner enables Code Mode with one switch", …);           // screenshot
-  await step("the teammate's request now runs as one script", …);        // screenshot
-  await step("the result is saved as a Workflow the team can open", …);  // screenshot
-  await step("a member outside the team cannot see it", …);              // screenshot
+  await step("before: the teammate's agent has no script tool", …);        // screenshot
+  await step("the owner enables Code Mode with one switch", …);             // screenshot
+  await step("after: the teammate's request runs as one script", …);        // screenshot
+  await step("the result is saved as a Workflow the team can open", …);    // screenshot
+  await step("a member outside the team cannot see it", …);                // screenshot
 });
 ```
 
@@ -111,6 +119,8 @@ placeholder, or test id. Bound every wait; declare external requirements in
   ```
 
   If the screenshots would not convince you, they will not convince the reviewer.
+  Read the step line in `index.html` as if it were the PR's Evidence section: it
+  should tell the before → after story on its own.
 - In CI the spec runs on `PR change proof`, one job per spec; the trusted
   publisher aggregates every changed spec's records into one report. Failed,
   skipped, and cancelled runs stay visible as such; nothing substitutes for them.

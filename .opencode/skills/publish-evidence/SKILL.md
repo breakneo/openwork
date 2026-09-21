@@ -64,6 +64,14 @@ publication is not a required CI check or a release dependency.
   useful evidence and can be published.
 - Single-run legacy publication remains available without the review app.
 
+## Update the PR body
+
+Publishing is not finished until the PR's `## Evidence` section matches the
+sticky comment: report link, verdict, head SHA, and one line per spec step
+copied verbatim (`before: …`, `after: …`). Follow `open-a-pr`; do not add
+suite counts, CI matrices, or caveats the publisher already carries. A body
+that still says "pending" on a head with published evidence is stale.
+
 ## Stacked PRs
 
 - Inspect `gh pr view <n> --json baseRefName,headRefName,headRefOid` before
