@@ -95,7 +95,7 @@ import {
 } from "./workspace-export-safety.js";
 import { serve, type ServeResult } from "./serve-node.js";
 import { serveStaticUi } from "./static-ui.js";
-import { externalFetch, loopbackFetch } from "./server-fetch.js";
+import { externalFetch, loopbackFetch, transferResponseBody } from "./server-fetch.js";
 import { registerCoreRoutes } from "./routes/core.js";
 import { registerFileRoutes } from "./routes/files.js";
 import { registerOperationRoutes } from "./routes/operations.js";
@@ -858,6 +858,10 @@ export async function startServer(
         if (typeof cause === "string") errorCause = cause;
       };
 
+      const recordUnhandledErrorCause = (error: unknown) => {
+        errorCause = error instanceof Error ? error.message : String(error);
+      };
+
       const finalize = (response: Response) => {
         const wrapped = withCors(response, request, config);
         if (config.logRequests) {
@@ -908,6 +912,7 @@ export async function startServer(
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
+            recordUnhandledErrorCause(error);
             captureServerException(error, { method: request.method, route: "/workspace/:id/opencode/*", requestSignal: request.signal });
           }
           const apiError = error instanceof ApiError
@@ -959,6 +964,7 @@ export async function startServer(
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
+            recordUnhandledErrorCause(error);
             captureServerException(error, { method: request.method, route: "/workspace/:id/opencode2/*", requestSignal: request.signal });
           }
           const apiError = error instanceof ApiError
@@ -1028,6 +1034,7 @@ export async function startServer(
         } catch (error) {
           const requestCanceled = isExpectedRequestCancellation(error, request.signal);
           if (!(error instanceof ApiError) && !requestCanceled) {
+            recordUnhandledErrorCause(error);
             captureServerException(error, { method: request.method, route: "/opencode/*", requestSignal: request.signal });
           }
           const apiError = error instanceof ApiError
@@ -2073,7 +2080,7 @@ function sanitizeProxyResponse(response: Response): Response {
   headers.delete("content-encoding");
   headers.delete("transfer-encoding");
   headers.delete("content-length");
-  return new Response(response.body, {
+  return new Response(transferResponseBody(response), {
     status: response.status,
     statusText: response.statusText,
     headers,
@@ -2108,7 +2115,11 @@ function withCors(response: Response, request: Request, config: ServerConfig) {
   const exposed = headers.get("Access-Control-Expose-Headers");
   headers.set("Access-Control-Expose-Headers", [exposed, "X-Next-Cursor", "Link"].filter(Boolean).join(", "));
   headers.set("Vary", "Origin");
-  return new Response(response.body, { status: response.status, headers });
+  return new Response(transferResponseBody(response), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 async function requireClient(request: Request, config: ServerConfig, tokens: TokenService): Promise<Actor> {
