@@ -229,10 +229,11 @@ function validateAgentWorkloads(value) {
     }
     const finalReplyInitiallyReleasedChunks = workload.finalReplyInitiallyReleasedChunks === undefined
       ? null : workload.finalReplyInitiallyReleasedChunks;
-    if (finalReplyInitiallyReleasedChunks !== null && (finalReplyChunks === null
-      || !Number.isInteger(finalReplyInitiallyReleasedChunks) || finalReplyInitiallyReleasedChunks < 1
-      || finalReplyInitiallyReleasedChunks > finalReplyChunks.length || workload.finalReplyFrom !== undefined)) {
-      throw new Error(`agent workload ${promptMarker} gated replies require exact static chunks and a valid initial release count`);
+    const gatedChunkCount = finalReplyChunks === null ? 1 : finalReplyChunks.length;
+    if (finalReplyInitiallyReleasedChunks !== null && (!Number.isInteger(finalReplyInitiallyReleasedChunks)
+      || finalReplyInitiallyReleasedChunks < 0 || finalReplyInitiallyReleasedChunks > gatedChunkCount
+      || workload.finalReplyFrom !== undefined)) {
+      throw new Error(`agent workload ${promptMarker} gated replies require a valid initial release count`);
     }
     if (workload.finalReasoning !== undefined && typeof workload.finalReasoning !== "string") {
       throw new Error(`agent workload ${promptMarker} finalReasoning must be a string`);
@@ -330,15 +331,19 @@ function waitForAgentReplyRelease(gate) {
     const finish = (released) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
       const index = gate.waiters.indexOf(finish);
       if (index >= 0) gate.waiters.splice(index, 1);
       resolve(released);
     };
-    const timer = setTimeout(() => {
-      gate.timedOut = true;
-      finish(false);
-    }, AGENT_REPLY_GATE_TIMEOUT_MS);
+    // A 0-chunk hold is the pause surface for a later human decision; do not
+    // invent a timeout that would look like a model error mid-proof.
+    const timer = gate.releasedChunks === 0 && gate.deliveredChunks === 0
+      ? null
+      : setTimeout(() => {
+        gate.timedOut = true;
+        finish(false);
+      }, AGENT_REPLY_GATE_TIMEOUT_MS);
     gate.waiters.push(finish);
   });
 }
@@ -600,14 +605,27 @@ async function handleAgentCompletion(req, res, entry) {
   }
   if (completedTools >= workload.steps.length) {
     if (workload.finalReplyDelayMs) await new Promise(resolve => setTimeout(resolve, workload.finalReplyDelayMs));
-    entry.agentCompletion = { ...baseRequest, kind: "final", promptMarker: workload.promptMarker, toolName: null, arguments: {} };
     const finalReply = workload.finalReplyFrom === "last-tool-text" ? lastToolText(scopedMessages)
       : workload.finalReplyFrom === "system-text" ? messages
         .filter((message) => message.role === "system" || message.role === "developer")
         .map(agentContentText).join("\n") || "No system instructions"
       : workload.finalReply;
+    const holdEntireReply = workload.finalReplyInitiallyReleasedChunks === 0;
+    if (!holdEntireReply) {
+      entry.agentCompletion = { ...baseRequest, kind: "final", promptMarker: workload.promptMarker, toolName: null, arguments: {} };
+    }
     if (workload.finalReplyInitiallyReleasedChunks !== null) {
       await gatedAgentStream(res, model, workload, finalReply);
+      if (holdEntireReply) {
+        const gate = agentReplyGates.get(workload.promptMarker);
+        entry.agentCompletion = {
+          ...baseRequest,
+          kind: gate?.complete ? "final" : "error",
+          promptMarker: workload.promptMarker,
+          toolName: null,
+          arguments: {},
+        };
+      }
     } else {
       agentStream(res, model, [
         agentChunk(model, { role: "assistant" }),

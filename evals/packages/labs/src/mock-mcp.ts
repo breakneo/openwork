@@ -54,7 +54,7 @@ export interface MockAgentWorkload {
   finalReplyChunkSize?: number;
   /** Exact content-delta boundaries. Their concatenation must equal finalReply. */
   finalReplyChunks?: string[];
-  /** Initially release this many exact chunks, then wait for releaseAgentReply(). */
+  /** Initially release this many exact chunks, then wait for releaseAgentReply(). 0 holds the whole reply. */
   finalReplyInitiallyReleasedChunks?: number;
   /** Hold the final response before sending headers, to exercise loading transitions. */
   finalReplyDelayMs?: number;
