@@ -67,6 +67,67 @@ moments. A spec whose assertions are RPC responses collected in the world and
 compared in one block is a mechanism check, not a proof. It is still allowed;
 it just tells the reviewer nothing.
 
+## Same story in three places
+
+The spec, the report, and the PR body tell one story in the same words. Write
+the report you want to read first, then make the code produce those lines.
+A bug fix with no screen still gets this shape; the "screenshot" is one
+`recordAssertionEvidence` line per step whose `evidence` is the observed fact.
+
+Report the reviewer reads (every line comes from the spec):
+
+```
+▶ a member's conversation stays readable while OpenWork is still checking who owns it
+  ✔ given an engine where the ownership check is slow and the messages read is fast
+      GET /session/:id answers in 150 ms; GET /session/:id/message in 2 ms
+  ✔ when the member opens the conversation and memory is reclaimed mid-check
+      three reads sent as the app sends them; gc() ran three times
+  ✔ then the runtime really reclaimed the engine's response
+      WeakRef → undefined  (witness; without it a pass means "nothing happened")
+  ✔ after: all three reads return the conversation, none say internal_error
+      200 / 200 / 200; body {"id":"ses_x", …}
+```
+
+Spec that produces it:
+
+```ts
+test("a member's conversation stays readable while OpenWork is still checking who owns it", async ({ world, step, evidence }) => {
+  await step("given an engine where the ownership check is slow and the messages read is fast", async () => {
+    evidence.recordAssertionEvidence("engine timings", `GET /session/:id ${world.ownershipMs} ms; GET /session/:id/message ${world.messagesMs} ms`, true);
+  });
+  await step("when the member opens the conversation and memory is reclaimed mid-check", async () => { /* act; gc(); */ });
+  await step("then the runtime really reclaimed the engine's response", async () => {
+    const collected = world.engineResponse.deref() === undefined;
+    evidence.recordAssertionEvidence("engine response reclaimed", collected ? "WeakRef → undefined" : "WeakRef still alive: window not exercised", collected);
+    expect(collected).toBe(true);
+  });
+  await step("after: all three reads return the conversation, none say internal_error", async () => {
+    evidence.recordAssertionEvidence("reads", `${statuses.join(" / ")}; body ${body.slice(0, 40)}`, statuses.every((s) => s === 200));
+    expect(bodies.join()).not.toContain("internal_error");
+  });
+});
+```
+
+PR body line that names it (`open-a-pr`):
+
+```markdown
+## Evidence
+`evals/specs/conversation-stays-readable.e2e.test.ts` — before: the read fails
+with "Response body object should not be disturbed or locked"; after: all
+three reads return the conversation and the reclaim witness is true.
+```
+
+Rules that make this parseable:
+
+- Step names are `given / when / then / after:` (or `before: / after:` with
+  screenshots). One clause each, the person's words, no function names.
+- Every step records exactly one evidence line: the observed fact, with the
+  numbers in it. The reviewer never opens the code to learn what happened.
+- A **witness** step proves the risky condition actually occurred. If it did
+  not, that step fails; a pass without the witness is not a proof.
+- The quoted "before:" string in the PR body is the exact error the user or
+  Sentry saw. CI shows it red on `dev` and green on the head; never narrate it.
+
 Rules of thumb:
 
 - At least three steps. Zero steps renders as "no claims declared".
