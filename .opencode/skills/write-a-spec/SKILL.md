@@ -32,13 +32,19 @@ after    → what they now see; screenshot at that moment
 boundary → who else is affected, and the negative half: who is not
 ```
 
-Step names are copied verbatim into the PR body's Evidence section (see
-`open-a-pr`) and rendered as-is in the report, so name them for the reviewer:
+The review app is generated from the spec. It shows exactly four strings, and
+each comes from one place in your code; write those strings for the reviewer:
 
-- The step that shows the old state starts with `before:`.
-- The step that shows the new state starts with `after:`.
-- Every other step is a plain claim a non-engineer could confirm from the
-  screenshot. No verbs like "assert", no selectors, no internal names.
+| Reviewer sees | Comes from | Rule |
+| --- | --- | --- |
+| Section heading | the `test("…")` title | names the persona and what they can now do |
+| Caption under a screenshot | the `step("…")` the `user.screenshot()` ran inside | the old state starts `before:`, the new state `after:`; otherwise a plain claim |
+| Caption + judgment on a `looks()` image | the first expectation in `user.looks([...])` | judged later; pending until then, so CI proof stays `Incomplete` |
+| Assertion line | `recordAssertionEvidence(claim, evidence, ok)` | `claim` is the caption, `evidence` the text under it |
+
+A screenshot taken outside any `step()` is captioned "<title> artifact N",
+which tells the reviewer nothing. No verbs like "assert", no selectors, no
+internal names anywhere in those strings.
 
 Example title and steps:
 
@@ -119,8 +125,8 @@ placeholder, or test id. Bound every wait; declare external requirements in
   ```
 
   If the screenshots would not convince you, they will not convince the reviewer.
-  Read the step line in `index.html` as if it were the PR's Evidence section: it
-  should tell the before → after story on its own.
+  Read the captions in `index.html` top to bottom: they should tell the
+  before → after story on their own.
 - In CI the spec runs on `PR change proof`, one job per spec; the trusted
   publisher aggregates every changed spec's records into one report. Failed,
   skipped, and cancelled runs stay visible as such; nothing substitutes for them.

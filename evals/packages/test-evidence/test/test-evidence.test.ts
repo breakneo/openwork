@@ -108,6 +108,30 @@ test("test evidence writes visual validations, assertions, failures, and unvalid
   }
 });
 
+test("a screenshot captioned with its step name reads as that step in the record and on disk", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "openwork-test-evidence-step-caption-"));
+  try {
+    const testEvidence = createTestEvidence({ name: "toolbar", outDir: dir });
+    testEvidence.recordScreenshot(screenshotArtifact("old toolbar"), { caption: "before: the toolbar shows Suspend" });
+    testEvidence.recordScreenshot(screenshotArtifact("new toolbar"), { caption: "after: Suspend is gone" });
+    testEvidence.recordScreenshot(screenshotArtifact("blank"), { caption: "   " });
+    testEvidence.recordScreenshot(screenshotArtifact("uncaptioned"));
+    await testEvidence.close();
+
+    const testRun = await payload(dir);
+    assert.ok(Array.isArray(testRun.artifacts));
+    assert.deepEqual(
+      testRun.artifacts.map((artifact) => isRecord(artifact) ? artifact.caption : null),
+      ["before: the toolbar shows Suspend", "after: Suspend is gone", "toolbar artifact 3", "toolbar artifact 4"],
+    );
+    await stat(join(dir, "01-before-the-toolbar-shows-suspend.png"));
+    await stat(join(dir, "02-after-suspend-is-gone.png"));
+    await stat(join(dir, "03-toolbar-artifact-3.png"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("test evidence writes a JSON artifact and lists it in the test run", async () => {
   const dir = await mkdtemp(join(tmpdir(), "openwork-test-evidence-json-"));
   try {

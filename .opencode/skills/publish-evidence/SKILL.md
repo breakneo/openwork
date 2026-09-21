@@ -27,6 +27,10 @@ never reruns a test.
   If a claim has no inspectable evidence, report the PR `Incomplete`.
 - Write the `<!-- test-evidence -->` marker. The publisher recognizes old sticky
   markers only to update comments created before the migration.
+- The report's headings and captions come straight from the spec (title, step
+  names, `looks()` expectations, assertion claims; see `write-a-spec`). If the
+  report is hard to read, fix the spec and rerun; never annotate it by hand in
+  the PR body.
 
 ## Publish the PR head
 
@@ -63,14 +67,6 @@ publication is not a required CI check or a release dependency.
   verdict from recorded results and gaps. Failed and incomplete reports are
   useful evidence and can be published.
 - Single-run legacy publication remains available without the review app.
-
-## Update the PR body
-
-Publishing is not finished until the PR's `## Evidence` section matches the
-sticky comment: report link, verdict, head SHA, and one line per spec step
-copied verbatim (`before: …`, `after: …`). Follow `open-a-pr`; do not add
-suite counts, CI matrices, or caveats the publisher already carries. A body
-that still says "pending" on a head with published evidence is stale.
 
 ## Stacked PRs
 
