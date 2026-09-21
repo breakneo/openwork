@@ -267,10 +267,10 @@ test("live browser setup detects Chrome, installs via Google's signed apt reposi
   const live = workflow.split("\n  live-proof:\n")[1];
   assert.match(live, /apt-get install -y xvfb x11-utils libgtk-3-0 libnss3 libasound2t64 libgbm1/);
   assert.equal(live.match(/command -v google-chrome \|\| command -v chromium \|\| command -v chromium-browser/g)?.length, 2);
-  assert.match(live, /if \[ -z "\$chrome" \]; then[\s\S]*https:\/\/dl.google.com\/linux\/linux_signing_key.pub/);
+  assert.match(live, /if \[ -z "\$chrome" \]; then[\s\S]*https:\/\/dl\.google\.com\/linux\/linux_signing_key.pub/);
   assert.match(live, /gpg --batch --yes --dearmor/);
   assert.match(live, /signed-by=\/usr\/share\/keyrings\/openwork-google-chrome.gpg/);
-  assert.match(live, /https:\/\/dl.google.com\/linux\/chrome\/deb\//);
+  assert.match(live, /https:\/\/dl\.google\.com\/linux\/chrome\/deb\//);
   assert.match(live, /apt-get install -y google-chrome-stable/);
   assert.match(live, /Repair the runner browser installation and rerun this job/);
   assert.match(live, /"\$chrome" --version/);
