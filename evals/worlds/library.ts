@@ -1034,8 +1034,8 @@ export const connectionActionQuestion = {
   multiple: false,
   custom: false,
 };
-export const connectionActionSkipPrompt = "I want to connect Notion, but let me skip if I choose.";
-export const connectionStatusSkipPrompt = "Check my Notion connection so I can sign in, but let me skip if I choose.";
+export const connectionActionSkipPrompt = "Skip Notion setup if I choose.";
+export const connectionStatusSkipPrompt = "Recheck Notion sign-in and skip if I choose.";
 export const ordinaryDiscoveryPrompt = "Create a dashboard using my notes.";
 export const ordinaryDiscoveryReply = "I found the available capabilities for the dashboard.";
 export const connectionActionPrompt = "I want to connect Notion.";

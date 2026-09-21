@@ -49,27 +49,29 @@ function turnTools(messages: Record<string, unknown>[], prompt: string) {
   return messages.slice(start + 1).flatMap(message => rows(message.parts)).filter(part => part.type === "tool");
 }
 
-for (const entry of [
+const journeys = [
   { prompt: connectionActionPrompt, choice: "Authenticate", tools: ["search_capabilities"] },
   { prompt: connectionActionSkipPrompt, choice: "Skip", tools: ["search_capabilities"] },
   { prompt: connectionStatusPrompt, choice: "Authenticate", tools: ["search_capabilities", "execute_capability"] },
   { prompt: connectionStatusSkipPrompt, choice: "Skip", tools: ["search_capabilities", "execute_capability"] },
-]) {
-  test(`a member chooses ${entry.choice} in the v2 App after ${entry.tools.join(" then ")} and continues the original task`, async ({ world, user, probe, evidence, step }) => {
-    const connector = world.den.mocks.connector;
-    const mount = `/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
-    const sessionPath = `${mount}/session/${encodeURIComponent(world.session.sessionId)}`;
-    const messages = async () => {
-      const response = await probe.desktopApi(`${sessionPath}/message`);
+];
+
+test("a member can Authenticate or Skip in the v2 App and continue the original task", async ({ world, agent, user, probe, evidence, step }) => {
+  const connector = world.den.mocks.connector;
+  const mount = `/workspace/${encodeURIComponent(world.workspace.workspaceId)}/opencode`;
+  let sessionId = world.session.sessionId;
+  const sessionPath = () => `${mount}/session/${encodeURIComponent(sessionId)}`;
+  const messages = async () => {
+      const response = await probe.desktopApi(`${sessionPath()}/message`);
       expect(response.status).toBe(200);
       return rows(response.body);
     };
     const pending = async () => {
       const response = await probe.desktopApi(`${mount}/question`);
       expect(response.status).toBe(200);
-      return rows(response.body).filter(request => request.sessionID === world.session.sessionId);
+      return rows(response.body).filter(request => request.sessionID === sessionId);
     };
-    const modelCalls = () => connector.agentRequests({ promptMarker: entry.prompt });
+    const modelCalls = (prompt: string) => connector.agentRequests({ promptMarker: prompt });
     const oauthRequests = async () => (await connector.requests()).filter(request => request.path === "/authorize" || request.path === "/token");
     let requestId = 0;
     async function gateway(method: string, params: Record<string, unknown> = {}) {
@@ -124,10 +126,14 @@ for (const entry of [
     });
 
     const expectedConnection = { connectionId: world.connection.id, connectionName: "Notion", state: "needs_connection", actor: "member", action: { type: "connect", surface: "openwork_your_connections" } };
+
+    for (const [index, entry] of journeys.entries()) {
+    if (index > 0) sessionId = await agent.createSession(`Connection decision ${index + 1}`);
     let statusName = "";
     let questionRequest: Record<string, unknown> = {};
-    await step("the original task waits behind the iframe controls without exposing native question UI", async () => {
-      for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, world.session.sessionId]) expect(entry.prompt).not.toContain(id);
+    const oauthBefore = await oauthRequests();
+    await step(`after ${entry.tools.join(" then ")}, ${entry.choice} waits behind the iframe without native question UI`, async () => {
+      for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, sessionId]) expect(entry.prompt).not.toContain(id);
       await user.type("composer", entry.prompt, { replace: true, verify: true });
       await user.press("Enter");
       const requests = await probe.eventually(pending, {
@@ -140,7 +146,7 @@ for (const entry of [
       for (const testId of ["desktop-connection-card", "connection-decision-panel", "question-panel"]) await user.notSee({ testId });
       expect(await pending()).toEqual(requests);
       const tools = turnTools(await messages(), entry.prompt);
-      const calls = (await modelCalls()).filter(call => call.kind === "tool");
+      const calls = (await modelCalls(entry.prompt)).filter(call => call.kind === "tool");
       const expectedTools = [...entry.tools, "openwork_context", "question"];
       expect(tools).toHaveLength(expectedTools.length);
       expect(calls).toHaveLength(expectedTools.length);
@@ -166,9 +172,9 @@ for (const entry of [
       const quietUntil = Date.now() + 3_000;
       await probe.eventually(async () => {
         expect(await pending()).toEqual(requests);
-        expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(calls);
-        expect((await modelCalls()).filter(call => call.kind === "final")).toEqual([]);
-        expect(await oauthRequests()).toEqual([]);
+        expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(calls);
+        expect((await modelCalls(entry.prompt)).filter(call => call.kind === "final")).toEqual([]);
+        expect(await oauthRequests()).toEqual(oauthBefore);
         expect(await connector.toolCalls()).toEqual([]);
         return Date.now() >= quietUntil;
       }, { within: 10_000, label: "The actual pending decision waits without a delayed fake success", until: Boolean });
@@ -177,7 +183,7 @@ for (const entry of [
 
     const beforeDecision = await messages();
     const usersBefore = beforeDecision.filter(message => record(message.info).role === "user");
-    const callsBefore = (await modelCalls()).filter(call => call.kind === "tool");
+    const callsBefore = (await modelCalls(entry.prompt)).filter(call => call.kind === "tool");
     const finalIdsBefore = beforeDecision.filter(message => record(message.info).role === "assistant"
       && rows(message.parts).some(part => part.type === "text")).map(message => record(message.info).id);
     await step(`${entry.choice} completes in the actual iframe and agrees with observed connection status`, async () => {
@@ -194,7 +200,7 @@ for (const entry of [
       const status = record((await gateway("tools/call", { name: "execute_capability", arguments: { name: statusName } })).result);
       expect(status.isError).not.toBe(true);
       expect(status.structuredContent).toMatchObject({ connectionId: world.connection.id, state: entry.choice === "Skip" ? "needs_connection" : "connected" });
-      const oauth = await oauthRequests();
+      const oauth = (await oauthRequests()).slice(oauthBefore.length);
       if (entry.choice === "Skip") expect(oauth).toEqual([]);
       else {
         expect(oauth.filter(request => request.path === "/authorize")).toHaveLength(1);
@@ -204,7 +210,7 @@ for (const entry of [
       }
       expect(await connector.toolCalls()).toEqual([]);
       expect(await pending()).toEqual([]);
-      expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(callsBefore);
       expect((await messages()).filter(message => record(message.info).role === "user")).toEqual(usersBefore);
       for (const text of ["Task interrupted", "MessageAbortedError", "Turn stopped. Nothing retried."]) await user.notSee({ text });
       await user.screenshot();
@@ -231,9 +237,9 @@ for (const entry of [
         && rows(message.parts).some(part => part.type === "text" && typeof part.text === "string" && part.text.includes(output)));
       expect(record(final?.info).parentID).toBe(record(usersBefore.at(-1)?.info).id);
       expect(record(record(final?.info).time).completed).toEqual(expect.any(Number));
-      expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(callsBefore);
-      expect((await modelCalls()).filter(call => call.kind === "final")).toHaveLength(1);
-      expect((await modelCalls()).filter(call => call.kind === "error")).toEqual([]);
+      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "final")).toHaveLength(1);
+      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "error")).toEqual([]);
       for (const message of finished) expect(record(message.info).error).toBeUndefined();
       await user.see({ text: output });
       await user.screenshot();
@@ -248,11 +254,11 @@ for (const entry of [
       const status = record((await gateway("tools/call", { name: "execute_capability", arguments: { name: statusName } })).result);
       expect(status.isError).not.toBe(true);
       expect(status.structuredContent).toMatchObject(expectedConnection);
-      expect((await oauthRequests()).filter(request => request.path === "/authorize")).toHaveLength(1);
-      expect((await modelCalls()).filter(call => call.kind === "tool")).toEqual(callsBefore);
+      expect((await oauthRequests()).slice(oauthBefore.length).filter(request => request.path === "/authorize")).toHaveLength(1);
+      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(callsBefore);
       expect(await pending()).toEqual([]);
       expect(await connector.toolCalls()).toEqual([]);
       evidence.recordAssertionEvidence("Revocation does not reuse the prior success", "Exact status returns needs_connection after refresh is rejected; no repeated authorization, model tool, or native question.", true);
     });
-  });
-}
+    }
+});
