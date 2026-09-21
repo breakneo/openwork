@@ -4,21 +4,20 @@ import { allConnectorsPrompt, allConnectorsReply, connectorCatalogDiscovery, con
 
 const test = spec.world(connectorCatalogDiscovery, {
   timeout: 600_000,
-  scope: "file",
   resources: { surfaces: ["desktop", "web"], services: ["den", "mock"], nativeReason: "The catalog Chat link must reach the desktop OS deep-link listener without sending a message." },
 });
 
-for (const request of [
-  { prompt: connectorCatalogPrompt, reply: connectorCatalogReply, query: "Slack" },
-  { prompt: allConnectorsPrompt, reply: allConnectorsReply, query: "quick add connectors" },
-]) {
-  test(`${request.query}: a member gets setup links without starting OAuth or creating connections`, async ({ world, seed, agent, user, probe, evidence, step }) => {
-    const appUser = user.on(world.app);
-    const appProbe = probe.on(world.app);
-    const webUser = user.on(world.web);
-    const beforeRequests = await probe.api(world.den.admin, "/v1/mcp-connections?scope=manageable");
-    expect(beforeRequests.response.ok).toBe(true);
+test("a member gets setup links without starting OAuth or creating connections", async ({ world, seed, agent, user, probe, evidence, step }) => {
+  const appUser = user.on(world.app);
+  const appProbe = probe.on(world.app);
+  const webUser = user.on(world.web);
+  const beforeRequests = await probe.api(world.den.admin, "/v1/mcp-connections?scope=manageable");
+  expect(beforeRequests.response.ok).toBe(true);
 
+  for (const request of [
+    { prompt: connectorCatalogPrompt, reply: connectorCatalogReply, query: "Slack" },
+    { prompt: allConnectorsPrompt, reply: allConnectorsReply, query: "quick add connectors" },
+  ]) {
     await step(`${request.query} returns an ordinary result without a catalog card`, async () => {
       expect(request.prompt).not.toContain(world.connection.id);
       await agent.on(world.app).send(request.prompt);
@@ -45,6 +44,7 @@ for (const request of [
       expect((await probe.api(world.den.admin, "/v1/mcp-connections?scope=manageable")).body).toEqual(beforeRequests.body);
       evidence.recordAssertionEvidence("Setup discovery uses an ordinary tool line without connecting or opening a catalog", `${request.query} returned legacy connector metadata and setup URLs in technical details without modern catalog UI; one search, no provider calls, no OAuth, and no connection mutation.`, true);
     });
+  }
 
     await step("unconfigured catalog and detail Chat links seed a draft without sending or connecting", async () => {
       const webProbe = probe.on(world.web);
@@ -85,5 +85,4 @@ for (const request of [
       expect(await probe.toolCalls(world.den.mocks.connector)).toEqual([]);
       await appUser.screenshot();
     });
-  });
-}
+});

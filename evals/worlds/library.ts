@@ -1061,20 +1061,18 @@ export async function connectionActionMcpApp(seed: Seed) {
         promptMarker,
         latestUserTurn: true,
         finalReply: "No connection outcome was observed.",
-        finalReplyFrom: "last-tool-text",
+        finalReplyInitiallyReleasedChunks: 0,
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", intent: "connect" } },
-          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), ...[connectionStatusPrompt, connectionStatusSkipPrompt].map((promptMarker): MockAgentWorkload => ({
         promptMarker,
         latestUserTurn: true,
         finalReply: "No connection outcome was observed.",
-        finalReplyFrom: "last-tool-text",
+        finalReplyInitiallyReleasedChunks: 0,
         steps: [
           { tool: "search_capabilities", arguments: { query: "Notion", type: "mcp", limit: 1 } },
           { tool: "execute_capability", arguments: {}, argumentsFrom: "capability-search" },
-          { tool: "question", arguments: { questions: [connectionActionQuestion] } },
         ],
       })), {
         promptMarker: connectorCatalogPrompt,

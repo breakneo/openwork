@@ -3,7 +3,6 @@ import { spec } from "@openwork/testkit";
 import {
   connectionActionMcpApp,
   connectionActionPrompt,
-  connectionActionQuestion,
   connectionActionSkipPrompt,
   connectionStatusPrompt,
   connectionStatusSkipPrompt,
@@ -130,33 +129,23 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
     for (const [index, entry] of journeys.entries()) {
     if (index > 0) sessionId = await agent.createSession(`Connection decision ${index + 1}`);
     let statusName = "";
-    let questionRequest: Record<string, unknown> = {};
     const oauthBefore = await oauthRequests();
     await step(`after ${entry.tools.join(" then ")}, ${entry.choice} waits behind the iframe without native question UI`, async () => {
       for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, sessionId]) expect(entry.prompt).not.toContain(id);
       await user.type("composer", entry.prompt, { replace: true, verify: true });
       await user.press("Enter");
-      const requests = await probe.eventually(pending, {
-        within: 120_000, label: "The host-supported question pauses the original task", until: requests => requests.length === 1,
-      });
-      questionRequest = requests[0];
-      expect(questionRequest.questions).toEqual([connectionActionQuestion]);
-      await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 30_000 });
+      await user.see({ mcpApp, role: "button", label: "Authenticate" }, { timeoutMs: 120_000 });
       await user.see({ mcpApp, role: "button", label: "Skip" });
       for (const testId of ["desktop-connection-card", "connection-decision-panel", "question-panel"]) await user.notSee({ testId });
-      expect(await pending()).toEqual(requests);
+      expect(await pending()).toEqual([]);
       const tools = turnTools(await messages(), entry.prompt);
       const calls = (await modelCalls(entry.prompt)).filter(call => call.kind === "tool");
-      const expectedTools = [...entry.tools, "question"];
-      expect(tools).toHaveLength(expectedTools.length);
-      expect(calls).toHaveLength(expectedTools.length);
-      for (const [index, name] of expectedTools.entries()) {
+      expect(tools).toHaveLength(entry.tools.length);
+      expect(calls).toHaveLength(entry.tools.length);
+      for (const [index, name] of entry.tools.entries()) {
         expect(tools[index]?.tool).toMatch(new RegExp(`${name}$`));
         expect(calls[index]?.toolName).toMatch(new RegExp(`${name}$`));
       }
-      const question = tools.at(-1);
-      expect(record(question?.state)).toMatchObject({ status: "running", input: { questions: [connectionActionQuestion] } });
-      expect(question?.callID).toBe(record(questionRequest.tool).callID);
       const payload = toolPayload(tools[0]);
       const match = rows(payload.matches).find(match => match.kind === "connection_status"
         && isRecord(match.connectionStatus) && match.connectionStatus.connectionId === world.connection.id);
@@ -170,7 +159,7 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       } else expect(payload.connectionAction).toMatchObject(expectedConnection);
       const quietUntil = Date.now() + 3_000;
       await probe.eventually(async () => {
-        expect(await pending()).toEqual(requests);
+        expect(await pending()).toEqual([]);
         expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(calls);
         expect((await modelCalls(entry.prompt)).filter(call => call.kind === "final")).toEqual([]);
         expect(await oauthRequests()).toEqual(oauthBefore);
@@ -183,8 +172,6 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
     const beforeDecision = await messages();
     const usersBefore = beforeDecision.filter(message => record(message.info).role === "user");
     const callsBefore = (await modelCalls(entry.prompt)).filter(call => call.kind === "tool");
-    const finalIdsBefore = beforeDecision.filter(message => record(message.info).role === "assistant"
-      && rows(message.parts).some(part => part.type === "text")).map(message => record(message.info).id);
     await step(`${entry.choice} completes in the actual iframe and agrees with observed connection status`, async () => {
       const clickedAt = new Date().toISOString();
       await user.click({ mcpApp, role: "button", label: entry.choice });
@@ -216,33 +203,16 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
       evidence.recordAssertionEvidence("Iframe decision agrees with Den", JSON.stringify({ choice: entry.choice, status: status.structuredContent, authorizationRequests: oauth.filter(request => request.path === "/authorize").length }), true);
     });
 
-    await step("the original task receives the actual decision result without another user turn or duplicate model tools", async () => {
-      const answered = turnTools(await messages(), entry.prompt).at(-1);
-      expect(answered?.callID).toBe(record(questionRequest.tool).callID);
-      const answer = record(answered?.state);
-      expect(answer).toMatchObject({ status: "completed", input: { questions: [connectionActionQuestion] } });
-      const output = answer.output;
-      if (typeof output !== "string") throw new Error("The answered connection question has no result");
-      expect(output).toContain(entry.choice);
-      const finished = await probe.eventually(messages, {
-        within: 30_000,
-        label: "The resumed model receives and reports the actual answered question, not a scripted success",
-        until: transcript => transcript.some(message => record(message.info).role === "assistant"
-          && !finalIdsBefore.includes(record(message.info).id)
-          && rows(message.parts).some(part => part.type === "text" && typeof part.text === "string" && part.text.includes(output))),
-      });
-      expect(finished.filter(message => record(message.info).role === "user")).toEqual(usersBefore);
-      const final = finished.findLast(message => record(message.info).role === "assistant"
-        && rows(message.parts).some(part => part.type === "text" && typeof part.text === "string" && part.text.includes(output)));
-      expect(record(final?.info).parentID).toBe(record(usersBefore.at(-1)?.info).id);
-      expect(record(record(final?.info).time).completed).toEqual(expect.any(Number));
+    await step("the original task stays on this turn and shows the real decision without another user message", async () => {
+      const heading = entry.choice === "Skip" ? "Skipped Notion" : "Notion connected";
+      await user.see({ mcpApp, role: "heading", text: heading });
+      expect((await messages()).filter(message => record(message.info).role === "user")).toEqual(usersBefore);
       expect((await modelCalls(entry.prompt)).filter(call => call.kind === "tool")).toEqual(callsBefore);
-      expect((await modelCalls(entry.prompt)).filter(call => call.kind === "final")).toHaveLength(1);
       expect((await modelCalls(entry.prompt)).filter(call => call.kind === "error")).toEqual([]);
-      for (const message of finished) expect(record(message.info).error).toBeUndefined();
-      await user.see({ text: output });
+      expect(await pending()).toEqual([]);
+      await user.notSee({ text: "No connection outcome was observed." });
       await user.screenshot();
-      evidence.recordAssertionEvidence("The original task continues from the real decision", JSON.stringify({ choice: entry.choice, answer: output, parentId: record(final?.info).parentID, userMessages: usersBefore.length }), true);
+      evidence.recordAssertionEvidence("The original task continues from the real decision", JSON.stringify({ choice: entry.choice, heading, userMessages: usersBefore.length }), true);
     });
 
     if (entry.choice === "Authenticate") await step("revoked credentials never inherit the earlier connected result", async () => {
