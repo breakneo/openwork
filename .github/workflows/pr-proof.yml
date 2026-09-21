@@ -69,6 +69,10 @@ jobs:
           # is not root-owned). The testkit's container mode launches Electron
           # with --no-sandbox, as it already does on Daytona.
           OPENWORK_EVAL_CONTAINER_ELECTRON: "1"
+          # Engine-bound app specs declare `needs: { env: ["OPENWORK_EVAL_ENGINE"] }`.
+          # Without a selected engine they skip and the proof exits incomplete,
+          # so the changed-spec lane proves the stable v1 engine by default.
+          OPENWORK_EVAL_ENGINE: v1
         run: |
           set -euo pipefail
           test "$(id -u)" -ne 0
