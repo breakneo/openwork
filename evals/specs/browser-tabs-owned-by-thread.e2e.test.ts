@@ -263,6 +263,10 @@ lifecycleTest("moving the last background page on screen releases its hidden hos
   }
 });
 
+// Effect contract: previously the browser toolbar exposed a memory-management action alongside navigation.
+// Removing Suspend simplifies that surface without unlocking a new capability: a person can still open,
+// read, and use a real page while thread ownership, action approval, and explicit handle release remain intact.
+// The distinguishing assertion is Suspend's absence; no performance or memory-saving benefit is claimed.
 test("a background conversation reads its owned page silently and requests attention before acting", async ({ world, user, agent, probe, step, evidence }) => {
   const reading = { ...world.session, title: "Reading the news" };
   await agent.run("session.rename", { sessionId: reading.sessionId, title: reading.title });
@@ -367,7 +371,7 @@ test("a background conversation reads its owned page silently and requests atten
     await user.see(tabButton("reading"));
   });
 
-  await step("Switching to the owner restores its native view but visible inputs still need action approval", async () => {
+  await step("The owner can use the page under the simplified toolbar while approvals stay scoped", async () => {
     await user.click(conversation(researching.title));
     const state = await probe.eventually(() => probe.browserState(), { within: 30_000, until: (value) => value.visibleSessionId === researching.sessionId && value.activeTabId === researchTab.tabId, label: "the research conversation takes the screen" });
     expect(state.tabs.map((tab) => tab.ownerSessionId).sort()).toEqual([reading.sessionId, researching.sessionId].sort());
@@ -407,6 +411,12 @@ test("a background conversation reads its owned page silently and requests atten
     const completed = await probe.eventually(witness, { within: 5_000, until: (value) => value.records.length === 1 && value.inputValue === "ok", label: "the fixture receives only the approved click and text" });
     expect(completed.records).toEqual([{ method: "dom", count: 1, signedIn: false }]);
     expect((await task("observe")).text).toContain("Saved 1");
+    await user.see({ role: "button", label: "Go back" });
+    await user.see({ role: "button", label: "Go forward" });
+    await user.see({ role: "button", label: "Reload page" });
+    await user.see({ placeholder: "Enter URL..." });
+    await user.notSee({ role: "button", label: "Suspend" });
+    await user.screenshot();
     evidence.recordAssertionEvidence("Selecting the owner restores its tab while inputs require separate approval", "Native attachment, z-order and both panel dimensions recovered. Reading reused the thread grant. Hidden, pending and denied inputs caused no writes; separately approved inputs produced one DOM save and the expected field value, and a new page observation verified Saved 1.", true);
   });
 
@@ -429,11 +439,16 @@ test("a background conversation reads its owned page silently and requests atten
     expect(await probe.browserTabMetrics(readingTab.targetId)).toMatchObject(panelViewport);
   });
 
-  await step("Returning to the first conversation brings back only its own tab", async () => {
+  await step("The first conversation returns to its own readable page under the simplified toolbar", async () => {
     await probe.eventually(() => probe.browserState(), { within: 30_000, until: (value) => value.visibleSessionId === reading.sessionId && value.activeTabId === readingTab.tabId, label: "the reading tab returns" });
     await user.see(tabButton("reading"));
     await user.notSee(tabButton("research"));
+    await user.notSee({ role: "button", label: "Suspend" });
     expect(await probe.browserTabMetrics(readingTab.targetId)).toMatchObject(panelViewport);
+    const observed = await agent.browserTask({ sessionId: reading.sessionId, operation: "observe", args: { tabId: readingTab.tabId } });
+    expect(observed).toMatchObject({ ok: true, text: expect.stringContaining("Project status") });
+    await user.screenshot();
+    evidence.recordAssertionEvidence("The original conversation keeps its readable page", "The original tab returned at the same panel dimensions without exposing its neighbor's tab or Suspend. A fresh browser observation read Project status from the live document.", true);
   });
   await step("Task handles preserve live pages, reject the other owner, and require explicit release", async () => {
     expect(await agent.run("browser.restore_tab", { tabId: readingTab.tabId }))
@@ -446,6 +461,10 @@ test("a background conversation reads its owned page silently and requests atten
     expect((await probe.browserState()).tabs.map(tab => tab.id).sort())
       .toEqual([readingTab.tabId, researchTab.tabId].sort());
     expect(await witness()).toMatchObject({ records: [{ method: "dom", count: 1, signedIn: false }], inputValue: "ok", sessionReads: 0 });
+    await user.see(tabButton("reading"));
+    await user.notSee(tabButton("research"));
+    await user.screenshot();
+    evidence.recordAssertionEvidence("Thread ownership and release remain unchanged", "Restoring the owner's handle kept the same tab and target identities; restoring the neighbor's tab was rejected. Explicit release returned released true, kept both tabs, and added no fixture writes or session reads. Suspend remained absent after release.", true);
   });
 });
 
