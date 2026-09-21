@@ -86,7 +86,7 @@ const llmProviderWriteSchema = z.object({
   customConfigText: z.string().trim().min(1).optional(),
   customConfig: z.unknown().optional(),
   credentialMode: z.enum(["shared", "per_member"]).optional().default("shared"),
-  apiKey: z.string().trim().min(1, "Provide a non-empty credential.").max(65535).optional(),
+  apiKey: z.string().trim().max(65535).optional(),
   apiKeys: z.record(z.string().trim().min(1).max(255), z.string().trim().max(65535)).optional(),
   memberIds: z.array(denTypeIdSchema("member")).max(500).optional().default([]),
   teamIds: z.array(denTypeIdSchema("team")).max(500).optional().default([]),
@@ -1145,6 +1145,18 @@ export function registerOrgLlmProviderRoutes<T extends { Variables: OrgRouteVari
       }
       const { externalKey } = c.req.valid("param")
       const input = c.req.valid("json")
+      // A blank scalar credential from a provisioning client is almost always
+      // an unresolved secret, not intent: it would otherwise "succeed" and
+      // leave (or make) the provider unusable. Omit apiKey to keep the stored
+      // value; clear it explicitly with apiKeys. The dashboard's create form
+      // legitimately sends a blank key for keyless providers, so this check
+      // stays on the declarative route only.
+      if (input.apiKey === "") {
+        return c.json({
+          error: "invalid_api_keys",
+          message: "apiKey is blank. Omit apiKey to keep the stored credential, or clear it explicitly with apiKeys.",
+        }, 400)
+      }
       const [existing] = await db.select().from(LlmProviderTable).where(and(
         eq(LlmProviderTable.organizationId, payload.organization.id),
         eq(LlmProviderTable.externalKey, externalKey),
