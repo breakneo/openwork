@@ -134,7 +134,17 @@ test("a member can Authenticate or Skip in the v2 App and continue the original 
     await step(`after ${entry.tools.join(" then ")}, ${entry.choice} waits behind the iframe without native question UI`, async () => {
       for (const id of [world.connection.id, world.organizationId, world.workspace.workspaceId, sessionId]) expect(entry.prompt).not.toContain(id);
       await user.type("composer", entry.prompt, { replace: true, verify: true });
-      await user.press("Enter");
+      await user.click({ role: "button", label: "Run task" });
+      await probe.eventually(messages, {
+        within: 30_000,
+        label: "The connection request appears in the conversation",
+        until: transcript => transcript.some(message => record(message.info).role === "user"
+          && rows(message.parts).some(part => part.type === "text" && part.text === entry.prompt)),
+      }).catch(async error => {
+        await user.screenshot();
+        evidence.recordAssertionEvidence("Connection request submission diagnostics", JSON.stringify({ screen: await probe.text(), transcript: await messages() }), false);
+        throw error;
+      });
       const requests = await probe.eventually(pending, {
         within: 120_000,
         label: "The hidden connection question pauses the original task",
