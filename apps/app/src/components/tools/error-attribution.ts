@@ -22,9 +22,13 @@ export type ChatToolReconnectResult = "connected"
 const OPENWORK_CLOUD_CAPABILITY_TOOLS = new Set([
   "openwork-cloud_search_capabilities",
   "openwork-cloud_execute_capability",
+  "openwork-cloud_list_skills",
+  "openwork-cloud_get_skill",
   "openwork-cloud_connection_action",
   "openwork_search_capabilities",
   "openwork_execute_capability",
+  "openwork_list_skills",
+  "openwork_get_skill",
   "openwork_connection_action",
 ])
 

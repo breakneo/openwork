@@ -98,7 +98,7 @@ export default {
   "composer.attachments_unavailable": "Attachments are unavailable.",
   "composer.behavior_label": "Behavior",
   "composer.configure": "Configure",
-  "composer.connect_skill_prompt": "Use the \"{name}\" skill from the \"{marketplace}\" marketplace. Find it with openwork-cloud_search_capabilities, then call openwork-cloud_execute_capability with the exact capability name \"{capability}\", follow the returned skill content, and use it to ",
+  "composer.connect_skill_prompt": "Use the \"{name}\" skill from the \"{marketplace}\" marketplace. Read it with openwork-cloud_get_skill using the exact capability name \"{capability}\" (or openwork-cloud_execute_capability with that name when get_skill is not exposed), follow the returned skill content, and use it to ",
   "composer.default_agent": "Default agent",
   "composer.file_kind": "File",
   "composer.image_kind": "Image",
