@@ -1,59 +1,46 @@
-import type { Seed } from "@openwork/env";
-import { queryDenDatabase } from "@openwork/env";
+import { allocateFreePort } from "@openwork/cdp";
+import { queryDenDatabase, type Seed } from "@openwork/env";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a Den response object");
+  return Object.fromEntries(Object.entries(value));
 }
 
-function text(record: Record<string, unknown> | null, key: string): string {
-  const value = record?.[key];
-  return typeof value === "string" ? value : "";
-}
-
+/**
+ * An owner and a teammate in one org with the AI Gateway dashboard turned on.
+ * No gateway proxy runs: the journey is the Den admin form, so the proxy URLs
+ * only satisfy den-api's GATEWAY_ENABLED boot check and point at a closed port.
+ */
 export async function aiGatewayAdmin(seed: Seed) {
+  const gatewayUrl = `http://127.0.0.1:${await allocateFreePort()}`;
   const den = await seed.den({
+    web: true,
     env: {
-      GATEWAY_ENABLED: "true",
-      NODE_ENV: "test",
-      OPENWORK_DEV_MODE: "1",
-      DEN_ORG_MODE: "multi_org",
+      NODE_ENV: "test", OPENWORK_DEV_MODE: "1", DB_MODE: "mysql", DEN_ORG_MODE: "multi_org",
+      GATEWAY_ENABLED: "true", GATEWAY_PROXY_BASE_URL: gatewayUrl, GATEWAY_PUBLIC_BASE_URL: gatewayUrl,
+      PROVISIONER_MODE: "stub", RESEND_API_KEY: "", STRIPE_SECRET_KEY: "", SENTRY_DSN: "",
     },
     org: {
-      name: `AI Gateway ${Date.now()}`,
-      admin: { name: "Gateway Admin" },
-      members: { teammate: { name: "Gateway Teammate" } },
+      name: "Acme Studio",
+      admin: { name: "Gateway Owner", email: "gateway-owner@example.test" },
+      members: { teammate: { name: "Gateway Teammate", email: "gateway-teammate@example.test" } },
     },
   });
   const teammate = den.members.teammate;
-  if (!teammate) throw new Error("The isolated Den did not provision a teammate.");
-  const context = await seed.api(den.admin, "/v1/org");
-  const organization = isRecord(context.body) && isRecord(context.body.organization) ? context.body.organization : null;
-  const orgId = text(organization, "id");
   const databaseUrl = den.database?.url;
-  if (!orgId || !databaseUrl) throw new Error("The isolated Den did not return an organization id and database.");
+  if (!teammate || !databaseUrl) throw new Error("Expected a teammate session and a testkit scratch database");
+  const org = record((await seed.api(den.admin, "/v1/org")).body);
+  const orgId = String(record(org.organization).id);
   await queryDenDatabase(
     databaseUrl,
     "UPDATE organization SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.capabilities', COALESCE(JSON_EXTRACT(metadata, '$.capabilities'), JSON_OBJECT()), '$.capabilities.gatewayDashboard', JSON_EXTRACT('true', '$')) WHERE id = ?",
     [orgId],
   );
-  const after = await seed.api(den.admin, "/v1/org");
-  const capabilities = isRecord(after.body) && isRecord(after.body.capabilities) ? after.body.capabilities : null;
-  if (capabilities?.gatewayDashboard !== true) {
-    throw new Error("The organization did not receive the AI Gateway dashboard capability.");
+  if (record(record((await seed.api(den.admin, "/v1/org")).body).capabilities).gatewayDashboard !== true) {
+    throw new Error("The org did not receive the AI Gateway dashboard capability");
   }
-  const web = await seed.web({
-    den,
-    signedInAs: den.admin,
-    startPath: "/dashboard/gateway-providers",
-    headless: true,
-    viewport: { width: 1440, height: 1100 },
-  });
-  const memberWeb = await seed.web({
-    den,
-    signedInAs: teammate,
-    startPath: "/dashboard",
-    headless: true,
-    viewport: { width: 1440, height: 1100 },
-  });
+  const viewport = { width: 1440, height: 1100 };
+  const web = await seed.web({ den, signedInAs: den.admin, startPath: "/dashboard/gateway-providers", headless: true, viewport });
+  const memberWeb = await seed.web({ den, signedInAs: teammate, startPath: "/dashboard", headless: true, viewport });
   return { den, web, memberWeb, teammate, orgId };
 }
