@@ -1,14 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import { GATEWAY_PAGE_DESCRIPTION, describeGatewayAccess } from "../app/(den)/dashboard/_components/inference-provider-request";
-import { GatewayModelUniverse } from "../app/(den)/dashboard/_components/inference-provider-model-universe";
+import { describeGatewayAccess } from "../app/(den)/dashboard/_components/inference-provider-request";
+import { orderCatalog, providerTagline } from "../app/(den)/dashboard/_components/inference-provider-picker-screen";
 import {
   getCustomLlmProvidersRoute,
   getGatewayProviderRoute,
   getGatewayProvidersRoute,
+  getGatewayUsageRoute,
   getNewGatewayProviderRoute,
 } from "../app/(den)/_lib/den-org";
 
@@ -35,6 +34,8 @@ describe("Gateway providers routes", () => {
     expect(getNewGatewayProviderRoute("acme")).toBe(`${base}/new`);
     expect(getNewGatewayProviderRoute("acme", "anthropic")).toBe(`${base}/new?provider=anthropic`);
     expect(getGatewayProviderRoute("acme", "infp_1")).toBe(`${base}/infp_1`);
+    expect(getGatewayUsageRoute("acme")).toBe(`${base}/usage`);
+    expect(getGatewayUsageRoute("acme", "spending")).toBe(`${base}/usage#spending`);
   });
 
   test("list, catalog-or-form, and saved-provider pages share the editor", () => {
@@ -58,18 +59,25 @@ describe("Gateway providers sidebar", () => {
 });
 
 describe("Gateway providers list", () => {
-  test("names who can use models and opens a provider as a row", () => {
-    expect(GATEWAY_PAGE_DESCRIPTION).toContain("provider keys stay on the server");
+  test("leads with a flat header, one policy row, provider rows, and two link rows", () => {
+    expect(list).toContain("<DashboardHeaderActions>");
+    expect(list).not.toContain("DashboardPageTemplate");
     expect(list).toContain("<GatewayWhoCanUseModels");
     expect(list).toContain("describeGatewayAccess");
     expect(list).toContain('data-testid="gateway-provider-create"');
-    expect(list).toContain("gateway-provider-open");
-    expect(list).toContain("<GatewayUsageSection");
-    expect(list).not.toContain("<DenCard");
+    expect(list).toContain('data-testid="gateway-provider-open"');
+    expect(list).toContain('data-testid="gateway-usage-link"');
+    expect(list).toContain('data-testid="gateway-spending-link"');
+    expect(list).toContain("Move them to AI Gateway");
+    expect(list).not.toContain("<GatewayUsageSection");
+    expect(read("dashboard", "_components", "gateway-usage-screen.tsx")).toContain("<GatewayUsageLimitsSection");
   });
 
   test("the policy sheet and the BYOK page save the same desktop policy", () => {
     expect(policy).toContain('testId="gateway-model-access-managed"');
+    expect(policy).toContain("Applies to every member, on Desktop and the web.");
+    expect(policy).toContain("Free starter model (Auto)");
+    expect(policy).toContain("Takes effect next time members open OpenWork");
     for (const source of [policy, byok]) {
       expect(source).toContain("readModelAccessState");
       expect(source).toContain("saveModelAccess(");
@@ -92,11 +100,21 @@ describe("Gateway providers list", () => {
 
 describe("Gateway provider form", () => {
   test("catalog picker then one form for key, who, and models", () => {
-    expect(picker).toContain("Where do your models come from?");
+    expect(picker).toContain("Start here");
+    expect(picker).toContain("Another provider");
     expect(picker).toContain("getNewGatewayProviderRoute(orgSlug, item.id)");
-    expect(editor).toContain("<ProviderAccessPicker");
-    expect(editor).toContain("<GatewayModelUniverse");
+    expect(orderCatalog([{ id: "zeta", name: "Zeta" }, { id: "anthropic", name: "Anthropic" }, { id: "openrouter", name: "OpenRouter" }]).map((entry) => entry.id)).toEqual(["openrouter", "anthropic", "zeta"]);
+    expect(providerTagline({ id: "anthropic", modelCount: 9 })).toBe("Claude models");
+    expect(providerTagline({ id: "unknown", modelCount: 1 })).toBe("1 model");
+    for (const heading of ["Key", "Who can use it", "Models"]) expect(editor).toContain(`>${heading}</h2>`);
+    expect(editor).toContain("Everyone in the organization");
+    expect(editor).toContain('data-testid="gateway-access-add-person"');
+    expect(editor).toContain('data-testid="gateway-access-add-team"');
+    expect(editor).toContain('testId="gateway-models-pick"');
     expect(editor).toContain('data-testid="gateway-provider-api-key"');
+    expect(editor).toContain("Replace key");
+    expect(editor).not.toContain("<ProviderAccessPicker");
+    expect(editor).not.toContain("<GatewayModelUniverse");
   });
 
   test("create posts one body; edit rewrites group, set, and grants through the matrix routes", () => {
@@ -105,7 +123,7 @@ describe("Gateway provider form", () => {
     expect(editor).toContain('resource: "credential-sets"');
     expect(editor).toContain('resource: "access-grants"');
     expect(editor).toContain("deleteGatewayResource");
-    expect(editor).toContain("Add a key before sharing these models.");
+    expect(editor).toContain("Paste a key before sharing these models.");
     expect(editor).toContain("modelIds: allowAllModels ? [] : modelIds");
     expect(editor).toContain("open={confirmDelete && !reauthDialogOpen}");
   });
@@ -117,14 +135,6 @@ describe("Gateway provider form", () => {
     expect(editor).toContain("Saved — enter a replacement to change it");
   });
 
-  test.each([true, false])("renders the model universe with allow-all %s", (allowAllModels) => {
-    const html = renderToStaticMarkup(createElement(GatewayModelUniverse, {
-      models: [{ id: "model-1", name: "Test Model" }], allowAllModels, modelIds: ["model-1"], onChange: () => {},
-    }));
-    expect(html).toContain('aria-label="Allow all models"');
-    expect(html).toContain(`aria-checked="${allowAllModels}"`);
-    expect(html.includes("Test Model")).toBe(!allowAllModels);
-  });
 });
 
 describe("Gateway usage", () => {

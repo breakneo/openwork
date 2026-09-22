@@ -3,13 +3,18 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allocateFreePort } from "../evals/packages/cdp/src/index.ts";
+import { startRemoteRuntime } from "../evals/packages/env/src/app-web-runtime.ts";
+import { deleteSandboxes, provisionWebSandbox } from "../evals/packages/hosts/src/provision.ts";
+import { privateSandboxId, privateWebPreview, verifyPrivateWebPreview } from "../evals/packages/hosts/src/private-web-preview.ts";
 import { launchHeadlessWeb } from "../packages/world/src/headless-web.ts";
+import { trackResource } from "../packages/world/src/ledger.ts";
 import type { HeadlessWebHandle } from "../packages/world/src/headless-web.ts";
 import { hold } from "../packages/world/src/hold.ts";
 import { output, secret } from "../packages/world/src/outputs.ts";
 import type { WorldOutput } from "../packages/world/src/outputs.ts";
 import type { Den } from "../evals/packages/env/src/den.ts";
 import { resolvePlace } from "../evals/packages/env/src/place.ts";
+import type { Place } from "../evals/packages/env/src/place.ts";
 import { receiptName, resolveStage } from "../packages/world/src/stage.ts";
 import { ACME_REPLY, bootAcmeGateway, probeAcmeGatewayDirect, seedAcmeGateway } from "./lib/acme-gateway.ts";
 import type { AcmeGatewayStack } from "./lib/acme-gateway.ts";
@@ -17,6 +22,43 @@ import { probeAcmeGateway } from "./lib/acme-gateway-probe.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ACME_WEB_NAME = "acme-web";
+const DAYTONA_WEB_PORT = 5178;
+const DAYTONA_LIFETIME_MINUTES = 120;
+
+/**
+ * The OpenWork web runtime on its own private Daytona sandbox, proxying the
+ * world's Den. Same shape as app-web, but the proxy target is this world's Den
+ * preview URL so a person can sign in as alex and chat through the gateway.
+ */
+async function startDaytonaWebRuntime(stack: AsyncDisposableStack, place: Place, den: Den) {
+  const base = place.denBase();
+  if (base.kind !== "daytona") throw new Error("acme-web Daytona runtime needs the Daytona Den base ref.");
+  const runtimeName = `${receiptName(ACME_WEB_NAME, resolveStage(process.env))}-${randomUUID().slice(0, 8)}`;
+  let sandboxId: string | undefined;
+  const room = await provisionWebSandbox({
+    ref: base.ref, name: runtimeName, private: true, autoStopMinutes: 0,
+    onCreated: async (name) => {
+      sandboxId = await privateSandboxId(name);
+      await trackResource({ kind: "app-web-daytona", id: sandboxId, match: sandboxId, label: runtimeName });
+    },
+  });
+  stack.defer(() => deleteSandboxes([sandboxId ?? room.sandbox]));
+  if (!sandboxId || !room.created || !room.source) throw new Error("acme-web did not receive an owned private web sandbox.");
+  const issuedAt = Date.now();
+  const preview = await privateWebPreview(sandboxId, DAYTONA_WEB_PORT, undefined, (DAYTONA_LIFETIME_MINUTES + 10) * 60);
+  const runtime = await startRemoteRuntime(sandboxId, runtimeName, "/workspace", room.source, {
+    env: {
+      OPENWORK_WEB_PORT: String(DAYTONA_WEB_PORT), VITE_HOST: "0.0.0.0",
+      OPENWORK_DEV_HEADLESS_WEB_DEN_PROXY: "1", OPENWORK_DEV_DEN_PROXY_TARGET: den.ref.webUrl,
+      VITE_DEN_BASE_URL: den.ref.webUrl, VITE_DEN_API_BASE_URL: den.ref.apiUrl, VITE_DISABLE_OPENWORK_MODELS: "0",
+    },
+    browserHostSuffix: preview.browserHostSuffix,
+  });
+  stack.adopt(runtime, (owned) => owned.stop());
+  await verifyPrivateWebPreview(preview);
+  if (Date.now() - issuedAt >= 10 * 60_000) throw new Error("acme-web exceeded its signed-preview startup buffer.");
+  return { browserOrigin: preview.browserOrigin, sandboxId, expires: new Date(issuedAt + (DAYTONA_LIFETIME_MINUTES + 10) * 60_000).toISOString() };
+}
 
 export interface AcmeWebWorld {
   den: Den;
@@ -94,13 +136,16 @@ async function run(): Promise<void> {
   if (place.kind === "daytona") {
     const gateway = await bootAcmeGateway(stack, place, { denEnv: { DEN_DASHBOARDS_ENABLED: "true" } });
     const probe = await probeAcmeGatewayDirect(gateway.den.admin, gateway);
+    const web = await startDaytonaWebRuntime(stack, place, gateway.den);
     await hold({
       name: ACME_WEB_NAME,
       outputs: {
+        webUrl: secret(web.browserOrigin, { group: "URLs", note: "Private signed OpenWork web runtime; sign in as alex, then pick Acme AI Gateway / Claude Haiku 4.5" }),
         ...gatewayOutputs(gateway),
         verified: output(`Message through AI Gateway (${probe.upstreamRequests} upstream call)`, { group: "AI Gateway" }),
-        webRuntime: output("not started", { group: "Runtime", note: "Daytona placement boots Den + AI Gateway only; use app-web for the OpenWork web runtime" }),
+        previewExpires: output(web.expires, { group: "Runtime" }),
         ...(gateway.den.placement?.kind === "daytona" ? { denSandbox: output(gateway.den.placement.sandboxId, { group: "World" }) } : {}),
+        webSandbox: output(web.sandboxId, { group: "World" }),
       },
     });
     return;

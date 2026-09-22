@@ -560,7 +560,7 @@ test("a successful deployment capability keeps the real Gateway dashboard availa
     expect(container.textContent).toContain("Upstream gateway is offline");
     expect(container.textContent).not.toContain(unavailableMessage);
     expect(container.querySelector("[data-testid=gateway-provider-create]")).not.toBeNull();
-    expect(calls.some(({ path }) => path.startsWith("/v1/inference-providers/usage?"))).toBe(true);
+    expect(calls.some(({ path }) => path.startsWith("/v1/inference-providers?scope=manageable"))).toBe(true);
     expect(replace).not.toHaveBeenCalled();
   }, { page: <GatewayProvidersPage />, gatewayFailure: true });
 });

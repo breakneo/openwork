@@ -79,7 +79,10 @@ the sandbox loopback. Startup completes only after one real message through
 the public gateway URL returns the fixed reply. Outputs include `denWeb`,
 `aiGateway` (the Den admin screen), `gatewayUrl`, and the owner account.
 
-The OpenWork web runtime and the OpenCode chat probe are local-only; on Daytona
-the world reports `webRuntime: not started`. Use `app-web` for that surface.
+The OpenWork web runtime runs on its own private sandbox (same primitives as
+`app-web`) and proxies this world's Den, so `webUrl` is a signed private URL:
+open it, sign in as `alex@acme.test`, and chat through the gateway. The
+OpenCode chat probe is local-only; on Daytona startup is verified with one
+message through the public gateway URL instead.
 Either placement exercises organization AI Gateway providers, not the separate
 OpenWork Models subscription/credit-billing flow.
