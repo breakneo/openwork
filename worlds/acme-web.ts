@@ -71,6 +71,7 @@ async function startDaytonaWebRuntime(stack: AsyncDisposableStack, place: Place,
 async function signRuntimeIntoDen(sandboxId: string, runtimeDirectory: string, den: Den, orgId: string) {
   const manifest = `${runtimeDirectory}/runtime.json`;
   const session = Buffer.from(JSON.stringify({ baseUrl: den.ref.apiUrl, token: den.admin.token, orgId }), "utf8").toString("base64");
+  const syncBody = Buffer.from(JSON.stringify({ reason: "acme-web" }), "utf8").toString("base64");
   const script = `python3 - <<PYEOF
 import base64, json, urllib.request
 manifest = json.load(open(${JSON.stringify(manifest)}))
@@ -81,7 +82,7 @@ def call(method, path, body):
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.status, response.read().decode("utf-8")
 print("den-session", call("PUT", "/den-session", session)[0])
-status, body = call("POST", "/cloud-provider-sync/run", b"{\"reason\":\"acme-web\"}")
+status, body = call("POST", "/cloud-provider-sync/run", base64.b64decode(${JSON.stringify(syncBody)}))
 print("sync", status, body[:200])
 PYEOF`;
   const result = await execInSandbox(defaultDaytonaExec, sandboxId, script, { timeoutMs: 120_000, context: "acme-web runtime Den sign-in" });
