@@ -18,13 +18,7 @@ import {
   getNewLlmProviderRoute,
 } from "../../_lib/den-org";
 import { useOrgDashboard } from "../_providers/org-dashboard-provider";
-import {
-  createDesktopPolicy,
-  updateDesktopPolicy,
-  useOrgDesktopPolicies,
-  type DenDesktopPolicy,
-  type DenDesktopPolicyRole,
-} from "./desktop-policy-data";
+import { useOrgDesktopPolicies } from "./desktop-policy-data";
 import {
   formatProviderTimestamp,
   getProviderDocUrl,
@@ -32,27 +26,10 @@ import {
   useOrgLlmProviders,
 } from "./llm-provider-data";
 
-type ModelAccessMode = "open" | "managed";
-
-const ADMIN_EXCEPTION_POLICY_NAME = "Admins may add providers";
-const ADMIN_EXCEPTION_ROLES: DenDesktopPolicyRole[] = ["owner", "admin"];
+import { readModelAccessState, saveModelAccess, type ModelAccessMode } from "./model-access-policy";
 
 function plural(count: number, noun: string) {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
-function getPolicyMemberIds(policy: DenDesktopPolicy) {
-  return policy.assignments.flatMap((assignment) => (assignment.orgMemberId ? [assignment.orgMemberId] : []));
-}
-
-function getPolicyTeamIds(policy: DenDesktopPolicy) {
-  return policy.assignments.flatMap((assignment) => (assignment.teamId ? [assignment.teamId] : []));
-}
-
-function getPolicyRoles(policy: DenDesktopPolicy) {
-  return policy.roles.length > 0
-    ? policy.roles
-    : policy.assignments.flatMap((assignment) => (assignment.role ? [assignment.role] : []));
 }
 
 export function LlmProvidersScreen() {
@@ -72,22 +49,14 @@ export function LlmProvidersScreen() {
   const [accessError, setAccessError] = useState<string | null>(null);
   const [accessSaved, setAccessSaved] = useState<string | null>(null);
 
-  const defaultPolicy = useMemo(
-    () => desktopPolicies.find((policy) => policy.isDefault) ?? null,
-    [desktopPolicies],
-  );
-
-  const adminExceptionPolicies = useMemo(
-    () => desktopPolicies.filter((policy) => !policy.isDefault && policy.policyName === ADMIN_EXCEPTION_POLICY_NAME),
-    [desktopPolicies],
-  );
+  const accessState = useMemo(() => readModelAccessState(desktopPolicies), [desktopPolicies]);
+  const defaultPolicy = accessState.defaultPolicy;
 
   useEffect(() => {
-    const defaultAllowsCustomProviders = defaultPolicy?.policy.allowCustomProviders !== false;
-    setAccessMode(defaultAllowsCustomProviders ? "open" : "managed");
-    setAdminExceptionChecked(defaultAllowsCustomProviders ? true : adminExceptionPolicies.some((policy) => policy.isEnabled));
-    setZenAllowed(defaultPolicy?.policy.allowZenModel !== false);
-  }, [defaultPolicy, adminExceptionPolicies]);
+    setAccessMode(accessState.mode);
+    setAdminExceptionChecked(accessState.adminException);
+    setZenAllowed(accessState.zenAllowed);
+  }, [accessState]);
 
   const customProviders = useMemo(
     () => llmProviders.filter((provider) => provider.source !== "openwork"),
@@ -121,100 +90,13 @@ export function LlmProvidersScreen() {
       : "Members may add their own providers. No org models are defined yet.";
   const accessFormDisabled = policiesBusy || accessSaving || !defaultPolicy;
 
-  const updateDefaultPolicy = async (allowCustomProviders: boolean, allowZenModel: boolean) => {
-    if (!defaultPolicy) throw new Error("Default desktop policy not found.");
-    await updateDesktopPolicy(defaultPolicy.id, {
-      policyName: defaultPolicy.policyName,
-      policy: {
-        ...defaultPolicy.policy,
-        allowCustomProviders,
-        allowZenModel,
-      },
-      priority: 0,
-      isEnabled: true,
-      memberIds: [],
-      teamIds: [],
-      roles: [],
-    });
-  };
-
-  const updateAdminExceptionPolicy = async (policy: DenDesktopPolicy, isEnabled: boolean) => {
-    await updateDesktopPolicy(policy.id, {
-      policyName: ADMIN_EXCEPTION_POLICY_NAME,
-      policy: {
-        ...policy.policy,
-        allowCustomProviders: true,
-      },
-      priority: policy.priority,
-      isEnabled,
-      memberIds: [],
-      teamIds: [],
-      roles: ADMIN_EXCEPTION_ROLES,
-    });
-  };
-
-  const disablePolicy = async (policy: DenDesktopPolicy) => {
-    if (!policy.isEnabled) return;
-    await updateDesktopPolicy(policy.id, {
-      policyName: policy.policyName,
-      policy: policy.policy,
-      priority: policy.priority,
-      isEnabled: false,
-      memberIds: getPolicyMemberIds(policy),
-      teamIds: getPolicyTeamIds(policy),
-      roles: getPolicyRoles(policy),
-    });
-  };
-
-  const ensureAdminExceptionPolicy = async () => {
-    const primaryPolicy = adminExceptionPolicies[0] ?? null;
-    if (primaryPolicy) {
-      await updateAdminExceptionPolicy(primaryPolicy, true);
-    } else {
-      await createDesktopPolicy({
-        policyName: ADMIN_EXCEPTION_POLICY_NAME,
-        policy: { allowCustomProviders: true },
-        priority: 0,
-        isEnabled: true,
-        memberIds: [],
-        teamIds: [],
-        roles: ADMIN_EXCEPTION_ROLES,
-      });
-    }
-
-    for (const policy of adminExceptionPolicies.slice(1)) {
-      await disablePolicy(policy);
-    }
-  };
-
-  const disableAdminExceptionPolicies = async () => {
-    for (const policy of adminExceptionPolicies) {
-      await disablePolicy(policy);
-    }
-  };
-
-  const saveModelAccess = async () => {
+  const saveModelAccessPolicy = async () => {
     setAccessError(null);
     setAccessSaved(null);
-    if (!defaultPolicy) {
-      setAccessError("Default desktop policy not found.");
-      return;
-    }
-
     try {
       setAccessSaving(true);
       await runReauthableAction("save-model-access", async () => {
-        if (accessMode === "managed") {
-          await updateDefaultPolicy(false, zenAllowed);
-          if (adminExceptionChecked) {
-            await ensureAdminExceptionPolicy();
-          } else {
-            await disableAdminExceptionPolicies();
-          }
-        } else {
-          await updateDefaultPolicy(true, true);
-          await disableAdminExceptionPolicies();
-        }
+        await saveModelAccess(accessState, { mode: accessMode, adminException: adminExceptionChecked, zenAllowed });
         await reloadPolicies();
       });
       setAccessSaved("Model access saved.");
@@ -240,7 +122,7 @@ export function LlmProvidersScreen() {
             <DenButton
               type="button"
               data-testid="models-access-save"
-              onClick={() => void saveModelAccess()}
+              onClick={() => void saveModelAccessPolicy()}
               loading={accessSaving}
               disabled={accessFormDisabled}
             >

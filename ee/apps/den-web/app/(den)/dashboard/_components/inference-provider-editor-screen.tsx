@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
-import type { GatewayAccessGrantWrite, GatewayCredentialSetWrite } from "@openwork/types/den/gateway";
+import type { GatewayAccessGrantWrite } from "@openwork/types/den/gateway";
 import { DenButton, buttonVariants } from "../../_components/ui/button";
 import { DenInput } from "../../_components/ui/input";
 import { DenNotice } from "../../_components/ui/notice";
@@ -110,67 +110,44 @@ export function InferenceProviderEditorScreen({
   const envNames = detail ? getProviderEnvNames(detail.config) : [];
   const memberSignInSupported = supportsMemberCredentialMode(providerId);
   const configuredSet = provider?.credentialSets[0] ?? null;
+  const formInput = {
+    name, providerId, modelIds: allowAllModels ? [] : modelIds, credentialMode, status: "active" as const,
+    settings, envNames, apiKey, apiKeyValues, serviceAccountJson, oauthClientId, oauthClientSecret, access,
+  };
 
+  /** Edits go through the matrix routes: first group, first set, and one grant per audience. */
   async function syncAccessAndCredential() {
     if (!provider) return;
     const group = provider.modelGroups[0];
     const set = provider.credentialSets[0];
-    if (group && detail) {
-      const groupModels = allowAllModels ? detail.models.map((model) => model.id) : modelIds;
-      if (groupModels.length) {
-        await saveGatewayResource(provider.id, group.id, {
-          resource: "model-groups",
-          body: { name: group.name, description: group.description, modelIds: groupModels, status: "active" },
-        });
-      }
+    if (!group || !set) return;
+    const groupModels = allowAllModels ? (detail?.models ?? []).map((model) => model.id) : modelIds;
+    if (groupModels.length) {
+      await saveGatewayResource(provider.id, group.id, {
+        resource: "model-groups",
+        body: { name: group.name, description: group.description, modelIds: groupModels, status: "active" },
+      });
     }
-    if (set) {
-      const body: GatewayCredentialSetWrite = {
-        name: set.name,
-        credentialMode,
-        status: "active",
-      };
-      if (credentialMode === "member") {
-        body.oauthClientId = oauthClientId.trim();
-        if (oauthClientSecret.trim()) body.oauthClientSecret = oauthClientSecret.trim();
-      } else if (vertex && serviceAccountJson.trim()) {
-        body.credential = { kind: "gcp_service_account", secret: serviceAccountJson.trim() };
-      } else if (envNames.length > 1) {
-        const entries = Object.entries(apiKeyValues).filter(([, value]) => value.trim());
-        if (entries.length) body.apiKeys = Object.fromEntries(entries.map(([key, value]) => [key, value.trim()]));
-      } else if (apiKey.trim()) {
-        body.credential = { kind: "api_key", secret: apiKey.trim() };
-      }
-      if (
-        credentialMode === "member"
-        || Boolean(body.credential)
-        || Boolean(body.apiKeys)
-        || set.credentialMode !== credentialMode
-      ) {
-        await saveGatewayResource(provider.id, set.id, { resource: "credential-sets", body });
-      }
+    const { credential, apiKeys, oauthClientId: clientId, oauthClientSecret: clientSecret } = buildInferenceProviderRequestBody(formInput);
+    if (credential || apiKeys || credentialMode === "member" || set.credentialMode !== credentialMode) {
+      await saveGatewayResource(provider.id, set.id, {
+        resource: "credential-sets",
+        body: { name: set.name, credentialMode, status: "active", credential, apiKeys, oauthClientId: clientId, oauthClientSecret: clientSecret },
+      });
     }
-    if (group && set) {
-      const desired: GatewayAccessGrantWrite["audience"][] = [
-        ...(access.allMembers ? [{ type: "organization" as const }] : []),
-        ...[...new Set(access.teamIds)].map((teamId) => ({ type: "team" as const, teamId })),
-        ...[...new Set(access.memberIds)].map((memberId) => ({ type: "member" as const, memberId })),
-      ];
-      const existing = provider.accessGrants.filter(
-        (grant) => grant.modelGroupId === group.id && grant.credentialSetId === set.id,
-      );
-      for (const grant of existing) {
-        const keep = desired.some((audience) => JSON.stringify(audience) === JSON.stringify(grant.audience));
-        if (!keep) await deleteGatewayResource(provider.id, "access-grants", grant.id);
-      }
-      for (const audience of desired) {
-        const already = existing.some((grant) => JSON.stringify(grant.audience) === JSON.stringify(audience));
-        if (!already) {
-          await saveGatewayResource(provider.id, null, {
-            resource: "access-grants",
-            body: { audience, modelGroupId: group.id, credentialSetId: set.id },
-          });
-        }
+    const desired: GatewayAccessGrantWrite["audience"][] = [
+      ...(access.allMembers ? [{ type: "organization" as const }] : []),
+      ...[...new Set(access.teamIds)].map((teamId) => ({ type: "team" as const, teamId })),
+      ...[...new Set(access.memberIds)].map((memberId) => ({ type: "member" as const, memberId })),
+    ];
+    const existing = provider.accessGrants.filter((grant) => grant.modelGroupId === group.id && grant.credentialSetId === set.id);
+    const same = (a: GatewayAccessGrantWrite["audience"], b: GatewayAccessGrantWrite["audience"]) => JSON.stringify(a) === JSON.stringify(b);
+    for (const grant of existing) {
+      if (!desired.some((audience) => same(audience, grant.audience))) await deleteGatewayResource(provider.id, "access-grants", grant.id);
+    }
+    for (const audience of desired) {
+      if (!existing.some((grant) => same(grant.audience, audience))) {
+        await saveGatewayResource(provider.id, null, { resource: "access-grants", body: { audience, modelGroupId: group.id, credentialSetId: set.id } });
       }
     }
   }
@@ -198,24 +175,7 @@ export function InferenceProviderEditorScreen({
     try {
       await runReauthableAction("save-inference-provider", async () => {
         if (!provider) {
-          const saved = await saveInferenceProvider({
-            inferenceProviderId: null,
-            body: buildInferenceProviderRequestBody({
-              name,
-              providerId,
-              modelIds: allowAllModels ? [] : modelIds,
-              credentialMode,
-              status: "active",
-              settings,
-              envNames,
-              apiKey,
-              apiKeyValues,
-              serviceAccountJson,
-              oauthClientId,
-              oauthClientSecret,
-              access,
-            }),
-          });
+          const saved = await saveInferenceProvider({ inferenceProviderId: null, body: buildInferenceProviderRequestBody(formInput) });
           router.push(getGatewayProviderRoute(orgSlug, saved.id));
           router.refresh();
           return;

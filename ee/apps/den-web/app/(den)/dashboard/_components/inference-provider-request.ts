@@ -317,23 +317,15 @@ export type GatewayAudienceNames = {
 
 /** One line for a list row: who this provider is shared with. */
 export function describeGatewayAccess(
-  provider: Pick<DenInferenceProvider, "accessGrants" | "access">,
+  provider: Pick<DenInferenceProvider, "accessGrants">,
   names: GatewayAudienceNames,
 ): string {
-  const everyone = names.organization ? `Everyone in ${names.organization}` : "Everyone";
-  if (provider.accessGrants?.length) {
-    if (provider.accessGrants.some((grant) => grant.audience.type === "organization")) return everyone;
-    const labels = provider.accessGrants.map((grant) => {
-      if (grant.audience.type === "team") return names.teamName(grant.audience.teamId) ?? "A team";
-      if (grant.audience.type === "member") return names.memberName(grant.audience.memberId) ?? "A person";
-      return everyone;
-    });
-    return labels.join(", ");
-  }
-  if (provider.access?.allMembers) return everyone;
-  const teamLabels = (provider.access?.teamIds ?? []).map((id) => names.teamName(id) ?? "A team");
-  const memberLabels = (provider.access?.memberIds ?? []).map((id) => names.memberName(id) ?? "A person");
-  const labels = [...teamLabels, ...memberLabels];
+  const { allMembers, teamIds, memberIds } = accessFromGrants(provider.accessGrants);
+  if (allMembers) return names.organization ? `Everyone in ${names.organization}` : "Everyone";
+  const labels = [
+    ...teamIds.map((id) => names.teamName(id) ?? "A team"),
+    ...memberIds.map((id) => names.memberName(id) ?? "A person"),
+  ];
   return labels.length ? labels.join(", ") : "No one has access yet";
 }
 

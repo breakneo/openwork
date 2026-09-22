@@ -129,11 +129,3 @@ export function InferenceProvidersScreen() {
     </DashboardPageTemplate>
   );
 }
-
-export function InferenceCredentialStatusBadge({
-  provider,
-}: {
-  provider: Pick<DenInferenceProvider, "credentialMode" | "credentialStatus">;
-}) {
-  return <DenBadge tone={getCredentialStatusTone(provider)}>{getCredentialStatusLabel(provider)}</DenBadge>;
-}

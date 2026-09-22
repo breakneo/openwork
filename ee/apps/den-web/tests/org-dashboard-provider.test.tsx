@@ -15,7 +15,6 @@ import AdminDashboardLayout from "../app/(den)/dashboard/(admin)/layout";
 import GatewayProvidersPage from "../app/(den)/dashboard/(admin)/gateway-providers/page";
 import NewGatewayProviderPage from "../app/(den)/dashboard/(admin)/gateway-providers/new/page";
 import GatewayProviderPage from "../app/(den)/dashboard/(admin)/gateway-providers/[inferenceProviderId]/page";
-import EditGatewayProviderPage from "../app/(den)/dashboard/(admin)/gateway-providers/[inferenceProviderId]/edit/page";
 import { useOrgInferenceProviders } from "../app/(den)/dashboard/_components/inference-provider-data";
 import { LlmProviderDetailScreen } from "../app/(den)/dashboard/_components/llm-provider-detail-screen";
 import InferencePage from "../app/(den)/dashboard/(admin)/inference/page";
@@ -184,12 +183,8 @@ test.each([
   "/dashboard/gateway-providers",
   "/dashboard/gateway-providers/new",
   "/dashboard/gateway-providers/infp_1",
-  "/dashboard/gateway-providers/infp_1/edit",
 ])("disabled direct route %s redirects without mounting its real screen or fetching providers", async (pathname) => {
-  const params = Promise.resolve({ inferenceProviderId: "infp_1" });
-  const page = pathname.endsWith("/edit") ? await EditGatewayProviderPage({ params })
-    : pathname.endsWith("/infp_1") ? await GatewayProviderPage({ params })
-    : pathname.endsWith("/new") ? <NewGatewayProviderPage /> : <GatewayProvidersPage />;
+  const page = await gatewayPage(pathname);
   await withDashboard(async ({ container, calls, replace }) => {
     expect(container.querySelector("[data-access-state=denied]")).not.toBeNull();
     expect(replace).toHaveBeenCalledWith("/dashboard");
@@ -483,14 +478,12 @@ const gatewayRoutes = [
   "/dashboard/gateway-providers",
   "/dashboard/gateway-providers/new",
   "/dashboard/gateway-providers/infp_1",
-  "/dashboard/gateway-providers/infp_1/edit",
 ];
 
 async function gatewayPage(pathname: string) {
-  const params = Promise.resolve({ inferenceProviderId: "infp_1" });
-  return pathname.endsWith("/edit") ? await EditGatewayProviderPage({ params })
-    : pathname.endsWith("/infp_1") ? await GatewayProviderPage({ params })
-    : pathname.endsWith("/new") ? <NewGatewayProviderPage /> : <GatewayProvidersPage />;
+  if (pathname.endsWith("/infp_1")) return GatewayProviderPage({ params: Promise.resolve({ inferenceProviderId: "infp_1" }) });
+  if (pathname.endsWith("/new")) return NewGatewayProviderPage({ searchParams: Promise.resolve({}) });
+  return <GatewayProvidersPage />;
 }
 
 function featureCalls(calls: { path: string }[]) {

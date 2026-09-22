@@ -620,10 +620,6 @@ export function getGatewayProviderRoute(orgSlug: string | null | undefined, infe
   return `${getGatewayProvidersRoute(orgSlug)}/${encodeURIComponent(inferenceProviderId)}`;
 }
 
-export function getEditGatewayProviderRoute(orgSlug: string | null | undefined, inferenceProviderId: string): string {
-  return `${getGatewayProviderRoute(orgSlug, inferenceProviderId)}/edit`;
-}
-
 export function getNewGatewayProviderRoute(orgSlug?: string | null, providerId?: string): string {
   const base = `${getGatewayProvidersRoute(orgSlug)}/new`;
   return providerId ? `${base}?provider=${encodeURIComponent(providerId)}` : base;
