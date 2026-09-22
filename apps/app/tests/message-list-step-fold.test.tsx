@@ -6,6 +6,7 @@ import type { DynamicToolUIPart, UIMessage } from "ai";
 import { MessageList } from "../src/components/chat/message-list";
 import { MessageListProvider } from "../src/components/chat/message-list-provider";
 import { createDefaultPlatform, PlatformProvider } from "../src/react-app/kernel/platform";
+import type { ChatConnectionDecisionBinding } from "../src/react-app/domains/session/surface/mcp-chat-reconnect";
 
 function bashPart(id: string): DynamicToolUIPart {
   return {
@@ -48,13 +49,18 @@ function withoutWindow<T>(run: () => T): T {
   }
 }
 
-function renderList(messages: UIMessage[], readOnly = false) {
+function renderList(messages: UIMessage[], readOnly = false, options: {
+  uiStateOwner?: string;
+  getConnectionDecision?: (toolCallId: string) => ChatConnectionDecisionBinding | null;
+} = {}) {
   return withoutWindow(() => renderToStaticMarkup(
     <PlatformProvider value={createDefaultPlatform()}>
     <MessageListProvider
       readOnly={readOnly}
       workspaceId="ws"
       sessionId="session"
+      uiStateOwner={options.uiStateOwner}
+      getConnectionDecision={options.getConnectionDecision}
       showThinking={true}
       developerMode={false}
       displaySuggestions={false}
@@ -172,5 +178,72 @@ describe("finished turn step fold (single OpenCode message per turn)", () => {
     const run = markup.indexOf("Ran 2 commands");
     expect(openingThought).toBeGreaterThan(-1);
     expect(run).toBeGreaterThan(openingThought);
+  });
+});
+
+describe("native connection card in the transcript", () => {
+  const stripeStatus = {
+    name: "mcp:emc_stripe:*", kind: "connection_status", status: "needs_connection",
+    connectionStatus: {
+      version: 1, kind: "connection_action", source: "openwork-cloud", connectionId: "emc_stripe", connectionName: "Stripe",
+      authType: "oauth", credentialMode: "per_member", state: "needs_connection", actor: "member",
+      message: "You haven't connected your Stripe account yet.",
+      action: { type: "connect", label: "Connect Stripe", surface: "openwork_your_connections", retry: "search_capabilities" },
+    },
+  };
+  const discovery: DynamicToolUIPart = {
+    type: "dynamic-tool", toolName: "openwork-cloud_search_capabilities", toolCallId: "call_stripe_discovery",
+    state: "output-available", input: { query: "Stripe weekly revenue growth", type: "mcp", limit: 10 }, output: { matches: [stripeStatus] },
+  };
+  const statusProbe: DynamicToolUIPart = {
+    type: "dynamic-tool", toolName: "openwork-cloud_execute_capability", toolCallId: "call_stripe_status",
+    state: "output-available", input: { name: "mcp:emc_stripe:*" },
+    output: { connectionAction: {
+      schemaVersion: "1", connectionId: "emc_stripe", connectionName: "Stripe", state: "needs_connection", actor: "member",
+      message: "Connect Stripe to continue.", action: { type: "connect", label: "Connect Stripe", surface: "openwork_your_connections" },
+    } },
+  };
+  const owner = "account/session";
+  const binding = (toolCallId: string): ChatConnectionDecisionBinding => ({
+    request: { requestId: "que_stripe", owner, sessionId: "session", turnId: userMessage.id, toolCallId, connectionId: "emc_stripe" },
+    isPending: () => true, respond: async () => {},
+  });
+  const turn = (...parts: DynamicToolUIPart[]): UIMessage[] => [userMessage, { id: "assistant-connection", role: "assistant", parts }];
+  const cards = (markup: string) => markup.match(/data-testid="desktop-connection-card"/g)?.length ?? 0;
+
+  test("an execute_capability connection report always renders the native card", () => {
+    const markup = renderList(turn(statusProbe));
+    expect(cards(markup)).toBe(1);
+    expect(markup).toContain("Connect Stripe");
+    expect(markup).not.toContain('data-capability-call="openwork-cloud_execute_capability"');
+    expect(markup).not.toContain("text-destructive");
+  });
+
+  test("ordinary discovery stays a quiet sentence line until the native question binds to it", () => {
+    const quiet = renderList(turn(discovery));
+    expect(cards(quiet)).toBe(0);
+    expect(quiet).toContain('data-capability-call="openwork-cloud_search_capabilities"');
+    expect(quiet).toContain("Searched your connections");
+    expect(quiet).not.toContain(">Authenticate</button>");
+
+    const otherCall = renderList(turn(discovery), false, { uiStateOwner: owner, getConnectionDecision: id => id === "another-call" ? binding("another-call") : null });
+    expect(cards(otherCall)).toBe(0);
+    expect(otherCall).toContain('data-capability-call="openwork-cloud_search_capabilities"');
+
+    const bound = renderList(turn(discovery), false, { uiStateOwner: owner, getConnectionDecision: id => id === discovery.toolCallId ? binding(discovery.toolCallId) : null });
+    expect(cards(bound)).toBe(1);
+    expect(bound).toContain("Connect Stripe to continue");
+    expect(bound).toContain(">Skip</button>");
+    expect(bound).toContain(">Authenticate</button>");
+    expect(bound).not.toContain('data-capability-call="openwork-cloud_search_capabilities"');
+    expect(bound).not.toContain("Checking connection request");
+  });
+
+  test("a bound discovery card is read-only in history", () => {
+    const markup = renderList(turn(discovery), true, { uiStateOwner: owner, getConnectionDecision: id => id === discovery.toolCallId ? binding(discovery.toolCallId) : null });
+    expect(cards(markup)).toBe(1);
+    const card = /<section data-testid="desktop-connection-card"[\s\S]*?<\/section>/.exec(markup)?.[0] ?? "";
+    expect(card).toContain("Connect Stripe");
+    expect(card).not.toContain("<button");
   });
 });

@@ -86,8 +86,10 @@ import {
 import { Tool } from "@/components/ui/tool"
 import { CapabilityCallLine } from "@/components/chat/capability-call-line"
 import { CodeModeTool } from "@/components/chat/code-mode-tool"
+import { ConnectionCard } from "@/components/chat/connection-card"
+import { connectionFromChatToolPart } from "@/components/tools/error-attribution"
 import { codeModeToolCalls } from "@/lib/code-mode-tools"
-import { hasPreservedMcpAppResult, McpAppFrame } from "@/components/chat/mcp-app-frame"
+import { hasPreservedMcpAppResult, isNativeConnectionAppLaunch, McpAppFrame } from "@/components/chat/mcp-app-frame"
 import { ReasoningBlock } from "@/components/chat/reasoning-block"
 import { SubagentRunLine } from "@/components/chat/subagent-run-line"
 import { ToolAggregateGroup } from "@/components/chat/tool-aggregate-group"
@@ -184,8 +186,19 @@ class ToolMessage extends React.Component<ToolMessageProps, { failed: boolean }>
   }
 }
 
+/**
+ * Whether the host presents this part as the native connection card. Ordinary
+ * discovery stays a quiet step unless the pending native question is bound to
+ * this exact tool call.
+ */
+function showsConnectionCard(part: DynamicToolUIPart, decisionBound: boolean): boolean {
+  if (part.state !== "output-available" && part.state !== "output-error") return false
+  if (connectionFromChatToolPart(part)) return true
+  return decisionBound && connectionFromChatToolPart(part, { allowDiscovery: true }) !== null
+}
+
 const ToolMessageInner = ({ part }: ToolMessageProps) => {
-  const { connectorIdentities, onMcpReconnect, onMcpReopenAuthorization, connectionQuestionToolCallId } = useMessageList()
+  const { connectorIdentities, onMcpReconnect, onMcpReopenAuthorization, connectionQuestionToolCallId, getConnectionDecision } = useMessageList()
   const parentActive = React.useContext(ParentRunActiveContext)
   const resolveLifecycle = useCurrentToolLifecycleResolver()
   const lifecycle = resolveLifecycle(part.toolCallId, isToolPartInFlight(part))
@@ -280,6 +293,15 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
 
   if (part.type === "dynamic-tool" && isAutomationProposalToolPart(part)) {
     return <OpenWorkAutomationProposalTool part={part} />
+  }
+
+  // OpenWork's own connection reports render as the native card: the host is
+  // the presentation; the Den App remains for external hosts.
+  if (part.type === "dynamic-tool") {
+    const decision = getConnectionDecision?.(part.toolCallId) ?? null
+    if (showsConnectionCard(part, decision !== null)) {
+      return <ConnectionCard part={part} allowDiscovery={decision !== null} />
+    }
   }
 
   // Failed calls use the same sentence line with the "failures are
@@ -1164,6 +1186,7 @@ function collectMcpAppParts(items: UIMessageWithIndex[]): DynamicToolUIPart[] {
         part.type === "dynamic-tool"
         && (part.state === "output-available" || part.state === "output-error")
         && hasPreservedMcpAppResult(part)
+        && !isNativeConnectionAppLaunch(part)
       ) {
         parts.set(part.toolCallId, part)
       }
