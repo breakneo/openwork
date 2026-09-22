@@ -4,8 +4,7 @@ import { aiGatewayAdmin } from "../worlds/ai-gateway-admin.ts";
 
 const test = spec.world(aiGatewayAdmin, {
   resources: { surfaces: ["web"], services: ["den"] },
-  needs: { placement: "local" },
-  timeout: 600_000,
+  timeout: 900_000,
 });
 
 function providers(body: unknown): Array<Record<string, unknown>> {

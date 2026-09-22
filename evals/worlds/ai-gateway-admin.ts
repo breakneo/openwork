@@ -1,5 +1,5 @@
 import { allocateFreePort } from "@openwork/cdp";
-import { queryDenDatabase, type Seed } from "@openwork/env";
+import type { Seed } from "@openwork/env";
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a Den response object");
@@ -27,15 +27,14 @@ export async function aiGatewayAdmin(seed: Seed) {
     },
   });
   const teammate = den.members.teammate;
-  const databaseUrl = den.database?.url;
-  if (!teammate || !databaseUrl) throw new Error("Expected a teammate session and a testkit scratch database");
+  if (!teammate) throw new Error("Expected a teammate session");
   const org = record((await seed.api(den.admin, "/v1/org")).body);
   const orgId = String(record(org.organization).id);
-  await queryDenDatabase(
-    databaseUrl,
-    "UPDATE organization SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.capabilities', COALESCE(JSON_EXTRACT(metadata, '$.capabilities'), JSON_OBJECT()), '$.capabilities.gatewayDashboard', JSON_EXTRACT('true', '$')) WHERE id = ?",
-    [orgId],
-  );
+  // The seeded org admin is also a platform admin, locally and on Daytona.
+  const rollout = await seed.api(den.admin, `/v1/admin/organizations/${orgId}/capabilities`, {
+    method: "PUT", body: JSON.stringify({ capabilities: { gatewayDashboard: true } }),
+  });
+  if (!rollout.response.ok) throw new Error(`AI Gateway capability rollout: HTTP ${rollout.response.status} ${rollout.text.slice(0, 200)}`);
   if (record(record((await seed.api(den.admin, "/v1/org")).body).capabilities).gatewayDashboard !== true) {
     throw new Error("The org did not receive the AI Gateway dashboard capability");
   }
