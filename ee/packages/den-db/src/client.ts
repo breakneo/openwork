@@ -83,7 +83,10 @@ function isRetryableReadQuery(sql: string | null): boolean {
  * MariaDB) without touching every locking read.
  */
 export function rewriteShareLock(sql: string): string {
-  return sql.replace(/\bfor\s+share\s*;?\s*$/i, "lock in share mode")
+  // Trim first so the match itself has no ambiguous trailing quantifiers.
+  const statement = sql.trimEnd().replace(/;$/, "").trimEnd()
+  const match = /\bfor\s+share$/i.exec(statement)
+  return match ? `${statement.slice(0, match.index)}lock in share mode` : sql
 }
 
 function rewriteQueryInput(input: string): string
