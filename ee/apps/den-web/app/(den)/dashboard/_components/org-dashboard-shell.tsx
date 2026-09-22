@@ -807,6 +807,8 @@ export function OrgDashboardShell({ children }: { children: React.ReactNode }) {
                   <FileText className="h-4 w-4" />
                   <span className="hidden sm:inline">Docs</span>
                 </a>
+                {/* Pages portal their primary action here (e.g. AI Gateway's Add provider). */}
+                <DashboardHeaderActionsSlot />
               </div>
             </>
           )}
