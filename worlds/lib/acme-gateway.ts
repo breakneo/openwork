@@ -153,7 +153,7 @@ export async function bootAcmeGateway(stack: AsyncDisposableStack, place: Place,
   const key = randomUUID();
   const upstreamBaseUrl = `http://127.0.0.1:${DAYTONA_UPSTREAM_PORT}`;
   const den = stack.use(await server({
-    place, web: true,
+    place, web: true, seedProfile: "demo-org",
     env: {
       GATEWAY_ENABLED: "true", GATEWAY_PORT: String(DAYTONA_GATEWAY_PORT),
       GATEWAY_EGRESS_ALLOWED_ORIGINS: upstreamBaseUrl, DEN_DB_ENCRYPTION_KEY: ACME_ENCRYPTION_KEY,
@@ -168,7 +168,8 @@ export async function bootAcmeGateway(stack: AsyncDisposableStack, place: Place,
     env: { ACME_UPSTREAM_KEY: key, ACME_MODEL, ACME_REPLY },
     log: (line) => console.error(`[acme-gateway] ${line}`),
   });
-  stack.defer(() => witness.stop());
+  // The Den disposer may already have deleted the sandbox; a witness stop then has nothing to stop.
+  stack.defer(() => witness.stop().catch(() => undefined));
   const model = await seedAcmeGateway(den.admin, { key, baseUrl: upstreamBaseUrl });
   return {
     den, gatewayUrl: den.gateway.publicUrl, model,

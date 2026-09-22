@@ -302,7 +302,7 @@ else
     DEN_ORG_MODE="$DEN_ORG_MODE" \
     OPENWORK_DEV_MODE="$OPENWORK_DEV_MODE" \
     DEN_WEB_ALLOWED_DEV_ORIGINS="$DEN_WEB_ALLOWED_DEV_ORIGINS" \
-    DEN_WEB_BUILD_CPUS="${DEN_WEB_BUILD_CPUS:-$(nproc 2>/dev/null || echo 4)}" \
+    DEN_WEB_BUILD_CPUS="${DEN_WEB_BUILD_CPUS:-4}" \
     bash -c 'pnpm --filter @openwork/ui build && pnpm --filter @openwork-ee/utils build && pnpm --filter @openwork-ee/den-web build' > /tmp/den-web-build.log 2>&1; then
     echo "ERROR: Den Web build failed. Last 80 lines:" >&2
     tail -n 80 /tmp/den-web-build.log >&2

@@ -666,8 +666,10 @@ export async function server(options: ServerOptions): Promise<Den> {
   }
 
   if (options.place.kind === "daytona") {
-    if (options.seedProfile) {
-      throw new Error('Den seedProfile "demo-org" is local-only and cannot seed a Daytona Den.');
+    // The Daytona provisioning script always seeds the demo org, so the
+    // profile only decides who the platform admin is: the seeded owner.
+    if (options.seedProfile && options.org) {
+      throw new Error('Den seedProfile "demo-org" signs in as the seeded owner; it cannot be combined with org.');
     }
     if (!daytonaAvailable()) {
       throw new SkipError("Daytona CLI is unavailable; install and authenticate daytona, then set OPENWORK_EVAL_DAYTONA=1");
@@ -692,7 +694,7 @@ export async function server(options: ServerOptions): Promise<Den> {
     const reuseUrls = preparedSandbox && preparedWebUrl && preparedApiUrl ? { webUrl: preparedWebUrl, apiUrl: preparedApiUrl } : undefined;
     const orgShape = options.org ?? {};
     const isolatePreparedTest = Boolean(preparedSandbox && options.provision !== false);
-    const bootstrapAdmin = personDefaults("admin", orgShape.admin, runId);
+    const bootstrapAdmin = options.seedProfile === "demo-org" ? defaultReuseAdmin() : personDefaults("admin", orgShape.admin, runId);
     const provisioned = await provisionDenSandbox({
       ref: base.ref,
       reuse: preparedSandbox,

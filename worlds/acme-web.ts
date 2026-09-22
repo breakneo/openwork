@@ -79,6 +79,16 @@ function gatewayOutputs({ den, model, gatewayUrl }: AcmeGatewayStack): Record<st
 }
 
 export async function main(): Promise<void> {
+  try {
+    await run();
+  } catch (error) {
+    // Disposal failures must not hide the boot error that caused teardown.
+    if (error instanceof SuppressedError) throw new AggregateError([error.error, error.suppressed], "acme-web boot and disposal failed");
+    throw error;
+  }
+}
+
+async function run(): Promise<void> {
   await using stack = new AsyncDisposableStack();
   const place = resolvePlace();
   if (place.kind === "daytona") {
