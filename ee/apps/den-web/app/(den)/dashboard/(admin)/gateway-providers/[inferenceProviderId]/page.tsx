@@ -1,4 +1,4 @@
-import { InferenceProviderDetailScreen } from "../../../_components/inference-provider-detail-screen";
+import { InferenceProviderEditorScreen } from "../../../_components/inference-provider-editor-screen";
 
 export default async function GatewayProviderPage({
   params,
@@ -6,5 +6,5 @@ export default async function GatewayProviderPage({
   params: Promise<{ inferenceProviderId: string }>;
 }) {
   const { inferenceProviderId } = await params;
-  return <InferenceProviderDetailScreen inferenceProviderId={inferenceProviderId} />;
+  return <InferenceProviderEditorScreen inferenceProviderId={inferenceProviderId} />;
 }

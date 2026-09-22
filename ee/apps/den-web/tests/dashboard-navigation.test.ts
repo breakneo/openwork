@@ -48,7 +48,7 @@ describe("dashboard navigation index", () => {
   test.each([false, true])("Gateway opt-in %s without deployment support changes only Gateway navigation and search", (gatewayDashboard) => {
     const sections = buildFor("admin", { ...baseCapabilities, gatewayDashboard });
     const models = sections.flatMap((section) => section.items).find((item) => item.label === "Models");
-    expect(models?.children?.some((child) => child.label === "Gateway")).toBe(gatewayDashboard);
+    expect(models?.children?.some((child) => child.label === "AI Gateway")).toBe(gatewayDashboard);
     const search = flattenNavigationForSearch(sections);
     expect(search.some((entry) => entry.href === "/dashboard/gateway-providers")).toBe(gatewayDashboard);
     expect(search.some((entry) => entry.label === "Models › OpenWork Models")).toBe(true);
@@ -66,7 +66,7 @@ describe("dashboard navigation index", () => {
     for (const href of ["/dashboard/custom-llm-providers", "/dashboard/billing", "/dashboard/api-keys"]) expect(hrefs).toContain(href);
     const models = sections.flatMap((section) => section.items).find((item) => item.label === "Models");
     expect(models?.href).toBe(gatewayAccess === "checking" ? "/dashboard/custom-llm-providers" : "/dashboard/inference");
-    expect(models?.children?.some((child) => child.label === "Gateway")).toBe(gatewayAccess === "enabled" || gatewayAccess === "unavailable");
+    expect(models?.children?.some((child) => child.label === "AI Gateway")).toBe(gatewayAccess === "enabled" || gatewayAccess === "unavailable");
     expect(models?.children?.some((child) => child.label === "OpenWork Models")).toBe(gatewayAccess !== "checking");
   });
 
@@ -74,12 +74,12 @@ describe("dashboard navigation index", () => {
     const sections = buildFor("admin", { ...baseCapabilities, gatewayDashboard: true }, "enabled");
     const models = sections.flatMap((section) => section.items).find((item) => item.label === "Models");
     expect(models?.children).toEqual([
-      { href: "/dashboard/gateway-providers", label: "Gateway", badge: "New" },
+      { href: "/dashboard/gateway-providers", label: "AI Gateway", badge: "New" },
       { href: "/dashboard/inference", label: "OpenWork Models" },
       { href: "/dashboard/custom-llm-providers", label: "Bring Your Own Keys (Legacy)" },
     ]);
     const search = flattenNavigationForSearch(sections);
-    expect(search.find((entry) => entry.label === "Models › Gateway")?.href).toBe("/dashboard/gateway-providers");
+    expect(search.find((entry) => entry.label === "Models › AI Gateway")?.href).toBe("/dashboard/gateway-providers");
     expect(search.find((entry) => entry.label === "Models › OpenWork Models")?.href).toBe("/dashboard/inference");
   });
 

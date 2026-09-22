@@ -624,8 +624,9 @@ export function getEditGatewayProviderRoute(orgSlug: string | null | undefined, 
   return `${getGatewayProviderRoute(orgSlug, inferenceProviderId)}/edit`;
 }
 
-export function getNewGatewayProviderRoute(orgSlug?: string | null): string {
-  return `${getGatewayProvidersRoute(orgSlug)}/new`;
+export function getNewGatewayProviderRoute(orgSlug?: string | null, providerId?: string): string {
+  const base = `${getGatewayProvidersRoute(orgSlug)}/new`;
+  return providerId ? `${base}?provider=${encodeURIComponent(providerId)}` : base;
 }
 
 export function getBillingRoute(orgSlug?: string | null): string {

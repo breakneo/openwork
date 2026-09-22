@@ -126,7 +126,7 @@ export function buildDashboardNavSections({
         badge: "Providers",
         children: [
           ...((gatewayAccess === "enabled" || gatewayAccess === "unavailable") && capabilities.gatewayDashboard === true
-            ? [{ href: getGatewayProvidersRoute(orgSlug), label: "Gateway", badge: "New" }]
+            ? [{ href: getGatewayProvidersRoute(orgSlug), label: "AI Gateway", badge: "New" }]
             : []),
           ...(showOpenWorkModels
             ? [{ href: getInferenceRoute(orgSlug), label: "OpenWork Models" }]
