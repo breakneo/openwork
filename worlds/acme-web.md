@@ -81,7 +81,10 @@ the public gateway URL returns the fixed reply. Outputs include `denWeb`,
 
 The OpenWork web runtime runs on its own private sandbox (same primitives as
 `app-web`) and proxies this world's Den, so `webUrl` is a signed private URL:
-open it, sign in as `alex@acme.test`, and chat through the gateway. The
+open it, sign in as `alex@acme.test`, and chat through the gateway. The launcher
+signs the runtime itself into Den as alex (host-token `den-session` + provider
+sync), so every AI Gateway provider — including ones you add later in Den's AI
+Gateway screen — shows up in the model picker after a reload. The
 OpenCode chat probe is local-only; on Daytona startup is verified with one
 message through the public gateway URL instead.
 Either placement exercises organization AI Gateway providers, not the separate

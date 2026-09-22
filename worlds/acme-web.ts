@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allocateFreePort } from "../evals/packages/cdp/src/index.ts";
 import { startRemoteRuntime } from "../evals/packages/env/src/app-web-runtime.ts";
-import { deleteSandboxes, provisionWebSandbox } from "../evals/packages/hosts/src/provision.ts";
+import { deleteSandboxes, execInSandbox, provisionWebSandbox } from "../evals/packages/hosts/src/provision.ts";
+import { defaultDaytonaExec } from "../evals/packages/hosts/src/daytona.ts";
 import { privateSandboxId, privateWebPreview, verifyPrivateWebPreview } from "../evals/packages/hosts/src/private-web-preview.ts";
 import { launchHeadlessWeb } from "../packages/world/src/headless-web.ts";
 import { trackResource } from "../packages/world/src/ledger.ts";
@@ -30,7 +31,7 @@ const DAYTONA_LIFETIME_MINUTES = 120;
  * world's Den. Same shape as app-web, but the proxy target is this world's Den
  * preview URL so a person can sign in as alex and chat through the gateway.
  */
-async function startDaytonaWebRuntime(stack: AsyncDisposableStack, place: Place, den: Den) {
+async function startDaytonaWebRuntime(stack: AsyncDisposableStack, place: Place, den: Den, orgId: string) {
   const base = place.denBase();
   if (base.kind !== "daytona") throw new Error("acme-web Daytona runtime needs the Daytona Den base ref.");
   const runtimeName = `${receiptName(ACME_WEB_NAME, resolveStage(process.env))}-${randomUUID().slice(0, 8)}`;
@@ -57,7 +58,36 @@ async function startDaytonaWebRuntime(stack: AsyncDisposableStack, place: Place,
   stack.adopt(runtime, (owned) => owned.stop());
   await verifyPrivateWebPreview(preview);
   if (Date.now() - issuedAt >= 10 * 60_000) throw new Error("acme-web exceeded its signed-preview startup buffer.");
+  await signRuntimeIntoDen(sandboxId, runtime.runtimeDirectory, den, orgId);
   return { browserOrigin: preview.browserOrigin, sandboxId, expires: new Date(issuedAt + (DAYTONA_LIFETIME_MINUTES + 10) * 60_000).toISOString() };
+}
+
+/**
+ * The browser only holds the runtime's client token; den-session and provider
+ * sync are host-token routes, so the launcher signs the runtime into Den as
+ * the seeded owner — exactly what bootAcmeWeb does locally over loopback.
+ * Without this, gateway models never reach the picker.
+ */
+async function signRuntimeIntoDen(sandboxId: string, runtimeDirectory: string, den: Den, orgId: string) {
+  const manifest = `${runtimeDirectory}/runtime.json`;
+  const session = Buffer.from(JSON.stringify({ baseUrl: den.ref.apiUrl, token: den.admin.token, orgId }), "utf8").toString("base64");
+  const script = `python3 - <<PYEOF
+import base64, json, urllib.request
+manifest = json.load(open(${JSON.stringify(manifest)}))
+session = base64.b64decode(${JSON.stringify(session)})
+headers = {"x-openwork-host-token": manifest["hostToken"], "content-type": "application/json"}
+def call(method, path, body):
+    request = urllib.request.Request(manifest["openworkUrl"] + path, data=body, method=method, headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.status, response.read().decode("utf-8")
+print("den-session", call("PUT", "/den-session", session)[0])
+status, body = call("POST", "/cloud-provider-sync/run", b"{\"reason\":\"acme-web\"}")
+print("sync", status, body[:200])
+PYEOF`;
+  const result = await execInSandbox(defaultDaytonaExec, sandboxId, script, { timeoutMs: 120_000, context: "acme-web runtime Den sign-in" });
+  if (!/den-session 204/.test(result.stdout) || !/sync 200/.test(result.stdout)) {
+    throw new Error(`acme-web could not sign the web runtime into Den: ${result.stdout.slice(-400)} ${result.stderr.slice(-400)}`);
+  }
 }
 
 export interface AcmeWebWorld {
@@ -136,7 +166,7 @@ async function run(): Promise<void> {
   if (place.kind === "daytona") {
     const gateway = await bootAcmeGateway(stack, place, { denEnv: { DEN_DASHBOARDS_ENABLED: "true" } });
     const probe = await probeAcmeGatewayDirect(gateway.den.admin, gateway);
-    const web = await startDaytonaWebRuntime(stack, place, gateway.den);
+    const web = await startDaytonaWebRuntime(stack, place, gateway.den, gateway.model.orgId);
     await hold({
       name: ACME_WEB_NAME,
       outputs: {
