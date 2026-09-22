@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,20 @@ async function main() {
     resolve(packageRoot, "dist/bin/openwork-server"),
     resolve(outputRoot, "dist/bin/openwork-server")
   );
+  // `openwork-server web` serves this bundle and hands these plugins to the engine.
+  const webDist = resolve(packageRoot, "..", "app", "dist");
+  if (!existsSync(resolve(webDist, "index.html"))) {
+    throw new Error(`Web UI bundle missing at ${webDist}. Run: pnpm --filter @openwork/app build:selfhost`);
+  }
+  await cp(webDist, resolve(outputRoot, "web"), { recursive: true });
+  const pluginDist = resolve(packageRoot, "dist/opencode-plugins");
+  if (!existsSync(resolve(pluginDist, "openwork-extensions-preview.js"))) {
+    throw new Error(`OpenCode plugin bundle missing at ${pluginDist}. Run: pnpm --filter openwork-server build`);
+  }
+  await cp(pluginDist, resolve(outputRoot, "dist/opencode-plugins"), {
+    recursive: true,
+    filter: (source) => !/\.test\.[cm]?js$/.test(source),
+  });
   await cp(resolve(packageRoot, "README.md"), resolve(outputRoot, "README.md"));
   await writeFile(
     resolve(outputRoot, "package.json"),

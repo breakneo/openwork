@@ -14,7 +14,9 @@ const builtCli = fileURLToPath(new URL("./dist/cli.js", `${new URL("../", import
 const sourceCli = fileURLToPath(new URL("./src/cli.ts", `${new URL("../", import.meta.url)}`));
 
 function run(command, commandArgs) {
-  const result = spawnSync(command, commandArgs, { stdio: "inherit" });
+  // Lets `openwork-server web` find the bundled web UI and plugins next to this launcher.
+  const env = { ...process.env, OPENWORK_PACKAGE_ROOT: process.env.OPENWORK_PACKAGE_ROOT ?? packageRoot };
+  const result = spawnSync(command, commandArgs, { stdio: "inherit", env });
   if (result.error) {
     if (result.error.code === "ENOENT") {
       console.error(`Missing runtime dependency: ${command}`);

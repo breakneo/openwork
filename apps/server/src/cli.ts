@@ -27,7 +27,20 @@ import { migrateOpenworkCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
 import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
 import { startWorkerActivityHeartbeat } from "./worker-activity-heartbeat.js";
+import {
+  checkForUpdate,
+  ensureManagedEngine,
+  loadOrCreateWebTokens,
+  openInBrowser,
+  readBinaryVersion,
+  resolveBundledPluginDir,
+  resolvePackageRoot,
+  resolveWebRoot,
+  updateHint,
+} from "./selfhost-web.js";
+import { readInstalledOpencodeVersion, setInstalledOpencodeVersion } from "./routes/core.js";
 import pkg from "../package.json" with { type: "json" };
+import constants from "../../../constants.json" with { type: "json" };
 
 const args = parseCliArgs(process.argv.slice(2));
 
@@ -39,6 +52,45 @@ if (args.help) {
 if (args.version) {
   console.log(pkg.version);
   process.exit(0);
+}
+
+let webRoot: string | null = null;
+let webTokensPath: string | null = null;
+if (args.web) {
+  // Everything below is read by resolveServerConfig / the engine spawn through
+  // process.env, so it must be settled before the config is resolved.
+  const packageRoot = await resolvePackageRoot({ env: process.env, execPath: process.execPath });
+  webRoot = await resolveWebRoot({ env: process.env, packageRoot, sourceDir: import.meta.dirname });
+  if (!webRoot) {
+    console.error("The OpenWork web UI bundle was not found. Reinstall openwork-server, or set OPENWORK_WEB_ROOT to a built apps/app/dist.");
+    process.exit(1);
+  }
+  process.env.OPENWORK_WEB_ROOT = webRoot;
+  if (args.bootstrapToken === false) process.env.OPENWORK_WEB_BOOTSTRAP_TOKEN = "0";
+  if (!process.env.OPENWORK_EXTENSIONS_PLUGIN_DIR) {
+    const pluginDir = await resolveBundledPluginDir(packageRoot);
+    if (pluginDir) process.env.OPENWORK_EXTENSIONS_PLUGIN_DIR = pluginDir;
+  }
+  // The web UI has no approvals responder, so manual mode would time out every gated write.
+  args.approvalMode ??= process.env.OPENWORK_APPROVAL_MODE === "manual" ? "manual" : "auto";
+  if (args.workspaces.length === 0 && !process.env.OPENWORK_WORKSPACES) args.workspaces.push(process.cwd());
+  // Stable tokens across restarts: CLI flag, then env, then a file in the data dir.
+  const tokenProvided = Boolean(args.token || process.env.OPENWORK_TOKEN);
+  const hostTokenProvided = Boolean(args.hostToken || process.env.OPENWORK_HOST_TOKEN);
+  if (!tokenProvided || !hostTokenProvided) {
+    const tokens = await loadOrCreateWebTokens({ env: process.env });
+    if (!tokenProvided) args.token = tokens.token;
+    if (!hostTokenProvided) args.hostToken = tokens.hostToken;
+    webTokensPath = tokens.path;
+  }
+  process.env.OPENWORK_MANAGE_OPENCODE = "1";
+  const engine = await ensureManagedEngine({
+    env: process.env,
+    expectedVersion: constants.opencodeVersion,
+    log: (message) => console.log(message),
+  });
+  process.env.OPENWORK_OPENCODE_BIN = engine.bin;
+  setInstalledOpencodeVersion(engine.installedVersion);
 }
 
 const config = await resolveServerConfig(args);
@@ -105,6 +157,9 @@ if (!config.opencodeBaseUrl && process.env.OPENWORK_MANAGE_OPENCODE === "1") {
       excludedPorts: [config.port],
       env: engineEnv,
     });
+    if (!readInstalledOpencodeVersion()) {
+      setInstalledOpencodeVersion(readBinaryVersion(process.env.OPENWORK_OPENCODE_BIN?.trim() || "opencode"));
+    }
     config.opencodeBaseUrl = managedOpencode.url;
     config.opencodeUsername = managedOpencode.username;
     config.opencodePassword = managedOpencode.password;
@@ -177,6 +232,34 @@ if (managedOpencode) {
 
 const url = `http://${config.host}:${server.port}`;
 logger.log("info", `OpenWork server listening on ${url}`);
+
+if (args.web) {
+  const browserHost = config.host === "0.0.0.0" || config.host === "::" ? "localhost" : config.host;
+  const browserUrl = `http://${browserHost}:${server.port}`;
+  logger.log("info", `OpenWork web UI: ${browserUrl}`);
+  logger.log("info", `Web root: ${webRoot}`);
+  logger.log("info", `Engine: ${process.env.OPENWORK_OPENCODE_BIN} (${installedOpencodeVersionLabel()})`);
+  if (webTokensPath) logger.log("info", `Tokens: ${webTokensPath}`);
+  if (process.env.OPENWORK_WEB_BOOTSTRAP_TOKEN === "0") {
+    logger.log("info", `Browser sign-in requires the client token: ${config.token}`);
+  } else if (browserHost !== "localhost" && browserHost !== "127.0.0.1") {
+    logger.log("info", "Anyone who can reach this URL is signed in automatically. Keep it on a private network or pass --no-bootstrap-token.");
+  }
+  if (browserHost !== "localhost" && browserHost !== "127.0.0.1") {
+    logger.log("info", "Browsers require HTTPS for a non-localhost origin; put a TLS proxy (e.g. tailscale serve) in front.");
+  }
+  if (args.open) openInBrowser(browserUrl);
+  void checkForUpdate({ currentVersion: pkg.version, env: process.env }).then((latest) => {
+    if (latest) logger.log("info", updateHint(latest));
+  });
+}
+
+function installedOpencodeVersionLabel(): string {
+  const installed = readInstalledOpencodeVersion();
+  const expected = constants.opencodeVersion.replace(/^v/, "");
+  if (!installed) return `version unknown, expected ${expected}`;
+  return installed === expected ? installed : `${installed}, expected ${expected}`;
+}
 
 if (config.tokenSource === "generated") {
   logger.log("info", `Client token: ${config.token}`);
