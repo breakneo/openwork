@@ -60,8 +60,9 @@ describe("Gateway providers sidebar", () => {
 
 describe("Gateway providers list", () => {
   test("leads with a flat header, one policy row, provider rows, and two link rows", () => {
-    expect(list).toContain("<DashboardHeaderActions>");
+    expect(list).not.toContain("DashboardHeaderActions");
     expect(list).not.toContain("DashboardPageTemplate");
+    expect(list).toMatch(/Providers[\s\S]*gateway-provider-create/);
     expect(list).toContain("<GatewayWhoCanUseModels");
     expect(list).toContain("describeGatewayAccess");
     expect(list).toContain('data-testid="gateway-provider-create"');
@@ -111,6 +112,9 @@ describe("Gateway provider form", () => {
     expect(editor).toContain('data-testid="gateway-access-add-person"');
     expect(editor).toContain('data-testid="gateway-access-add-team"');
     expect(editor).toContain('testId="gateway-models-pick"');
+    expect(editor).toContain('data-testid="gateway-models-select-all"');
+    expect(editor).toContain('data-testid="gateway-models-clear"');
+    expect(editor).toContain("if (!provider) setModelIds([]);");
     expect(editor).toContain('data-testid="gateway-provider-api-key"');
     expect(editor).toContain("Replace key");
     expect(editor).not.toContain("<ProviderAccessPicker");

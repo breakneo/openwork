@@ -330,11 +330,18 @@ export function InferenceProviderEditorScreen({ inferenceProviderId, catalogProv
         <h2 id="gateway-models-heading" className={CARD_TITLE}>Models</h2>
         <div className="mt-3 flex gap-2">
           <Radio testId="gateway-models-all" checked={allowAllModels} label={`All ${displayName} models`} onSelect={() => setAllowAllModels(true)} />
-          <Radio testId="gateway-models-pick" checked={!allowAllModels} label="Only the ones I pick" onSelect={() => { setAllowAllModels(false); if (!modelIds.length) setModelIds(models.map((model) => model.id)); }} />
+          <Radio testId="gateway-models-pick" checked={!allowAllModels} label="Only the ones I pick" onSelect={() => { setAllowAllModels(false); if (!provider) setModelIds([]); }} />
         </div>
         {!allowAllModels ? (
           <div className="mt-3 rounded-[10px] bg-gray-50 p-2">
-            <div className="w-[200px]"><DenInput type="search" icon={Search} value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder="Filter models" className="h-8 bg-white text-[12px]" /></div>
+            <div className="flex items-center gap-3">
+              <div className="w-[200px]"><DenInput type="search" icon={Search} value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder="Filter models" className="h-8 bg-white text-[12px]" /></div>
+              <span className="text-[12px] text-gray-500" data-testid="gateway-models-count">{modelIds.length} of {models.length} selected</span>
+              <span className="ml-auto flex items-center gap-3 text-[12px]">
+                <button type="button" data-testid="gateway-models-select-all" className="font-medium text-gray-700 hover:text-gray-900" onClick={() => setModelIds(models.map((model) => model.id))}>Select all</button>
+                <button type="button" data-testid="gateway-models-clear" className="font-medium text-gray-700 hover:text-gray-900" onClick={() => setModelIds([])}>Clear</button>
+              </span>
+            </div>
             <ul className="mt-2 max-h-[320px] overflow-y-auto">
               {filteredModels.map((model) => {
                 const checked = modelIds.includes(model.id);

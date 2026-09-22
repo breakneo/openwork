@@ -9,7 +9,6 @@ import { DenInput } from "../../_components/ui/input";
 import { DenNotice } from "../../_components/ui/notice";
 import { getCustomLlmProvidersRoute, getGatewayProviderRoute, getGatewayUsageRoute, getNewGatewayProviderRoute } from "../../_lib/den-org";
 import { useOrgDashboard } from "../_providers/org-dashboard-provider";
-import { DashboardHeaderActions } from "./dashboard-header-actions";
 import { GatewayWhoCanUseModels } from "./gateway-who-can-use-models";
 import { useOrgInferenceProviders } from "./inference-provider-data";
 import { describeGatewayAccess, type DenInferenceProvider } from "./inference-provider-request";
@@ -120,15 +119,6 @@ export function InferenceProvidersScreen() {
 
   return (
     <div className="mx-auto max-w-[860px] px-6 py-6">
-      {!empty ? (
-        <DashboardHeaderActions>
-          <Link href={getNewGatewayProviderRoute(orgSlug)} data-testid="gateway-provider-create" className={buttonVariants({ variant: "primary", size: "sm" })}>
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            Add provider
-          </Link>
-        </DashboardHeaderActions>
-      ) : null}
-
       {error ? <DenNotice message={error} tone="error" className="mb-6" /> : null}
 
       {empty ? <EmptyState orgSlug={orgSlug} /> : (
@@ -141,8 +131,14 @@ export function InferenceProvidersScreen() {
                 Providers
                 {!busy ? <span className="ml-2 font-normal text-gray-400">{inferenceProviders.length} · {modelCount} models</span> : null}
               </h2>
-              <div className="w-[220px]">
-                <DenInput type="search" icon={Search} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by name" className="h-8 text-[12px]" />
+              <div className="flex items-center gap-2">
+                <div className="w-[200px]">
+                  <DenInput type="search" icon={Search} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by name" className="h-8 text-[12px]" />
+                </div>
+                <Link href={getNewGatewayProviderRoute(orgSlug)} data-testid="gateway-provider-create" className={buttonVariants({ variant: "primary", size: "sm" })}>
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  Add provider
+                </Link>
               </div>
             </div>
             <div className="divide-y divide-gray-100 rounded-[12px] border border-gray-100 bg-white">
