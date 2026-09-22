@@ -77,6 +77,8 @@ export interface Den extends AsyncDisposable {
   mocks: Record<string, MockHandle>;
   database?: DbHandle;
   ports?: { api: number; web: number };
+  /** Co-located AI Gateway, when the Den was booted with GATEWAY_ENABLED=true. */
+  gateway?: { publicUrl: string };
   /**
    * Raw den-api HTTP log text (JSON lines carrying http_route/timestamp).
    * Daytona lane: reads /tmp/den-api.log inside the server sandbox; local
@@ -733,6 +735,7 @@ export async function server(options: ServerOptions): Promise<Den> {
         admin: organization.admin,
         members: organization.members,
         mocks: bootedMocks.handles,
+        ...(provisioned.gatewayUrl ? { gateway: { publicUrl: cleanUrl(provisioned.gatewayUrl) } } : {}),
         async apiLog(): Promise<string> {
           // den-api on the server sandbox logs to /tmp/den-api.log
           // (.devcontainer/start-daytona-server.sh:158; the provisioning

@@ -64,7 +64,22 @@ Tests can import `bootAcmeWeb` and `probeAcmeGateway` and own teardown with an
 pnpm world down acme-web --stage gateway-demo
 ```
 
-This world currently runs co-located (`--place local`), including inside a
-prepared Daytona machine. Host-driven `--place daytona` provisioning is not
-implemented. It exercises organization AI Gateway providers, not the separate
+## Daytona
+
+```sh
+OPENWORK_EVAL_REF=$(git rev-parse HEAD) pnpm world up acme-web --place daytona --stage gateway-demo --detach --timeout 900000
+pnpm world outputs acme-web --stage gateway-demo --reveal
+```
+
+Push the commit first; the sandbox builds that ref. The provisioner boots Den
+with `GATEWAY_ENABLED=true`, starts the real `ee/apps/gateway` next to it in
+the same sandbox, and uploads the deterministic upstream
+(`evals/packages/labs/src/acme-upstream.mjs`) so gateway → upstream stays on
+the sandbox loopback. Startup completes only after one real message through
+the public gateway URL returns the fixed reply. Outputs include `denWeb`,
+`aiGateway` (the Den admin screen), `gatewayUrl`, and the owner account.
+
+The OpenWork web runtime and the OpenCode chat probe are local-only; on Daytona
+the world reports `webRuntime: not started`. Use `app-web` for that surface.
+Either placement exercises organization AI Gateway providers, not the separate
 OpenWork Models subscription/credit-billing flow.
