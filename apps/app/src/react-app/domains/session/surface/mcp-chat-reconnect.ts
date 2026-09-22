@@ -97,8 +97,8 @@ export function nativeChatConnectionDecision(input: {
   }))
   if (questionTool && questionParts.length !== 1) return null
   // The question pauses the turn, so a blocker reported by ordinary discovery
-  // (no `intent: "connect"`) counts here. The latest report wins for state;
-  // the first tool part carrying the connection hosts the card.
+  // (no `intent: "connect"`) counts here. The latest report for a connection
+  // wins and hosts the card; earlier reports stay quiet sentence lines.
   const connections = new Map<string, { connection: ConnectionActionPayload; toolCallId: string; oauth: boolean }>()
   for (const message of currentMessages) {
     for (const part of message.parts) {
@@ -106,10 +106,7 @@ export function nativeChatConnectionDecision(input: {
       const found = connectionFromChatToolPart(part, { allowDiscovery: true })
       if (!found) continue
       const { connection, action } = found
-      const first = connections.get(connection.connectionId)
-      connections.set(connection.connectionId, {
-        connection, toolCallId: first?.toolCallId ?? part.toolCallId, oauth: action?.connectionId === connection.connectionId,
-      })
+      connections.set(connection.connectionId, { connection, toolCallId: part.toolCallId, oauth: action?.connectionId === connection.connectionId })
     }
   }
   const blockers = [...connections.values()].filter(entry => entry.connection.state !== "connected")

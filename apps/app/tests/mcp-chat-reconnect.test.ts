@@ -207,7 +207,7 @@ test("v2 question source part ID resolves to the UI call ID only in the owning m
  * Real transcript: ordinary discovery (no `intent: "connect"`) reported the
  * Stripe blocker twice, a third search matched only an unrelated tool, then
  * the model paused on the reserved question. The question must bind to the
- * first discovery part carrying Stripe instead of dead-ending the turn.
+ * latest discovery part carrying Stripe instead of dead-ending the turn.
  */
 const stripeStatus = {
   name: "mcp:emc_01kxh1ns3cesjax0x2zz6ekvxm:*", kind: "connection_status", status: "needs_connection",
@@ -250,7 +250,7 @@ function stripeTranscript(extraDiscovery: UIMessage["parts"] = []): UIMessage[] 
 test("a reserved question binds to the blocker that ordinary discovery reported, not a dead end", () => {
   expect(nativeChatConnectionDecision({ question: stripeQuestion, owner: request.owner, sessionId: "session-1", messages: stripeTranscript() })).toEqual({
     requestId: "que_0c6b41285001W3e3iAhUamcorJ", owner: request.owner, sessionId: "session-1", turnId: "user-stripe",
-    toolCallId: "call_stripe_1", connectionId: "emc_01kxh1ns3cesjax0x2zz6ekvxm", questionToolCallId: stripeQuestionCallId,
+    toolCallId: "call_stripe_2", connectionId: "emc_01kxh1ns3cesjax0x2zz6ekvxm", questionToolCallId: stripeQuestionCallId,
   })
 })
 
@@ -266,7 +266,7 @@ test("with two blockers only the one named in the question binds", () => {
   }
   const transcript = stripeTranscript([discovery("call_notion", "Notion pages", [notionStatus])])
   expect(nativeChatConnectionDecision({ question: stripeQuestion, owner: request.owner, sessionId: "session-1", messages: transcript }))
-    .toMatchObject({ toolCallId: "call_stripe_1", connectionId: "emc_01kxh1ns3cesjax0x2zz6ekvxm", questionToolCallId: stripeQuestionCallId })
+    .toMatchObject({ toolCallId: "call_stripe_2", connectionId: "emc_01kxh1ns3cesjax0x2zz6ekvxm", questionToolCallId: stripeQuestionCallId })
   const notionQuestion = { ...stripeQuestion, questions: [{ ...stripeQuestionItem, question: "Connect Notion to continue?" }] }
   expect(nativeChatConnectionDecision({ question: notionQuestion, owner: request.owner, sessionId: "session-1", messages: transcript }))
     .toMatchObject({ toolCallId: "call_notion", connectionId: "emc_notion", questionToolCallId: stripeQuestionCallId })
