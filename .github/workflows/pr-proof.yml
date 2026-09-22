@@ -51,89 +51,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-tests
-      - name: Prepare a virtual display and real OAuth browser handoff
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y xvfb x11-utils xdg-utils libgtk-3-0 libnss3 libasound2t64 libgbm1 ca-certificates curl gnupg
-          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
-          if [ -z "$chrome" ]; then
-            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-              https://dl.google.com/linux/linux_signing_key.pub -o "$RUNNER_TEMP/google-linux-signing-key.pub"
-            gpg --batch --yes --dearmor --output "$RUNNER_TEMP/google-chrome.gpg" "$RUNNER_TEMP/google-linux-signing-key.pub"
-            sudo install -m 0644 "$RUNNER_TEMP/google-chrome.gpg" /usr/share/keyrings/openwork-google-chrome.gpg
-            printf '%s\n' 'deb [arch=amd64 signed-by=/usr/share/keyrings/openwork-google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' \
-              | sudo tee /etc/apt/sources.list.d/openwork-google-chrome.list >/dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y google-chrome-stable
-          fi
-          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
-          if [ -z "$chrome" ]; then
-            printf '%s\n' '::error::Desktop proof requires Chrome or Chromium for the real OAuth browser handoff.' >&2
-            exit 1
-          fi
-          "$chrome" --version
-          export CHROME_BIN="$chrome"
-          export BROWSER=/usr/local/bin/openwork-proof-browser
-          # The isolated Electron HOME must still resolve a system HTTP handler.
-          # Like Electron, the browser needs container-safe flags on this runner.
-          sudo tee "$BROWSER" >/dev/null <<'BROWSER_SCRIPT'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          exec "$CHROME_BIN" --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check \
-            --user-data-dir="${OPENWORK_PROOF_BROWSER_PROFILE:-$RUNNER_TEMP/pr-proof-browser}" "$@"
-          BROWSER_SCRIPT
-          sudo chmod +x "$BROWSER"
-          sudo tee /usr/share/applications/openwork-proof-browser.desktop >/dev/null <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=OpenWork proof browser
-          Exec=/usr/local/bin/openwork-proof-browser %U
-          Terminal=false
-          MimeType=x-scheme-handler/http;x-scheme-handler/https;
-          DESKTOP
-          sudo mkdir -p /etc/xdg
-          printf '%s\n' '[Default Applications]' \
-            'x-scheme-handler/http=openwork-proof-browser.desktop' \
-            'x-scheme-handler/https=openwork-proof-browser.desktop' \
-            | sudo tee /etc/xdg/mimeapps.list >/dev/null
-          printf 'CHROME_BIN=%s\nBROWSER=%s\n' "$CHROME_BIN" "$BROWSER" >> "$GITHUB_ENV"
-          # Prove navigation, not just a successful xdg-open exit or installed binary.
-          xvfb-run -a node --input-type=module <<'PROBE'
-          import { createServer } from 'node:http';
-          import { spawn } from 'node:child_process';
-          import { once } from 'node:events';
-          const server = createServer((req, res) => {
-            res.end('OAuth browser handoff ready');
-            if (req.url === '/browser-hop-proof') server.emit('browser-hop');
-          });
-          server.listen(0, '127.0.0.1');
-          await once(server, 'listening');
-          const reached = once(server, 'browser-hop', { signal: AbortSignal.timeout(30_000) });
-          const browser = spawn('xdg-open', [`http://127.0.0.1:${server.address().port}/browser-hop-proof`], {
-            detached: true,
-            stdio: 'inherit',
-            env: { ...process.env, OPENWORK_PROOF_BROWSER_PROFILE: `${process.env.RUNNER_TEMP}/pr-proof-browser-gate` },
-          });
-          try {
-            await Promise.race([reached, once(browser, 'error').then(([error]) => { throw error; })]);
-            console.log('Real xdg-open browser handoff verified');
-          } catch (error) {
-            console.error('::error::xdg-open did not navigate to the local OAuth browser probe.', error);
-            process.exitCode = 1;
-          } finally {
-            if (browser.pid) {
-              try { process.kill(-browser.pid, 'SIGTERM'); } catch (error) {
-                if (error.code !== 'ESRCH') throw error;
-              }
-            }
-            server.closeAllConnections();
-            server.close();
-          }
-          PROBE
+      - uses: ./.github/actions/setup-browser
+        with:
+          oauth-handoff: "true"
       - name: Build local Den dependencies and the review app
+        shell: bash
         run: |
-          set -euo pipefail
           pnpm --filter @openwork/types build
           pnpm --filter @openwork-ee/den-db build
           pnpm --filter @openwork/email build
@@ -189,29 +112,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-tests
-      - name: Prepare a virtual display and verified Linux browser
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y xvfb x11-utils libgtk-3-0 libnss3 libasound2t64 libgbm1 ca-certificates curl gnupg
-          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
-          if [ -z "$chrome" ]; then
-            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-              https://dl.google.com/linux/linux_signing_key.pub -o "$RUNNER_TEMP/google-linux-signing-key.pub"
-            gpg --batch --yes --dearmor --output "$RUNNER_TEMP/google-chrome.gpg" "$RUNNER_TEMP/google-linux-signing-key.pub"
-            sudo install -m 0644 "$RUNNER_TEMP/google-chrome.gpg" /usr/share/keyrings/openwork-google-chrome.gpg
-            printf '%s\n' 'deb [arch=amd64 signed-by=/usr/share/keyrings/openwork-google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' \
-              | sudo tee /etc/apt/sources.list.d/openwork-google-chrome.list >/dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y google-chrome-stable
-          fi
-          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
-          if [ -z "$chrome" ]; then
-            printf '%s\n' '::error::Live appWeb proof requires Google Chrome or Chromium on PATH. Repair the runner browser installation and rerun this job.' >&2
-            exit 1
-          fi
-          "$chrome" --version
-          printf 'CHROME_BIN=%s\n' "$chrome" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-browser
       - name: Build local appWeb dependencies without live credentials
         run: pnpm --filter @openwork/types build
       - name: Run the whole selected live spec on local v1 appWeb

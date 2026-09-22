@@ -262,18 +262,42 @@ test("workflow keeps ordinary proof unprotected and gates all live PR code befor
   assert.doesNotMatch(live, /--no-sandbox|OPENWORK_EVAL_CONTAINER_ELECTRON/);
 });
 
-test("live browser setup detects Chrome, installs via Google's signed apt repository if missing, and verifies it", async () => {
+test("both proof jobs share verified Chrome setup, with system OAuth handoff only for desktop proof", async () => {
   const workflow = await readFile(new URL("../workflows/pr-proof.yml", import.meta.url), "utf8");
-  const live = workflow.split("\n  live-proof:\n")[1];
-  assert.match(live, /apt-get install -y xvfb x11-utils libgtk-3-0 libnss3 libasound2t64 libgbm1/);
-  assert.equal(live.match(/command -v google-chrome \|\| command -v chromium \|\| command -v chromium-browser/g)?.length, 2);
-  assert.match(live, /if \[ -z "\$chrome" \]; then[\s\S]*https:\/\/dl\.google\.com\/linux\/linux_signing_key.pub/);
-  assert.match(live, /gpg --batch --yes --dearmor/);
-  assert.match(live, /signed-by=\/usr\/share\/keyrings\/openwork-google-chrome.gpg/);
-  assert.match(live, /https:\/\/dl\.google\.com\/linux\/chrome\/deb\//);
-  assert.match(live, /apt-get install -y google-chrome-stable/);
-  assert.match(live, /Repair the runner browser installation and rerun this job/);
-  assert.match(live, /"\$chrome" --version/);
-  assert.match(live, /CHROME_BIN=%s\\n' "\$chrome" >> "\$GITHUB_ENV"/);
-  assert.doesNotMatch(live, /curl[^\n]*\|[^\n]*(?:sh|bash)|trusted=yes|allow-unauthenticated/);
+  const [ordinary, live] = workflow.split("\n  live-proof:\n");
+  for (const job of [ordinary, live]) {
+    assert.match(job, /uses: \.\/\.github\/actions\/setup-tests\n      - uses: \.\/\.github\/actions\/setup-browser/);
+    assert.doesNotMatch(job, /apt-get|google-chrome|--input-type=module/);
+  }
+  assert.match(ordinary, /oauth-handoff: "true"/);
+  assert.doesNotMatch(live, /oauth-handoff:/);
+  const action = await readFile(new URL("../actions/setup-browser/action.yml", import.meta.url), "utf8");
+  assert.match(action, /default: "false"/);
+  assert.match(action, /ACTION_PATH: \$\{\{ github.action_path \}\}/);
+  assert.match(action, /OAUTH_HANDOFF: \$\{\{ inputs.oauth-handoff \}\}/);
+  assert.match(action, /run: bash "\$ACTION_PATH\/setup.sh"/);
+  assert.match(action, /if: inputs.oauth-handoff == 'true'/);
+  assert.match(action, /run: xvfb-run -a node "\$ACTION_PATH\/probe-handoff.mjs"/);
+  const setup = await readFile(new URL("../actions/setup-browser/setup.sh", import.meta.url), "utf8");
+  assert.match(setup, /apt-get install -y xvfb x11-utils libgtk-3-0 libnss3 libasound2t64 libgbm1/);
+  assert.equal(setup.match(/command -v google-chrome \|\| command -v chromium \|\| command -v chromium-browser/g)?.length, 2);
+  assert.match(setup, /if \[ -z "\$chrome" \]; then[\s\S]*https:\/\/dl\.google\.com\/linux\/linux_signing_key.pub/);
+  assert.match(setup, /gpg --batch --yes --dearmor/);
+  assert.match(setup, /signed-by=\/usr\/share\/keyrings\/openwork-google-chrome.gpg/);
+  assert.match(setup, /https:\/\/dl\.google\.com\/linux\/chrome\/deb\//);
+  assert.match(setup, /apt-get install -y google-chrome-stable/);
+  assert.match(setup, /Repair the runner browser installation and rerun this job/);
+  assert.match(setup, /"\$chrome" --version/);
+  assert.match(setup, /CHROME_BIN=%s\\n' "\$chrome" >> "\$GITHUB_ENV"/);
+  assert.doesNotMatch(setup, /curl[^\n]*\|[^\n]*(?:sh|bash)|trusted=yes|allow-unauthenticated/);
+  const handoff = setup.split('if [ "$OAUTH_HANDOFF" = true ]; then')[1];
+  assert.ok(handoff);
+  assert.match(handoff, /sudo install -m 0755 "\$ACTION_PATH\/browser.sh" "\$browser"/);
+  assert.match(handoff, /\/usr\/share\/applications\/openwork-proof-browser.desktop/);
+  assert.match(handoff, /\/etc\/xdg\/mimeapps.list/);
+  for (const scheme of ["http", "https"]) assert.ok(handoff.includes(`x-scheme-handler/${scheme}=openwork-proof-browser.desktop`));
+  assert.match(handoff, /BROWSER=%s\\n' "\$browser" >> "\$GITHUB_ENV"/);
+  const browser = await readFile(new URL("../actions/setup-browser/browser.sh", import.meta.url), "utf8");
+  assert.match(browser, /exec "\$CHROME_BIN" --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check/);
+  assert.ok(browser.includes('--user-data-dir="${OPENWORK_PROOF_BROWSER_PROFILE:-$RUNNER_TEMP/pr-proof-browser}" "$@"'));
 });
